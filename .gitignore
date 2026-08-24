@@ -1,0 +1,21 @@
+# Compilado
+target/
+*.class
+
+# IDEs e editores
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# Arquivos de Mac
+.DS_Store
+
+# Logs e temporais
+*.log
+*.tmp
+*.swp
+.axonbase/
+data/

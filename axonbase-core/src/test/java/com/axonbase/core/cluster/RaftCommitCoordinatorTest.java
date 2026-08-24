@@ -1,0 +1,3 @@
+package com.axonbase.core.cluster;
+import org.junit.jupiter.api.Test;import java.util.Map;import java.util.Set;import static org.junit.jupiter.api.Assertions.*;
+class RaftCommitCoordinatorTest{@Test void confirmaNoLiderERejeitaSeguidorESemQuorum(){var g=RaftGroup.inMemory("d","n1","n2","n3");var c=new RaftCommitCoordinator(g);assertEquals(1,c.confirm("n1",new CommittedBatch("a",Map.of(),Set.of())));assertThrows(NotLeaderException.class,()->c.confirm("n2",new CommittedBatch("b",Map.of(),Set.of())));g.stop("n2");g.stop("n3");assertThrows(QuorumUnavailableException.class,()->c.confirm("n1",new CommittedBatch("c",Map.of(),Set.of())));}}

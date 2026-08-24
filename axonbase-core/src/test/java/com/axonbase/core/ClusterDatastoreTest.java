@@ -1,0 +1,3 @@
+package com.axonbase.core;
+import com.axonbase.core.cluster.*;import com.axonbase.core.engine.Datastore;import org.junit.jupiter.api.Test;import static org.junit.jupiter.api.Assertions.*;
+class ClusterDatastoreTest{@Test void naoAplicaCommitAntesDoQuorum(){var ds=Datastore.memory();ds.createDatabase("n","d");var s=Session.create();s.namespace("n");s.database("d");var g=RaftGroup.inMemory("n/d","n1","n2","n3");g.stop("n2");g.stop("n3");ds.commitCoordinator(new RaftCommitCoordinator(g),"n1");ds.execute("BEGIN",s,null);ds.execute("CREATE t CONTENT {x: 1}",s,null);assertThrows(QuorumUnavailableException.class,()->ds.execute("COMMIT",s,null));ds.cancelSession(s);assertEquals(0,ds.execute("SELECT * FROM t",s,null).asArray().size());}}

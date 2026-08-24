@@ -1,0 +1,18 @@
+# AxonBase: configuração local de desenvolvimento.
+# Variáveis AXON_* substituem estes valores; flags da CLI substituem ambos.
+
+path = memory
+bind = 127.0.0.1
+port = 8000
+require_auth = true
+
+# Nunca versione um segredo ou senha de produção neste arquivo.
+secret = axonbase-dev-secret
+user = root
+pass = root
+
+# Cluster opcional. Deixe cluster_id vazio para modo local.
+# cluster_id = primary
+# node_id = node-1
+# raft_bind = 127.0.0.1:9000
+# raft_peers = 127.0.0.1:9001,127.0.0.1:9002
