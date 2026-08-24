@@ -33,6 +33,11 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
         factory.setCreator((req, resp) -> new Endpoint(dispatcher));
     }
 
+    /** Dispatcher compartilhado pelas conexões, para o servidor ligá-lo ao cluster. */
+    RpcDispatcher dispatcher() {
+        return dispatcher;
+    }
+
     /** Endpoint por conexión: unha sesión AxonBase reutilizada. */
     public static final class Endpoint extends WebSocketAdapter {
 

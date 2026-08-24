@@ -35,6 +35,7 @@ public final class AxonServer {
     private final AuthService auth;
     private final boolean requireAuth;
     private volatile com.axonbase.core.cluster.ClusterStatusProvider clusterStatus;
+    private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicLong requests = new java.util.concurrent.atomic.AtomicLong();
     private Server jetty;
 
@@ -45,7 +46,7 @@ public final class AxonServer {
         this.bind = bind;
         this.auth = auth;
         this.requireAuth = requireAuth;
-        this.clusterStatus = () -> com.axonbase.core.cluster.ClusterStatusProvider.Status.local();
+        this.clusterStatus = com.axonbase.core.cluster.ClusterStatusProvider.Status::local;
     }
 
     public static AxonServer start(Datastore ds, String secret, int port) throws Exception {
@@ -115,22 +116,66 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new SqlServlet()), "/sql/*");
         ctx.addServlet(new ServletHolder(new TableServlet()), "/table/*");
         ctx.addServlet(new ServletHolder(new SigninServlet()), "/signin");
-        ctx.addServlet(new ServletHolder(new RpcServlet(ds, auth, requireAuth)), "/rpc");
+        RpcServlet rpc = new RpcServlet(ds, auth, requireAuth);
+        WsRpcServlet ws = new WsRpcServlet(ds, auth, requireAuth);
+        dispatchers.add(rpc.dispatcher);
+        dispatchers.add(ws.dispatcher());
+        ctx.addServlet(new ServletHolder(rpc), "/rpc");
         ctx.addServlet(new ServletHolder(new ExportServlet()), "/export");
         ctx.addServlet(new ServletHolder(new ImportServlet()), "/import");
         JettyWebSocketServletContainerInitializer.configure(ctx, (sc, wsContainer) -> {
             // configuración extra do contenedor websocket (baleira no MVP)
         });
-        ctx.addServlet(new ServletHolder(new WsRpcServlet(ds, auth, requireAuth)), "/rpc/ws/*");
+        ctx.addServlet(new ServletHolder(ws), "/rpc/ws/*");
         return ctx;
     }
 
     public int port() {
         return ((ServerConnector) jetty.getConnectors()[0]).getLocalPort();
     }
-    /** Liga o status de um grupo Raft real aos endpoints /ready e /status. */
+    /**
+     * Liga o estado real do consenso a este servidor.
+     *
+     * <p>Alcança três coisas de uma vez: {@code /ready} e {@code /status} passam a
+     * refletir papel, termo, índice de commit e membros vivos; os endpoints HTTP de
+     * escrita redirecionam para o líder; e os dispatchers de RPC e WebSocket passam
+     * a responder NOT_LEADER estruturado.</p>
+     */
     public void clusterStatus(com.axonbase.core.cluster.ClusterStatusProvider provider) {
-        this.clusterStatus = provider == null ? () -> com.axonbase.core.cluster.ClusterStatusProvider.Status.local() : provider;
+        this.clusterStatus = provider == null
+            ? com.axonbase.core.cluster.ClusterStatusProvider.Status::local : provider;
+        dispatchers.forEach(dispatcher -> dispatcher.clusterStatus(() -> clusterStatus.status()));
+    }
+
+    /**
+     * Desvia uma escrita que chegou a um seguidor.
+     *
+     * <p>Com endereço de líder conhecido responde 307, preservando método e corpo,
+     * de modo que o cliente possa reenviar sem saber nada de Raft. Sem endereço, o
+     * que resta é um 503 estruturado: há um erro real a reportar, e inventar um
+     * destino seria pior que recusar.</p>
+     *
+     * @return {@code true} se a requisição já foi respondida e não deve ser executada
+     */
+    private boolean redirectWrites(HttpServletRequest req, HttpServletResponse resp)
+            throws IOException {
+        var status = clusterStatus.status();
+        if (status.isLeader()) {
+            return false;
+        }
+        if (!status.leaderAddress().isEmpty()) {
+            String query = req.getQueryString();
+            resp.setHeader("Location", "http://" + status.leaderAddress() + req.getRequestURI()
+                + (query == null ? "" : "?" + query));
+            resp.setHeader("Axon-Leader", status.leader());
+            resp.setStatus(307);
+            return true;
+        }
+        resp.setHeader("Axon-Leader", status.leader());
+        json(resp, 503, "{\"status\":\"ERR\",\"kind\":\"NOT_LEADER\",\"leader\":\""
+            + esc(status.leader()) + "\",\"leader_address\":\"\",\"detail\":\""
+            + esc("escrita recusada: nenhum líder conhecido neste momento") + "\"}");
+        return true;
     }
 
     public void stop() throws Exception {
@@ -151,15 +196,31 @@ public final class AxonServer {
     }
 
     private final class ReadyServlet extends HttpServlet {
-        @Override protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            var status=clusterStatus.status();
-            json(resp,status.ready()?200:503,"{\"ready\":"+status.ready()+",\"leader\":\""+esc(String.valueOf(status.leader()))+"\"}");
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+            var s = clusterStatus.status();
+            json(resp, s.ready() ? 200 : 503, "{\"ready\":" + s.ready()
+                + ",\"role\":\"" + s.role() + "\""
+                + ",\"leader\":\"" + esc(s.leader()) + "\""
+                + ",\"active\":" + s.active() + ",\"quorum\":" + s.quorum() + "}");
         }
     }
+
     private final class StatusServlet extends HttpServlet {
-        @Override protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            var s=clusterStatus.status();
-            json(resp,200,"{\"node_id\":\""+esc(s.nodeId())+"\",\"cluster_id\":\""+esc(s.clusterId())+"\",\"leader\":\""+esc(String.valueOf(s.leader()))+"\",\"term\":"+s.term()+",\"commit_index\":"+s.commitIndex()+",\"active\":"+s.active()+",\"quorum\":"+s.quorum()+"}");
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+            var s = clusterStatus.status();
+            json(resp, 200, "{\"node_id\":\"" + esc(s.nodeId()) + "\""
+                + ",\"cluster_id\":\"" + esc(s.clusterId()) + "\""
+                + ",\"role\":\"" + s.role() + "\""
+                + ",\"leader\":\"" + esc(s.leader()) + "\""
+                + ",\"leader_address\":\"" + esc(s.leaderAddress()) + "\""
+                + ",\"term\":" + s.term()
+                + ",\"commit_index\":" + s.commitIndex()
+                + ",\"active\":" + s.active()
+                + ",\"members\":" + s.members()
+                + ",\"quorum\":" + s.quorum()
+                + ",\"ready\":" + s.ready() + "}");
         }
     }
 
@@ -185,6 +246,9 @@ public final class AxonServer {
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             requests.incrementAndGet();
             String body = readBody(req);
+            if (com.axonbase.core.engine.Datastore.isMutation(body) && redirectWrites(req, resp)) {
+                return;
+            }
             Session s = withNames(req);
             String error = null;
             AxonValue result = null;
@@ -212,6 +276,9 @@ public final class AxonServer {
 
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+            if (redirectWrites(req, resp)) {
+                return;
+            }
             String table = tablePath(req);
             Session s = withNames(req);
             AxonValue data = AxonJson.parseDocument(readBody(req));
@@ -247,7 +314,7 @@ public final class AxonServer {
     }
 
     private final class RpcServlet extends HttpServlet {
-        private final RpcDispatcher dispatcher;
+        final RpcDispatcher dispatcher;
 
         RpcServlet(Datastore ds) {
             this.dispatcher = new RpcDispatcher(ds);
@@ -286,6 +353,9 @@ public final class AxonServer {
     private final class ImportServlet extends HttpServlet {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+            if (redirectWrites(req, resp)) {
+                return;
+            }
             Session s = withNames(req);
             String ns = s.namespace() != null ? s.namespace() : "";
             String db = s.database() != null ? s.database() : "";

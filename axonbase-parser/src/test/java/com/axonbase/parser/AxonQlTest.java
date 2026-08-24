@@ -175,6 +175,19 @@ class AxonQlTest {
     }
 
     @Test
+    void roundTripDefineUserComPasshash() {
+        // A forma PASSHASH é o que o plano de controle replica: salt e hash juntos,
+        // sem a senha original, para que o replay não precise rehashear nada.
+        assertRoundTrip("DEFINE USER alice ON ROOT PASSHASH \"a1b2:c3d4\"");
+        assertRoundTrip("DEFINE USER alice ON DATABASE PASSHASH \"a1b2:c3d4\" ROLES editor");
+    }
+
+    @Test
+    void defineUserExigePasswordOuPasshash() {
+        assertThrows(AxonError.class, () -> AxonQl.parse("DEFINE USER alice ON ROOT"));
+    }
+
+    @Test
     void roundTripFullText() {
         assertRoundTrip("DEFINE ANALYZER pt LOWERCASE STOPWORDS \"o\", \"a\" STEMMING");
         assertRoundTrip("DEFINE INDEX body_search ON TABLE article COLUMNS body SEARCH ANALYZER pt");

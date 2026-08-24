@@ -4,35 +4,74 @@ import com.axonbase.common.AxonError;
 import com.axonbase.core.Session;
 import com.axonbase.core.catalog.Catalog;
 import com.axonbase.core.catalog.Database;
+import com.axonbase.core.catalog.RecordId;
+import com.axonbase.core.cluster.AppliedBatchListener;
+import com.axonbase.core.cluster.CommitCoordinator;
+import com.axonbase.core.cluster.CommittedBatch;
+import com.axonbase.core.control.ControlCommand;
+import com.axonbase.core.control.ControlSnapshot;
+import com.axonbase.core.control.ControlStateMachine;
+import com.axonbase.core.control.ControlStore;
+import com.axonbase.core.security.AuthCatalog;
 import com.axonbase.core.storage.KvBackend;
 import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.core.storage.Transaction;
-import com.axonbase.core.security.AuthCatalog;
 import com.axonbase.parser.AxonQl;
 import com.axonbase.parser.ast.Query;
+import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Núcleo de datos: xestión de namespaces, bancos de datos, catálogos e records.
- * É o punto de entrada que leva o plan: {@code Datastore.execute(sql, session,
- * vars)}.
+ * Núcleo de dados: namespaces, bancos, catálogos e registros.
+ *
+ * <p>O catálogo e as identidades vivem em memória, mas a fonte de verdade é o
+ * plano de controle: uma lista de {@link ControlCommand} com o texto AxonQL de
+ * cada definição, gravada numa única chave do KV. Reexecutar essa lista é o que
+ * reconstrói o estado, seja num restart, seja num seguidor que acabou de receber
+ * o batch replicado. Definição e replay compartilham o mesmo caminho de código,
+ * o que impede que os dois divirjam.</p>
  */
 public final class Datastore {
 
     private final KvBackend backend;
-    private final ConcurrentMap<String, ConcurrentMap<String, Database>> namespaces = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConcurrentMap<String, Database>> namespaces =
+        new ConcurrentHashMap<>();
     private final LiveBus liveBus = new LiveBus();
     private final AuthCatalog authCatalog = new AuthCatalog();
-    private volatile com.axonbase.core.cluster.CommitCoordinator commitCoordinator;
+    private final ControlStateMachine controlState = new ControlStateMachine();
+    private final ControlStore controlStore;
+    private final Object controlLock = new Object();
+    private volatile CommitCoordinator commitCoordinator;
     private volatile String clusterNodeId;
+    /**
+     * Marca de reexecução, por thread. Um flag global faria a thread do consenso, ao
+     * reconstruir o catálogo, engolir silenciosamente uma definição que um cliente
+     * estivesse aplicando ao mesmo tempo.
+     */
+    private final ThreadLocal<Boolean> replaying = ThreadLocal.withInitial(() -> false);
+    /**
+     * Transações cuja notificação já saiu pela sessão que as originou. O batch volta
+     * pelo listener do consenso e não deve gerar um segundo evento.
+     */
+    private final Deque<String> locallyOriginated = new ArrayDeque<>();
+    private static final int ORIGINATED_MEMORY = 256;
 
     public Datastore(KvBackend backend) {
         this.backend = backend != null ? backend : new MemoryBackend();
+        this.controlStore = new ControlStore(this.backend);
+        synchronized (controlLock) {
+            controlState.restore(controlStore.load());
+            replayControl();
+        }
     }
 
     public static Datastore memory() {
@@ -40,17 +79,33 @@ public final class Datastore {
     }
 
     // ------------------------------------------------------------------
-    // xestión de namespaces / databases
+    // namespaces e databases
     // ------------------------------------------------------------------
 
     public Database ensureDatabase(String ns, String db) {
+        return ensureDatabase(null, ns, db);
+    }
+
+    /**
+     * Garante o banco e registra a criação no plano de controle.
+     *
+     * <p>Com uma transação aberta na sessão, o registro entra no batch replicado.
+     * Fora dela, vai direto ao storage: o próximo DDL ou escrita no banco carrega o
+     * snapshot completo para os seguidores de qualquer forma.</p>
+     */
+    public Database ensureDatabase(Session session, String ns, String db) {
         if (ns == null || ns.isBlank() || db == null || db.isBlank()) {
-            throw AxonError.internal(
-                "ecué ns e db non poden estar en banco para acceder á base");
+            throw AxonError.internal("ns e db são obrigatórios para acessar a base");
         }
-        ConcurrentMap<String, Database> dbs = namespaces.computeIfAbsent(ns, k -> new ConcurrentHashMap<>());
-        return dbs.computeIfAbsent(db, k -> new Database(ns, db, backend));
+        ConcurrentMap<String, Database> dbs = namespaces.computeIfAbsent(ns,
+            k -> new ConcurrentHashMap<>());
+        boolean created = !dbs.containsKey(db);
+        Database database = dbs.computeIfAbsent(db, k -> new Database(ns, db, backend));
+        if (created && !replaying.get()) {
+            applyControl(session, ControlCommand.database(ns, db));
         }
+        return database;
+    }
 
     public void createDatabase(String ns, String db) {
         ensureDatabase(ns, db);
@@ -65,23 +120,19 @@ public final class Datastore {
         String ns = session.namespace();
         String db = session.database();
         if (ns == null || db == null) {
-            throw AxonError.internal("não se seleccionou un namespace/database de uso");
+            throw AxonError.internal("nenhum namespace/database selecionado");
         }
-        return ensureDatabase(ns, db);
+        return ensureDatabase(session, ns, db);
     }
 
-    /** Barramento de live queries partilhado por todas as sessões. */
+    /** Barramento de live queries compartilhado por todas as sessões. */
     public LiveBus liveBus() {
         return liveBus;
     }
 
-    /** Catálogo de usuários e access methods deste servidor. */
+    /** Catálogo de usuários e access methods deste nó. */
     public AuthCatalog authCatalog() {
         return authCatalog;
-    }
-    /** Ativa confirmação de quórum antes de commits locais. */
-    public void commitCoordinator(com.axonbase.core.cluster.CommitCoordinator coordinator, String nodeId) {
-        this.commitCoordinator = coordinator; this.clusterNodeId = nodeId;
     }
 
     public List<String> namespaces() {
@@ -94,7 +145,218 @@ public final class Datastore {
     }
 
     // ------------------------------------------------------------------
-    // Execución
+    // plano de controle
+    // ------------------------------------------------------------------
+
+    /**
+     * Registra uma definição no plano de controle e grava o snapshot resultante.
+     *
+     * <p>Com uma transação aberta, o snapshot vai para o buffer dela. É o que faz o
+     * DDL viajar no mesmo batch replicado das escritas de dados, chegando ao
+     * seguidor de forma atômica e nunca antes do quórum.</p>
+     *
+     * @param session sessão que originou a definição, ou {@code null} fora de sessão
+     * @param command definição já renderizada em AxonQL
+     */
+    public void applyControl(Session session, ControlCommand command) {
+        if (replaying.get()) {
+            return;
+        }
+        synchronized (controlLock) {
+            controlState.apply(command);
+            KvBackend target = session != null && session.inTransaction() ? session.tx() : backend;
+            controlStore.save(controlState, target);
+            if (target == backend) {
+                backend.flush();
+            }
+        }
+    }
+
+    /** Registra uma definição fora de qualquer sessão. */
+    public void applyControl(ControlCommand command) {
+        applyControl(null, command);
+    }
+
+    public ControlSnapshot controlSnapshot() {
+        synchronized (controlLock) {
+            return controlState.snapshot();
+        }
+    }
+
+    /** Ativa confirmação de quórum antes dos commits locais. */
+    public void commitCoordinator(CommitCoordinator coordinator, String nodeId) {
+        this.commitCoordinator = coordinator;
+        this.clusterNodeId = nodeId;
+    }
+
+    /**
+     * Reconstrói catálogo e identidades reexecutando o plano de controle.
+     *
+     * <p>Os comandos vêm ordenados por dependência, então um índice com analyzer
+     * encontra o analyzer, e um campo encontra a tabela. O flag {@code replaying}
+     * evita que a reexecução grave de novo o que acabou de ler.</p>
+     */
+    private void replayControl() {
+        ControlSnapshot snapshot = controlState.snapshot();
+        replaying.set(true);
+        try {
+            namespaces.clear();
+            authCatalog.clear();
+            for (ControlCommand command : snapshot.commands()) {
+                replay(command);
+            }
+        } finally {
+            replaying.set(false);
+        }
+    }
+
+    private void replay(ControlCommand command) {
+        if (command.kind() == ControlCommand.Kind.DATABASE) {
+            ensureDatabase(command.namespace(), command.database());
+            return;
+        }
+        Session session = new Session(emptyToNull(command.namespace()),
+            emptyToNull(command.database()));
+        Query query = AxonQl.parse(command.definition());
+        new Executor(this).execute(query, session, null);
+    }
+
+    /**
+     * Aplica no estado em memória um batch que o consenso já confirmou.
+     *
+     * <p>Chamado em todos os membros, inclusive no líder. Duas coisas acontecem: o
+     * catálogo é reconstruído quando o snapshot de controle mudou, e as live
+     * queries deste nó recebem as mudanças de registro. É por aqui que uma
+     * subscription num nó que não é líder enxerga uma escrita confirmada.</p>
+     */
+    public void onReplicatedBatch(AppliedBatchListener.AppliedBatch applied) {
+        // O líder já aplicou o DDL em memória e já vai entregar as notificações pela
+        // sessão que originou a escrita; reprocessar aqui duplicaria os dois efeitos.
+        if (consumeLocalOrigin(applied.batch().transactionId())) {
+            return;
+        }
+        byte[] snapshot = applied.batch().puts().get(ControlStore.KEY);
+        if (snapshot != null) {
+            // O batch só carrega a chave de controle quando alguma definição mudou, então
+            // reconstruir aqui não é desperdício. Reconstruir sempre também é o que faz o
+            // acoplamento tardio do listener recuperar o catálogo de um log já aplicado.
+            synchronized (controlLock) {
+                controlState.restore(ControlStore.decode(snapshot));
+                replayControl();
+            }
+        }
+        fanout(applied);
+    }
+
+    /** Listener pronto para acoplar a um runtime de consenso. */
+    public AppliedBatchListener appliedBatchListener() {
+        return this::onReplicatedBatch;
+    }
+
+    private void markLocalOrigin(String transactionId) {
+        synchronized (locallyOriginated) {
+            locallyOriginated.addLast(transactionId);
+            while (locallyOriginated.size() > ORIGINATED_MEMORY) {
+                locallyOriginated.removeFirst();
+            }
+        }
+    }
+
+    private boolean consumeLocalOrigin(String transactionId) {
+        synchronized (locallyOriginated) {
+            return locallyOriginated.remove(transactionId);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // fanout de live queries pós-quórum
+    // ------------------------------------------------------------------
+
+    /**
+     * Traduz as chaves de registro do batch em notificações de live query.
+     *
+     * <p>Só chaves de registro entram: as de índice, aresta e controle não
+     * representam documentos. O estado anterior vem do batch aplicado, porque o
+     * storage já foi sobrescrito quando chegamos aqui.</p>
+     */
+    private void fanout(AppliedBatchListener.AppliedBatch applied) {
+        if (liveBus.isEmpty()) {
+            return;
+        }
+        Executor executor = new Executor(this);
+        Session carrier = Session.create();
+        for (Map.Entry<String, byte[]> put : applied.batch().puts().entrySet()) {
+            RecordRef ref = RecordRef.parse(put.getKey());
+            if (ref == null) {
+                continue;
+            }
+            AxonValue after = decodeRecord(put.getValue());
+            AxonValue before = decodeRecord(applied.previous().get(put.getKey()));
+            if (after == null) {
+                continue;
+            }
+            String action = before == null ? LiveBus.CREATE : LiveBus.UPDATE;
+            publish(executor, carrier, ref, action, before, after);
+        }
+        for (String key : applied.batch().deletes()) {
+            RecordRef ref = RecordRef.parse(key);
+            AxonValue before = decodeRecord(applied.previous().get(key));
+            if (ref == null || before == null) {
+                continue;
+            }
+            publish(executor, carrier, ref, LiveBus.DELETE, before, null);
+        }
+    }
+
+    private void publish(Executor executor, Session carrier, RecordRef ref, String action,
+                         AxonValue before, AxonValue after) {
+        ConcurrentMap<String, Database> dbs = namespaces.get(ref.ns());
+        Database database = dbs == null ? null : dbs.get(ref.db());
+        if (database == null) {
+            return;
+        }
+        AxonValue identity = (after != null ? after : before).asObject().get("id");
+        if (identity == null) {
+            return;
+        }
+        RecordId rid = new RecordId(ref.table(), identity);
+        executor.publishConfirmed(carrier, database, rid, action, before, after);
+    }
+
+    private static AxonValue decodeRecord(byte[] raw) {
+        if (raw == null || raw.length == 0) {
+            return null;
+        }
+        try {
+            AxonValue value = AxonJson.decode(raw);
+            return value.isObject() && value.asObject().containsKey("id") ? value : null;
+        } catch (RuntimeException notARecord) {
+            return null;
+        }
+    }
+
+    /**
+     * Referência a um registro extraída da chave física
+     * {@code <ns>\0<db>\0<tabela>\0<chave>}. Chaves de índice têm mais segmentos e
+     * chaves de controle não têm nenhum, então ambas são descartadas.
+     */
+    private record RecordRef(String ns, String db, String table) {
+
+        static RecordRef parse(String key) {
+            String[] parts = key.split("\u0000", -1);
+            if (parts.length != 4 || parts[0].isEmpty() || parts[1].isEmpty() || parts[2].isEmpty()) {
+                return null;
+            }
+            return new RecordRef(parts[0], parts[1], parts[2]);
+        }
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    // ------------------------------------------------------------------
+    // Execução
     // ------------------------------------------------------------------
 
     public AxonValue execute(String sql, Session session, Map<String, AxonValue> vars) {
@@ -104,15 +366,14 @@ public final class Datastore {
             beginSession(session);
         }
         try {
-        Query query = AxonQl.parse(sql);
-        Executor ex = new Executor(this);
-        AxonValue result = ex.execute(query, session, vars);
-        if (implicitClusterTransaction) {
-            commitSession(session);
-        } else {
-            backend.flush();
-        }
-        return result;
+            Query query = AxonQl.parse(sql);
+            AxonValue result = new Executor(this).execute(query, session, vars);
+            if (implicitClusterTransaction) {
+                commitSession(session);
+            } else {
+                backend.flush();
+            }
+            return result;
         } catch (RuntimeException e) {
             if (implicitClusterTransaction && session.inTransaction()) {
                 cancelSession(session);
@@ -121,12 +382,19 @@ public final class Datastore {
         }
     }
 
-    private static boolean isMutation(String sql) {
-        String normalized = sql == null ? "" : sql.stripLeading().toUpperCase(java.util.Locale.ROOT);
+    /**
+     * O texto muda estado e portanto precisa passar pelo líder.
+     *
+     * <p>Público porque o transporte usa a mesma regra para decidir se responde
+     * NOT_LEADER antes de executar qualquer coisa.</p>
+     */
+    public static boolean isMutation(String sql) {
+        String normalized = sql == null ? "" : sql.stripLeading().toUpperCase(Locale.ROOT);
         return !(normalized.startsWith("SELECT") || normalized.startsWith("INFO")
             || normalized.startsWith("RETURN") || normalized.startsWith("USE ")
             || normalized.startsWith("BEGIN") || normalized.startsWith("COMMIT")
-            || normalized.startsWith("CANCEL"));
+            || normalized.startsWith("CANCEL") || normalized.startsWith("LIVE")
+            || normalized.startsWith("KILL"));
     }
 
     // ------------------------------------------------------------------
@@ -134,8 +402,8 @@ public final class Datastore {
     // ------------------------------------------------------------------
 
     /**
-     * Gera um dump AxonQL da base: DEFINEs do catálogo seguidos de um CREATE
-     * por registro, para restauração.
+     * Gera um dump AxonQL da base: DEFINEs do catálogo seguidos de um CREATE por
+     * registro, para restauração.
      */
     public String exportDatabase(String ns, String db) {
         Database database = ensureDatabase(ns, db);
@@ -175,11 +443,11 @@ public final class Datastore {
         }
         String prefix = ns + "\u0000" + db + "\u0000";
         for (String key : database.records().keysWithPrefix(prefix)) {
-            java.util.Optional<byte[]> raw = database.records().get(key);
+            Optional<byte[]> raw = database.records().get(key);
             if (raw.isEmpty()) {
                 continue;
             }
-            com.axonbase.value.AxonValue record = com.axonbase.value.AxonJson.decode(raw.get());
+            AxonValue record = AxonJson.decode(raw.get());
             if (!record.isObject() || !record.asObject().containsKey("id")) {
                 continue;
             }
@@ -192,11 +460,9 @@ public final class Datastore {
             String table = body.substring(0, last);
             String keyStr = body.substring(last + 1);
             // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>
-            java.util.Map<String, com.axonbase.value.AxonValue> m =
-                new java.util.LinkedHashMap<>(record.asObject());
+            Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
             m.remove("id");
-            String content = com.axonbase.value.AxonJson.write(
-                com.axonbase.value.AxonValue.object(m));
+            String content = AxonJson.write(AxonValue.object(m));
             sb.append("CREATE ").append(table).append(":").append(literalKey(keyStr))
                 .append(" CONTENT ").append(content).append(";\n");
         }
@@ -224,30 +490,53 @@ public final class Datastore {
     }
 
     // ------------------------------------------------------------------
-    // Transações de sesión (Begin/Commit/Cancel
+    // Transações de sessão (BEGIN / COMMIT / CANCEL)
     // ------------------------------------------------------------------
 
     public void beginSession(Session session) {
         if (session.inTransaction()) {
-            throw AxonError.internal("xa existe unha transación activa");
+            throw AxonError.internal("já existe uma transação ativa");
         }
-        session.tx(new Transaction(requireDatabase(session).records()));
+        // Uma definição de escopo ROOT não tem banco selecionado, mas ainda precisa
+        // de um buffer para que o snapshot de controle entre no batch replicado.
+        KvBackend base = session.namespace() == null || session.database() == null
+            ? backend : requireDatabase(session).records();
+        session.tx(new Transaction(base));
     }
 
     public void commitSession(Session session) {
         Transaction tx = session.tx();
         if (tx == null || !tx.isOpen()) {
-            throw AxonError.internal("non hay transación activa");
+            throw AxonError.internal("não há transação ativa");
         }
-        var coordinator = commitCoordinator;
-        if (coordinator != null) {
-            coordinator.confirm(clusterNodeId, new com.axonbase.core.cluster.CommittedBatch(
-                java.util.UUID.randomUUID().toString(), tx.stagedWrites(), tx.stagedDeletes()));
+        CommitCoordinator coordinator = commitCoordinator;
+        if (coordinator == null) {
+            tx.commit();
+        } else {
+            // Precondições primeiro, replicação depois, aplicação por último. Validar
+            // após o consenso acusaria conflito com a própria escrita que acabou de ser
+            // aplicada ao state machine.
+            tx.validate();
+            String transactionId = java.util.UUID.randomUUID().toString();
+            // Registrar antes de confirmar: o listener do consenso é chamado de dentro
+            // de confirm() e precisa reconhecer o batch como local para não duplicar
+            // as notificações que esta sessão já vai entregar no flushLive.
+            markLocalOrigin(transactionId);
+            try {
+                coordinator.confirm(clusterNodeId, new CommittedBatch(transactionId,
+                    tx.stagedWrites(), tx.stagedDeletes()));
+            } catch (RuntimeException notConfirmed) {
+                consumeLocalOrigin(transactionId);
+                // Sem confirmação a transação morre aqui. Deixá-la aberta faria a própria
+                // sessão continuar lendo escritas que o cluster nunca aceitou.
+                cancelSession(session);
+                throw notConfirmed;
+            }
+            tx.commitValidated();
         }
-        tx.commit();
         session.tx(null);
-        requireDatabase(session).records().flush();
-        // as notificações retidas durante a transação só saem agora
+        backend.flush();
+        // As notificações retidas durante a transação só saem agora, depois do quórum.
         session.flushLive();
     }
 
@@ -258,5 +547,11 @@ public final class Datastore {
             session.tx(null);
         }
         session.discardLive();
+        // DDL e auth foram aplicados em memória para a própria sessão; se o batch não
+        // confirmou, o plano de controle volta ao que está durável no storage.
+        synchronized (controlLock) {
+            controlState.restore(controlStore.load());
+            replayControl();
+        }
     }
 }

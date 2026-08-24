@@ -63,9 +63,28 @@ public sealed interface Statement {
             implements Statement {
     }
 
-    /** Usuário autenticável em um escopo ROOT, NAMESPACE ou DATABASE. */
+    /**
+     * Usuário autenticável em um escopo ROOT, NAMESPACE ou DATABASE.
+     *
+     * <p>A senha chega em texto puro pela cláusula {@code PASSWORD} ou já
+     * protegida pela cláusula {@code PASSHASH "&lt;salt&gt;:&lt;hash&gt;"}. A segunda forma
+     * existe para que o plano de controle replicado e o dump de catálogo possam
+     * transportar a identidade sem conhecer nem rehashear a senha original.
+     * Exatamente uma das duas é preenchida.</p>
+     */
     record DefineUser(String name, AuthScope scope, String namespace, String database,
-                      Expr password, List<String> roles) implements Statement {
+                      Expr password, String passhash, List<String> roles) implements Statement {
+
+        public DefineUser {
+            if ((password == null) == (passhash == null)) {
+                throw new IllegalArgumentException("DEFINE USER exige PASSWORD ou PASSHASH, nunca ambos");
+            }
+        }
+
+        /** A identidade já veio protegida por hash, sem senha em texto puro. */
+        public boolean hashed() {
+            return passhash != null;
+        }
     }
 
     /** Access method nomeado, limitado a um escopo. */

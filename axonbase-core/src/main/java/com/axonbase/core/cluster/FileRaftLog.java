@@ -43,6 +43,23 @@ public final class FileRaftLog implements AutoCloseable {
     public synchronized Entry entry(long index) {
         return entries.stream().filter(entry -> entry.index() == index).findFirst().orElse(null);
     }
+    public synchronized long termAt(long index) { Entry entry=entry(index); return entry==null?0:entry.term(); }
+    /** Remove a cauda conflitante e regrava o arquivo antes de aceitar a entrada do líder. */
+    public synchronized void truncateFrom(long index) {
+        entries.removeIf(entry -> entry.index() >= index);
+        try (DataOutputStream out = new DataOutputStream(Files.newOutputStream(path,
+            StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING))) {
+            for (Entry entry : entries) write(out, entry);
+            out.flush();
+        } catch (IOException e) { throw new UncheckedIOException(e); }
+    }
+
+    private static void write(DataOutputStream out, Entry entry) throws IOException {
+        out.writeLong(entry.index()); out.writeLong(entry.term()); out.writeUTF(entry.batch().transactionId());
+        out.writeInt(entry.batch().deletes().size()); for (String key : entry.batch().deletes()) out.writeUTF(key);
+        out.writeInt(entry.batch().puts().size());
+        for (var put : entry.batch().puts().entrySet()) { out.writeUTF(put.getKey()); out.writeInt(put.getValue().length); out.write(put.getValue()); }
+    }
 
     private void recover() throws IOException {
         if (!Files.exists(path)) return;

@@ -138,6 +138,38 @@ public final class Transaction implements KvBackend {
         finish();
     }
 
+    /**
+     * Verifica as precondições otimistas sem aplicar nada.
+     *
+     * <p>Num cluster, a validação tem de acontecer antes de replicar: depois do
+     * consenso aplicar o batch, as versões que esta transação leu já mudaram por
+     * causa dela mesma, e revalidar acusaria um conflito inexistente.</p>
+     */
+    public void validate() {
+        ensureOpen();
+        if (base instanceof VersionedKvBackend versioned) {
+            versioned.commit(java.util.Map.copyOf(readVersions), java.util.Map.of(),
+                java.util.Set.of());
+        }
+    }
+
+    /**
+     * Aplica o staged sem revalidar as precondições e pecha a transación.
+     *
+     * <p>Usada quando o consenso já aceitou este batch: a ordem foi decidida no log
+     * e as precondições foram verificadas em {@link #validate()} antes disso.</p>
+     */
+    public void commitValidated() {
+        ensureOpen();
+        if (base instanceof VersionedKvBackend versioned) {
+            versioned.commit(java.util.Map.of(), java.util.Map.copyOf(staged),
+                java.util.Set.copyOf(deleted));
+            finish();
+            return;
+        }
+        commit();
+    }
+
     private void finish() {
         open = false;
         staged.clear();

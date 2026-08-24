@@ -10,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("Storage: persistencia en arquivo")
@@ -53,5 +54,34 @@ class PersistenceTest {
         assertTrue(rows.isArray());
         assertEquals(1, rows.asArray().size());
         assertEquals("Ana", rows.asArray().get(0).asObject().get("name").asString());
+    }
+
+    @Test
+    void recuperaPlanoDeControleCompleto(@TempDir Path dir) {
+        String path = dir.resolve("control.db").toString();
+        Datastore first = new Datastore(new FileBackend(path));
+        Session s = session();
+        first.createDatabase("test", "dev");
+        first.execute("DEFINE ANALYZER texto LOWERCASE STOPWORDS \"o\" STEMMING", s, null);
+        first.execute("DEFINE TABLE person SCHEMAFULL PERMISSIONS FOR select WHERE age >= 18", s, null);
+        first.execute("DEFINE FIELD age ON TABLE person TYPE int DEFAULT 18", s, null);
+        first.execute("DEFINE INDEX busca ON TABLE person COLUMNS name SEARCH ANALYZER texto", s, null);
+        first.execute("DEFINE EVENT audit ON TABLE person WHEN $event = \"CREATE\" "
+            + "THEN (CREATE changes CONTENT { kind: \"person\" })", s, null);
+        first.execute("DEFINE USER alice ON DATABASE PASSWORD \"secreta\" ROLES editor", s, null);
+        first.execute("DEFINE ACCESS login ON DATABASE", s, null);
+
+        Datastore recovered = new Datastore(new FileBackend(path));
+        assertTrue(recovered.namespaces().contains("test"));
+        assertTrue(recovered.databases("test").contains("dev"));
+        assertNotNull(recovered.authCatalog().verify("alice", "secreta", "test", "dev"));
+        assertNotNull(recovered.authCatalog().access("login", "test", "dev"));
+        AxonValue info = recovered.execute("INFO FOR TABLE person", session(), null);
+        assertTrue(info.asObject().get("fields").asObject().containsKey("age"));
+        assertTrue(info.asObject().get("indexes").asObject().containsKey("busca"));
+        assertTrue(info.asObject().get("events").asObject().containsKey("audit"));
+
+        recovered.execute("CREATE person CONTENT { name: \"Ana\" }", session(), null);
+        assertEquals(1, recovered.execute("SELECT * FROM changes", session(), null).asArray().size());
     }
 }

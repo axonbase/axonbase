@@ -25,8 +25,9 @@ public final class TcpRaftServer implements AutoCloseable {
     }
     private void handle(Socket socket) {
         try (socket; var in = new DataInputStream(socket.getInputStream()); var out = new DataOutputStream(socket.getOutputStream())) {
-            byte type=in.readByte(); String group=in.readUTF(); long term=in.readLong(); String actor=in.readUTF(); long index=in.readLong(); long commit=in.readLong();
-            byte[] payload=in.readNBytes(in.readInt()); RaftWire.Response response=handler.handle(new RaftWire.Request(type,group,term,actor,index,commit,payload));
+            byte type=in.readByte(); String group=in.readUTF(); long term=in.readLong(); String actor=in.readUTF();
+            String advertise=in.readUTF(); long index=in.readLong(); long commit=in.readLong();
+            byte[] payload=in.readNBytes(in.readInt()); RaftWire.Response response=handler.handle(new RaftWire.Request(type,group,term,actor,advertise,index,commit,payload));
             out.writeLong(response.term()); out.writeBoolean(response.accepted()); out.writeLong(response.matchIndex()); out.flush();
         } catch (IOException ignored) { }
     }

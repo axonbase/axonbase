@@ -498,8 +498,14 @@ public final class Parser {
         if (matchKeyword("user")) {
             String name = expectIdent();
             AuthTarget target = parseAuthTarget();
-            expectKeyword("password");
-            Expr password = parseExpr();
+            Expr password = null;
+            String passhash = null;
+            if (matchKeyword("passhash")) {
+                passhash = (String) expect(TokenType.STRING).literal();
+            } else {
+                expectKeyword("password");
+                password = parseExpr();
+            }
             List<String> roles = new ArrayList<>();
             if (matchKeyword("roles")) {
                 roles.add(expectIdent());
@@ -508,7 +514,7 @@ public final class Parser {
                 }
             }
             return new Statement.DefineUser(name, target.scope(), target.namespace(),
-                target.database(), password, roles);
+                target.database(), password, passhash, roles);
         }
         if (matchKeyword("access")) {
             String name = expectIdent();

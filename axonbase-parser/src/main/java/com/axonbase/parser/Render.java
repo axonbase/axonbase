@@ -227,7 +227,11 @@ public final class Render {
             case Statement.DefineUser du -> {
                 sb.append("DEFINE USER ").append(du.name()).append(" ON ");
                 authScope(sb, du.scope(), du.namespace(), du.database());
-                sb.append(" PASSWORD ").append(expr(du.password()));
+                if (du.hashed()) {
+                    sb.append(" PASSHASH \"").append(escape(du.passhash())).append('"');
+                } else {
+                    sb.append(" PASSWORD ").append(expr(du.password()));
+                }
                 if (!du.roles().isEmpty()) {
                     sb.append(" ROLES ").append(String.join(", ", du.roles()));
                 }

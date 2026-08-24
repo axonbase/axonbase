@@ -6,8 +6,11 @@ import com.axonbase.core.catalog.Catalog;
 import com.axonbase.core.catalog.Database;
 import com.axonbase.core.catalog.Document;
 import com.axonbase.core.catalog.RecordId;
+import com.axonbase.core.control.AuthCodec;
+import com.axonbase.core.control.ControlCommand;
 import com.axonbase.core.storage.KvBackend;
 import com.axonbase.core.storage.Transaction;
+import com.axonbase.core.security.AuthCatalog;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Query;
 import com.axonbase.parser.ast.Statement;
@@ -78,6 +81,20 @@ public final class Executor {
 
     private Database db() {
         return ds.requireDatabase(session);
+    }
+
+    /**
+     * Publica uma mudança que o consenso já confirmou nas live queries deste nó.
+     *
+     * <p>Usado no caminho de replicação: o batch chega aplicado, sem transação
+     * local, e o evento tem de sair imediatamente. É o que faz uma subscription num
+     * nó que não é líder ver a escrita, e o motivo de nada sair quando o quórum
+     * falha, porque aí nenhum batch é aplicado.</p>
+     */
+    public void publishConfirmed(Session carrier, Database db, RecordId rid, String action,
+                                 AxonValue before, AxonValue after) {
+        this.session = carrier;
+        notifyLive(db, rid, action, before, after);
     }
 
     /**
@@ -170,6 +187,7 @@ public final class Executor {
         if (def == null) {
             def = new Catalog.TableDef(name, false, false);
             db.catalog().defineTable(def);
+            control(db, ControlCommand.Kind.TABLE, name, "DEFINE TABLE " + name + " SCHEMALESS");
         }
         return def;
     }
@@ -1368,6 +1386,7 @@ public final class Executor {
         }
         def.permissions(dt.permissions());
         db.catalog().defineTable(def);
+        control(db, ControlCommand.Kind.TABLE, dt.name(), com.axonbase.parser.Render.stmt(dt));
         return AxonValue.nul();
     }
 
@@ -1376,6 +1395,8 @@ public final class Executor {
         Catalog.TableDef def = ensureTable(db, df.table());
         def.fields().put(df.name(),
             new Catalog.FieldDef(df.name(), df.type(), df.readonly(), df.assertExpr(), df.defaultExpr()));
+        control(db, ControlCommand.Kind.FIELD, df.table() + ":" + df.name(),
+            com.axonbase.parser.Render.stmt(df));
         return AxonValue.nul();
     }
 
@@ -1397,12 +1418,16 @@ public final class Executor {
                 }
             }
         }
+        control(db, ControlCommand.Kind.INDEX, di.table() + ":" + di.name(),
+            com.axonbase.parser.Render.stmt(di));
         return AxonValue.nul();
     }
 
     private AxonValue runDefineAnalyzer(Statement.DefineAnalyzer da) {
-        db().catalog().defineAnalyzer(new Catalog.AnalyzerDef(da.name(), da.lowercase(),
+        Database db = db();
+        db.catalog().defineAnalyzer(new Catalog.AnalyzerDef(da.name(), da.lowercase(),
             da.stopwords(), da.stemming()));
+        control(db, ControlCommand.Kind.ANALYZER, da.name(), com.axonbase.parser.Render.stmt(da));
         return AxonValue.nul();
     }
 
@@ -1411,10 +1436,19 @@ public final class Executor {
         Catalog.TableDef def = ensureTable(db, de.table());
         String when = de.when() == null ? "" : com.axonbase.parser.Render.expr(de.when());
         def.events().put(de.name(), new Catalog.EventDef(de.name(), when, de.when(), de.then()));
+        control(db, ControlCommand.Kind.EVENT, de.table() + ":" + de.name(),
+            com.axonbase.parser.Render.stmt(de));
         return AxonValue.nul();
     }
 
-    /** Define uma identidade que o servidor pode autenticar por signin. */
+    /**
+     * Define uma identidade que o servidor pode autenticar por signin.
+     *
+     * <p>A senha é hasheada aqui e o comando de controle guarda o texto AxonQL na
+     * forma {@code PASSHASH "salt:hash"}. Assim o replay e a réplica reconstroem a
+     * identidade sem conhecer a senha e sem rehashear, que é justamente onde uma
+     * credencial se perderia.</p>
+     */
     private AxonValue runDefineUser(Statement.DefineUser du) {
         String ns = du.scope() == Statement.AuthScope.ROOT ? null
             : du.namespace() != null ? du.namespace() : session.namespace();
@@ -1426,9 +1460,23 @@ public final class Executor {
         if (du.scope() == Statement.AuthScope.DATABASE && (database == null || database.isBlank())) {
             throw errorStmt("DEFINE USER ON DATABASE exige banco selecionado");
         }
-        AxonValue password = eval(du.password());
-        ds.authCatalog().defineUser(du.name(), authScope(du.scope()), ns, database,
-            password.isString() ? password.asString() : password.toString(), du.roles());
+        AuthCatalog.User stored;
+        if (du.hashed()) {
+            AuthCodec.Credential credential = AuthCodec.parse(du.passhash());
+            stored = new AuthCatalog.User(du.name(), authScope(du.scope()), ns, database,
+                credential.saltHex(), credential.hashHex(), du.roles());
+            ds.authCatalog().restoreUser(stored);
+        } else {
+            AxonValue password = eval(du.password());
+            stored = ds.authCatalog().defineUser(du.name(), authScope(du.scope()), ns, database,
+                password.isString() ? password.asString() : password.toString(), du.roles());
+        }
+        Statement.DefineUser replayable = new Statement.DefineUser(du.name(), du.scope(),
+            du.namespace(), du.database(), null,
+            AuthCodec.passhash(stored.saltHex(), stored.hashHex()), du.roles());
+        ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.USER, ns, database,
+            identity(du.name(), du.scope(), ns, database),
+            com.axonbase.parser.Render.stmt(replayable)));
         return AxonValue.nul();
     }
 
@@ -1445,8 +1493,22 @@ public final class Executor {
             throw errorStmt("DEFINE ACCESS ON DATABASE exige banco selecionado");
         }
         ds.authCatalog().defineAccess(da.name(), authScope(da.scope()), ns, database);
+        ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.ACCESS, ns, database,
+            identity(da.name(), da.scope(), ns, database),
+            com.axonbase.parser.Render.stmt(da)));
         return AxonValue.nul();
     }
+
+    /** Nome único da identidade no plano de controle, incluindo o escopo. */
+    private static String identity(String name, Statement.AuthScope scope, String ns, String db) {
+        return name + ":" + scope + ":" + (ns == null ? "" : ns) + ":" + (db == null ? "" : db);
+    }
+
+    /** Registra a definição no plano de controle, no escopo do banco corrente. */
+    private void control(Database db, ControlCommand.Kind kind, String name, String definition) {
+        ds.applyControl(session, ControlCommand.of(kind, db.ns(), db.db(), name, definition));
+    }
+
 
     private com.axonbase.core.security.AuthCatalog.Scope authScope(Statement.AuthScope scope) {
         return com.axonbase.core.security.AuthCatalog.Scope.valueOf(scope.name());

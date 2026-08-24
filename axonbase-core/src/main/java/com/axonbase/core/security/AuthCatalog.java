@@ -11,8 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Catálogo de identidades do AxonBase. Mantém somente hashes salgados de senha,
  * com escopo ROOT, NAMESPACE ou DATABASE. A persistência acompanha a do
- * catálogo geral numa etapa posterior; o objeto fica no Datastore enquanto o
- * processo estiver ativo.
+ * catálogo geral do datastore.
  */
 public final class AuthCatalog {
 
@@ -30,8 +29,13 @@ public final class AuthCatalog {
     private final Map<String, Access> accesses = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
 
-    /** Cria ou substitui o usuário, com senha convertida em hash antes de guardar. */
-    public void defineUser(String name, Scope scope, String namespace, String database,
+    /**
+     * Cria ou substitui o usuário, com a senha convertida em hash antes de guardar.
+     *
+     * @return a identidade gravada, já com salt e hash, para que o chamador possa
+     *         replicá-la sem manter a senha em texto puro
+     */
+    public User defineUser(String name, Scope scope, String namespace, String database,
                            String password, List<String> roles) {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("nome de usuário não pode ser vazio");
@@ -40,8 +44,10 @@ public final class AuthCatalog {
         random.nextBytes(salt);
         String saltHex = HexFormat.of().formatHex(salt);
         String hashHex = hash(salt, password == null ? "" : password);
-        users.put(userKey(name, scope, namespace, database), new User(name, scope,
-            namespace, database, saltHex, hashHex, roles == null ? List.of() : List.copyOf(roles)));
+        User user = new User(name, scope, namespace, database, saltHex, hashHex,
+            roles == null ? List.of() : List.copyOf(roles));
+        users.put(userKey(name, scope, namespace, database), user);
+        return user;
     }
 
     /** Cria o usuário se ele ainda não existir no escopo indicado. */
@@ -92,6 +98,21 @@ public final class AuthCatalog {
 
     public List<Access> accesses() {
         return accesses.values().stream().sorted(java.util.Comparator.comparing(Access::name)).toList();
+    }
+
+    /** Restaura uma identidade já protegida por hash, sem reprocessar a senha. */
+    public void restoreUser(User user) {
+        users.put(userKey(user.name(), user.scope(), user.namespace(), user.database()), user);
+    }
+
+    /** Restaura um access method persistido. */
+    public void restoreAccess(Access access) {
+        accesses.put(accessKey(access.name(), access.scope(), access.namespace(), access.database()), access);
+    }
+
+    public void clear() {
+        users.clear();
+        accesses.clear();
     }
 
     private static String userKey(String name, Scope scope, String ns, String db) {

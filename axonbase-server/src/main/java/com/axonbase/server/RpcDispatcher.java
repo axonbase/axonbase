@@ -1,12 +1,17 @@
 package com.axonbase.server;
 
 import com.axonbase.core.Session;
+import com.axonbase.core.cluster.ClusterStatusProvider;
+import com.axonbase.core.cluster.NotLeaderException;
+import com.axonbase.core.cluster.QuorumUnavailableException;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.server.auth.AuthService;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Dispatcher da lóxica JSON-RPC do AxonBase. Comparte a mesma lóxica entre o
@@ -16,9 +21,19 @@ import java.util.Map;
  */
 public final class RpcDispatcher {
 
+    /** Código JSON-RPC de "escrita enviada ao nó errado". */
+    public static final int NOT_LEADER = -32010;
+    /** Código JSON-RPC de "sem maioria para confirmar a escrita". */
+    public static final int NO_QUORUM = -32011;
+
+    /** Métodos que alteram estado replicado e portanto só rodam no líder. */
+    private static final Set<String> WRITE_METHODS = Set.of("query", "begin", "commit");
+
     private final Datastore ds;
     private final AuthService auth;
     private final boolean requireAuth;
+    private volatile Supplier<ClusterStatusProvider.Status> clusterStatus =
+        ClusterStatusProvider.Status::local;
 
     public RpcDispatcher(Datastore ds) {
         this(ds, null, false);
@@ -28,6 +43,49 @@ public final class RpcDispatcher {
         this.ds = ds;
         this.auth = auth;
         this.requireAuth = requireAuth;
+    }
+
+    /** Liga o dispatcher ao estado real do cluster, para recusar escritas fora do líder. */
+    public void clusterStatus(Supplier<ClusterStatusProvider.Status> status) {
+        this.clusterStatus = status == null ? ClusterStatusProvider.Status::local : status;
+    }
+
+    /**
+     * Decide se a chamada muda estado replicado.
+     *
+     * <p>{@code query} depende do texto: um SELECT roda em qualquer réplica, um
+     * CREATE ou um DEFINE não.</p>
+     */
+    private boolean isWrite(String method, Map<String, AxonValue> request) {
+        if (!WRITE_METHODS.contains(method)) {
+            return false;
+        }
+        if (!"query".equals(method)) {
+            return true;
+        }
+        AxonValue params = request.get("params");
+        if (params == null || !params.isArray() || params.asArray().isEmpty()
+            || !params.asArray().get(0).isString()) {
+            return false;
+        }
+        return Datastore.isMutation(params.asArray().get(0).asString());
+    }
+
+    /**
+     * Erro estruturado de redirecionamento, com o líder e o endereço dele.
+     *
+     * <p>É a mesma resposta no HTTP {@code /rpc} e no WebSocket, porque os dois
+     * transportes compartilham este dispatcher.</p>
+     */
+    private static String notLeaderError(AxonValue id, String leader, String address) {
+        String detail = leader == null || leader.isEmpty()
+            ? "escrita recusada: nenhum líder conhecido neste momento"
+            : "escrita deve ser enviada ao líder " + leader
+                + (address == null || address.isEmpty() ? "" : " em " + address);
+        return "{\"id\":" + idJson(id) + ",\"error\":{\"code\":" + NOT_LEADER
+            + ",\"message\":\"" + esc(detail) + "\",\"kind\":\"NOT_LEADER\",\"leader\":\""
+            + esc(leader == null ? "" : leader) + "\",\"leader_address\":\""
+            + esc(address == null ? "" : address) + "\"}}";
     }
 
     private boolean authRequired() {
@@ -62,6 +120,12 @@ public final class RpcDispatcher {
         }
         String method = obj.get("method").asString();
         AxonValue id = obj.get("id");
+        ClusterStatusProvider.Status cluster = clusterStatus.get();
+        if (!cluster.isLeader() && isWrite(method, obj)) {
+            // Recusa antes de executar: um seguidor que aplicasse a escrita localmente
+            // divergiria do log replicado.
+            return notLeaderError(id, cluster.leader(), cluster.leaderAddress());
+        }
         AxonValue result = null;
         String error = null;
         switch (method) {
@@ -106,6 +170,10 @@ public final class RpcDispatcher {
                     : AxonValue.object(Map.of());
                 try {
                     result = ds.execute(sql, session, mapOf(vars));
+                } catch (NotLeaderException moved) {
+                    return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (QuorumUnavailableException noQuorum) {
+                    return rpcError(id, NO_QUORUM, noQuorum.getMessage());
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                 }
@@ -190,6 +258,12 @@ public final class RpcDispatcher {
                 try {
                     ds.commitSession(session);
                     result = AxonValue.nul();
+                } catch (NotLeaderException moved) {
+                    ds.cancelSession(session);
+                    return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (QuorumUnavailableException noQuorum) {
+                    ds.cancelSession(session);
+                    return rpcError(id, NO_QUORUM, noQuorum.getMessage());
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                 }

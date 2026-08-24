@@ -20,7 +20,7 @@ public final class Lexer {
         "if", "then", "else", "end", "when", "error", "kill", "info", "and", "or", "not",
         "true", "false", "null", "none", "contains", "inside", "outside", "intersects",
         "begin", "commit", "cancel", "any", "option", "live", "diff",
-        "in", "as", "asc", "desc", "user", "access", "password", "roles",
+        "in", "as", "asc", "desc", "user", "access", "password", "passhash", "roles",
         "analyzer", "search", "lowercase", "stopwords", "stemming", "geo", "hnsw", "dimension", "dist",
         "int", "float", "number", "decimal", "string", "bool", "datetime", "uuid",
         "array", "object", "bytes", "duration", "record", "geometry", "vector"

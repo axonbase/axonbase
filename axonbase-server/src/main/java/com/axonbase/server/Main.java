@@ -67,6 +67,10 @@ public final class Main {
             if (config.nodeId().isBlank() || config.raftBind().isBlank()) {
                 throw new IllegalArgumentException("cluster_id requer node_id e raft_bind");
             }
+            if (!(backend instanceof VersionedKvBackend)) {
+                throw new IllegalArgumentException(
+                    "cluster exige um backend versionado; use path=memory ou um WAL");
+            }
             ClusterConfig clusterConfig = ClusterConfig.parse(config.nodeId(), config.clusterId(),
                 config.raftBind(), config.raftPeers());
             cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
@@ -75,22 +79,25 @@ public final class Main {
         Datastore ds = new Datastore(backend);
         ds.createDatabase("axonbase", "main");
         if (cluster != null) {
-            ds.commitCoordinator(new TcpRaftCommitCoordinator(config.clusterId(), config.nodeId(),
-                cluster.config().peers()), config.nodeId());
+            // O datastore precisa existir antes de observar o log: acoplar aqui faz o
+            // runtime reprocessar o que já estava aplicado e reconstruir o catálogo.
+            cluster.appliedBatchListener(ds.appliedBatchListener());
+            ds.commitCoordinator(new TcpRaftCommitCoordinator(cluster), config.nodeId());
         }
 
         AxonServer server = AxonServer.start(ds, secret, port, user, pass, requireAuth, bind);
         if (cluster != null) {
-            ClusterRuntime runtime = cluster;
-            server.clusterStatus(() -> {
-                var status = runtime.status();
-                int members = runtime.config().peers().size() + 1;
-                return new com.axonbase.core.cluster.ClusterStatusProvider.Status(status.nodeId(),
-                    status.clusterId(), config.nodeId(), status.term(), 0, members, members / 2 + 1);
-            });
+            // ClusterRuntime já implementa ClusterStatusProvider, então /ready e /status
+            // leem o papel, o termo, o índice de commit e os membros vivos reais.
+            server.clusterStatus(cluster);
         }
         System.out.println("AxonBase 0.1.0 iniciado en http://" + bind + ":" + port
             + " (storage=" + path + ")");
+        if (cluster != null) {
+            System.out.println("cluster=" + config.clusterId() + " node=" + config.nodeId()
+                + " raft=" + config.raftBind() + " quorum=" + cluster.quorum()
+                + "/" + cluster.members());
+        }
         System.out.println("Para detelo, Ctrl+C");
         Thread.currentThread().join();
     }
