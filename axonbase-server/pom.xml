@@ -6,7 +6,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.axonbase</groupId>
+        <groupId>com.axondatabase</groupId>
         <artifactId>axonbase</artifactId>
         <version>0.2.0</version>
         <relativePath>../pom.xml</relativePath>
@@ -18,12 +18,12 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.axonbase</groupId>
+            <groupId>com.axondatabase</groupId>
             <artifactId>axonbase-common</artifactId>
             <version>0.2.0</version>
         </dependency>
         <dependency>
-            <groupId>com.axonbase</groupId>
+            <groupId>com.axondatabase</groupId>
             <artifactId>axonbase-core</artifactId>
             <version>0.2.0</version>
         </dependency>

@@ -24,7 +24,7 @@ All 8 SDKs expose the same public API with feature parity, tested independently:
 
 | Language | Package | Status |
 |---|---|---|
-| Java | `com.axonbase:axonbase-sdk-java` | Reference SDK |
+| Java | `com.axondatabase:axonbase-sdk-java` | Reference SDK |
 | Node.js / TypeScript | `@axonbase/sdk` | Full parity |
 | Python | `axonbase-sdk` | Full parity + DBAPI 2.0 + SQLAlchemy + LangChain + Agno |
 | Go | `github.com/axonbase/axonbase-sdk-go` | Full parity |

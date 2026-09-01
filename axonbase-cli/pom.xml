@@ -1,7 +1,7 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <parent>
-    <groupId>com.axonbase</groupId>
+    <groupId>com.axondatabase</groupId>
     <artifactId>axonbase</artifactId>
     <version>0.2.0</version>
   </parent>
@@ -10,7 +10,7 @@
   <description>CLI e REPL do AxonBase — consulta, export, import, administração de cluster.</description>
   <dependencies>
     <dependency>
-      <groupId>com.axonbase</groupId>
+      <groupId>com.axondatabase</groupId>
       <artifactId>axonbase-sdk-java</artifactId>
       <version>0.2.0</version>
     </dependency>

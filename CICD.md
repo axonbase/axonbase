@@ -8,33 +8,69 @@ Este documento descreve o passo a passo para publicar cada SDK no registry da re
 2. Versionamento semântico: siga `0.x.0` até o primeiro release estável (`1.0.0`).
 3. Toda publicação deve ser acompanhada de uma tag git `v<versão>` no commit correspondente.
 4. Antes de publicar pela primeira vez, decida o **namespace definitivo**:
-   - `com.axonbase` (Maven) / `@axonbase` (npm) / `axonbase` (PyPI, RubyGems, crates.io, Packagist)
+    - `com.axondatabase` (Maven) / `@axonbase` (npm) / `axonbase` (PyPI, RubyGems, crates.io, Packagist)
    - O SDK Go precisa de um module path canônico (ex: `github.com/axonbase/sdk-go`)
 
 ---
 
 ## 1. Java (Maven Central)
 
-**Problema**: o SDK depende de `axonbase-value`, `axonbase-common`, `axonbase-server` (test). Publicar o SDK exige que esses módulos também estejam no Maven Central.
+**Escopo**: publicar apenas as bibliotecas para consumidores: `axonbase-common`, `axonbase-value`, `axonbase-sdk-java`, `axonbase-jdbc` e `axonbase-spring-data`. Os módulos `axonbase-parser`, `axonbase-core` e `axonbase-server` permanecem privados e são distribuídos pela imagem Docker.
 
 **Registry**: [Maven Central](https://central.sonatype.com/) via `mvn deploy`
 
 **Passos**:
 
 1. Obter conta no Sonatype e configurar `~/.m2/settings.xml` com `server` e token.
-2. Adicionar ao `pom.xml` raiz e de cada módulo:
-   - `<distributionManagement>` com Sonatype OSSRH
-   - `<licenses>`, `<scm>`, `<developers>`
-   - `<plugins>`: `maven-source-plugin`, `maven-javadoc-plugin`, `maven-gpg-plugin`
-3. Publicar os módulos base primeiro:
-   - `axonbase-common`, `axonbase-value`, `axonbase-parser`, `axonbase-core`
-4. Depois publicar:
-   - `axonbase-sdk-java` (standalone, sem depender do `axonbase-server` de teste)
-5. **Importante**: separar o SDK do módulo de teste que usa `axonbase-server`. O `SdkEndToEndTest` deve ser movido para fora ou dependências de test scoped removidas.
+2. Adicionar ao `pom.xml` raiz:
+    - `<licenses>`, `<scm>`, `<developers>`
+    - `central-publishing-maven-plugin`, `maven-source-plugin`, `maven-javadoc-plugin` e `maven-gpg-plugin`
+3. Gerar e enviar o bundle de publicação:
 
 ```bash
-mvn clean deploy -pl axonbase-common,axonbase-value,axonbase-parser,axonbase-core -am -DskipTests
-mvn clean deploy -pl axonbase-sdk-java -am -DskipTests
+bash scripts/publish-maven.sh
+```
+
+4. Aguardar a validação e publicar manualmente o deployment em `https://central.sonatype.com/publishing/deployments`.
+
+### Procedimento de release Maven
+
+O script publica o POM pai e as bibliotecas públicas necessárias para resolver as dependências: `axonbase-common`, `axonbase-value`, `axonbase-sdk-java`, `axonbase-jdbc` e `axonbase-spring-data`.
+
+1. Atualize a versão no `pom.xml` raiz.
+2. Execute os testes necessários e faça commit das alterações.
+3. Crie e envie a tag da mesma versão:
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+4. Gere o token no Central Portal e mantenha-o no `settings.xml` com o identificador `central`.
+5. Execute:
+   ```bash
+   bash scripts/publish-maven.sh
+   ```
+6. O script envia o bundle para validação. Abra `https://central.sonatype.com/publishing/deployments`, revise o deployment validado e confirme a publicação.
+
+O script recusa executar se existirem alterações locais ou se `HEAD` não estiver marcado com `v<versão>`. Os módulos internos `axonbase-parser`, `axonbase-core` e `axonbase-server` não entram no bundle Maven.
+
+### Procedimento de release Docker Hub
+
+O banco é compilado no `Dockerfile` a partir de `axonbase-server` e de suas dependências internas. A imagem recebe as tags `axonbase/axonbase:<versão>` e `axonbase/axonbase:latest`.
+
+1. Atualize a versão no `pom.xml` raiz, teste o banco, faça commit e envie a tag `v<versão>`.
+2. Autentique no Docker Hub:
+   ```bash
+   docker login
+   ```
+3. Execute:
+   ```bash
+   bash scripts/publish-docker.sh
+   ```
+
+O script roda `mvn clean test -pl axonbase-server -am`, gera a imagem para `linux/amd64` e `linux/arm64` e envia ambas as arquiteturas ao Docker Hub. Para publicar apenas uma arquitetura, defina `DOCKER_PLATFORMS`, por exemplo:
+
+```bash
+DOCKER_PLATFORMS=linux/amd64 bash scripts/publish-docker.sh
 ```
 
 ---

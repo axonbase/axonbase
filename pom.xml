@@ -5,7 +5,7 @@
 
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.axonbase</groupId>
+    <groupId>com.axondatabase</groupId>
     <artifactId>axonbase</artifactId>
     <version>0.2.0</version>
     <packaging>pom</packaging>
@@ -26,7 +26,7 @@
             <name>AxonBase Team</name>
             <email>axonbase@worklessconsult.com.br</email>
             <organization>AxonBase</organization>
-            <organizationUrl>https://axonbase.com</organizationUrl>
+            <organizationUrl>https://axondatabase.com</organizationUrl>
         </developer>
     </developers>
 
@@ -78,6 +78,15 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>0.9.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
