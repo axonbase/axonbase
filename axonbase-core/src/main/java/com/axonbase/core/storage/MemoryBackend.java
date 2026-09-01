@@ -1,5 +1,7 @@
 package com.axonbase.core.storage;
 
+import com.axonbase.common.Messages;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -64,12 +66,27 @@ public final class MemoryBackend implements VersionedKvBackend {
         return versions.getOrDefault(key, 0L);
     }
 
-    @Override
+@Override
     public synchronized void commit(java.util.Map<String, Long> expectedVersions,
                                     java.util.Map<String, byte[]> puts, java.util.Set<String> deletes) {
+        commit(expectedVersions, puts, deletes, java.util.Set.of());
+    }
+
+    @Override
+    public synchronized void commit(java.util.Map<String, Long> expectedVersions,
+                                    java.util.Map<String, byte[]> puts, java.util.Set<String> deletes,
+                                    java.util.Set<String> readPrefixes) {
         for (var expected : expectedVersions.entrySet()) {
             if (versionOf(expected.getKey()) != expected.getValue()) {
-                throw new VersionConflictException("conflito de versão na chave '" + expected.getKey() + "'");
+                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()));
+            }
+        }
+        for (String prefix : readPrefixes) {
+            for (String key : keysWithPrefix(prefix)) {
+                if (expectedVersions.containsKey(key) || puts.containsKey(key) || deletes.contains(key)) {
+                    continue;
+                }
+                throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key));
             }
         }
         for (String key : deletes) {

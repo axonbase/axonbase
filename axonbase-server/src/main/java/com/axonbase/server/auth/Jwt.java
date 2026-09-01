@@ -1,10 +1,12 @@
 package com.axonbase.server.auth;
 
+import com.axonbase.common.Messages;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.Map;
 
@@ -48,7 +50,7 @@ public final class Jwt {
             mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
             return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
         } catch (Exception e) {
-            throw new IllegalStateException("erro ao asinar JWT", e);
+            throw new IllegalStateException(Messages.get("jwt_sign_failed"), e);
         }
     }
 
@@ -90,7 +92,8 @@ public final class Jwt {
             return null;
         }
         String unsigned = parts[0] + "." + parts[1];
-        if (!parts[2].equals(signPart(secret, unsigned))) {
+        if (!MessageDigest.isEqual(parts[2].getBytes(StandardCharsets.US_ASCII),
+            signPart(secret, unsigned).getBytes(StandardCharsets.US_ASCII))) {
             return null;
         }
         String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);

@@ -1,5 +1,7 @@
 package com.axonbase.core.control;
 
+import com.axonbase.common.Messages;
+
 /**
  * Codec do material de autenticação que entra no plano de controle.
  *
@@ -17,7 +19,7 @@ public final class AuthCodec {
     /** Formata salt e hash na forma aceita por {@code PASSHASH}. */
     public static String passhash(String saltHex, String hashHex) {
         if (saltHex == null || saltHex.isBlank() || hashHex == null || hashHex.isBlank()) {
-            throw new IllegalArgumentException("salt e hash são obrigatórios no plano de controle");
+            throw new IllegalArgumentException(Messages.get("control_auth_salt_hash_required"));
         }
         return saltHex + ':' + hashHex;
     }
@@ -26,7 +28,7 @@ public final class AuthCodec {
     public static Credential parse(String passhash) {
         int split = passhash == null ? -1 : passhash.indexOf(':');
         if (split < 1 || split == passhash.length() - 1) {
-            throw new IllegalArgumentException("PASSHASH deve ter o formato salt:hash");
+            throw new IllegalArgumentException(Messages.get("control_passhash_format"));
         }
         return new Credential(passhash.substring(0, split), passhash.substring(split + 1));
     }

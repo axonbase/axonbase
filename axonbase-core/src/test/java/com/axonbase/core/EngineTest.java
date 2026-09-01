@@ -20,6 +20,27 @@ class EngineTest {
         return ds;
     }
 
+    @Test
+    void createJksDelegatesOnlyForRootSessions() {
+        Datastore ds = ns();
+        String[] got = new String[4];
+        ds.jksRegistrar((name, path, password, collector, oids) -> {
+            got[0] = name;
+            got[1] = path;
+            got[2] = new String(password);
+            got[3] = collector + ":" + String.join(",", oids);
+        });
+        Session root = new Session("test", "dev");
+        root.auth(AxonValue.object(java.util.Map.of("scope", AxonValue.str("ROOT"))));
+
+        ds.execute("CREATE JKS company PATH \"/tmp/company.jks\" PASSWORD \"secret\" COLLECT USER BY OID \"2.5.4.5\"", root, null);
+
+        assertEquals("company", got[0]);
+        assertEquals("/tmp/company.jks", got[1]);
+        assertEquals("secret", got[2]);
+        assertEquals("OID:2.5.4.5", got[3]);
+    }
+
     private Session session() {
         Session s = Session.create();
         s.namespace("test");
@@ -52,6 +73,37 @@ class EngineTest {
     }
 
     @Test
+    void joinDevolveObxectoAchatadoConPrefixos() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE a CONTENT { pk: 1, name: \"pedro\" }", s, null);
+        ds.execute("CREATE a CONTENT { pk: 2, name: \"lúa\" }", s, null);
+        ds.execute("CREATE b CONTENT { fk: 1, label: \"L1\" }", s, null);
+        ds.execute("CREATE b CONTENT { fk: 99, label: \"senz vínculo\" }", s, null);
+        // documento horizontal sen o campo de unión: debe ignorarse
+        ds.execute("CREATE b CONTENT { label: \"orfano\" }", s, null);
+        AxonValue rows = ds.execute("SELECT * FROM a JOIN b ON a.pk = b.fk", s, null);
+        assertEquals(1, rows.asArray().size(), "só unha coincidencia pk=1 debe cruzar");
+        java.util.Map<String, AxonValue> joined = rows.asArray().get(0).asObject();
+        assertEquals(1, joined.get("a.pk").asLong());
+        assertEquals("pedro", joined.get("a.name").asString());
+        assertEquals(1, joined.get("b.fk").asLong());
+        assertEquals("L1", joined.get("b.label").asString());
+    }
+
+    @Test
+    void joinProxeccionQualificada() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE a CONTENT { pk: 5, name: \"Ana\" }", s, null);
+        ds.execute("CREATE b CONTENT { fk: 5, city: \"Lima\" }", s, null);
+        AxonValue rows = ds.execute("SELECT a.name, b.city FROM a JOIN b ON a.pk = b.fk", s, null);
+        java.util.Map<String, AxonValue> row = rows.asArray().get(0).asObject();
+        assertEquals("Ana", row.get("a.name").asString());
+        assertEquals("Lima", row.get("b.city").asString());
+    }
+
+    @Test
     void updateModifica() {
         Datastore ds = ns();
         Session s = session();
@@ -70,6 +122,20 @@ class EngineTest {
         ds.execute("CREATE user CONTENT { email: \"a@x.com\", name: \"Ana\" }", s, null);
         assertThrows(AxonError.class, () ->
             ds.execute("CREATE user CONTENT { email: \"a@x.com\", name: \"Bob\" }", s, null));
+    }
+
+    @Test
+    void indiceUnicoCompostoPermiteValoresIsoladosRepetidos() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("DEFINE TABLE saga_step SCHEMAFULL", s, null);
+        ds.execute("DEFINE INDEX step_corr ON TABLE saga_step COLUMNS correlation_id, step_order UNIQUE", s, null);
+
+        ds.execute("CREATE saga_step CONTENT { correlation_id: \"first\", step_order: 1 }", s, null);
+        ds.execute("CREATE saga_step CONTENT { correlation_id: \"second\", step_order: 1 }", s, null);
+
+        AxonValue rows = ds.execute("SELECT * FROM saga_step", s, null);
+        assertEquals(2, rows.asArray().size());
     }
 
     @Test
@@ -165,6 +231,39 @@ class EngineTest {
         AxonValue rows = ds.execute("SELECT * FROM doc", s, null);
         assertEquals(1, rows.asArray().size());
         assertEquals("A", rows.asArray().get(0).asObject().get("title").asString());
+    }
+
+    @Test
+    void dataRuleBloqueiaCreateEInsertQuandoPredicadoNaoPassa() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE DATA RULE published_only APPLY published = true", s, null);
+        s.auth(AxonValue.object(java.util.Map.of("data_rules", AxonValue.str("published_only"))));
+
+        assertThrows(AxonError.class, () ->
+            ds.execute("CREATE doc CONTENT { published: false }", s, null));
+        assertThrows(AxonError.class, () ->
+            ds.execute("INSERT INTO doc [{ published: false }]", s, null));
+
+        ds.execute("CREATE doc CONTENT { published: true }", s, null);
+        ds.execute("INSERT INTO doc [{ published: true }]", s, null);
+        assertEquals(2, ds.execute("SELECT * FROM doc", s, null).asArray().size());
+    }
+
+    @Test
+    void permissaoDeCreateBloqueiaCreateEInsertQuandoPredicadoNaoPassa() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("DEFINE TABLE doc SCHEMALESS PERMISSIONS FOR create WHERE published = true", s, null);
+
+        assertThrows(AxonError.class, () ->
+            ds.execute("CREATE doc CONTENT { published: false }", s, null));
+        assertThrows(AxonError.class, () ->
+            ds.execute("INSERT INTO doc [{ published: false }]", s, null));
+
+        ds.execute("CREATE doc CONTENT { published: true }", s, null);
+        ds.execute("INSERT INTO doc [{ published: true }]", s, null);
+        assertEquals(2, ds.execute("SELECT * FROM doc", s, null).asArray().size());
     }
 
     @Test
@@ -269,7 +368,7 @@ class EngineTest {
         assertTrue(hasSp17);
     }
 
-    @Test
+@Test
     void fetchResolveRecordLink() {
         Datastore ds = ns();
         Session s = session();
@@ -279,7 +378,57 @@ class EngineTest {
         AxonValue out = ds.execute("SELECT titulo, autor FROM post FETCH autor", s, null);
         AxonValue post = out.asArray().get(0);
         AxonValue autor = post.asObject().get("autor");
-        // o autor deve ser resolvido para um objeto (doc completo) ou still record
+        // o autor deve ser resolvido para um objeto (doc completo) or still record
         assertNotNull(autor);
+    }
+
+    @Test
+    void graphConnectedAndPath() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE person:1 CONTENT {name: \"Alice\"}", s, null);
+        ds.execute("CREATE person:2 CONTENT {name: \"Bob\"}", s, null);
+        ds.execute("CREATE person:3 CONTENT {name: \"Charlie\"}", s, null);
+        ds.execute("CREATE person:4 CONTENT {name: \"Diana\"}", s, null);
+        ds.execute("CREATE person:5 CONTENT {name: \"Eve\"}", s, null);
+
+        // Chain: 1 -> 2 -> 3 -> 4
+        ds.execute("RELATE person:1->knows->person:2", s, null);
+        ds.execute("RELATE person:2->knows->person:3", s, null);
+        ds.execute("RELATE person:3->knows->person:4", s, null);
+        // Isolated: 5
+        // Another edge: 1 -> friend -> 3
+        ds.execute("RELATE person:1->friend->person:3", s, null);
+
+        // Connected via knows (3 hops)
+        AxonValue connected = ds.execute(
+            "RETURN graph::connected(person:1, person:4, \"knows\", 10)", s, null);
+        assertEquals(true, connected.isBool() && connected.asBool());
+
+        // Path should be an array with at least 2 elements
+        AxonValue path = ds.execute(
+            "RETURN graph::path(person:1, person:4, \"knows\", 10)", s, null);
+        assertTrue(path.isArray());
+        assertTrue(path.asArray().size() >= 2);
+
+        // Not connected (no path to Eve via knows)
+        AxonValue notConnected = ds.execute(
+            "RETURN graph::connected(person:1, person:5, \"knows\", 10)", s, null);
+        assertEquals(false, notConnected.asBool());
+
+        // Connected via friend (1 hop)
+        AxonValue friendConnected = ds.execute(
+            "RETURN graph::connected(person:1, person:3, \"friend\", 5)", s, null);
+        assertEquals(true, friendConnected.isBool() && friendConnected.asBool());
+
+        // Self connection
+        AxonValue self = ds.execute(
+            "RETURN graph::connected(person:1, person:1, \"knows\", 10)", s, null);
+        assertEquals(true, self.isBool() && self.asBool());
+
+        // MaxDepth limits search (1 hop is not enough to reach person:4 via knows)
+        AxonValue limited = ds.execute(
+            "RETURN graph::connected(person:1, person:4, \"knows\", 1)", s, null);
+        assertEquals(false, limited.asBool());
     }
 }

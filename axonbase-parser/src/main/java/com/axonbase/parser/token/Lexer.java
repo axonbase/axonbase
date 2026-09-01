@@ -1,6 +1,7 @@
 package com.axonbase.parser.token;
 
 import com.axonbase.common.AxonError;
+import com.axonbase.common.Messages;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -20,10 +21,18 @@ public final class Lexer {
         "if", "then", "else", "end", "when", "error", "kill", "info", "and", "or", "not",
         "true", "false", "null", "none", "contains", "inside", "outside", "intersects",
         "begin", "commit", "cancel", "any", "option", "live", "diff",
+        "savepoint", "release", "rollback",
         "in", "as", "asc", "desc", "user", "access", "password", "passhash", "roles",
+        "jks", "path", "certificate", "fingerprint", "collect", "oid", "icpbrasil",
         "analyzer", "search", "lowercase", "stopwords", "stemming", "geo", "hnsw", "dimension", "dist",
+        "references", "join",
         "int", "float", "number", "decimal", "string", "bool", "datetime", "uuid",
-        "array", "object", "bytes", "duration", "record", "geometry", "vector"
+        "array", "object", "bytes", "duration", "record", "geometry", "vector",
+        "explain", "analyze", "at", "before", "timestamp", "statement",
+        "link", "connect", "with", "saga", "correlation", "databases", "describe", "show",
+        "data", "rule", "rules", "apply", "mask", "fields", "columnar",
+        "ai", "audit", "warning", "danger", "reason", "case", "cases",
+        "authorized", "denied", "audited"
     );
 
     private static final List<String> DUR_UNITS = List.of("ms", "us", "ns", "y", "w", "d", "h", "m", "s");
@@ -109,7 +118,7 @@ public final class Lexer {
     private void skipBlock() {
         int end = src.indexOf("*/", pos + 2);
         if (end < 0) {
-            throw error("comentário de bloco não fechado");
+            throw error(Messages.get("lexer_unterminated_block_comment"));
         }
         pos = end + 2;
     }
@@ -147,7 +156,7 @@ public final class Lexer {
         StringBuilder sb = new StringBuilder();
         while (true) {
             if (pos >= src.length()) {
-                throw error("string não fechada");
+                throw error(Messages.get("lexer_unterminated_string"));
             }
             char c = src.charAt(pos);
             if (c == '\\' && pos + 1 < src.length()) {
@@ -222,7 +231,7 @@ public final class Lexer {
         char close = open == '`' ? '`' : '\u27e9';
         int closeIdx = src.indexOf(close, pos + 1);
         if (closeIdx < 0) {
-            throw error("identificador não fechado");
+            throw error(Messages.get("lexer_unterminated_identifier"));
         }
         String content = src.substring(pos + 1, closeIdx);
         int rawStart = pos;
@@ -238,7 +247,7 @@ public final class Lexer {
             pos++;
         }
         if (start == pos) {
-            throw error("parâmetro sem nome");
+            throw error(Messages.get("lexer_unnamed_parameter"));
         }
         String name = src.substring(start, pos);
         tokens.add(new Token(TokenType.PARAM, name, start - 1, pos, name));
@@ -319,7 +328,7 @@ public final class Lexer {
             case "s" -> n * 1_000L;
             case "ms" -> n;
             case "us", "ns" -> 0L;
-            default -> throw new IllegalStateException("unidade de duração desconhecida: " + unit);
+            default -> throw new IllegalStateException(Messages.get("lexer_unknown_duration_unit", unit));
         };
     }
 
@@ -337,7 +346,7 @@ public final class Lexer {
             case '@' -> singleOr(TokenType.MATCH, TokenType.AT, '@');
             case '.' -> dotDot();
             case ':' -> colons();
-            case '=' -> singleOr(TokenType.EQ_EQ, TokenType.EQ, '=');
+            case '=' -> eqOrArrow();
             case '!' -> singleOr(TokenType.NE, TokenType.BANG, '=');
             case '>' -> gt();
             case '<' -> lt();
@@ -347,8 +356,26 @@ public final class Lexer {
             case '*' -> star();
             case '+' -> single(TokenType.PLUS);
             case '%' -> single(TokenType.PERCENT);
-            default -> throw error("caractere inesperado '" + c + "'");
+            default -> throw error(Messages.get("lexer_unexpected_character", c));
         }
+    }
+
+    private void eqOrArrow() {
+        int start = pos++;
+        if (pos < src.length()) {
+            char next = src.charAt(pos);
+            if (next == '=') {
+                pos++;
+                emit(TokenType.EQ_EQ, src.substring(start, pos));
+                return;
+            }
+            if (next == '>') {
+                pos++;
+                emit(TokenType.ARROW, src.substring(start, pos));
+                return;
+            }
+        }
+        emit(TokenType.EQ, src.substring(start, pos));
     }
 
     private void singleOr(TokenType two, TokenType one, char second) {
@@ -453,6 +480,6 @@ public final class Lexer {
     }
 
     private AxonError error(String msg) {
-        return AxonError.parse("erro de lexado na posição " + pos + ": " + msg);
+        return AxonError.parse(Messages.get("lexer_parse_error", pos, msg));
     }
 }

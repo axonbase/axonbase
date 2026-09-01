@@ -1,6 +1,7 @@
 package com.axonbase.core;
 
 import com.axonbase.core.storage.Transaction;
+import com.axonbase.common.Messages;
 import com.axonbase.value.AxonValue;
 
 /**
@@ -13,6 +14,9 @@ public final class Session {
     private String database;
     private final Variables vars = new Variables();
     private AxonValue auth;
+    // Saga active state
+    private String sagaName;
+    private String sagaCorrelationId;
 
     public Session(String namespace, String database) {
         this.namespace = namespace;
@@ -67,6 +71,28 @@ public final class Session {
 
     public void tx(Transaction tx) {
         this.txt = tx;
+    }
+
+    private Transaction requireTx() {
+        if (txt == null || !txt.isOpen()) {
+            throw new com.axonbase.common.AxonError(-32000, Messages.get("txn_inactive"));
+        }
+        return txt;
+    }
+
+    /** Delega na transacción activa: crea un savepoint co nome dado. */
+    public void savepoint(String name) {
+        requireTx().savepoint(name);
+    }
+
+    /** Delega na transacción activa: elimina o savepoint nomeado. */
+    public void release(String name) {
+        requireTx().release(name);
+    }
+
+    /** Delega na transacción activa: retrocede ao savepoint nomeado. */
+    public void rollbackTo(String name) {
+        requireTx().rollbackTo(name);
     }
 
     // ------------------------------------------------------------------
@@ -126,5 +152,31 @@ public final class Session {
     /** Descarta as notificações acumuladas (chamado no CANCEL). */
     public void discardLive() {
         pendingLive.clear();
+    }
+
+    // ------------------------------------------------------------------
+    // Saga (transação distribuída)
+    // ------------------------------------------------------------------
+
+    public boolean inSaga() {
+        return sagaName != null && sagaCorrelationId != null;
+    }
+
+    public String sagaName() {
+        return sagaName;
+    }
+
+    public String sagaCorrelationId() {
+        return sagaCorrelationId;
+    }
+
+    public void sagaBegin(String name, String correlationId) {
+        this.sagaName = name;
+        this.sagaCorrelationId = correlationId;
+    }
+
+    public void sagaEnd() {
+        this.sagaName = null;
+        this.sagaCorrelationId = null;
     }
 }

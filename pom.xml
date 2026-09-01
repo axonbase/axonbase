@@ -7,11 +7,45 @@
 
     <groupId>com.axonbase</groupId>
     <artifactId>axonbase</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0</version>
     <packaging>pom</packaging>
 
     <name>AxonBase</name>
-    <description>Base de datos multi-modelo en Java 21+ inspirada na arquitectura de SurrealDB.</description>
+    <description>Multi-model database in Java 21+</description>
+    <url>https://github.com/axonbase/axonbase</url>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>AxonBase Team</name>
+            <email>axonbase@worklessconsult.com.br</email>
+            <organization>AxonBase</organization>
+            <organizationUrl>https://axonbase.com</organizationUrl>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:git@github.com:axonbase/axonbase.git</connection>
+        <developerConnection>scm:git:git@github.com:axonbase/axonbase.git</developerConnection>
+        <url>https://github.com/axonbase/axonbase</url>
+    </scm>
+
+    <distributionManagement>
+        <snapshotRepository>
+            <id>central</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+        </snapshotRepository>
+        <repository>
+            <id>central</id>
+            <url>https://central.sonatype.com/repository/maven-releases/</url>
+        </repository>
+    </distributionManagement>
 
     <modules>
         <module>axonbase-common</module>
@@ -20,6 +54,9 @@
         <module>axonbase-core</module>
         <module>axonbase-server</module>
         <module>axonbase-sdk-java</module>
+        <module>axonbase-spring-data</module>
+        <module>axonbase-cli</module>
+        <module>axonbase-jdbc</module>
     </modules>
 
     <properties>
@@ -38,5 +75,44 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals><goal>jar-no-fork</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.10.0</version>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals><goal>jar</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+                <version>3.2.4</version>
+                <executions>
+                    <execution>
+                        <id>sign-artifacts</id>
+                        <phase>verify</phase>
+                        <goals><goal>sign</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

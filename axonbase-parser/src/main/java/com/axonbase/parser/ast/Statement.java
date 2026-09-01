@@ -1,5 +1,6 @@
 package com.axonbase.parser.ast;
 
+import com.axonbase.common.Messages;
 import java.util.List;
 
 /** Sentenças da AxonQL (o subconjunto da primeira entrega). */
@@ -14,6 +15,9 @@ public sealed interface Statement {
     record Create(boolean only, Expr target, Data data, ReturnSpec ret) implements Statement {
     }
 
+    record CreateJks(String name, String path, String password, String collector, List<String> oids) implements Statement {
+    }
+
     record Insert(boolean ignore, boolean relation, String table, Expr data, ReturnSpec ret)
             implements Statement {
     }
@@ -26,16 +30,44 @@ public sealed interface Statement {
     }
 
     /**
-     * SELECT. Com {@code valueOnly} ({@code SELECT VALUE x}), o resultado é a
-     * lista dos valores do campo em vez de uma lista de objetos.
+     * SELECT. Con {@code valueOnly} ({@code SELECT VALUE x}), o resultado é a
+     * lista dos valores do campo en vez de unha lista de obxectos.
      */
     record Select(List<Expr> fields, boolean valueOnly, boolean only, Expr from, Expr cond,
-                  List<OrderTerm> orders, List<Expr> group, Expr limit, Expr start,
-                  List<String> fetch) implements Statement {
+                   List<OrderTerm> orders, List<Expr> group, Expr limit, Expr start,
+                   List<String> fetch, List<Join> joins, TimeTravel timeTravel) implements Statement {
+    }
+
+    /** Ponto histórico de leitura de um SELECT. */
+    record TimeTravel(TimeTravelMode mode, TimeTravelSelector selector, Expr value) {
+    }
+
+    enum TimeTravelMode {
+        AT, BEFORE
+    }
+
+    enum TimeTravelSelector {
+        TIMESTAMP, COMMIT, STATEMENT
+    }
+
+    /**
+     * Unión dunha orixe co par clave a seguir no EXECUTE: {@code a} é a fonte
+     * externa (o {@code FROM}), {@code b} a fonte enlazada. A igualdade vale sobre
+     * {@code left} (=) {@code right}.
+     */
+    record Join(Expr source, Expr left, Expr right) implements Statement {
     }
 
     /** LIVE SELECT ... DIFF: subscrição em tempo real. */
     record Live(Select select, boolean diff) implements Statement {
+    }
+
+    /**
+     * EXPLAIN SELECT ... [ANALYZE]... Despide un object co plan de execución
+     * (strategy, índice, filas examinadas) sen executar o SELECT, ou execútano
+     * cando {@code analyze} é certo para contar as filas reais.
+     */
+    record Explain(Select select, boolean analyze) implements Statement {
     }
 
     record Relate(Expr from, Expr kind, Expr to, Data data, ReturnSpec ret) implements Statement {
@@ -46,12 +78,18 @@ public sealed interface Statement {
     }
 
     record DefineField(String name, String table, String type, Expr assertExpr, boolean readonly,
-                       Expr valueExpr, Expr defaultExpr) implements Statement {
+                       Expr valueExpr, Expr defaultExpr, String references) implements Statement {
     }
 
     record DefineIndex(String name, String table, List<String> columns, boolean unique, boolean count,
-                       String searchAnalyzer, boolean geo, Integer vectorDimension, String vectorDistance)
+                       String searchAnalyzer, boolean geo, boolean columnar,
+                       Integer vectorDimension, String vectorDistance,
+                       Integer m, Integer efConstruction, Integer efSearch)
             implements Statement {
+
+        public DefineIndex {
+            columns = List.copyOf(columns);
+        }
     }
 
     /** Analisador para índices full-text: tokeniza, normaliza e remove stopwords. */
@@ -69,27 +107,85 @@ public sealed interface Statement {
      * <p>A senha chega em texto puro pela cláusula {@code PASSWORD} ou já
      * protegida pela cláusula {@code PASSHASH "&lt;salt&gt;:&lt;hash&gt;"}. A segunda forma
      * existe para que o plano de controle replicado e o dump de catálogo possam
-     * transportar a identidade sem conhecer nem rehashear a senha original.
-     * Exatamente uma das duas é preenchida.</p>
+     * transportar a identidade sem conhecer nem rehashear a senha original. Como
+     * alternativa, {@code CERTIFICATE} referencia um JKS previamente criado e pode
+     * restringir o certificado por {@code FINGERPRINT}. Exatamente uma credencial é
+     * preenchida.</p>
      */
     record DefineUser(String name, AuthScope scope, String namespace, String database,
-                      Expr password, String passhash, List<String> roles) implements Statement {
+                       Expr password, String passhash, String certificate, String fingerprint,
+                       List<String> roles, List<String> dataRules, String auditName) implements Statement {
 
         public DefineUser {
-            if ((password == null) == (passhash == null)) {
-                throw new IllegalArgumentException("DEFINE USER exige PASSWORD ou PASSHASH, nunca ambos");
+            int credentials = (password == null ? 0 : 1) + (passhash == null ? 0 : 1)
+                + (certificate == null ? 0 : 1);
+            if (credentials != 1) {
+                throw new IllegalArgumentException(Messages.get("parser_define_user_credential_count"));
             }
+            if (fingerprint != null && certificate == null) {
+                throw new IllegalArgumentException(Messages.get("parser_fingerprint_requires_certificate"));
+            }
+            roles = roles == null ? List.of() : List.copyOf(roles);
+            dataRules = dataRules == null ? List.of() : List.copyOf(dataRules);
+        }
+
+        public DefineUser(String name, AuthScope scope, String namespace, String database,
+                          Expr password, String passhash, List<String> roles) {
+            this(name, scope, namespace, database, password, passhash, null, null, roles, null, null);
         }
 
         /** A identidade já veio protegida por hash, sem senha em texto puro. */
         public boolean hashed() {
             return passhash != null;
         }
+
+        public boolean certificateBased() {
+            return certificate != null;
+        }
     }
 
     /** Access method nomeado, limitado a um escopo. */
     record DefineAccess(String name, AuthScope scope, String namespace, String database)
             implements Statement {
+    }
+
+    record DefineDatabaseLink(String name, String url, String ns, String db,
+                               String user, String password) implements Statement {
+    }
+
+    record DropDatabaseLink(String name) implements Statement {
+    }
+
+    // ------------------------------------------------------------------
+    // SAGA (transações distribuídas orquestradas por DATABASE LINK)
+    // ------------------------------------------------------------------
+
+    /** CREATE SAGA &lt;nome&gt; WITH DATABASES 'link1', 'link2', ... */
+    record CreateSaga(String name, List<String> links) implements Statement {
+
+        public CreateSaga {
+            links = List.copyOf(links);
+        }
+    }
+
+    /** DESCRIBE SAGA &lt;nome&gt;: metadados e links do recurso. */
+    record DescribeSaga(String name) implements Statement {
+    }
+
+    /** SHOW SAGA TRANSACTION &lt;nome&gt; 'corr-id': ledger da transação. */
+    record ShowSagaTransaction(String name, String correlationId) implements Statement {
+    }
+
+    /** BEGIN SAGA &lt;nome&gt; WITH CORRELATION 'corr-id'. */
+    record BeginSaga(String name, String correlationId) implements Statement {
+    }
+
+    /** COMMIT SAGA &lt;nome&gt; WITH CORRELATION 'corr-id'. */
+    record CommitSaga(String name, String correlationId) implements Statement {
+    }
+
+    /** CANCEL SAGA &lt;nome&gt; WITH CORRELATION 'corr-id': compensação reversa. */
+    record CancelSaga(String name, String correlationId) implements Statement {
     }
 
     record Info(String kind, String table) implements Statement {
@@ -114,6 +210,52 @@ public sealed interface Statement {
     }
 
     record Cancel() implements Statement {
+    }
+
+    /** SAVEPOINT &lt;nome&gt;: marca un checkpoint na transacción activa. */
+    record Savepoint(String name) implements Statement {
+    }
+
+    /** RELEASE [SAVEPOINT] &lt;nome&gt;: elimina o marcador sen botar os writes. */
+    record Release(String name) implements Statement {
+    }
+
+    /** ROLLBACK TO [SAVEPOINT] &lt;nome&gt;: reverte os writes/deletes ao checkpoint. */
+    record RollbackTo(String name) implements Statement {
+    }
+
+    /** CREATE DATA RULE &lt;nome&gt; APPLY &lt;predicate&gt; [MASK FIELDS WITH 'p1', 'p2', ...] */
+    record CreateDataRule(String name, Expr predicate, List<String> maskPatterns) implements Statement {
+        public CreateDataRule {
+            maskPatterns = maskPatterns == null ? List.of() : List.copyOf(maskPatterns);
+        }
+    }
+
+    /** DROP DATA RULE &lt;nome&gt; */
+    record DropDataRule(String name) implements Statement {
+    }
+
+    /** SHOW DATA RULES: lista as regras definidas no catálogo. */
+    record ShowDataRules() implements Statement {
+    }
+
+    // ------------------------------------------------------------------
+    // AI AUDIT
+    // ------------------------------------------------------------------
+
+    record DefineAiAudit(String name, String warningWhen, String dangerWhen) implements Statement {
+    }
+
+    record DropAiAudit(String name) implements Statement {
+    }
+
+    record ShowAiAudit(String name) implements Statement {
+    }
+
+    record SetReasonAudit(String hash, String reason) implements Statement {
+    }
+
+    record SetAuditCase(String hash, String status, String reason) implements Statement {
     }
 
     // ------------------------------------------------------------------

@@ -1,12 +1,16 @@
 package com.axonbase.core.control;
 
+import com.axonbase.common.Messages;
+
 /**
  * Comando determinístico do plano de controle, replicável pelo log Raft.
  *
  * <p>{@code definition} guarda o texto AxonQL renderizado da definição. Reexecutar
  * esse texto reconstrói o catálogo, o que torna o replay e a replicação um único
- * mecanismo. Para {@link Kind#USER} o texto usa a cláusula {@code PASSHASH}, de
- * modo que o salt e o hash viajam juntos e a senha nunca é reprocessada.</p>
+ * mecanismo. Para {@link Kind#USER}, identidades por senha usam a cláusula
+ * {@code PASSHASH}, de modo que o salt e o hash viajam juntos sem reprocessar a
+ * senha; identidades por certificado preservam apenas o identificador do JKS e
+ * o fingerprint.</p>
  */
 public record ControlCommand(Kind kind, String namespace, String database, String name,
                              String definition) {
@@ -17,15 +21,15 @@ public record ControlCommand(Kind kind, String namespace, String database, Strin
      * tabela, e a tabela precisa do banco de dados.
      */
     public enum Kind {
-        DATABASE, ANALYZER, TABLE, FIELD, INDEX, EVENT, ACCESS, USER
+        DATABASE, DATABASE_LINK, ANALYZER, TABLE, FIELD, INDEX, EVENT, ACCESS, USER, AUDIT
     }
 
     public ControlCommand {
         if (kind == null) {
-            throw new IllegalArgumentException("kind do comando de controle é obrigatório");
+            throw new IllegalArgumentException(Messages.get("control_kind_required"));
         }
         if (name == null) {
-            throw new IllegalArgumentException("name do comando de controle é obrigatório");
+            throw new IllegalArgumentException(Messages.get("control_name_required"));
         }
         namespace = namespace == null ? "" : namespace;
         database = database == null ? "" : database;

@@ -48,6 +48,6 @@ public final class UserStore {
 
     public void define(String name, AuthCatalog.Scope scope, String namespace, String database,
                        String password, List<String> roles) {
-        catalog.defineUser(name, scope, namespace, database, password, roles);
+        catalog.defineUser(name, scope, namespace, database, password, roles, List.of());
     }
 }

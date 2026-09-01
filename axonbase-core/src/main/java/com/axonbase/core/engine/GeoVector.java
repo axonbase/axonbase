@@ -108,6 +108,11 @@ final class GeoVector {
         return AxonValue.num(na == 0 || nb == 0 ? 0 : dot / Math.sqrt(na * nb));
     }
 
+    static AxonValue cosineDistance(AxonValue a, AxonValue b) {
+        AxonValue similarity = cosine(a, b);
+        return similarity.isNumber() ? AxonValue.num(1d - similarity.asDouble()) : similarity;
+    }
+
     static AxonValue manhattan(AxonValue a, AxonValue b) {
         List<AxonValue> left = vector(a);
         List<AxonValue> right = vector(b);

@@ -1,6 +1,7 @@
 package com.axonbase.value;
 
 import com.axonbase.common.AxonError;
+import com.axonbase.common.Messages;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -9,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Base64;
 
 /**
  * Codec JSON (JavaScript Object Notation) manual para {@link AxonValue}, sen
@@ -55,19 +57,73 @@ public final class AxonJson {
         return parseDocument(new String(data, java.nio.charset.StandardCharsets.UTF_8));
     }
 
+    /**
+     * Formato compacto de duración no wire: {@code 1h}, {@code 30m}, {@code 500ms},
+     * sempre redondável a uma unidade para que o parse seja estável.
+     */
+    static String durationToString(long millis) {
+        if (millis == 0) {
+            return "0ms";
+        }
+        if (millis % 3_600_000L == 0) {
+            return (millis / 3_600_000L) + "h";
+        }
+        if (millis % 60_000L == 0) {
+            return (millis / 60_000L) + "m";
+        }
+        if (millis % 1_000L == 0) {
+            return (millis / 1_000L) + "s";
+        }
+        return millis + "ms";
+    }
+
+    /** Converte texto de duração ({@code 1h30m}, {@code 500ms}, {@code 2d}) em milisegundos. */
+    static long durationFromString(String text) {
+        String s = text == null ? "" : text.trim();
+        if (s.isEmpty()) {
+            throw new IllegalArgumentException(Messages.get("value_duration_empty"));
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("(\\d+(?:\\.\\d+)?)(ms|w|d|h|m|s)")
+            .matcher(s);
+        long total = 0;
+        int last = 0;
+        while (m.find()) {
+            if (m.start() != last) {
+                throw new IllegalArgumentException(Messages.get("value_duration_unexpected_syntax", s));
+            }
+            long amount = java.lang.Long.parseLong(m.group(1));
+            long unit = switch (m.group(2)) {
+                case "ms" -> 1L;
+                case "s" -> 1_000L;
+                case "m" -> 60_000L;
+                case "h" -> 3_600_000L;
+                case "d" -> 86_400_000L;
+                case "w" -> 604_800_000L;
+                default -> 0L;
+            };
+            total += amount * unit;
+            last = m.end();
+        }
+        if (last != s.length()) {
+            throw new IllegalArgumentException(Messages.get("value_duration_invalid", s));
+        }
+        return total;
+    }
+
     private static void writeTo(StringBuilder sb, AxonValue v) {
         switch (v.type()) {
             case NONE, NULL -> sb.append("null");
             case BOOL -> sb.append(v.asBool() ? "true" : "false");
             case NUMBER -> writeNumber(sb, v);
             case STRING -> writeString(sb, v.asString());
-            case DATETIME -> writeString(sb, v.asInstant().toString());
-            case UUID -> writeString(sb, v.asUuidValue().toString());
-            case DURATION -> writeString(sb, v.asDuration().toString());
+            case DATETIME -> writeTaggedString(sb, "$datetime", v.asInstant().toString());
+            case UUID -> writeTaggedString(sb, "$uuid", v.asUuidValue().toString());
+            case DURATION -> writeTaggedString(sb, "$duration", durationToString(v.asDuration().millis()));
             case ARRAY, SET -> writeArray(sb, v);
             case OBJECT -> writeObject(sb, v);
             case BYTES -> writeBytes(sb, (byte[]) v.raw());
-            case TABLE -> writeString(sb, v.asTable());
+            case TABLE -> writeTaggedString(sb, "$table", v.asTable());
             case RECORD_ID -> writeString(sb, v.asRecordId().toString());
         }
     }
@@ -75,7 +131,7 @@ public final class AxonJson {
     private static void writeNumber(StringBuilder sb, AxonValue v) {
         Object n = v.raw();
         if (n instanceof BigDecimal dec) {
-            sb.append(dec.toPlainString());
+            writeTaggedString(sb, "$decimal", dec.toPlainString());
         } else {
             sb.append(n.toString());
         }
@@ -110,14 +166,15 @@ public final class AxonJson {
     }
 
     private static void writeBytes(StringBuilder sb, byte[] data) {
-        sb.append('[');
-        for (int i = 0; i < data.length; i++) {
-            if (i > 0) {
-                sb.append(',');
-            }
-            sb.append(data[i] & 0xFF);
-        }
-        sb.append(']');
+        writeTaggedString(sb, "$bytes", Base64.getEncoder().encodeToString(data));
+    }
+
+    private static void writeTaggedString(StringBuilder sb, String tag, String value) {
+        sb.append('{');
+        writeString(sb, tag);
+        sb.append(':');
+        writeString(sb, value);
+        sb.append('}');
     }
 
     private static void writeString(StringBuilder sb, String s) {
@@ -152,13 +209,13 @@ public final class AxonJson {
         AxonValue v = p.parseValue();
         p.skipWs();
         if (!p.eof()) {
-            throw decodeError("conteúdo extra despois do valor JSON");
+            throw decodeError(Messages.get("json_extra_content"));
         }
         return v;
     }
 
     private static AxonError decodeError(String msg) {
-        return AxonError.parse("erro JSON: " + msg);
+        return AxonError.parse(Messages.get("json_parse_error", msg));
     }
 
     private static final class Parser {
@@ -187,7 +244,7 @@ public final class AxonJson {
         AxonValue parseValue() {
             skipWs();
             if (eof()) {
-                throw decodeError("final de entrada inesperado");
+                throw decodeError(Messages.get("json_unexpected_end"));
             }
             char c = s.charAt(pos);
             return switch (c) {
@@ -212,7 +269,7 @@ public final class AxonJson {
             while (true) {
                 skipWs();
                 if (peek() != '"') {
-                    throw decodeError("esperado string como chave de objeto");
+                    throw decodeError(Messages.get("json_expected_object_key"));
                 }
                 String key = parseString();
                 skipWs();
@@ -227,9 +284,71 @@ public final class AxonJson {
                 if (c == '}') {
                     break;
                 }
-                throw decodeError("esperado ',' ou '}' en objeto");
+                throw decodeError(Messages.get("json_expected_object_separator"));
+            }
+            if (map.size() == 1) {
+                AxonValue tagged = parseTagged(map);
+                if (tagged != null) {
+                    return tagged;
+                }
             }
             return AxonValue.object(map);
+        }
+
+        /**
+         * Reconhece os envelopes marcados de valor tipado: {@code $decimal},
+         * {@code $bytes}, {@code $datetime}, {@code $duration}, {@code $uuid},
+         * {@code $table} e {@code $record}. É a ponte entre JSON e os tipos
+         * AxonQL que o wire protocol não representa como literal JSON.
+         */
+        private AxonValue parseTagged(Map<String, AxonValue> map) {
+            if (map.get("$decimal") != null && map.get("$decimal").isString()) {
+                try {
+                    return AxonValue.num(new BigDecimal(map.get("$decimal").asString()));
+                } catch (NumberFormatException e) {
+                    throw decodeError(Messages.get("json_invalid_decimal"));
+                }
+            }
+            if (map.get("$bytes") != null && map.get("$bytes").isString()) {
+                try {
+                    return AxonValue.bytes(Base64.getDecoder().decode(map.get("$bytes").asString()));
+                } catch (IllegalArgumentException e) {
+                    throw decodeError(Messages.get("json_invalid_base64"));
+                }
+            }
+            if (map.get("$datetime") != null && map.get("$datetime").isString()) {
+                try {
+                    return AxonValue.datetime(Instant.parse(map.get("$datetime").asString()));
+                } catch (java.time.format.DateTimeParseException e) {
+                    throw decodeError(Messages.get("json_invalid_datetime"));
+                }
+            }
+            if (map.get("$duration") != null && map.get("$duration").isString()) {
+                try {
+                    return AxonValue.duration(durationFromString(map.get("$duration").asString()));
+                } catch (IllegalArgumentException e) {
+                    throw decodeError(Messages.get("value_duration_invalid", e.getMessage()));
+                }
+            }
+            if (map.get("$uuid") != null && map.get("$uuid").isString()) {
+                try {
+                    return AxonValue.uuid(UUID.fromString(map.get("$uuid").asString()));
+                } catch (IllegalArgumentException e) {
+                    throw decodeError(Messages.get("json_invalid_uuid"));
+                }
+            }
+            if (map.get("$table") != null && map.get("$table").isString()) {
+                return AxonValue.table(map.get("$table").asString());
+            }
+            if (map.get("$record") != null && map.get("$record").isString()) {
+                String raw = map.get("$record").asString();
+                int i = raw.indexOf(':');
+                if (i <= 0 || i == raw.length() - 1) {
+                    throw decodeError(Messages.get("json_invalid_record", raw));
+                }
+                return AxonValue.record(raw.substring(0, i), raw.substring(i + 1));
+            }
+            return null;
         }
 
         AxonValue parseArray() {
@@ -250,7 +369,7 @@ public final class AxonJson {
                 if (c == ']') {
                     break;
                 }
-                throw decodeError("esperado ',' ou ']' en array");
+                throw decodeError(Messages.get("json_expected_array_separator"));
             }
             return AxonValue.array(list);
         }
@@ -267,7 +386,7 @@ public final class AxonJson {
             }
             String token = s.substring(start, pos);
             if (token.isEmpty()) {
-                throw decodeError("número JSON inválido");
+                throw decodeError(Messages.get("json_invalid_number_empty"));
             }
             try {
                 if (token.contains(".") || token.contains("e") || token.contains("E")) {
@@ -278,7 +397,7 @@ public final class AxonJson {
                 }
                 return AxonValue.num(Long.parseLong(token));
             } catch (NumberFormatException e) {
-                throw decodeError("número JSON inválido: " + token);
+                throw decodeError(Messages.get("json_invalid_number", token));
             }
         }
 
@@ -301,14 +420,24 @@ public final class AxonJson {
                         case 'n' -> sb.append('\n');
                         case 'r' -> sb.append('\r');
                         case 't' -> sb.append('\t');
-                        case 'u' -> sb.append((char) Integer.parseInt(s.substring(pos, pos + 4), 16));
-                        default -> throw decodeError("escape JSON inválido: \\" + esc);
+                        case 'u' -> {
+                            if (pos + 4 > s.length()) {
+                            throw decodeError(Messages.get("json_truncated_unicode_escape"));
+                            }
+                            try {
+                                sb.append((char) Integer.parseInt(s.substring(pos, pos + 4), 16));
+                                pos += 4;
+                            } catch (NumberFormatException e) {
+                                throw decodeError(Messages.get("json_invalid_unicode_escape"));
+                            }
+                        }
+                        default -> throw decodeError(Messages.get("json_invalid_escape", esc));
                     }
                     continue;
                 }
                 sb.append(c);
             }
-            throw decodeError("string JSON non terminada");
+            throw decodeError(Messages.get("json_unterminated_string"));
         }
 
         AxonValue parseKeyword(String kw, AxonValue v) {
@@ -316,7 +445,7 @@ public final class AxonJson {
                 pos += kw.length();
                 return v;
             }
-            throw decodeError("literal inválido");
+            throw decodeError(Messages.get("json_invalid_literal"));
         }
 
         char peek() {
@@ -328,7 +457,7 @@ public final class AxonJson {
 
         char next() {
             if (eof()) {
-                throw decodeError("final de entrada inesperado");
+                throw decodeError(Messages.get("json_unexpected_end"));
             }
             return s.charAt(pos++);
         }
@@ -336,7 +465,7 @@ public final class AxonJson {
         void expect(char c) {
             char got = next();
             if (got != c) {
-                throw decodeError("esperado '" + c + "' pero era '" + got + "'");
+                throw decodeError(Messages.get("json_expected_character", c, got));
             }
         }
     }

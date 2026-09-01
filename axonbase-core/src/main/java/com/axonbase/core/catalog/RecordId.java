@@ -1,5 +1,7 @@
 package com.axonbase.core.catalog;
 
+import com.axonbase.common.Messages;
+
 import com.axonbase.value.AxonValue;
 
 /**
@@ -10,10 +12,10 @@ public record RecordId(String table, AxonValue key) {
 
     public RecordId {
         if (table == null || table.isBlank()) {
-            throw new IllegalArgumentException("táboa do record id non pode estar en branco");
+            throw new IllegalArgumentException(Messages.get("record_table_required"));
         }
         if (key == null) {
-            throw new IllegalArgumentException("chave do record id non pode ser null");
+            throw new IllegalArgumentException(Messages.get("record_key_required"));
         }
     }
 

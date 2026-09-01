@@ -1,5 +1,6 @@
 package com.axonbase.core.security;
 
+import com.axonbase.common.Messages;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -18,7 +19,29 @@ public final class AuthCatalog {
     public enum Scope { ROOT, NAMESPACE, DATABASE }
 
     public record User(String name, Scope scope, String namespace, String database,
-                       String saltHex, String hashHex, List<String> roles) {
+                       String saltHex, String hashHex, String certificate, String fingerprint,
+                       List<String> roles, List<String> dataRules, String auditName) {
+        public User {
+            if (certificate != null && (saltHex != null || hashHex != null)) {
+                throw new IllegalArgumentException(Messages.get("auth_cert_user_password"));
+            }
+            if (certificate == null && (saltHex == null || hashHex == null)) {
+                throw new IllegalArgumentException(Messages.get("auth_user_needs_salt"));
+            }
+            roles = roles == null ? List.of() : List.copyOf(roles);
+            dataRules = dataRules == null ? List.of() : List.copyOf(dataRules);
+        }
+
+        public User(String name, Scope scope, String namespace, String database,
+                    String saltHex, String hashHex, String certificate, String fingerprint,
+                    List<String> roles, List<String> dataRules) {
+            this(name, scope, namespace, database, saltHex, hashHex, certificate, fingerprint,
+                roles, dataRules, null);
+        }
+
+        public boolean certificateBased() {
+            return certificate != null;
+        }
     }
 
     public record Access(String name, Scope scope, String namespace, String database) {
@@ -36,16 +59,47 @@ public final class AuthCatalog {
      *         replicá-la sem manter a senha em texto puro
      */
     public User defineUser(String name, Scope scope, String namespace, String database,
-                           String password, List<String> roles) {
+                           String password, List<String> roles, List<String> dataRules) {
+        return defineUser(name, scope, namespace, database, password, roles, dataRules, null);
+    }
+
+    public User defineUser(String name, Scope scope, String namespace, String database,
+                           String password, List<String> roles, List<String> dataRules,
+                           String auditName) {
         if (name == null || name.isBlank()) {
-            throw new IllegalArgumentException("nome de usuário não pode ser vazio");
+            throw new IllegalArgumentException(Messages.get("auth_user_empty"));
         }
         byte[] salt = new byte[16];
         random.nextBytes(salt);
         String saltHex = HexFormat.of().formatHex(salt);
         String hashHex = hash(salt, password == null ? "" : password);
-        User user = new User(name, scope, namespace, database, saltHex, hashHex,
-            roles == null ? List.of() : List.copyOf(roles));
+        User user = new User(name, scope, namespace, database, saltHex, hashHex, null, null,
+            roles == null ? List.of() : List.copyOf(roles),
+            dataRules == null ? List.of() : List.copyOf(dataRules), auditName);
+        users.put(userKey(name, scope, namespace, database), user);
+        return user;
+    }
+
+    /** Cria ou substitui um usuário autenticável exclusivamente por certificado. */
+    public User defineCertificateUser(String name, Scope scope, String namespace, String database,
+                                      String certificate, String fingerprint, List<String> roles,
+                                      List<String> dataRules) {
+        return defineCertificateUser(name, scope, namespace, database, certificate, fingerprint,
+            roles, dataRules, null);
+    }
+
+    public User defineCertificateUser(String name, Scope scope, String namespace, String database,
+                                      String certificate, String fingerprint, List<String> roles,
+                                      List<String> dataRules, String auditName) {
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException(Messages.get("auth_user_empty"));
+        }
+        if (certificate == null || certificate.isBlank()) {
+            throw new IllegalArgumentException(Messages.get("auth_cert_empty"));
+        }
+        User user = new User(name, scope, namespace, database, null, null, certificate, fingerprint,
+            roles == null ? List.of() : List.copyOf(roles),
+            dataRules == null ? List.of() : List.copyOf(dataRules), auditName);
         users.put(userKey(name, scope, namespace, database), user);
         return user;
     }
@@ -54,15 +108,17 @@ public final class AuthCatalog {
     public void ensureUser(String name, String password) {
         String key = userKey(name, Scope.ROOT, null, null);
         if (!users.containsKey(key)) {
-            defineUser(name, Scope.ROOT, null, null, password, List.of("OWNER"));
+            defineUser(name, Scope.ROOT, null, null, password, List.of("OWNER"), List.of());
         }
     }
 
     /** Procura a identidade mais específica que se aplique ao ns/db indicado. */
     public User verify(String name, String password, String namespace, String database) {
         for (Scope scope : List.of(Scope.DATABASE, Scope.NAMESPACE, Scope.ROOT)) {
-            User user = users.get(userKey(name, scope, namespace, database));
-            if (user != null && constantTimeEquals(user.hashHex(), hash(
+            String ns = scope == Scope.ROOT ? null : (scope == Scope.NAMESPACE ? namespace : namespace);
+            String db = scope == Scope.DATABASE ? database : null;
+            User user = users.get(userKey(name, scope, ns, db));
+            if (user != null && !user.certificateBased() && constantTimeEquals(user.hashHex(), hash(
                 HexFormat.of().parseHex(user.saltHex()), password == null ? "" : password))) {
                 return user;
             }
@@ -70,9 +126,39 @@ public final class AuthCatalog {
         return null;
     }
 
+    /** Procura a identidade mais específica sem validar uma senha. */
+    public User user(String name, String namespace, String database) {
+        for (Scope scope : List.of(Scope.DATABASE, Scope.NAMESPACE, Scope.ROOT)) {
+            String ns = scope == Scope.ROOT ? null : (scope == Scope.NAMESPACE ? namespace : namespace);
+            String db = scope == Scope.DATABASE ? database : null;
+            User user = users.get(userKey(name, scope, ns, db));
+            if (user != null) {
+                return user;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Procura uma identidade de certificado com o nome e truststore dados, em
+     * qualquer escopo. Usado na emissão de credencial temporária, que não fica
+     * amarrada a um namespace/banco específico.
+     */
+    public User certificateUser(String name, String certificateStore, String fingerprint) {
+        return users.values().stream()
+            .filter(user -> user.name().equals(name))
+            .filter(AuthCatalog.User::certificateBased)
+            .filter(user -> user.certificate().equals(certificateStore))
+            .filter(user -> fingerprint == null || fingerprint.isBlank()
+                || user.fingerprint() == null || user.fingerprint().isBlank()
+                || user.fingerprint().equals(fingerprint))
+            .findFirst()
+            .orElse(null);
+    }
+
     public void defineAccess(String name, Scope scope, String namespace, String database) {
         if (name == null || name.isBlank()) {
-            throw new IllegalArgumentException("nome de access não pode ser vazio");
+            throw new IllegalArgumentException(Messages.get("auth_access_empty"));
         }
         accesses.put(accessKey(name, scope, namespace, database),
             new Access(name, scope, namespace, database));
@@ -136,7 +222,7 @@ public final class AuthCatalog {
             digest.update(PEPPER.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(digest.digest(password.getBytes(StandardCharsets.UTF_8)));
         } catch (Exception e) {
-            throw new IllegalStateException("SHA-256 não disponível", e);
+            throw new IllegalStateException(Messages.get("auth_hash_unavailable"), e);
         }
     }
 

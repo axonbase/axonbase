@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 
+import com.axonbase.common.Messages;
 import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.core.storage.VersionedKvBackend;
 
@@ -34,7 +35,7 @@ public final class RaftGroup {
 
     public static RaftGroup inMemory(String id, String... members) {
         if (members.length == 0) {
-            throw new IllegalArgumentException("grupo precisa de membros");
+            throw new IllegalArgumentException(Messages.get("cluster_members_required"));
         }
         Map<String, VersionedKvBackend> backends = new LinkedHashMap<>();
         for (String member : members) {
@@ -46,7 +47,7 @@ public final class RaftGroup {
     /** Grupo sobre backends já existentes, um por membro. */
     public static RaftGroup over(String id, Map<String, VersionedKvBackend> members) {
         if (members.isEmpty()) {
-            throw new IllegalArgumentException("grupo precisa de membros");
+            throw new IllegalArgumentException(Messages.get("cluster_members_required"));
         }
         return new RaftGroup(id, members);
     }
@@ -132,7 +133,7 @@ public final class RaftGroup {
     private Node require(String id) {
         Node node = nodes.get(id);
         if (node == null) {
-            throw new IllegalArgumentException("nó desconhecido " + id);
+            throw new IllegalArgumentException(Messages.get("cluster_node_unknown", id));
         }
         return node;
     }

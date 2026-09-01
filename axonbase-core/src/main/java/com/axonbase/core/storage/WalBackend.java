@@ -1,5 +1,7 @@
 package com.axonbase.core.storage;
 
+import com.axonbase.common.Messages;
+
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
@@ -10,8 +12,11 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -33,6 +38,7 @@ public final class WalBackend implements VersionedKvBackend {
 
     private final TreeMap<String, byte[]> data = new TreeMap<>();
     private final TreeMap<String, Long> versions = new TreeMap<>();
+    private final HistoryLedger history = new HistoryLedger();
     private long clock;
     private final Path dir;
     private final Path walPath;
@@ -250,7 +256,10 @@ public final class WalBackend implements VersionedKvBackend {
 
     @Override
     public synchronized void put(String key, byte[] value) {
-        data.put(key, value.clone()); versions.put(key, ++clock);
+        data.put(key, value.clone());
+        long ver = ++clock;
+        history.record(key, value, ver, System.currentTimeMillis());
+        versions.put(key, ver);
         try {
             appendWal(OP_PUT, key.getBytes(StandardCharsets.UTF_8), value);
         } catch (IOException e) {
@@ -296,16 +305,49 @@ public final class WalBackend implements VersionedKvBackend {
 
     @Override public synchronized long versionOf(String key) { return versions.getOrDefault(key, 0L); }
 
+    public HistoryLedger history() { return history; }
+
     @Override
+    public Optional<byte[]> snapshotAt(String key, long timestampEpochMillis) {
+        Optional<byte[]> historical = history.snapshotAt(key, timestampEpochMillis);
+        if (historical.isPresent()) return historical;
+        return Optional.empty();
+    }
+
+@Override
     public synchronized void commit(java.util.Map<String, Long> expectedVersions,
                                     java.util.Map<String, byte[]> puts, java.util.Set<String> deletes) {
+        commit(expectedVersions, puts, deletes, java.util.Set.of());
+    }
+
+    @Override
+    public synchronized void commit(java.util.Map<String, Long> expectedVersions,
+                                    java.util.Map<String, byte[]> puts, java.util.Set<String> deletes,
+                                    java.util.Set<String> readPrefixes) {
         for (var expected : expectedVersions.entrySet()) {
             if (versionOf(expected.getKey()) != expected.getValue())
-                throw new VersionConflictException("conflito de versão na chave '" + expected.getKey() + "'");
+                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()));
+        }
+        for (String prefix : readPrefixes) {
+            for (String key : keysWithPrefix(prefix)) {
+                if (expectedVersions.containsKey(key) || puts.containsKey(key) || deletes.contains(key)) {
+                    continue;
+                }
+                throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key));
+            }
         }
         try { appendBatch(puts, deletes); } catch (IOException e) { throw new UncheckedIOException(e); }
-        for (String key : deletes) { if (data.remove(key) != null) versions.put(key, ++clock); }
-        for (var put : puts.entrySet()) { data.put(put.getKey(), put.getValue().clone()); versions.put(put.getKey(), ++clock); }
+        long now = System.currentTimeMillis();
+        for (String key : deletes) {
+            data.remove(key);
+            versions.put(key, ++clock);
+        }
+        for (var put : puts.entrySet()) {
+            data.put(put.getKey(), put.getValue().clone());
+            long ver = ++clock;
+            versions.put(put.getKey(), ver);
+            history.record(put.getKey(), put.getValue(), ver, now);
+        }
     }
 
     @Override

@@ -9,11 +9,27 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("SDK: Axon sobre WebSocket end-to-end")
 class SdkEndToEndTest {
+
+    @Test
+    void startsCertificateChallengeOverWebSocket() throws Exception {
+        Datastore ds = Datastore.memory();
+        AxonServer srv = AxonServer.startRandomPort(ds, "sdk-secret");
+        try (Axon axon = Axon.connect("ws://127.0.0.1:" + srv.port() + "/rpc/ws")) {
+            axon.use("test", "dev");
+            Axon.CertificateChallenge challenge = axon.certificateBegin("test_clients");
+            assertNotNull(challenge.id());
+            assertNotNull(challenge.challenge());
+            assertNotNull(challenge.expiresAt());
+        } finally {
+            srv.stop();
+        }
+    }
 
     @Test
     void criaEseleccionaPorWebSocket() throws Exception {

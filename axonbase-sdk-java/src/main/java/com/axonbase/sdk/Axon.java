@@ -1,13 +1,19 @@
 package com.axonbase.sdk;
 
+import com.axonbase.common.Messages;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
+import org.eclipse.jetty.client.HttpClient;
+import org.eclipse.jetty.client.http.HttpClientTransportOverHTTP;
+import org.eclipse.jetty.io.ClientConnector;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.WebSocketAdapter;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 
 import java.net.URI;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -15,6 +21,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * Cliente SDK de AxonBase sobre WebSocket (JSON-RPC), usando o cliente
@@ -35,15 +42,44 @@ public final class Axon implements AutoCloseable {
     }
 
     public static Axon connect(String url) {
+        return connect(url, null, null);
+    }
+
+    public static Axon connect(String url, String keyStorePath, String keyStorePassword) {
+        return connect(url, keyStorePath, keyStorePassword, null, null);
+    }
+
+    /** Connects with optional PKCS12 client identity and JKS server truststore. */
+    public static Axon connect(String url, String keyStorePath, String keyStorePassword,
+                               String trustStorePath, String trustStorePassword) {
         try {
-            WebSocketClient client = new WebSocketClient();
+            WebSocketClient client;
+            if (url.startsWith("wss://")) {
+                var ssl = new SslContextFactory.Client();
+                if (keyStorePath != null && !keyStorePath.isBlank()) {
+                    ssl.setKeyStorePath(keyStorePath);
+                    ssl.setKeyStorePassword(keyStorePassword);
+                    ssl.setKeyStoreType("PKCS12");
+                }
+                if (trustStorePath != null && !trustStorePath.isBlank()) {
+                    ssl.setTrustStorePath(trustStorePath);
+                    ssl.setTrustStorePassword(trustStorePassword);
+                    ssl.setTrustStoreType("JKS");
+                }
+                var connector = new ClientConnector();
+                connector.setSslContextFactory(ssl);
+                var transport = new HttpClientTransportOverHTTP(connector);
+                var httpClient = new HttpClient(transport);
+                client = new WebSocketClient(httpClient);
+            } else {
+                client = new WebSocketClient();
+            }
             client.start();
             Axon axon = new Axon(client);
-            // 'this' (Axon) extiende WebSocketAdapter, así que é o endpoint da conexión.
-            client.connect(new Holder(axon), URI.create(url)).get(10, TimeUnit.SECONDS);
+            client.connect(new Holder(axon), URI.create(url)).get(30, TimeUnit.SECONDS);
             return axon;
         } catch (Exception e) {
-            throw new AxonSdkException("erro ao conectarse a " + url, e);
+            throw new AxonSdkException(Messages.get("sdk_connect_failed", url, e.getClass().getName(), e.getMessage()), e);
         }
     }
 
@@ -57,6 +93,49 @@ public final class Axon implements AutoCloseable {
 
     public AxonValue query(String sql) {
         return call("query", new Object[]{sql});
+    }
+
+    /** Starts a local database transaction. */
+    public void begin() {
+        call("begin", new Object[]{});
+    }
+
+    /** Commits the current local database transaction. */
+    public void commit() {
+        call("commit", new Object[]{});
+    }
+
+    /** Rolls back the current local database transaction. */
+    public void cancel() {
+        call("cancel", new Object[]{});
+    }
+
+    /** Creates a stateful helper for a distributed SAGA. */
+    public SagaTransaction saga(String name, String correlationId) {
+        return new SagaTransaction(this, name, correlationId);
+    }
+
+    /** Joins an active SAGA while controlling only this client's local transaction. */
+    public SagaParticipantTransaction sagaParticipant(String correlationId) {
+        return new SagaParticipantTransaction(this, correlationId);
+    }
+
+    /** Runs work in a SAGA, committing on success and compensating on failure. */
+    public <T> T inSaga(String name, String correlationId, Supplier<T> work) {
+        try (SagaTransaction saga = saga(name, correlationId)) {
+            saga.begin();
+            T result = work.get();
+            saga.commit();
+            return result;
+        }
+    }
+
+    /** Runs work in a SAGA, committing on success and compensating on failure. */
+    public void inSaga(String name, String correlationId, Runnable work) {
+        inSaga(name, correlationId, () -> {
+            work.run();
+            return null;
+        });
     }
 
     public AxonValue create(String table, AxonValue content) {
@@ -84,9 +163,39 @@ public final class Axon implements AutoCloseable {
         return jwt;
     }
 
-    /** Valida un JWT no servidor (autenticación explícita). */
+    /** Validates a JWT explicitly on the server. */
     public void authenticate(String token) {
         call("authenticate", new Object[]{token});
+        credentials = token;
+    }
+
+    public record CertificateChallenge(String id, String challenge, String expiresAt) {
+    }
+
+    public record CertificateCompletion(String id, String challenge, String store, String user,
+                                        List<String> chain, String signature) {
+    }
+
+    /** Starts a certificate proof-of-possession challenge. */
+    public CertificateChallenge certificateBegin(String store) {
+        AxonValue result = call("certificate.begin", new Object[]{Map.of("store", store)});
+        if (!result.isObject()) {
+            throw new AxonSdkException(Messages.get("sdk_certificate_begin_response_invalid"));
+        }
+        Map<String, AxonValue> value = result.asObject();
+        return new CertificateChallenge(value.get("id").asString(), value.get("challenge").asString(),
+            value.get("expires_at").asString());
+    }
+
+    /** Completes a certificate proof and returns a temporary credential. */
+    public String certificateComplete(CertificateCompletion completion) {
+        AxonValue result = call("certificate.complete", new Object[]{Map.of(
+            "id", completion.id(), "challenge", completion.challenge(), "store", completion.store(),
+            "user", completion.user(), "chain", completion.chain(), "signature", completion.signature())});
+        if (!result.isString()) {
+            throw new AxonSdkException(Messages.get("sdk_certificate_complete_response_invalid"));
+        }
+        return result.asString();
     }
 
     // ------------------------------------------------------------------
@@ -171,6 +280,11 @@ public final class Axon implements AutoCloseable {
         }
     }
 
+    public boolean isConnected() {
+        Session s = session;
+        return s != null && s.isOpen();
+    }
+
     // ------------------------------------------------------------------
     // rexistro da sesión (endpoint pon o handler)
     // ------------------------------------------------------------------
@@ -204,24 +318,24 @@ public final class Axon implements AutoCloseable {
         Session s = session;
         if (s == null || !s.isOpen()) {
             pending.remove(id);
-            throw new AxonSdkException("conexión WebSocket non aberta");
+            throw new AxonSdkException(Messages.get("sdk_websocket_closed"));
         }
         try {
             s.getRemote().sendString(req);
         } catch (Exception e) {
             pending.remove(id);
-            throw new AxonSdkException("erro ao enviar " + method, e);
+            throw new AxonSdkException(Messages.get("sdk_send_failed", method), e);
         }
         try {
             String resp = fut.get(30, TimeUnit.SECONDS);
             return parseResponse(resp);
         } catch (TimeoutException e) {
-            throw new AxonSdkException("tempo esgotado na chamada " + method, e);
+            throw new AxonSdkException(Messages.get("sdk_call_timeout", method), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new AxonSdkException("chamada interrompida", e);
+            throw new AxonSdkException(Messages.get("sdk_call_interrupted"), e);
         } catch (ExecutionException e) {
-            throw new AxonSdkException("erro de execución en " + method, e);
+            throw new AxonSdkException(Messages.get("sdk_call_execution_failed", method), e);
         } finally {
             pending.remove(id);
         }
@@ -273,6 +387,17 @@ public final class Axon implements AutoCloseable {
                 appendValue(sb, e.getValue());
             }
             sb.append('}');
+        } else if (v instanceof Iterable<?> values) {
+            sb.append('[');
+            boolean first = true;
+            for (Object item : values) {
+                if (!first) {
+                    sb.append(',');
+                }
+                first = false;
+                appendValue(sb, item);
+            }
+            sb.append(']');
         } else {
             sb.append('"').append(v).append('"');
         }
@@ -281,7 +406,7 @@ public final class Axon implements AutoCloseable {
     private static AxonValue parseResponse(String resp) {
         AxonValue v = AxonJson.parseDocument(resp);
         if (!v.isObject()) {
-            throw new AxonSdkException("resposta RPC non obxecto");
+            throw new AxonSdkException(Messages.get("sdk_rpc_response_invalid"));
         }
         Map<String, AxonValue> obj = v.asObject();
         if (obj.containsKey("error")) {
@@ -289,7 +414,7 @@ public final class Axon implements AutoCloseable {
             String msg = err.isObject() && err.asObject().containsKey("message")
                 ? err.asObject().get("message").asString()
                 : err.toString();
-            throw new AxonSdkException("erro do servidor: " + msg);
+            throw new AxonSdkException(Messages.get("sdk_server_error", msg));
         }
         return obj.getOrDefault("result", AxonValue.nul());
     }

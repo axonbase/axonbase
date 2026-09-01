@@ -1,5 +1,6 @@
 package com.axonbase.parser;
 
+import com.axonbase.common.Messages;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Query;
 import com.axonbase.parser.ast.Statement;
@@ -54,6 +55,20 @@ public final class Render {
                 data(sb, c.data());
                 ret(sb, c.ret());
             }
+            case Statement.CreateJks jks -> {
+                sb.append("CREATE JKS ").append(jks.name())
+                    .append(" PATH \"").append(escape(jks.path())).append("\" PASSWORD \"")
+                    .append(escape(jks.password())).append('"');
+                if ("ICPBRASIL".equals(jks.collector())) {
+                    sb.append(" COLLECT USER BY ICPBRASIL");
+                } else if ("OID".equals(jks.collector())) {
+                    sb.append(" COLLECT USER BY OID ");
+                    for (int i = 0; i < jks.oids().size(); i++) {
+                        if (i > 0) sb.append(", ");
+                        sb.append('"').append(escape(jks.oids().get(i))).append('"');
+                    }
+                }
+            }
             case Statement.Insert i -> {
                 sb.append("INSERT ");
                 if (i.ignore()) {
@@ -99,6 +114,16 @@ public final class Render {
                     sb.append(" ONLY");
                 }
                 sb.append(" FROM ").append(expr(s2.from()));
+                if (s2.timeTravel() != null) {
+                    var travel = s2.timeTravel();
+                    sb.append(travel.mode() == Statement.TimeTravelMode.AT ? " AT (" : " BEFORE (")
+                        .append(travel.selector()).append(" => ").append(expr(travel.value())).append(')');
+                }
+                for (var join : s2.joins()) {
+                    sb.append(" JOIN ").append(expr(join.source()))
+                        .append(" ON ").append(expr(join.left()))
+                        .append(" = ").append(expr(join.right()));
+                }
                 if (s2.cond() != null) {
                     sb.append(" WHERE ").append(expr(s2.cond()));
                 }
@@ -141,6 +166,13 @@ public final class Render {
                     sb.append(" DIFF");
                 }
             }
+            case Statement.Explain ex -> {
+                sb.append("EXPLAIN ");
+                if (ex.analyze()) {
+                    sb.append("ANALYZE ");
+                }
+                statement(sb, ex.select());
+            }
             case Statement.Relate r -> {
                 sb.append("RELATE ").append(expr(r.from())).append("->").append(expr(r.kind()));
                 if (r.to() != null) {
@@ -178,6 +210,9 @@ public final class Render {
                 if (df.defaultExpr() != null) {
                     sb.append(" DEFAULT ").append(expr(df.defaultExpr()));
                 }
+                if (df.references() != null) {
+                    sb.append(" REFERENCES ").append(df.references());
+                }
             }
             case Statement.DefineIndex di -> {
                 sb.append("DEFINE INDEX ").append(di.name()).append(" ON TABLE ").append(di.table())
@@ -190,9 +225,20 @@ public final class Render {
                     sb.append(" SEARCH ANALYZER ").append(di.searchAnalyzer());
                 } else if (di.geo()) {
                     sb.append(" GEO");
+                } else if (di.columnar()) {
+                    sb.append(" COLUMNAR");
                 } else if (di.vectorDimension() != null) {
                     sb.append(" HNSW DIMENSION ").append(di.vectorDimension())
                         .append(" DIST ").append(di.vectorDistance());
+                    if (di.m() != null) {
+                        sb.append(" M ").append(di.m());
+                    }
+                    if (di.efConstruction() != null) {
+                        sb.append(" EFC ").append(di.efConstruction());
+                    }
+                    if (di.efSearch() != null) {
+                        sb.append(" EFS ").append(di.efSearch());
+                    }
                 }
             }
             case Statement.DefineAnalyzer da -> {
@@ -225,15 +271,32 @@ public final class Render {
                 sb.append(')');
             }
             case Statement.DefineUser du -> {
-                sb.append("DEFINE USER ").append(du.name()).append(" ON ");
+                sb.append("DEFINE USER ");
+                if (du.name().matches("[\\p{L}_][\\p{L}\\p{N}_!]*")) {
+                    sb.append(du.name());
+                } else {
+                    sb.append('"').append(escape(du.name())).append('"');
+                }
+                sb.append(" ON ");
                 authScope(sb, du.scope(), du.namespace(), du.database());
-                if (du.hashed()) {
+                if (du.certificateBased()) {
+                    sb.append(" CERTIFICATE ").append(du.certificate());
+                    if (du.fingerprint() != null) {
+                        sb.append(" FINGERPRINT \"").append(escape(du.fingerprint())).append('"');
+                    }
+                } else if (du.hashed()) {
                     sb.append(" PASSHASH \"").append(escape(du.passhash())).append('"');
                 } else {
                     sb.append(" PASSWORD ").append(expr(du.password()));
                 }
                 if (!du.roles().isEmpty()) {
                     sb.append(" ROLES ").append(String.join(", ", du.roles()));
+                }
+                if (!du.dataRules().isEmpty()) {
+                    sb.append(" APPLY DATA RULE ").append(String.join(", ", du.dataRules()));
+                }
+                if (du.auditName() != null && !du.auditName().isBlank()) {
+                    sb.append(" AUDITED BY ").append(du.auditName());
                 }
             }
             case Statement.DefineAccess da -> {
@@ -263,6 +326,82 @@ public final class Render {
             case Statement.Begin ignored -> sb.append("BEGIN");
             case Statement.Commit ignored -> sb.append("COMMIT");
             case Statement.Cancel ignored -> sb.append("CANCEL");
+            case Statement.Savepoint sp -> sb.append("SAVEPOINT ").append(sp.name());
+            case Statement.Release rl -> sb.append("RELEASE ").append(rl.name());
+            case Statement.RollbackTo rb -> sb.append("ROLLBACK TO ").append(rb.name());
+            case Statement.Join j -> throw new IllegalArgumentException(Messages.get("parser_join_outside_select"));
+            case Statement.DefineDatabaseLink ddl -> {
+                sb.append("DEFINE DATABASE LINK \"").append(escape(ddl.name())).append('"')
+                    .append(" CONNECT BY \"").append(escape(ddl.url())).append('"')
+                    .append(" WITH ns = \"").append(escape(ddl.ns())).append('"')
+                    .append(" db = \"").append(escape(ddl.db())).append('"')
+                    .append(" user = \"").append(escape(ddl.user())).append('"')
+                    .append(" password = \"").append(escape(ddl.password())).append('"');
+            }
+            case Statement.DropDatabaseLink ddl2 -> {
+                sb.append("DROP DATABASE LINK \"").append(escape(ddl2.name())).append('"');
+            }
+            case Statement.CreateSaga cs -> {
+                sb.append("CREATE SAGA ").append(cs.name()).append(" WITH DATABASES ");
+                for (int i = 0; i < cs.links().size(); i++) {
+                    if (i > 0) sb.append(", ");
+                    sb.append('\'').append(escape(cs.links().get(i))).append('\'');
+                }
+            }
+            case Statement.DescribeSaga ds -> sb.append("DESCRIBE SAGA ").append(ds.name());
+            case Statement.ShowSagaTransaction st -> {
+                sb.append("SHOW SAGA TRANSACTION ").append(st.name())
+                    .append(" '").append(escape(st.correlationId())).append('\'');
+            }
+            case Statement.BeginSaga bs -> {
+                sb.append("BEGIN SAGA ").append(bs.name())
+                    .append(" WITH CORRELATION '").append(escape(bs.correlationId())).append('\'');
+            }
+            case Statement.CommitSaga cs2 -> {
+                sb.append("COMMIT SAGA ").append(cs2.name())
+                    .append(" WITH CORRELATION '").append(escape(cs2.correlationId())).append('\'');
+            }
+            case Statement.CancelSaga cs3 -> {
+                sb.append("CANCEL SAGA ").append(cs3.name())
+                    .append(" WITH CORRELATION '").append(escape(cs3.correlationId())).append('\'');
+            }
+            case Statement.CreateDataRule cd -> {
+                sb.append("CREATE DATA RULE ").append(cd.name()).append(" APPLY ")
+                    .append(expr(cd.predicate()));
+                if (!cd.maskPatterns().isEmpty()) {
+                    sb.append(" MASK FIELDS WITH");
+                    for (int i = 0; i < cd.maskPatterns().size(); i++) {
+                        sb.append(i == 0 ? " " : ", ");
+                        sb.append('\'').append(escape(cd.maskPatterns().get(i))).append('\'');
+                    }
+                }
+            }
+            case Statement.DropDataRule dr -> {
+                sb.append("DROP DATA RULE ").append(dr.name());
+            }
+            case Statement.ShowDataRules ignored -> {
+                sb.append("SHOW DATA RULES");
+            }
+            case Statement.DefineAiAudit aa -> {
+                sb.append("CREATE AI AUDIT ").append(aa.name())
+                    .append(" SET WARNING WHEN '").append(escape(aa.warningWhen()))
+                    .append("' SET DANGER WHEN '").append(escape(aa.dangerWhen())).append("'");
+            }
+            case Statement.DropAiAudit da -> {
+                sb.append("DROP AI AUDIT ").append(da.name());
+            }
+            case Statement.ShowAiAudit sa -> {
+                sb.append("SHOW AI AUDIT ").append(sa.name());
+            }
+            case Statement.SetReasonAudit sra -> {
+                sb.append("SET REASON AUDIT CASE '").append(escape(sra.hash()))
+                    .append("' '").append(escape(sra.reason())).append("'");
+            }
+            case Statement.SetAuditCase sac -> {
+                sb.append("SET AUDIT CASE '").append(escape(sac.hash()))
+                    .append("' ").append(sac.status()).append(" REASON '")
+                    .append(escape(sac.reason())).append("'");
+            }
         }
     }
 
@@ -270,7 +409,15 @@ public final class Render {
         switch (scope) {
             case ROOT -> sb.append("ROOT");
             case NAMESPACE -> sb.append("NAMESPACE").append(ns == null ? "" : " " + ns);
-            case DATABASE -> sb.append("DATABASE").append(db == null ? "" : " " + db);
+            case DATABASE -> {
+                sb.append("DATABASE");
+                if (ns != null) {
+                    sb.append(" ").append(ns);
+                }
+                if (db != null) {
+                    sb.append(" ").append(db);
+                }
+            }
         }
     }
 
@@ -349,6 +496,7 @@ public final class Render {
                     sb.append(id.name());
                 }
             }
+            case Expr.Qualified q -> sb.append(q.link()).append('.').append(q.table());
             case Expr.Param p -> sb.append('$').append(p.name());
             case Expr.Path p -> sb.append(p.name());
             case Expr.Call c2 -> {

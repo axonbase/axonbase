@@ -19,6 +19,9 @@ public sealed interface Expr {
     record Param(String name) implements Expr {
     }
 
+    record Qualified(String link, String table) implements Expr {
+    }
+
     record Path(String name) implements Expr {
     }
 
@@ -46,6 +49,15 @@ public sealed interface Expr {
     }
 
     record Binary(BinaryOp op, Expr left, Expr right) implements Expr {
+    }
+
+    /** Retorna a AND-encadeada de várias expressões. */
+    static Expr and(List<Expr> predicates) {
+        Expr result = predicates.get(0);
+        for (int i = 1; i < predicates.size(); i++) {
+            result = new Expr.Binary(BinaryOp.AND, result, predicates.get(i));
+        }
+        return result;
     }
 
     record Cast(String type, Expr operand) implements Expr {

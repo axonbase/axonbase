@@ -1,20 +1,26 @@
 # Uso do AxonBase
 
-Guia rápido para levantar o servidor, consultar com HTTP e conectar com o SDK Java.
+Guia rápido para levantar o servidor, consultar com HTTP (Hypertext Transfer Protocol) e conectar com o SDK (Software Development Kit) Java.
 
 ## Servidor
 
-Compilar e rodar a CLI:
+Compilar e rodar a CLI (Command-Line Interface):
 
 ```bash
-./run.sh start --path memory --port 8000
+./run.sh start --port 8000
+```
+
+O padrão é usar o **RocksDB** (no diretório `data/`). Para desenvolvimento rápido (sem persistência), use:
+
+```bash
+./run.sh start --path memory
 ```
 
 Opções:
 
 | Flag | Valor padrão | Descrição |
 |---|---|---|
-| `--path` | `memory` | `memory` ou um diretório para persistência em arquivo (cria `axon.db`) |
+| `--path` | `data` | `memory` (RAM, Random Access Memory), `data` (RocksDB no diretório), ou caminho explícito |
 | `--bind`/`-b` | `127.0.0.1` | endereço de bind |
 | `--port` | `8000` | porta HTTP/WebSocket |
 | `--secret` | `axonbase-dev-secret` | segredo para JWT (JSON Web Token) |
@@ -28,7 +34,7 @@ Opções:
 Copie `axonbase.conf.example` para `axonbase.conf` e ajuste os valores locais:
 
 ```ini
-path = memory
+path = data
 bind = 127.0.0.1
 port = 8000
 require_auth = true
@@ -45,12 +51,25 @@ Endpoints:
 |---|---|
 | `GET /health` | status de saúde |
 | `GET /version` | versão do servidor |
-| `POST /sql` | executa AxonQL (raw body), com headers `Axon-Ns` e `Axon-Db` |
-| `POST /table/{nome}` | cria um registro na tabela (body JSON) |
+| `POST /sql` | executa AxonQL no corpo da requisição |
+| `POST /table/{nome}` | cria um registro na tabela (corpo JSON, JavaScript Object Notation) |
 | `GET /table/{nome}` | lista registros da tabela |
 | `POST /signin` | autentica e devolve um JWT |
-| `POST /rpc` | JSON-RPC sobre HTTP |
-| `WS /rpc/ws` | JSON-RPC sobre WebSocket |
+| `POST /rpc` | JSON-RPC (JSON Remote Procedure Call) sobre HTTP |
+| `WebSocket /rpc/ws` | JSON-RPC sobre WebSocket |
+| `POST /graphql` | consulta GraphQL (Graph Query Language) de leitura |
+| `GET /mcp/sse` | abre a conexão SSE (Server-Sent Events) do MCP |
+| `POST /mcp/message` | envia uma mensagem MCP |
+
+### Autenticação HTTP
+
+Com `require_auth = true`, `/sql`, `/table`, `/rpc`, `/graphql` e os endpoints MCP (Model Context Protocol) exigem `Authorization: Bearer <JWT>` em cada requisição. Os endpoints que usam o banco também exigem `Axon-Ns` e `Axon-Db`; o JWT (JSON Web Token) deve autorizar esse escopo. Obtenha o token em `/signin` e use-o nos exemplos seguintes:
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/signin \
+  -H 'Content-Type: application/json' \
+  --data '{"user":"root","pass":"root"}' | jq -r .token)
+```
 
 ## Exemplos com HTTP
 
@@ -62,22 +81,26 @@ curl http://127.0.0.1:8000/health
 curl -X POST http://127.0.0.1:8000/sql \
   -H 'Content-Type: application/json' \
   -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
+  -H "Authorization: Bearer $TOKEN" \
   --data 'CREATE person CONTENT {name: "Ana", age: 30}'
 
 # selecionar
 curl -X POST http://127.0.0.1:8000/sql \
   -H 'Content-Type: application/json' \
   -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
+  -H "Authorization: Bearer $TOKEN" \
   --data 'SELECT * FROM person WHERE age >= 18'
 
 # REST de tabela
 curl -X POST http://127.0.0.1:8000/table/person \
   -H 'Content-Type: application/json' \
   -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
+  -H "Authorization: Bearer $TOKEN" \
   --data '{"name":"Bob","age":21}'
 
 curl http://127.0.0.1:8000/table/person \
-  -H 'Axon-Ns: test' -H 'Axon-Db: dev'
+  -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
+  -H "Authorization: Bearer $TOKEN"
 
 # signin (devolve um JWT)
 curl -X POST http://127.0.0.1:8000/signin \
@@ -88,8 +111,23 @@ curl -X POST http://127.0.0.1:8000/signin \
 curl -X POST http://127.0.0.1:8000/rpc \
   -H 'Content-Type: application/json' \
   -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
+  -H "Authorization: Bearer $TOKEN" \
   --data '{"id":1,"method":"query","params":["SELECT * FROM person"]}'
 ```
+
+## GraphQL e MCP
+
+GraphQL aceita consultas de leitura por tabela e introspecção. Com autenticação ativa, use os mesmos cabeçalhos Bearer e de escopo:
+
+```bash
+curl -X POST http://127.0.0.1:8000/graphql \
+  -H 'Content-Type: application/json' \
+  -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
+  -H "Authorization: Bearer $TOKEN" \
+  --data '{"query":"{ person { id name } }"}'
+```
+
+O MCP usa `GET /mcp/sse` para a conexão e `POST /mcp/message?session_id=...` para mensagens. Ambos exigem o Bearer e os cabeçalhos de escopo quando `require_auth` está ativo. Por segurança, as ferramentas disponíveis são somente leitura: `axon_select` (tabela e limite de até 100 registros) e `axon_info` (catálogo do banco atual). O MCP não aceita consultas AxonQL arbitrárias nem oferece ferramentas de escrita.
 
 ## SDK Java
 
@@ -101,6 +139,7 @@ import com.axonbase.value.AxonValue;
 import com.axonbase.value.AxonJson;
 
 try (Axon axon = Axon.connect("ws://127.0.0.1:8000/rpc/ws")) {
+    axon.authenticate(System.getenv("AXON_TOKEN"));
     axon.use("test", "dev");
 
     axon.query("CREATE person CONTENT {name: \"Ana\", age: 30}");
@@ -111,6 +150,12 @@ try (Axon axon = Axon.connect("ws://127.0.0.1:8000/rpc/ws")) {
 ```
 
 Métodos disponíveis: `connect`, `use`, `query`, `create`, `select`, `update`, `delete`, `signin`, `authenticate`, `live`, `kill`, `version`, `close`.
+
+Quando `require_auth` está ativo, execute `signin` e depois `authenticate(token)`, ou apenas `authenticate` com um token existente, antes de consultar na conexão WebSocket. O cabeçalho Bearer é usado pelos endpoints HTTP, não substitui a autenticação da sessão WebSocket.
+
+## SDKs PHP e Ruby
+
+Os clientes PHP e Ruby usam WebSocket e JSON-RPC (JSON Remote Procedure Call). Consulte `axonbase-sdk-php/README.md` e `axonbase-sdk-ruby/README.md` para instalação, consultas e autenticação por `signin` ou `authenticate`.
 
 ## Tempo real (live queries)
 
@@ -170,7 +215,7 @@ DEFINE FIELD email ON TABLE user TYPE string;
 DEFINE INDEX email ON TABLE user COLUMNS email UNIQUE;
 ```
 
-Uma violação de índice único, por exemplo, devolve um erro com código `-32000` (erro interno) no MVP.
+Uma violação de índice único, por exemplo, devolve um erro com código `-32000` (erro interno) no MVP (Minimum Viable Product).
 
 ## Subqueries, funções e metadados
 

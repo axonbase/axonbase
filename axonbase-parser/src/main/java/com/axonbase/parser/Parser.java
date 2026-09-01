@@ -1,6 +1,7 @@
 package com.axonbase.parser;
 
 import com.axonbase.common.AxonError;
+import com.axonbase.common.Messages;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Expr.BinaryOp;
 import com.axonbase.parser.ast.Expr.Direction;
@@ -11,6 +12,7 @@ import com.axonbase.parser.ast.Statement;
 import com.axonbase.parser.ast.Statement.Assignment;
 import com.axonbase.parser.ast.Statement.Branch;
 import com.axonbase.parser.ast.Statement.Data;
+import com.axonbase.parser.ast.Statement.Join;
 import com.axonbase.parser.ast.Statement.OrderTerm;
 import com.axonbase.parser.ast.Statement.ReturnKind;
 import com.axonbase.parser.ast.Statement.ReturnSpec;
@@ -127,18 +129,32 @@ public final class Parser {
         return false;
     }
 
+    /**
+     * Consome um parâmetro numérico contextual do HNSW ({@code M 12}, {@code EFC 64}).
+     * Os nomes {@code m}, {@code efc} e {@code efs} não são palavras-chave globais para
+     * não capturar identificadores de consulta, então casam por texto em IDENT/KEYWORD.
+     */
+    private Integer matchParamInt(String name) {
+        Token tok = peek();
+        if (!(tok.type() == TokenType.IDENT || tok.type() == TokenType.KEYWORD)
+            || !tok.text().equalsIgnoreCase(name)) {
+            return null;
+        }
+        pos++;
+        return ((Number) expect(TokenType.INT).literal()).intValue();
+    }
+
     private Token expect(TokenType t) {
         Token tok = peek();
         if (!tok.is(t)) {
-            throw error("esperava-se " + t + " na posição " + tok.start()
-                + " mas apareceu '" + tok.text() + "'");
+            throw error(Messages.get("parser_expected_token", t, tok.start(), tok.text()));
         }
         return take();
     }
 
     private Token expectKeyword(String kw) {
         if (!atKeyword(kw)) {
-            throw error("esperava-se a palavra-chave '" + kw + "' na posição " + peek().start());
+            throw error(Messages.get("parser_expected_keyword", kw, peek().start()));
         }
         return take();
     }
@@ -169,13 +185,19 @@ public final class Parser {
         Token t = peek();
         return switch (t.type()) {
             case KEYWORD -> statementKeyword(t);
-            default -> throw error("sentença inesperada na posição " + t.start() + ": '" + t.text() + "'");
+            default -> throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
         };
     }
 
     private Statement statementKeyword(Token t) {
         if (t.isKeyword("use")) {
             return parseUse();
+        }
+        if (t.isKeyword("set") && peek(1) != null && peek(1).isKeyword("reason")) {
+            return parseSetReasonAudit();
+        }
+        if (t.isKeyword("set") && peek(1) != null && peek(1).isKeyword("audit")) {
+            return parseSetAuditCase();
         }
         if (t.isKeyword("let") || t.isKeyword("set")) {
             return parseLet();
@@ -198,6 +220,9 @@ public final class Parser {
         if (t.isKeyword("select")) {
             return parseSelect();
         }
+        if (t.isKeyword("explain")) {
+            return parseExplain();
+        }
         if (t.isKeyword("live")) {
             return parseLive();
         }
@@ -207,8 +232,17 @@ public final class Parser {
         if (t.isKeyword("define")) {
             return parseDefine();
         }
+        if (t.isKeyword("drop")) {
+            return parseDrop();
+        }
         if (t.isKeyword("info")) {
             return parseInfo();
+        }
+        if (t.isKeyword("describe")) {
+            return parseDescribe();
+        }
+        if (t.isKeyword("show")) {
+            return parseShow();
         }
         if (t.isKeyword("return")) {
             return parseReturn();
@@ -223,18 +257,165 @@ public final class Parser {
             return parseKill();
         }
         if (t.isKeyword("begin")) {
+            if (peek(1) != null && peek(1).isKeyword("saga")) {
+                return parseBeginSaga();
+            }
             pos++;
             return new Statement.Begin();
         }
         if (t.isKeyword("commit")) {
+            if (peek(1) != null && peek(1).isKeyword("saga")) {
+                return parseCommitSaga();
+            }
             pos++;
             return new Statement.Commit();
         }
         if (t.isKeyword("cancel")) {
+            if (peek(1) != null && peek(1).isKeyword("saga")) {
+                return parseCancelSaga();
+            }
             pos++;
             return new Statement.Cancel();
         }
-        throw error("sentença inesperada na posição " + t.start() + ": '" + t.text() + "'");
+        if (t.isKeyword("savepoint")) {
+            return parseSavepoint();
+        }
+        if (t.isKeyword("release")) {
+            return parseRelease();
+        }
+        if (t.isKeyword("rollback")) {
+            return parseRollbackTo();
+        }
+        throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
+    }
+
+    private Statement parseSavepoint() {
+        pos++; // savepoint
+        String name = expectIdent();
+        return new Statement.Savepoint(name);
+    }
+
+    private Statement parseRelease() {
+        pos++; // release
+        // RELEASE SAVEPOINT <nome> ou RELEASE <nome>
+        matchKeyword("savepoint");
+        String name = expectIdent();
+        return new Statement.Release(name);
+    }
+
+    private Statement parseRollbackTo() {
+        pos++; // rollback
+        expectText("to");
+        matchKeyword("savepoint");
+        String name = expectIdent();
+        return new Statement.RollbackTo(name);
+    }
+
+    // ------------------------------------------------------------------
+    // SAGA
+    // ------------------------------------------------------------------
+
+    private Statement parseSagaCreate() {
+        // CREATE SAGA <name> WITH DATABASES 'link1', 'link2', ...
+        String name = expectIdentOrString();
+        expectKeyword("with");
+        expectKeyword("databases");
+        List<String> links = new ArrayList<>();
+        links.add(expectString());
+        while (match(COMMA)) {
+            links.add(expectString());
+        }
+        return new Statement.CreateSaga(name, links);
+    }
+
+    private Statement parseDescribe() {
+        pos++; // describe
+        if (matchKeyword("saga")) {
+            String name = expectIdentOrString();
+            return new Statement.DescribeSaga(name);
+        }
+        throw error(Messages.get("parser_unexpected_describe", peek().start(), peek().text()));
+    }
+
+    private Statement parseShow() {
+        pos++; // show
+        if (matchKeyword("saga")) {
+            expectText("transaction");
+            String name = expectIdentOrString();
+            String corrId = expectString();
+            return new Statement.ShowSagaTransaction(name, corrId);
+        }
+        if (matchKeyword("ai")) {
+            expectKeyword("audit");
+            String name = expectIdent();
+            return new Statement.ShowAiAudit(name);
+        }
+        if (matchKeyword("data")) {
+            if (matchKeyword("rules")) {
+                return new Statement.ShowDataRules();
+            }
+            throw error(Messages.get("parser_show_data_expected_rules", peek().start()));
+        }
+        throw error(Messages.get("parser_unexpected_show", peek().start(), peek().text()));
+    }
+
+    private Statement parseBeginSaga() {
+        pos++; // begin
+        pos++; // saga
+        String name = expectIdentOrString();
+        expectKeyword("with");
+        expectKeyword("correlation");
+        String corrId = expectString();
+        return new Statement.BeginSaga(name, corrId);
+    }
+
+    private Statement parseCommitSaga() {
+        pos++; // commit
+        pos++; // saga
+        String name = expectIdentOrString();
+        expectKeyword("with");
+        expectKeyword("correlation");
+        String corrId = expectString();
+        return new Statement.CommitSaga(name, corrId);
+    }
+
+    private Statement parseCancelSaga() {
+        pos++; // cancel
+        pos++; // saga
+        String name = expectIdentOrString();
+        expectKeyword("with");
+        expectKeyword("correlation");
+        String corrId = expectString();
+        return new Statement.CancelSaga(name, corrId);
+    }
+
+    // ------------------------------------------------------------------
+    // DATA RULE
+    // ------------------------------------------------------------------
+
+    private Statement parseCreateDataRule() {
+        String name = expectIdent();
+        expectKeyword("apply");
+        Expr predicate = parseExpr();
+        List<String> masks = new ArrayList<>();
+        if (matchKeyword("mask")) {
+            expectKeyword("fields");
+            expectKeyword("with");
+            masks.add(expectString());
+            while (match(COMMA)) {
+                masks.add(expectString());
+            }
+        }
+        return new Statement.CreateDataRule(name, predicate, masks);
+    }
+
+    /** Consome unha palabra (IDENT ou KEYWORD) co texto dado, sin ser obrigatoriamente keyword. */
+    private void expectText(String word) {
+        Token t = peek();
+        if (!(t.is(IDENT) || t.is(KEYWORD)) || !t.text().equalsIgnoreCase(word)) {
+            throw error(Messages.get("parser_expected_word", word, t.start()));
+        }
+        pos++;
     }
 
     private Statement parseUse() {
@@ -264,6 +445,67 @@ public final class Parser {
 
     private Statement parseCreate() {
         pos++;
+        if (matchKeyword("saga")) {
+            return parseSagaCreate();
+        }
+        if (matchKeyword("ai")) {
+            expectKeyword("audit");
+            String name = expectIdent();
+            expectKeyword("set");
+            expectKeyword("warning");
+            expectKeyword("when");
+            String warningWhen = expectString();
+            expectKeyword("set");
+            expectKeyword("danger");
+            expectKeyword("when");
+            String dangerWhen = expectString();
+            return new Statement.DefineAiAudit(name, warningWhen, dangerWhen);
+        }
+        if (matchKeyword("jks")) {
+            String name = expectIdent();
+            expectKeyword("path");
+            String path = expectString();
+            expectKeyword("password");
+            String password = expectString();
+            String collector = "NONE";
+            List<String> oids = List.of();
+            if (matchKeyword("collect")) {
+                expectKeyword("user");
+                expectKeyword("by");
+                if (matchKeyword("icpbrasil")) {
+                    collector = "ICPBRASIL";
+                } else {
+                    expectKeyword("oid");
+                    List<String> values = new ArrayList<>();
+                    values.add(expectString());
+                    while (match(COMMA)) {
+                        values.add(expectString());
+                    }
+                    collector = "OID";
+                    oids = List.copyOf(values);
+                }
+            }
+            return new Statement.CreateJks(name, path, password, collector, oids);
+        }
+        if (matchKeyword("ai")) {
+            expectKeyword("audit");
+            String name = expectIdent();
+            expectKeyword("set");
+            expectKeyword("warning");
+            expectKeyword("when");
+            String warningWhen = expectString();
+            expectKeyword("set");
+            expectKeyword("danger");
+            expectKeyword("when");
+            String dangerWhen = expectString();
+            return new Statement.DefineAiAudit(name, warningWhen, dangerWhen);
+        }
+        if (matchKeyword("data")) {
+            if (matchKeyword("rule")) {
+                return parseCreateDataRule();
+            }
+            throw error(Messages.get("parser_create_data_expected_rule", peek().start()));
+        }
         boolean only = matchKeyword("only");
         Expr target = parseTarget();
         Data data = null;
@@ -324,7 +566,10 @@ public final class Parser {
 
     private Statement parseSelect() {
         pos++;
-        // SELECT VALUE <expr> devolve os valores nus, sem envolver num objeto
+        return parseSelectBody();
+    }
+
+    private Statement parseSelectBody() {
         boolean valueOnly = matchKeyword("value");
         List<Expr> fields = new ArrayList<>();
         while (true) {
@@ -342,8 +587,28 @@ public final class Parser {
             }
         }
         boolean only = matchKeyword("only");
-        expectKeyword("from");
-        Expr from = parseTarget();
+        Expr from;
+        boolean hasFrom = matchKeyword("from");
+        if (hasFrom) {
+            from = parseTarget();
+            consumeAlias();
+        } else if (valueOnly) {
+            from = null;
+        } else {
+            throw error(Messages.get("parser_select_expected_from"));
+        }
+        Statement.TimeTravel timeTravel = parseTimeTravel();
+        List<Join> joins = new ArrayList<>();
+        while (matchKeyword("join")) {
+            Expr source = parseTarget();
+            consumeAlias();
+            expectKeyword("on");
+            Expr on = parseExpr();
+            if (!(on instanceof Expr.Binary bin) || bin.op() != Expr.BinaryOp.EQ) {
+                throw error(Messages.get("parser_join_expected_condition"));
+            }
+            joins.add(new Join(source, bin.left(), bin.right()));
+        }
         Expr cond = null;
         if (matchKeyword("where")) {
             cond = parseExpr();
@@ -401,7 +666,34 @@ public final class Parser {
             only = true;
         }
         return new Statement.Select(fields, valueOnly, only, from, cond, orders, group,
-            limit, start, fetch);
+            limit, start, fetch, joins, timeTravel);
+    }
+
+    private Statement.TimeTravel parseTimeTravel() {
+        Statement.TimeTravelMode mode;
+        if (matchKeyword("at")) {
+            mode = Statement.TimeTravelMode.AT;
+        } else if (matchKeyword("before")) {
+            mode = Statement.TimeTravelMode.BEFORE;
+        } else {
+            return null;
+        }
+
+        expect(LPAREN);
+        Statement.TimeTravelSelector selector;
+        if (matchKeyword("timestamp")) {
+            selector = Statement.TimeTravelSelector.TIMESTAMP;
+        } else if (matchKeyword("commit")) {
+            selector = Statement.TimeTravelSelector.COMMIT;
+        } else if (matchKeyword("statement")) {
+            selector = Statement.TimeTravelSelector.STATEMENT;
+        } else {
+            throw error(Messages.get("parser_time_travel_expected_selector", peek().start()));
+        }
+        expect(ARROW);
+        Expr value = parseExpr();
+        expect(RPAREN);
+        return new Statement.TimeTravel(mode, selector, value);
     }
 
     /** LIVE SELECT ... [DIFF]: consome 'live' e delega no parseSelect. */
@@ -410,12 +702,26 @@ public final class Parser {
         boolean diff = false;
         Statement parsed = parseSelect();
         if (!(parsed instanceof Statement.Select sel)) {
-            throw error("LIVE SELECT esperava um SELECT");
+            throw error(Messages.get("parser_live_expected_select"));
         }
         if (matchKeyword("diff")) {
             diff = true;
         }
         return new Statement.Live(sel, diff);
+    }
+
+    /**
+     * EXPLAIN SELECT ... e EXPLAIN ANALYZE SELECT ...: envolve o SELECT seguinte
+     * nun plano. ANALYZE ordénase executar o SELECT e contar as filas reais.
+     */
+    private Statement parseExplain() {
+        pos++; // explain
+        boolean analyze = matchKeyword("analyze");
+        Statement parsed = parseSelect();
+        if (!(parsed instanceof Statement.Select sel)) {
+            throw error(Messages.get("parser_explain_expected_select"));
+        }
+        return new Statement.Explain(sel, analyze);
     }
 
     private Statement parseRelate() {
@@ -451,7 +757,7 @@ public final class Parser {
                     case "create" -> crt = cond;
                     case "update" -> upd = cond;
                     case "delete" -> del = cond;
-                    default -> throw error("acción de permiso non recoñecida: " + action);
+                    default -> throw error(Messages.get("parser_unknown_permission_action", action));
                 }
             }
             if (matchKeyword("for")) {
@@ -468,6 +774,18 @@ public final class Parser {
             return take().text();
         }
         return expect(IDENT).text();
+    }
+
+    /** Consome um alias opcional após um target de FROM/JOIN (ex.: {@code FROM users u}). */
+    private void consumeAlias() {
+        Token t = peek();
+        if (t == null || !t.is(IDENT)) return;
+        String text = t.text();
+        if (!"join".equals(text) && !"where".equals(text) && !"order".equals(text)
+            && !"limit".equals(text) && !"start".equals(text) && !"group".equals(text)
+            && !"fetch".equals(text) && !"on".equals(text)) {
+            pos++;
+        }
     }
 
     private Statement parseDefine() {
@@ -496,15 +814,23 @@ public final class Parser {
             return new Statement.DefineAnalyzer(name, lowercase, stopwords, stemming);
         }
         if (matchKeyword("user")) {
-            String name = expectIdent();
+            String name = expectIdentOrString();
             AuthTarget target = parseAuthTarget();
             Expr password = null;
             String passhash = null;
+            String certificate = null;
+            String fingerprint = null;
             if (matchKeyword("passhash")) {
-                passhash = (String) expect(TokenType.STRING).literal();
-            } else {
-                expectKeyword("password");
+                passhash = expectString();
+            } else if (matchKeyword("password")) {
                 password = parseExpr();
+            } else if (matchKeyword("certificate")) {
+                certificate = expectIdent();
+                if (matchKeyword("fingerprint")) {
+                    fingerprint = expectString();
+                }
+            } else {
+                throw error(Messages.get("parser_define_user_expected_credential"));
             }
             List<String> roles = new ArrayList<>();
             if (matchKeyword("roles")) {
@@ -513,8 +839,22 @@ public final class Parser {
                     roles.add(expectIdent());
                 }
             }
+            List<String> dataRules = new ArrayList<>();
+            if (matchKeyword("apply")) {
+                expectKeyword("data");
+                expectKeyword("rule");
+                dataRules.add(expectIdent());
+                while (match(COMMA)) {
+                    dataRules.add(expectIdent());
+                }
+            }
+            String auditName = null;
+            if (matchKeyword("audited")) {
+                expectKeyword("by");
+                auditName = expectIdent();
+            }
             return new Statement.DefineUser(name, target.scope(), target.namespace(),
-                target.database(), password, passhash, roles);
+                target.database(), password, passhash, certificate, fingerprint, roles, dataRules, auditName);
         }
         if (matchKeyword("access")) {
             String name = expectIdent();
@@ -562,7 +902,11 @@ public final class Parser {
             if (matchKeyword("default")) {
                 defaultE = parseExpr();
             }
-            return new Statement.DefineField(name, table, type, assertE, readonly, valueE, defaultE);
+            String references = null;
+            if (matchKeyword("references")) {
+                references = expectIdent();
+            }
+            return new Statement.DefineField(name, table, type, assertE, readonly, valueE, defaultE, references);
         }
         if (matchKeyword("index")) {
             String name = expectIdent();
@@ -579,13 +923,19 @@ public final class Parser {
             boolean count = !unique && matchKeyword("count");
             String searchAnalyzer = null;
             boolean geo = false;
+            boolean columnar = false;
             Integer vectorDimension = null;
             String vectorDistance = null;
+            Integer hnswM = null;
+            Integer hnswEfc = null;
+            Integer hnswEfs = null;
             if (!unique && !count && matchKeyword("search")) {
                 expectKeyword("analyzer");
                 searchAnalyzer = expectIdent();
             } else if (!unique && !count && matchKeyword("geo")) {
                 geo = true;
+            } else if (!unique && !count && matchKeyword("columnar")) {
+                columnar = true;
             } else if (!unique && !count && matchKeyword("hnsw")) {
                 expectKeyword("dimension");
                 vectorDimension = ((Number) expect(TokenType.INT).literal()).intValue();
@@ -594,9 +944,21 @@ public final class Parser {
                 } else {
                     vectorDistance = "euclidean";
                 }
+                while (true) {
+                    if (hnswM == null && (hnswM = matchParamInt("m")) != null) {
+                        continue;
+                    }
+                    if (hnswEfc == null && (hnswEfc = matchParamInt("efc")) != null) {
+                        continue;
+                    }
+                    if (hnswEfs == null && (hnswEfs = matchParamInt("efs")) != null) {
+                        continue;
+                    }
+                    break;
+                }
             }
             return new Statement.DefineIndex(name, table, columns, unique, count, searchAnalyzer,
-                geo, vectorDimension, vectorDistance);
+                geo, columnar, vectorDimension, vectorDistance, hnswM, hnswEfc, hnswEfs);
         }
         if (matchKeyword("event")) {
             String name = expectIdent();
@@ -609,7 +971,54 @@ public final class Parser {
             List<Statement> then = parseParenStatements();
             return new Statement.DefineEvent(name, table, when, then);
         }
-        throw error("DEFINE inesperado na posição " + peek().start() + ": '" + peek().text() + "'");
+        if (matchKeyword("ai")) {
+            expectKeyword("audit");
+            String name = expectIdent();
+            return new Statement.DropAiAudit(name);
+        }
+        if (matchKeyword("database")) {
+            if (matchKeyword("link")) {
+                String name = expectIdentOrString();
+                expectKeyword("connect");
+                expectKeyword("by");
+                String url = expectString();
+                String linkNs = "";
+                String linkDb = "";
+                String linkUser = "";
+                String linkPassword = "";
+                if (matchKeyword("with")) {
+                    linkNs = parseKvAfterWith("ns");
+                    linkDb = parseKvAfterWith("db");
+                    linkUser = parseKvAfterWith("user");
+                    linkPassword = parseKvAfterWith("password");
+                }
+                return new Statement.DefineDatabaseLink(name, url, linkNs, linkDb, linkUser, linkPassword);
+            }
+        }
+        throw error(Messages.get("parser_unexpected_define", peek().start(), peek().text()));
+    }
+
+    private Statement parseDrop() {
+        pos++;
+        if (matchKeyword("ai")) {
+            expectKeyword("audit");
+            String name = expectIdent();
+            return new Statement.DropAiAudit(name);
+        }
+        if (matchKeyword("data")) {
+            if (matchKeyword("rule")) {
+                String name = expectIdent();
+                return new Statement.DropDataRule(name);
+            }
+            throw error(Messages.get("parser_drop_data_expected_rule", peek().start()));
+        }
+        if (matchKeyword("database")) {
+            if (matchKeyword("link")) {
+                String name = expectIdentOrString();
+                return new Statement.DropDatabaseLink(name);
+            }
+        }
+        throw error(Messages.get("parser_unexpected_drop", peek().start(), peek().text()));
     }
 
     /** Escopo de DEFINE USER/ACCESS: ON ROOT, ON NAMESPACE [nome], ON DATABASE [nome]. */
@@ -623,10 +1032,14 @@ public final class Parser {
             return new AuthTarget(Statement.AuthScope.NAMESPACE, ns, null);
         }
         if (matchKeyword("database")) {
-            String db = at(IDENT) ? expectIdent() : null;
-            return new AuthTarget(Statement.AuthScope.DATABASE, null, db);
+            String id1 = at(IDENT) ? expectIdent() : null;
+            String id2 = id1 != null && at(IDENT) ? expectIdent() : null;
+            if (id2 != null) {
+                return new AuthTarget(Statement.AuthScope.DATABASE, id1, id2);
+            }
+            return new AuthTarget(Statement.AuthScope.DATABASE, null, id1);
         }
-        throw error("DEFINE USER/ACCESS exige ON ROOT, ON NAMESPACE ou ON DATABASE");
+        throw error(Messages.get("parser_invalid_auth_target"));
     }
 
     private record AuthTarget(Statement.AuthScope scope, String namespace, String database) {
@@ -641,13 +1054,18 @@ public final class Parser {
         if (matchKeyword("namespace")) {
             return new Statement.Info("namespace", null);
         }
+        if (matchKeyword("ai")) {
+            expectKeyword("audit");
+            String name = expectIdent();
+            return new Statement.DropAiAudit(name);
+        }
         if (matchKeyword("database")) {
             return new Statement.Info("database", null);
         }
         if (matchKeyword("table")) {
             return new Statement.Info("table", expectIdent());
         }
-        throw error("INFO inválido na posição " + peek().start());
+        throw error(Messages.get("parser_invalid_info", peek().start()));
     }
 
     private Statement parseReturn() {
@@ -690,6 +1108,30 @@ public final class Parser {
         return new Statement.ErrorStmt(parseExpr());
     }
 
+    private Statement parseSetReasonAudit() {
+        pos++; // set
+        pos++; // reason
+        expectKeyword("audit");
+        expectKeyword("case");
+        String hash = expectString();
+        String reason = expectString();
+        return new Statement.SetReasonAudit(hash, reason);
+    }
+
+    private Statement parseSetAuditCase() {
+        pos++; // set
+        pos++; // audit
+        expectKeyword("case");
+        String hash = expectString();
+        String status = expectIdent().toUpperCase();
+        if (!"AUTHORIZED".equals(status) && !"DENIED".equals(status)) {
+            throw error(Messages.get("parser_invalid_audit_case_status", status));
+        }
+        expectKeyword("reason");
+        String reason = expectString();
+        return new Statement.SetAuditCase(hash, status, reason);
+    }
+
     private Statement parseKill() {
         pos++;
         return new Statement.Kill(parseExpr());
@@ -722,8 +1164,29 @@ public final class Parser {
     private String expectIdentOrString() {
         Token t = peek();
         if (t.is(TokenType.STRING)) {
-            return String.valueOf(take().literal() instanceof AxonValue av && av.isString()
-                ? av.asString() : t.text());
+            Object literal = take().literal();
+            if (literal instanceof AxonValue av && av.isString()) {
+                return av.asString();
+            }
+            return String.valueOf(literal);
+        }
+        return expectIdent();
+    }
+
+    private String expectString() {
+        return (String) expect(TokenType.STRING).literal();
+    }
+
+    /** Lê {@code chave = "valor"} ou {@code chave = valor} ou {@code chave "valor"} após um {@code WITH}. */
+    private String parseKvAfterWith(String expectedKey) {
+        Token t = peek();
+        if (t == null) return "";
+        String text = t.text();
+        if (!expectedKey.equals(text)) return "";
+        pos++;
+        match(TokenType.EQ);
+        if (at(TokenType.STRING)) {
+            return expectString();
         }
         return expectIdent();
     }
@@ -746,7 +1209,17 @@ public final class Parser {
         if (at(TokenType.LPAREN) || at(TokenType.LBRACKET)) {
             return parseExpr();
         }
-        String name = expectIdent();
+        String name = expectIdentOrString();
+        // "db"."table" → Qualified
+        if (match(DOT)) {
+            String table = expectIdentOrString();
+            if (at(COLON)) {
+                pos++;
+                Expr key = parseRecordKey();
+                return new Expr.RecordId(new Expr.Qualified(name, table), key);
+            }
+            return new Expr.Qualified(name, table);
+        }
         if (at(COLON)) {
             pos++;
             Expr key = parseRecordKey();
@@ -766,7 +1239,7 @@ public final class Parser {
             case PARAM -> new Expr.Param((String) t.literal());
             case LBRACKET -> parseArrayLiteral();
             case LBRACE -> parseObjectOrSet();
-            default -> throw error("chave de record inválida na posição " + t.start() + ": '" + t.text() + "'");
+            default -> throw error(Messages.get("parser_invalid_record_key", t.start(), t.text()));
         };
     }
 
@@ -1121,12 +1594,18 @@ public final class Parser {
             case LPAREN -> coveredOrSubquery();
             case LBRACE -> parseObjectOrSet();
             case LBRACKET -> parseArrayLiteral();
-            default -> throw error("expressão inesperada na posição " + t.start() + ": '" + t.text() + "'");
+            default -> throw error(Messages.get("parser_unexpected_expression", t.start(), t.text()));
         };
     }
 
     private Expr primaryKeyword() {
         Token name = take();
+        // Subquery: SELECT ... sem parenteses, mas sem consumir ')'
+        if (name.isKeyword("select")) {
+            List<Statement> stmts = new ArrayList<>();
+            stmts.add(parseSelectBody());
+            return new Expr.SubQuery(new Query(stmts));
+        }
         // nomes de função com namespace começam por palavras que também são
         // palavras-chave de tipo: string::, array::, object::, type::, record::
         if (at(COLON_COLON)) {
@@ -1225,7 +1704,7 @@ public final class Parser {
             case DECIMAL -> new Expr.Literal(AxonValue.num((BigDecimal) t.literal()));
             case DATETIME -> new Expr.Literal(AxonValue.datetime(Instant.parse((String) t.literal())));
             case STRING -> new Expr.Literal(AxonValue.str((String) t.literal()));
-            default -> throw error("literal inválido na posição " + t.start());
+            default -> throw error(Messages.get("parser_invalid_literal", t.start()));
         };
     }
 

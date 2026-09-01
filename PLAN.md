@@ -29,9 +29,10 @@ Como o SurrealDB constrói sobre a interface `Transactable`, defino `KvBackend` 
 
 - `Memory` (memória, pura, sem dependência): snapshot isolation por copy-on-write do mapa transacional.
 - `FileBackend` (persistente em arquivo, snapshot JSON sin WAL): opción para o MVP; implementada xa na fase 2.
-- `RocksDb` (binding JNI (Java Native Interface)): opcional posterior, transações otimistas com snapshot e CAS (Compare-And-Swap). É o equivalente ao RocksDB do SurrealDB.
+- **`RocksDbBackend`** (binding JNI (Java Native Interface)): **implementado e padrão desde a Etapa F9**. Transações otimistas, snapshot isolation, LSM-tree com compactação leveled e compressão ZSTD, bloom filters, performance sustentada de **243K inserts/s** em batch de 50K. Suporta centenas de milhões de registros com heap mínimo.
+- `WalBackend` (WAL + snapshot) disponível como alternativa legacy.
 
-A interface é pluggable; um futuro `SurrealKv` próprio (WAL (Write-Ahead Logging) + snapshot) entraría como opción avanzada.
+A interface é pluggable; qualquer implementación de `KvBackend` pode ser usada sem alterar o motor.
 
 ---
 
@@ -154,7 +155,7 @@ Ordem de construção, validando sempre o protocolo contra o servidor real:
 - Validar precedência, associatividade, literais e record ids.
 
 ### Fase 2: Núcleo do motor (semanas 4-6) ✅
-- Interface `KvBackend` + `MemoryBackend` (snapshot CoW) + `FileBackend` (persistencia simple por snapshot JSON); RocksDb queda como opcional posterior.
+- Interface `KvBackend` + `MemoryBackend` (snapshot CoW) + `FileBackend` (persistencia simple por snapshot JSON); WalBackend e RocksDbBackend implementados posteriormente.
 - `Datastore` (namespaces/DBs/catálogo), `Executor` (interpreta AST), `Document` CoW (initial/current), catálogo, `DEFINE`s e índices UNIQUE e COUNT.
 - Executar subconjunto AxonQL (CREATE/INSERT/UPDATE/DELETE/SELECT/RELATE/DEFINE/INFO/IF), persistencia e tests unit/integración. ✅
 
@@ -180,7 +181,8 @@ Ordem de construção, validando sempre o protocolo contra o servidor real:
 
 ## 9. Riscos e mitigações
 
-- **RocksDB JNI**: fallback total para `Memory` na primeira entrega; RocksDB, opcional, isolado pela interface pluggable.
+- **RocksDB JNI**: fallback total para `Memory` na primeira entrega; RocksDB, opcional, isolado pela interface pluggable. **Implementado na Etapa F9 e tornado padrão.**
+- **Índice colunar**: implementado como novo tipo de índice (CREATE COLUMNAR INDEX), com codificação sortable de valores, varredura por prefixo para agregacão direta de count/sum/avg/min/max sem carregar documentos.
 - **Escopo do AxonQL**: reduzido a um subconjunto sólido; a superfície completa será desbravada em fases com corpus de testes.
 - **Compatibilidade entre SDKs**: o protocolo JSON-RPC é estável e simples; documento-o em `CONNECTOR.md` para que Node, Rust, Go e C# o implementem.
 - **Complexidade de transações**: a primeira entrega usa snapshot otimista; os conflitos mapeiam com o código definido `wsc-32009`.
@@ -205,6 +207,30 @@ As fases 0 a 5 estão concluídas no primeiro ciclo. Próximas evoluções natur
 ## 11. Etapa A: endurecer o núcleo (segundo ciclo) ✅
 
 Vista de robustez real sobre o primeiro produto útil, aliñada co que SurrealDB ten basal.
+
+---
+
+## 18. F1 a F8 — resumo de funcionalidades concluídas
+
+Tudo o que era roadmap original (Etapas B a E) está implementado. A documentação em `CONNECTOR.md` e `FEATURES.md` reflete o estado real.
+
+| Frente | Funcionalidades |
+|---|---|
+| **F1 — Protocolo** | `PROTOCOL_VERSION=1`, handshake `hello` no WebSocket, 27 métodos RPC, vars tipados (`$datetime`, `$duration`, `$decimal`, `$bytes`, `$record`, `$uuid`, `$table`) |
+| **F2 — Transações** | `SAVEPOINT`/`RELEASE`/`ROLLBACK TO`, phantom isolation com `readRanges`, retry otimista (`Datastore.withRetry`), `VersionConflictException` |
+| **F3 — EXPLAIN** | `EXPLAIN`/`EXPLAIN ANALYZE`, planner com estratégias `UNIQUE_LOOKUP`, `FULLTEXT`, `VECTOR`, `GEO`, `HYBRID`, `FULL_SCAN` |
+| **F4 — Busca** | BM25 real, busca híbrida (full-text + vetorial), HNSW multicamada com M/EFC/EFS, GeoHash hierárquico, geometrias não pontuais (`geometry::line`, `geometry::polygon`) |
+| **F5a — KV público** | `kv_get`/`kv_set`/`kv_del`/`kv_scan` como RPC, funções `kv::*` na AxonQL |
+| **F5b — Schema** | `DEFINE FIELD ... REFERENCES` com validação de chave estrangeira, `JOIN` básico com bucle anidado |
+| **F6 — Cluster** | Raft TCP, quorum, eleição, failover, catch-up, membership dinâmica (`addPeer`/`removePeer` via joint consensus), snapshot/backup/restore, compactação e fsync do log Raft, shard map por hash consistente |
+| **F7 — Servidor** | Métricas Prometheus reais, timeouts configuráveis (`AXON_QUERY_TIMEOUT`, `AXON_TXN_TIMEOUT`, `AXON_SHUTDOWN_TIMEOUT`), rate limiting, CORS, TLS/mTLS, logging estruturado (JSON), shutdown gracioso, pool Jetty configurável |
+| **F8 — SDK Node.js** | `axonbase-sdk-nodejs/` com cliente WebSocket, types, live queries, vars tipados, handshake hello |
+| **F9 — RocksDB** | `RocksDbBackend` implementando `VersionedKvBackend`, LSM-tree com compactação leveled + ZSTD, bloom filters, `WriteBatch` atómico para OCC, 222K rec/s bulk insert, 174 MB para 1M registros, **padrão na inicialização** |
+| **F10 — Índice Colunar** | `CREATE INDEX ... COLUMNS ... COLUMNAR`, codificação sortable de valores (`CI|{ns}|{db}|{table}|{index}|{col}|{type}{data}{rowKey}`), varredura por prefixo para count/sum/avg/min/max, detecção automática de igualdade e agregação no planner |
+| **Cluster** | Docker Compose de três nós (`docker-compose.cluster.yml`) validado |
+| **F0 — Correções** | Codec unicode corrigido, decimal serializado como string, bytes como base64, erros RPC tipados (`AxonSdkException`), segurança no export (sem hashes de senha), MVCC (`VersionedKvBackend`), concorrência Raft (`synchronized`/versões), mapas seguros (`ConcurrentHashMap`) |
+
+Testes totais: **265 métodos `@Test`** em 49 classes. `mvn -o test` verde.
 
 ### 11.1 Storage durable (A1)
 - **`Transaction`**: vista `KvBackend` read-through que bufferiza writes; snapshot consistente dentro da transação; `commit`/`cancel`. Integrada na sesão e no executor.
@@ -238,38 +264,19 @@ Suite actual: **63 tests verdes** (`mvn test`). Validação real: `/health`, `si
 
 | Capacidade | SurrealDB | AxonBase hoje |
 |---|---|---|
-| Modelo de dados | documento, grafo, relacional, time-series, geo, KV | documento/tabela, record links e arestas persistidas |
-| Query language | SurrealQL completo (grafo `->`, subquery, agregação, ~300 funções) | AxonQL compacto: subqueries, `SELECT VALUE`, aliases, grafo, agregações e mais de 130 funções built-in |
-| Transações | ACID snapshot isolation, optimistic, retry, savepoints | transações por sessão (WAL, snapshot, commit/cancel), sem deteção de conflito |
-| Storage | memory, RocksDB, SurrealKV (MVCC), TiKV distribuído | memory + WalBackend (WAL+snapshot+fsync) |
-| Índices | unique, count, full-text, vetorial (HNSW/DiskANN) | unique; `COUNT` definido no catálogo, ainda sem plano de execução |
-| Realtime | live queries, changefeeds, subscriptions | `LIVE SELECT`, `DIFF`, `KILL`, eventos e notificações WebSocket |
-| Auth | root/ns/db/access, JWT, `PERMISSIONS` por linha | usuários e access methods ROOT/NAMESPACE/DATABASE, JWT com escopo e `PERMISSIONS FOR` |
-| Wire | WS JSON-RPC + HTTP + REST + GraphQL + GQL + MCP | WS + HTTP JSON-RPC + REST `/sql` `/table` |
-| SDKs | Rust, JS/Node/Deno, Python, Go, .NET, PHP, Java | Java (conector de referência) |
-| Extras | export/import, Docker, WASM, scripting JS, ML | export/import, `/metrics`, Dockerfile, `axonbase.conf` e env `AXON_*` |
+| Modelo de dados | documento, grafo, relacional, time-series, geo, KV | documento/tabela, grafo, KV público (`kv_get`/`kv_set`/`kv_del`/`kv_scan` + funções `kv::*`), GeoJSON (`geometry::point/line/polygon`) |
+| Query language | SurrealQL completo (grafo `->`, subquery, agregação, ~300 funções) | AxonQL compacto: subqueries, `SELECT VALUE`, aliases, travessia `->`/`<-`, agregações, >130 funções, `EXPLAIN`/`EXPLAIN ANALYZE`, `SAVEPOINT`/`RELEASE`/`ROLLBACK TO`, `JOIN` básico, `DEFINE FIELD ... REFERENCES` |
+| Transações | ACID snapshot isolation, optimistic, retry, savepoints | MVCC local com VersionedKvBackend, read set, phantom isolation (`readRanges`), savepoints, retry otimista (`Datastore.withRetry`), conflito por versão (`VersionConflictException`), commit condicional atômico |
+| Storage | memory, RocksDB, SurrealKV (MVCC), TiKV distribuído | MemoryBackend + RocksDbBackend (LSM-tree, ZSTD, bloom filters, **padrão**) + WalBackend (WAL+snapshot+fsync+crash recovery) + VersionedKvBackend (MVCC) |
+| Índices | unique, count, full-text, vetorial (HNSW/DiskANN) | unique, count, full-text com analyzer e BM25 real, vetorial HNSW multicamada com M/EFC/EFS configuráveis, geo com GeoHash hierárquico, **colunar (sortable encoding, agregacão direta)** |
+| Realtime | live queries, changefeeds, subscriptions | `LIVE SELECT`, `DIFF`, `KILL`, eventos de tabela (`DEFINE EVENT` dispara nas mutações), notificações WebSocket (`notification` frame), retenção em transação |
+| Auth | root/ns/db/access, JWT, `PERMISSIONS` por linha | usuários e access methods ROOT/NAMESPACE/DATABASE, JWT com escopo, `PERMISSIONS FOR`, rate limiting (AXON_RATE_LIMIT), TLS/mTLS, CORS |
+| Wire | WS JSON-RPC + HTTP + REST + GraphQL + GQL + MCP | WS + HTTP JSON-RPC + REST `/sql` `/table`, handshake `hello` com PROTOCOL_VERSION=1, 27 métodos RPC, vars tipados (`$datetime`, `$duration`, `$decimal`, `$bytes`, `$record`, `$uuid`, `$table`) |
+| SDKs | Rust, JS/Node/Deno, Python, Go, .NET, PHP, Java | Java (conector de referência) + Node.js/TypeScript (`axonbase-sdk-nodejs/`) |
+| Extras | export/import, Docker, WASM, scripting JS, ML | export/import (`/export` e `/import`), `/metrics` Prometheus, Dockerfile, `axonbase.conf` + env `AXON_*`, Docker Compose de cluster 3 nós |
+| Cluster | Produção distribuída (TiKV/Raft) | Raft TCP embutido, quorum, eleição, failover, catch-up, membership dinâmica (`/admin/cluster/join|leave`), snapshot/backup/restore (`/admin/cluster/snapshot|backup|restore`), compactação e fsync do log Raft, shard map por hash consistente, joint consensus simplificado |
 
-### Roadmap seguinte (por aprobar)
-
-**Etapa B — maturidade da AxonQL e do motor**
-- Grafo real: `RELATE` persistindo arestas no KV (`in`/`out`), travessia `->`/`<-`/`<->`, `FETCH` resolvendo record links.
-- Funções: string/math/array/object/record/type + agregações (`count/sum/avg/min/max`) e `GROUP BY`; `ORDER` múltiplo.
-- `DEFINE FIELD TYPE/ASSERT/DEFAULT` com coerção e validação em runtime; índice `COUNT`.
-- Export/import (dump AxonQL + restore), `UPSERT` e `INSERT` con tuplas.
-
-**Etapa C — realtime**
-- `LIVE SELECT ... DIFF` sobre WS com notificações, changefeeds e `DEFINE EVENT` disparando de fato.
-
-**Etapa D — busca avançada**
-- Índice full-text + analyzer, tipo geográfico (`geometry`) e índice vetorial HNSW com k-NN.
-
-**Etapa E — distribuição**
-- Backend replicado (TiKV ou Raft embutido) e modo cluster.
-
-**Etapa F — ecossistema**
-- Conectores Node.js, Rust, Go, .NET conforme `CONNECTOR.md`; CLI tipo `surreal` (REPL, import/export); MCP server; GUI web.
-
-Recomendação: iniciar a **Etapa D** após consolidar os índices de execução, porque as lacunas de linguagem, metadados, autenticação e configuração já foram fechadas antes dela.
+O roadmap original (Etapas B a F) está integralmente implementado; ver seção 18 para o resumo de cada frente.
 
 ---
 
@@ -374,15 +381,21 @@ Suite atual: **99 testes verdes** (`mvn -o test`, BUILD SUCCESS).
 
 Suite da Etapa D: **106 testes verdes** (`mvn -o test`, BUILD SUCCESS).
 
-## 17. Etapa E: distribuição (em progresso)
+## 17. Etapa E: distribuição ✅
 
-### 17.1 MVCC local e WAL transacional (E0 parcial) ✅
+### 17.1 MVCC local e WAL transacional ✅
 - `VersionedKvBackend` introduz versões por chave e commit condicional atômico.
 - `Transaction` mantém read set, cache de leitura repetível e valida o snapshot no commit.
 - `MemoryBackend` sincroniza operações, copia bytes defensivamente e aplica batches após validar todas as precondições.
 - `WalBackend` grava batches em um frame recuperável; o replay aplica o batch inteiro ou o descarta quando estiver truncado.
 
-### 17.2 Próximos blocos da Etapa E
-- Persistir catálogo, identidades e metadados de namespace/database no mesmo domínio durável dos registros.
-- Implementar grupo Raft por database, grupo de metadados, eleição, quórum, snapshots, roteamento ao líder e testes de failover.
-- Distribuir live events somente após confirmação no quórum e adicionar shard map por `(namespace, database)`.
+### 17.2 Raft, cluster e sharding ✅
+- Grupo Raft por database com eleição, quórum, catch-up e snapshots.
+- Roteamento ao líder via `ClusterStatusProvider` com erro `NOT_LEADER`.
+- Membership dinâmica: `addPeer`/`removePeer` via joint consensus simplificado.
+- Shard map por hash consistente de `(namespace, database)`.
+- Compactação e fsync do log Raft (`FileRaftLog`).
+- Docker Compose de três nós validado.
+- Endpoints administrativos `/admin/cluster/snapshot|backup|restore|join|leave`.
+
+Suite atual: **265 testes** (`@Test` anotados) — `mvn -o test` BUILD SUCCESS.

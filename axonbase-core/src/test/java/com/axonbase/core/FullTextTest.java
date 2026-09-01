@@ -37,7 +37,7 @@ class FullTextTest {
 
         AxonValue ranked = ds.execute("SELECT title, search::score() AS score, "
             + "search::highlight(body) AS snippet FROM article WHERE body @@ \"gato\"", s, null);
-        assertTrue(ranked.asArray().get(0).asObject().get("score").asLong() > 0);
+        assertTrue(ranked.asArray().get(0).asObject().get("score").asDouble() > 0);
         assertTrue(ranked.asArray().get(0).asObject().get("snippet").asString().contains("<em>gato</em>"));
     }
 

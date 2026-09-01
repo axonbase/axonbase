@@ -3,11 +3,11 @@ x-cluster-env: &cluster_env
   AXON_BIND: 0.0.0.0
   AXON_PORT: 8000
   AXON_REQUIRE_AUTH: "false"
-  AXON_CLUSTER_ID: axonbase-it
+  AXON_CLUSTER_ID: axonbase-cluster
 
 services:
   n1:
-    build: .
+    image: axonbase/axonbase:latest
     hostname: n1
     environment:
       <<: *cluster_env
@@ -16,9 +16,8 @@ services:
       AXON_RAFT_PEERS: n2:7000,n3:7000
     volumes: [n1-data:/data]
     ports: ["18001:8000"]
-    command: ["start", "--path", "/data", "--bind", "0.0.0.0", "--port", "8000"]
   n2:
-    build: .
+    image: axonbase/axonbase:latest
     hostname: n2
     environment:
       <<: *cluster_env
@@ -27,9 +26,8 @@ services:
       AXON_RAFT_PEERS: n1:7000,n3:7000
     volumes: [n2-data:/data]
     ports: ["18002:8000"]
-    command: ["start", "--path", "/data", "--bind", "0.0.0.0", "--port", "8000"]
   n3:
-    build: .
+    image: axonbase/axonbase:latest
     hostname: n3
     environment:
       <<: *cluster_env
@@ -38,7 +36,6 @@ services:
       AXON_RAFT_PEERS: n1:7000,n2:7000
     volumes: [n3-data:/data]
     ports: ["18003:8000"]
-    command: ["start", "--path", "/data", "--bind", "0.0.0.0", "--port", "8000"]
 
 volumes:
   n1-data:

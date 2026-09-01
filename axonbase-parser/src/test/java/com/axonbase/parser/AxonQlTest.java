@@ -1,6 +1,7 @@
 package com.axonbase.parser;
 
 import com.axonbase.common.AxonError;
+import com.axonbase.common.Messages;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Query;
 import com.axonbase.parser.ast.Statement;
@@ -32,6 +33,26 @@ class AxonQlTest {
     }
 
     @Test
+    void roundTripSelectTimeTravel() {
+        assertEquals("SELECT * FROM person AT (TIMESTAMP => \"2024-01-01T00:00:00Z\")",
+            AxonQl.render(AxonQl.parse("SELECT * FROM person AT (TIMESTAMP => '2024-01-01T00:00:00Z')")));
+        assertRoundTrip("SELECT * FROM person AT (COMMIT => 123)");
+        assertEquals("SELECT * FROM person BEFORE (STATEMENT => \"01HZY3Q7KX4M6NP8R2TW5V9ABC\")",
+            AxonQl.render(AxonQl.parse("SELECT * FROM person BEFORE (STATEMENT => '01HZY3Q7KX4M6NP8R2TW5V9ABC')")));
+    }
+
+    @Test
+    void selectGuardaTimeTravel() {
+        Query q = AxonQl.parse("SELECT * FROM person BEFORE (STATEMENT => '01HZY3Q7KX4M6NP8R2TW5V9ABC')");
+        Statement.Select sel = assertInstanceOf(Statement.Select.class, q.statements().get(0));
+        Statement.TimeTravel travel = sel.timeTravel();
+
+        assertEquals(Statement.TimeTravelMode.BEFORE, travel.mode());
+        assertEquals(Statement.TimeTravelSelector.STATEMENT, travel.selector());
+        assertEquals("\"01HZY3Q7KX4M6NP8R2TW5V9ABC\"", Render.expr(travel.value()));
+    }
+
+    @Test
     void roundTripSelectWhere() {
         assertRoundTrip("SELECT * FROM person WHERE age > 18");
     }
@@ -49,6 +70,25 @@ class AxonQlTest {
     @Test
     void roundTripSelectAnd() {
         assertRoundTrip("SELECT name FROM person WHERE age >= 18 AND active = true");
+    }
+
+    @Test
+    void roundTripJoin() {
+        assertRoundTrip("SELECT * FROM pedido JOIN cliente ON pedido.cliente = cliente.id");
+    }
+
+    @Test
+    void joinGuardaFonteEClaves() {
+        Query q = AxonQl.parse("SELECT * FROM a JOIN b ON a.k = b.k WHERE a.x = 1");
+        var sel = (Statement.Select) q.statements().get(0);
+        assertEquals(1, sel.joins().size());
+        var join = sel.joins().get(0);
+        var src = (Expr.Ident) join.source();
+        assertEquals("b", src.name());
+        var left = (Expr.Idiom) join.left();
+        var right = (Expr.Idiom) join.right();
+        assertEquals("a.k", Render.expr(left));
+        assertEquals("b.k", Render.expr(right));
     }
 
     @Test
@@ -173,6 +213,10 @@ class AxonQlTest {
         assertRoundTrip("DEFINE USER alice ON DATABASE PASSWORD \"segredo\" ROLES editor, writer");
         assertRoundTrip("DEFINE ACCESS app_login ON NAMESPACE app");
     }
+    @Test
+    void roundTripDefineFieldReferences() {
+        assertRoundTrip("DEFINE FIELD autor ON TABLE post REFERENCES user");
+    }
 
     @Test
     void roundTripDefineUserComPasshash() {
@@ -180,6 +224,48 @@ class AxonQlTest {
         // sem a senha original, para que o replay não precise rehashear nada.
         assertRoundTrip("DEFINE USER alice ON ROOT PASSHASH \"a1b2:c3d4\"");
         assertRoundTrip("DEFINE USER alice ON DATABASE PASSHASH \"a1b2:c3d4\" ROLES editor");
+    }
+
+    @Test
+    void roundTripCreateJks() {
+        assertRoundTrip("CREATE JKS clients PATH \"/etc/axonbase/clients.jks\" PASSWORD \"changeit\"");
+    }
+
+    @Test
+    void createJksGuardaConfiguracao() {
+        Query q = AxonQl.parse("CREATE JKS clients PATH \"/etc/axonbase/clients.jks\" PASSWORD \"changeit\"");
+        Statement.CreateJks jks = assertInstanceOf(Statement.CreateJks.class, q.statements().get(0));
+
+        assertEquals("clients", jks.name());
+        assertEquals("/etc/axonbase/clients.jks", jks.path());
+        assertEquals("changeit", jks.password());
+    }
+
+    @Test
+    void createJksSupportsIcpBrasilAndOidCollectors() {
+        assertRoundTrip("CREATE JKS icp_brasil PATH \"/etc/axonbase/icpbrasil.jks\" PASSWORD \"changeit\" COLLECT USER BY ICPBRASIL");
+        assertRoundTrip("CREATE JKS company PATH \"/etc/axonbase/company.jks\" PASSWORD \"changeit\" COLLECT USER BY OID \"2.5.4.5\", \"2.16.76.1.3.1\"");
+
+        Statement.CreateJks jks = assertInstanceOf(Statement.CreateJks.class,
+            AxonQl.parse("CREATE JKS company PATH \"/etc/axonbase/company.jks\" PASSWORD \"changeit\" COLLECT USER BY OID \"2.5.4.5\", \"2.16.76.1.3.1\"").statements().get(0));
+        assertEquals("OID", jks.collector());
+        assertEquals(java.util.List.of("2.5.4.5", "2.16.76.1.3.1"), jks.oids());
+    }
+
+    @Test
+    void roundTripDefineUserComCertificado() {
+        assertRoundTrip("DEFINE USER alice ON ROOT CERTIFICATE clients ROLES editor");
+        assertRoundTrip("DEFINE USER alice ON NAMESPACE app CERTIFICATE clients FINGERPRINT \"AB:CD\" ROLES editor, writer");
+        assertRoundTrip("DEFINE USER alice ON DATABASE app CERTIFICATE clients FINGERPRINT \"AB:CD\"");
+    }
+
+    @Test
+    void defineUserComCertificadoGuardaJksEFingerprint() {
+        Query q = AxonQl.parse("DEFINE USER alice ON ROOT CERTIFICATE clients FINGERPRINT \"AB:CD\" ROLES editor");
+        Statement.DefineUser user = assertInstanceOf(Statement.DefineUser.class, q.statements().get(0));
+
+        assertEquals("clients", user.certificate());
+        assertEquals("AB:CD", user.fingerprint());
     }
 
     @Test
@@ -197,7 +283,62 @@ class AxonQlTest {
     }
 
     @Test
+    void roundTripHybridSearch() {
+        assertRoundTrip("SELECT name, search::score() AS score FROM item "
+            + "WHERE body @@ \"topic\" AND vector::similarity::cosine(embedding, [1, 0, 0]) > 0 "
+            + "ORDER BY search::score() DESC LIMIT 2");
+        assertRoundTrip("EXPLAIN SELECT * FROM item "
+            + "WHERE body @@ \"topic\" AND vector::similarity::cosine(embedding, [1, 0]) > 0");
+    }
+
+    @Test
     void parseErroInvalido() {
         assertThrows(AxonError.class, () -> AxonQl.parse("SELECT FROM "));
+    }
+
+    @Test
+    void mensagensDoParserPreservamPosicaoEmIngles() {
+        assertEquals("expected EOF at position 7 but found 'FROM'",
+            Messages.getForLanguage("en", "parser_expected_token", "EOF", 7, "FROM"));
+    }
+
+    @Test
+    void roundTripExplain() {
+        assertRoundTrip("EXPLAIN SELECT * FROM person");
+        assertRoundTrip("EXPLAIN SELECT name FROM person WHERE age > 18");
+        assertRoundTrip("EXPLAIN ANALYZE SELECT * FROM person");
+        assertRoundTrip("EXPLAIN ANALYZE SELECT name FROM person WHERE age = 18");
+    }
+
+    @Test
+    void explainGuardaSelectEAnalyze() {
+        Query q = AxonQl.parse("EXPLAIN ANALYZE SELECT name FROM person WHERE age = 18");
+        Statement.Explain ex = assertInstanceOf(Statement.Explain.class, q.statements().get(0));
+        assertEquals(true, ex.analyze());
+        assertEquals("person", ((Expr.Ident) ex.select().from()).name());
+    }
+
+    @Test
+    void roundTripSavepoints() {
+        assertRoundTrip("SAVEPOINT sp1");
+        assertRoundTrip("RELEASE sp1");
+        assertRoundTrip("ROLLBACK TO sp1");
+        assertRoundTrip("SAVEPOINT a; RELEASE a; SAVEPOINT b; ROLLBACK TO b");
+    }
+
+    @Test
+    void savepointsFormaLongaEQuivalente() {
+        Query full = AxonQl.parse("RELEASE SAVEPOINT sp1; ROLLBACK TO SAVEPOINT sp2; SAVEPOINT sp3");
+        Query shortForm = AxonQl.parse("RELEASE sp1; ROLLBACK TO sp2; SAVEPOINT sp3");
+        assertEquals(AxonQl.render(shortForm), AxonQl.render(full));
+        assertEquals(3, full.statements().size());
+        Statement.Release rel = assertInstanceOf(Statement.Release.class, full.statements().get(0));
+        assertEquals("sp1", rel.name());
+        Statement.RollbackTo rb = assertInstanceOf(Statement.RollbackTo.class,
+            full.statements().get(1));
+        assertEquals("sp2", rb.name());
+        Statement.Savepoint sp = assertInstanceOf(Statement.Savepoint.class,
+            full.statements().get(2));
+        assertEquals("sp3", sp.name());
     }
 }

@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 
+import com.axonbase.common.Messages;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -35,7 +36,7 @@ public final class ClusterControl {
 
     public synchronized RaftGroup group(String namespace, String database) {
         RaftGroup group = groups.get(groupId(namespace, database));
-        if (group == null) throw new IllegalArgumentException("database sem grupo: " + namespace + "/" + database);
+        if (group == null) throw new IllegalArgumentException(Messages.get("cluster_database_group_missing", namespace, database));
         return group;
     }
 

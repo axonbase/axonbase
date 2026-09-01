@@ -1,6 +1,9 @@
 package com.axonbase.core.cluster;
 
+import java.net.InetSocketAddress;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.core.storage.VersionedKvBackend;
 
@@ -38,18 +41,36 @@ public final class RaftNode {
      * do nó: sem ele, tudo que o log aplicou antes do acoplamento ficaria invisível
      * para o catálogo em memória.</p>
      */
-    public synchronized void listener(AppliedBatchListener listener) {
-        this.listener = listener == null ? AppliedBatchListener.none() : listener;
-        for (long i = 1; i <= state.appliedIndex(); i++) {
-            FileRaftLog.Entry entry = log.entry(i);
-            if (entry != null) {
-                // Reaplicar é seguro: o batch é idempotente e o storage já tem os bytes.
-                RaftApplier.apply(stateMachine, entry.batch(), this.listener);
+    public void listener(AppliedBatchListener listener) {
+        AppliedBatchListener target = listener == null ? AppliedBatchListener.none() : listener;
+        List<AppliedBatchListener.AppliedBatch> replayed = new ArrayList<>();
+        synchronized (this) {
+            this.listener = target;
+            for (long i = 1; i <= state.appliedIndex(); i++) {
+                FileRaftLog.Entry entry = log.entry(i);
+                if (entry != null) {
+                    // Reaplicar é seguro: o batch é idempotente e o storage já tem os bytes.
+                    replayed.add(RaftApplier.applyAndCapture(stateMachine, entry.batch()));
+                }
             }
         }
+        notifyApplied(target, replayed);
     }
 
-    public synchronized RaftWire.Response handle(RaftWire.Request request) {
+    public RaftWire.Response handle(RaftWire.Request request) {
+        List<AppliedBatchListener.AppliedBatch> applied = new ArrayList<>();
+        AppliedBatchListener target;
+        RaftWire.Response response;
+        synchronized (this) {
+            target = listener;
+            response = handleLocked(request, applied);
+        }
+        notifyApplied(target, applied);
+        return response;
+    }
+
+    private RaftWire.Response handleLocked(RaftWire.Request request,
+                                           List<AppliedBatchListener.AppliedBatch> applied) {
         if (request.term() < state.term()) {
             return response(false);
         }
@@ -57,10 +78,10 @@ public final class RaftNode {
             return vote(request);
         }
         if (request.type() == RaftWire.APPEND) {
-            return append(request);
+            return append(request, applied);
         }
         if (request.type() == RaftWire.SNAPSHOT) {
-            return snapshot(request);
+            return snapshot(request, applied);
         }
         return response(false);
     }
@@ -80,13 +101,14 @@ public final class RaftNode {
         return response(free && upToDate);
     }
 
-    private RaftWire.Response append(RaftWire.Request request) {
+    private RaftWire.Response append(RaftWire.Request request,
+                                     List<AppliedBatchListener.AppliedBatch> applied) {
         if (request.term() > state.term()) {
             state.update(request.term(), "", state.appliedIndex());
         }
         if (request.payload().length == 0) {
             commitThrough(Math.min(request.commitIndex(), log.lastIndex()), request.term(),
-                request.leaderOrCandidate());
+                request.leaderOrCandidate(), applied);
             return response(true);
         }
         RaftPayload.Append append;
@@ -113,17 +135,18 @@ public final class RaftNode {
             log.append(new FileRaftLog.Entry(request.index(), request.term(), append.batch()));
         }
         commitThrough(Math.min(request.commitIndex(), log.lastIndex()), request.term(),
-            request.leaderOrCandidate());
+            request.leaderOrCandidate(), applied);
         return response(true);
     }
 
-    private RaftWire.Response snapshot(RaftWire.Request request) {
+    private RaftWire.Response snapshot(RaftWire.Request request,
+                                       List<AppliedBatchListener.AppliedBatch> applied) {
         if (request.term() > state.term()) {
             state.update(request.term(), "", state.appliedIndex());
         }
         // O payload do snapshot é um batch atômico do state machine no índice pedido.
         if (request.index() > state.appliedIndex()) {
-            RaftApplier.apply(stateMachine, RaftPayload.decode(request.payload()), listener);
+            applied.add(RaftApplier.applyAndCapture(stateMachine, RaftPayload.decode(request.payload())));
             state.update(request.term(), request.leaderOrCandidate(), request.index());
         }
         if (log.lastIndex() < request.index()) {
@@ -138,8 +161,21 @@ public final class RaftNode {
         }
     }
 
-    synchronized void commitLocal(long term, String leader, long index) {
-        commitThrough(index, term, leader);
+    /** Descarta uma cauda local que não chegou a ser confirmada pelo quórum. */
+    synchronized void discardUncommittedFrom(long index) {
+        if (index > state.appliedIndex()) {
+            log.truncateFrom(index);
+        }
+    }
+
+    void commitLocal(long term, String leader, long index) {
+        List<AppliedBatchListener.AppliedBatch> applied = new ArrayList<>();
+        AppliedBatchListener target;
+        synchronized (this) {
+            target = listener;
+            commitThrough(index, term, leader, applied);
+        }
+        notifyApplied(target, applied);
     }
 
     public synchronized long term() {
@@ -172,15 +208,23 @@ public final class RaftNode {
         return term;
     }
 
-    private void commitThrough(long index, long term, String leader) {
+    private void commitThrough(long index, long term, String leader,
+                               List<AppliedBatchListener.AppliedBatch> applied) {
         for (long i = state.appliedIndex() + 1; i <= index; i++) {
             FileRaftLog.Entry entry = log.entry(i);
             if (entry != null) {
-                RaftApplier.apply(stateMachine, entry.batch(), listener);
+                applied.add(RaftApplier.applyAndCapture(stateMachine, entry.batch()));
+                byte[] configData = entry.batch().puts().get("__raft/config");
+                if (configData != null) {
+                    state.updatePeers(parsePeers(new String(configData, java.nio.charset.StandardCharsets.UTF_8)));
+                }
             }
         }
         if (index > state.appliedIndex()) {
             state.update(term, leader, index);
+        }
+        if (log.lastIndex() - state.appliedIndex() > 10_000) {
+            log.compact(state.appliedIndex());
         }
     }
 
@@ -189,7 +233,18 @@ public final class RaftNode {
             FileRaftLog.Entry entry = log.entry(i);
             if (entry != null) {
                 RaftApplier.apply(stateMachine, entry.batch(), listener);
+                byte[] configData = entry.batch().puts().get("__raft/config");
+                if (configData != null) {
+                    state.updatePeers(parsePeers(new String(configData, java.nio.charset.StandardCharsets.UTF_8)));
+                }
             }
+        }
+    }
+
+    private static void notifyApplied(AppliedBatchListener listener,
+                                      List<AppliedBatchListener.AppliedBatch> applied) {
+        for (AppliedBatchListener.AppliedBatch batch : applied) {
+            listener.onApplied(batch);
         }
     }
 
@@ -199,5 +254,26 @@ public final class RaftNode {
 
     public VersionedKvBackend stateMachine() {
         return stateMachine;
+    }
+
+    public synchronized java.util.List<InetSocketAddress> peers() {
+        return state.peers();
+    }
+
+    public synchronized void updatePeers(java.util.List<InetSocketAddress> persisted) {
+        state.updatePeers(persisted);
+    }
+
+    private static List<InetSocketAddress> parsePeers(String raw) {
+        List<InetSocketAddress> out = new ArrayList<>();
+        if (raw == null || raw.isBlank()) return out;
+        for (String part : raw.split(",")) {
+            part = part.trim();
+            int i = part.lastIndexOf(':');
+            if (i < 1) continue;
+            try { out.add(new InetSocketAddress(part.substring(0, i), Integer.parseInt(part.substring(i + 1)))); }
+            catch (NumberFormatException ignored) {}
+        }
+        return out;
     }
 }

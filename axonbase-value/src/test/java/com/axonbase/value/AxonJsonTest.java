@@ -1,10 +1,13 @@
 package com.axonbase.value;
 
+import com.axonbase.common.Messages;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.Map;
+import java.math.BigDecimal;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -57,5 +60,73 @@ class AxonJsonTest {
     @Test
     void parseInvalidoFalla() {
         assertThrows(com.axonbase.common.AxonError.class, () -> AxonJson.parseDocument("{invalido"));
+    }
+
+    @Test
+    void parseEscapeUnicodeNaoRepeteDigitosHexadecimais() {
+        assertEquals("café", AxonJson.parseDocument("\"caf\\u00e9\"").asString());
+    }
+
+    @Test
+    void preservaDecimalGrandeSemConverterParaDouble() {
+        AxonValue value = AxonValue.num(new BigDecimal("12345678901234567890.123456789"));
+        assertEquals("{\"$decimal\":\"12345678901234567890.123456789\"}", AxonJson.write(value));
+        assertEquals(value, AxonJson.parseDocument(AxonJson.write(value)));
+    }
+
+    @Test
+    void serializaBytesComoBase64Marcado() {
+        assertEquals("{\"$bytes\":\"SGk=\"}", AxonJson.write(AxonValue.bytes(new byte[] {72, 105})));
+    }
+
+    @Test
+    void serializaEDeserializaDatetimeMarcado() {
+        var t = java.time.Instant.parse("2026-01-01T00:00:00Z");
+        assertEquals("{\"$datetime\":\"2026-01-01T00:00:00Z\"}", AxonJson.write(AxonValue.datetime(t)));
+        assertEquals(AxonValue.datetime(t), AxonJson.parseDocument("{\"$datetime\":\"2026-01-01T00:00:00Z\"}"));
+    }
+
+    @Test
+    void serializaEDeserializaDuracaoMarcada() {
+        assertEquals("{\"$duration\":\"1h\"}", AxonJson.write(AxonValue.duration(3_600_000L)));
+        assertEquals(AxonValue.duration(3_600_000L),
+            AxonJson.parseDocument("{\"$duration\":\"1h\"}"));
+        assertEquals("{\"$duration\":\"90m\"}", AxonJson.write(AxonValue.duration(90 * 60_000L)));
+        assertEquals(AxonValue.duration(90 * 60_000L),
+            AxonJson.parseDocument("{\"$duration\":\"1h30m\"}"));
+    }
+
+    @Test
+    void serializaEDeserializaUuidETabelaMarcados() {
+        var u = java.util.UUID.fromString("73e9a5c7-91f2-4b6e-b9a9-123456789abc");
+        assertEquals("{\"$uuid\":\"73e9a5c7-91f2-4b6e-b9a9-123456789abc\"}",
+            AxonJson.write(AxonValue.uuid(u)));
+        assertEquals(AxonValue.uuid(u),
+            AxonJson.parseDocument("{\"$uuid\":\"73e9a5c7-91f2-4b6e-b9a9-123456789abc\"}"));
+        assertEquals("{\"$table\":\"person\"}", AxonJson.write(AxonValue.table("person")));
+        assertEquals(AxonValue.table("person"),
+            AxonJson.parseDocument("{\"$table\":\"person\"}"));
+    }
+
+    @Test
+    void deserializaRecordMarcado() {
+        AxonValue r = AxonJson.parseDocument("{\"$record\":\"person:ana\"}");
+        assertEquals(AxonValue.record("person", "ana"), r);
+        assertTrue(r.isRecordId());
+    }
+
+    @Test
+    void taggingInvalidoFalla() {
+        assertThrows(com.axonbase.common.AxonError.class,
+            () -> AxonJson.parseDocument("{\"$datetime\":\"nao-e-data\"}"));
+        assertThrows(com.axonbase.common.AxonError.class,
+            () -> AxonJson.parseDocument("{\"$record\":\"sem-tabela\"}"));
+    }
+
+    @Test
+    void mensagensDeParsePreservamDetalhesEmIngles() {
+        assertEquals("JSON error: invalid record: person:ana",
+            Messages.getForLanguage("en", "json_parse_error",
+                Messages.getForLanguage("en", "json_invalid_record", "person:ana")));
     }
 }

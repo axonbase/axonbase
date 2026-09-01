@@ -1,0 +1,11 @@
+/src/AxonBaseSdk/bin/Debug/net9.0/AxonBaseSdk.deps.json
+/src/AxonBaseSdk/bin/Debug/net9.0/AxonBaseSdk.dll
+/src/AxonBaseSdk/bin/Debug/net9.0/AxonBaseSdk.pdb
+/src/AxonBaseSdk/obj/Debug/net9.0/AxonBaseSdk.GeneratedMSBuildEditorConfig.editorconfig
+/src/AxonBaseSdk/obj/Debug/net9.0/AxonBaseSdk.AssemblyInfoInputs.cache
+/src/AxonBaseSdk/obj/Debug/net9.0/AxonBaseSdk.AssemblyInfo.cs
+/src/AxonBaseSdk/obj/Debug/net9.0/AxonBaseSdk.csproj.CoreCompileInputs.cache
+/src/AxonBaseSdk/obj/Debug/net9.0/AxonBaseSdk.dll
+/src/AxonBaseSdk/obj/Debug/net9.0/refint/AxonBaseSdk.dll
+/src/AxonBaseSdk/obj/Debug/net9.0/AxonBaseSdk.pdb
+/src/AxonBaseSdk/obj/Debug/net9.0/ref/AxonBaseSdk.dll

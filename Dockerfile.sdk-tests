@@ -1,0 +1,22 @@
+FROM golang:1.22 AS go-test
+WORKDIR /src/axonbase-sdk-go
+COPY axonbase-sdk-go/go.mod axonbase-sdk-go/go.sum* ./
+RUN go mod download
+COPY axonbase-sdk-go/ ./
+RUN go test ./...
+
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS dotnet-test
+WORKDIR /src
+COPY axonbase-sdk-dotnet/AxonBaseSdk/AxonBaseSdk.csproj axonbase-sdk-dotnet/AxonBaseSdk/
+COPY axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj axonbase-sdk-dotnet/AxonBaseSdk.Tests/
+RUN dotnet restore axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj
+COPY axonbase-sdk-dotnet/ axonbase-sdk-dotnet/
+RUN dotnet build axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj --configuration Release --no-restore
+RUN dotnet run --project axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj --configuration Release --no-build
+
+FROM composer:2 AS php-test
+WORKDIR /src/axonbase-sdk-php
+COPY axonbase-sdk-php/composer.json ./
+RUN composer install --no-interaction --no-progress
+COPY axonbase-sdk-php/ ./
+RUN composer test

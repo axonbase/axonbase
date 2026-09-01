@@ -16,3 +16,25 @@ pass = root
 # node_id = node-1
 # raft_bind = 127.0.0.1:9000
 # raft_peers = 127.0.0.1:9001,127.0.0.1:9002
+
+# Backup S3 periódico. Deixe s3_bucket vazio para desligar.
+# s3_endpoint = http://localhost:9000
+# s3_bucket = axonbase
+# s3_prefix = backups
+# s3_access = minioadmin
+# s3_secret = minioadmin
+# s3_interval = 60000
+# s3_encrypt_key =
+# s3_retention = 10
+
+# AI Audit: necessário para CREATE AI AUDIT.
+# Provedores suportados: claude | openai | gemini | ollama
+# ai_provider = claude
+# ai_model = claude-3-5-sonnet-20241022
+# ai_api_key = sk-ant-...
+
+# Alternativa Ollama (IA privada):
+# ai_provider = ollama
+# ai_model = qwen3-coder:latest
+# ai_api_key = ollama
+# ai_base_url = https://ollama.dataseed.com.br

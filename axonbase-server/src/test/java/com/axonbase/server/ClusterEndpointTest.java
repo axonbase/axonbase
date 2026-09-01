@@ -1,7 +1,9 @@
 package com.axonbase.server;
 
 import com.axonbase.core.Session;
+import com.axonbase.core.cluster.ClusterConfig;
 import com.axonbase.core.cluster.ClusterRole;
+import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.ClusterStatusProvider;
 import com.axonbase.core.cluster.RaftCommitCoordinator;
 import com.axonbase.core.cluster.RaftGroup;
@@ -13,10 +15,13 @@ import com.axonbase.value.AxonValue;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -265,6 +270,86 @@ class ClusterEndpointTest {
             assertEquals(200, post(server.port(), "/sql", "CREATE t CONTENT {x: 1}").statusCode());
         } finally {
             server.stop();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Admin dinámico: JOIN / LEAVE de membros
+    // ------------------------------------------------------------------
+
+    @Test
+    void adminSemRuntimeRespondeInestruturado() throws Exception {
+        Datastore ds = Datastore.memory();
+        ds.createDatabase("n", "d");
+        AxonServer server = AxonServer.startRandomPort(ds, "secret-testing");
+        try {
+            HttpResponse<String> response = post(server.port(), "/admin/cluster/join",
+                "{\"node\":\"n2\",\"address\":\"127.0.0.1:9001\"}");
+            assertEquals(503, response.statusCode());
+            assertEquals("ERR", AxonJson.parseDocument(response.body()).asObject()
+                .get("status").asString());
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    void adminJoIYLeaveAlteranOLinea() throws Exception {
+        Datastore ds = Datastore.memory();
+        AxonServer server = AxonServer.startRandomPort(ds, "secret-testing");
+        Path dir = Files.createTempDirectory("srv");
+        ClusterRuntime rt = new ClusterRuntime(new ClusterConfig("n1", "g",
+            new InetSocketAddress("127.0.0.1", 0), java.util.List.of()), dir);
+        try {
+            server.clusterStatus(rt);
+            awaitLeader(rt);
+            assertEquals(1, rt.members());
+
+            HttpResponse<String> join = post(server.port(), "/admin/cluster/join",
+                "{\"node\":\"n2\",\"address\":\"127.0.0.1:9090\"}");
+            assertEquals(200, join.statusCode());
+            AxonValue joined = AxonJson.parseDocument(join.body());
+            assertEquals(2, joined.asObject().get("members").asLong());
+            assertEquals(2, joined.asObject().get("quorum").asLong());
+            assertEquals(2, rt.members());
+
+            HttpResponse<String> leave = post(server.port(), "/admin/cluster/leave",
+                "{\"address\":\"127.0.0.1:9090\"}");
+            assertEquals(200, leave.statusCode());
+            AxonValue gone = AxonJson.parseDocument(leave.body());
+            assertEquals(1, gone.asObject().get("members").asLong());
+            assertEquals(1, gone.asObject().get("quorum").asLong());
+            assertEquals(1, rt.members());
+
+            // As métricas de raft exponse co runtime acoplado.
+            HttpResponse<String> metrics = get(server.port(), "/metrics");
+            assertEquals(200, metrics.statusCode());
+            assertTrue(metrics.body().contains("axe_raft_lag "), metrics.body());
+            assertTrue(metrics.body().contains("axe_raft_election_started_total "), metrics.body());
+            assertTrue(metrics.body().contains("axe_raft_quorum_unavailable_total "), metrics.body());
+            assertTrue(metrics.body().contains("axe_raft_snapshot_bytes_total "), metrics.body());
+        } finally {
+            server.stop();
+            rt.close();
+        }
+    }
+
+    @Test
+    void adminExigeTokenCandoAuthEstaActiva() throws Exception {
+        Datastore ds = Datastore.memory();
+        AxonServer server = AxonServer.startRandomPort(ds, "secret-testing", "root", "pw", true);
+        try {
+            HttpResponse<String> response = post(server.port(), "/admin/cluster/join",
+                "{\"node\":\"n2\",\"address\":\"127.0.0.1:9090\"}");
+            assertEquals(401, response.statusCode());
+        } finally {
+            server.stop();
+        }
+    }
+
+    private static void awaitLeader(ClusterRuntime rt) throws Exception {
+        for (int attempt = 0; attempt < 80 && rt.role() != ClusterRole.LEADER; attempt++) {
+            Thread.sleep(60);
         }
     }
 

@@ -8,7 +8,7 @@
     <parent>
         <groupId>com.axonbase</groupId>
         <artifactId>axonbase</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>0.2.0</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -20,7 +20,12 @@
         <dependency>
             <groupId>com.axonbase</groupId>
             <artifactId>axonbase-value</artifactId>
-            <version>0.1.0-SNAPSHOT</version>
+            <version>0.2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.axonbase</groupId>
+            <artifactId>axonbase-common</artifactId>
+            <version>0.2.0</version>
         </dependency>
         <dependency>
             <groupId>org.eclipse.jetty.websocket</groupId>
@@ -30,7 +35,7 @@
         <dependency>
             <groupId>com.axonbase</groupId>
             <artifactId>axonbase-server</artifactId>
-            <version>0.1.0-SNAPSHOT</version>
+            <version>0.2.0</version>
             <scope>test</scope>
         </dependency>
         <dependency>

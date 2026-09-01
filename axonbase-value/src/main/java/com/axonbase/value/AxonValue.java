@@ -1,5 +1,6 @@
 package com.axonbase.value;
 
+import com.axonbase.common.Messages;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -71,21 +72,21 @@ public final class AxonValue implements Comparable<AxonValue> {
 
     public static AxonValue str(String s) {
         if (s == null) {
-            throw new NullPointerException("string value cannot be null");
+            throw new NullPointerException(Messages.get("value_string_null"));
         }
         return new AxonValue(AxonType.STRING, s);
     }
 
     public static AxonValue uuid(UUID u) {
         if (u == null) {
-            throw new NullPointerException("uuid value cannot be null");
+            throw new NullPointerException(Messages.get("value_uuid_null"));
         }
         return new AxonValue(AxonType.UUID, u);
     }
 
     public static AxonValue datetime(Instant t) {
         if (t == null) {
-            throw new NullPointerException("datetime value cannot be null");
+            throw new NullPointerException(Messages.get("value_datetime_null"));
         }
         return new AxonValue(AxonType.DATETIME, t);
     }
@@ -197,6 +198,22 @@ public final class AxonValue implements Comparable<AxonValue> {
         return type == AxonType.DATETIME;
     }
 
+    public boolean isDuration() {
+        return type == AxonType.DURATION;
+    }
+
+    public boolean isUuid() {
+        return type == AxonType.UUID;
+    }
+
+    public boolean isBytes() {
+        return type == AxonType.BYTES;
+    }
+
+    public boolean isTable() {
+        return type == AxonType.TABLE;
+    }
+
     // ------------------------------------------------------------------
     // Conversión a tipos concretos
     // ------------------------------------------------------------------
@@ -267,7 +284,7 @@ public final class AxonValue implements Comparable<AxonValue> {
 
     private void require(AxonType t) {
         if (type != t) {
-            throw new IllegalStateException("esperado " + t + " pero era " + type);
+            throw new IllegalStateException(Messages.get("value_type_mismatch", t, type));
         }
     }
 
@@ -279,10 +296,10 @@ public final class AxonValue implements Comparable<AxonValue> {
     public record RecordId(String table, Object key) {
         public RecordId {
             if (table == null || table.isBlank()) {
-                throw new IllegalArgumentException("táboa do record id non pode estar en branco");
+                throw new IllegalArgumentException(Messages.get("value_record_table_blank"));
             }
             if (key == null) {
-                throw new IllegalArgumentException("clave do record id non pode ser null");
+                throw new IllegalArgumentException(Messages.get("value_record_key_null"));
             }
         }
 

@@ -57,4 +57,21 @@ class ServerConfigTest {
             Files.deleteIfExists(file);
         }
     }
+
+    @Test
+    void leAiBaseUrlDoArquivoESobrescreveComAmbiente() throws Exception {
+        Path file = Files.createTempFile("axonbase", ".conf");
+        Files.writeString(file, "ai_provider = ollama\nai_model = qwen3-coder:latest\n"
+            + "ai_api_key = ollama\nai_base_url = http://localhost:11434\n");
+        try {
+            ServerConfig config = ServerConfig.load(file, Map.of(
+                "AXON_AI_BASE_URL", "https://ollama.example.com"));
+            assertEquals("ollama", config.aiProvider());
+            assertEquals("qwen3-coder:latest", config.aiModel());
+            assertEquals("ollama", config.aiApiKey());
+            assertEquals("https://ollama.example.com", config.aiBaseUrl());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
 }

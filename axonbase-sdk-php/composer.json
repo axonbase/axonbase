@@ -1,0 +1,20 @@
+{
+  "name": "axonbase/sdk",
+  "description": "AxonBase WebSocket JSON-RPC client for PHP",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.1",
+    "textalk/websocket": "^1.6"
+  },
+  "autoload": {
+    "psr-4": { "AxonBase\\": "src/" },
+    "files": ["src/Error.php"]
+  },
+  "autoload-dev": {
+    "psr-4": { "AxonBase\\Tests\\": "tests/" }
+  },
+  "scripts": {
+    "test": "php tests/run.php"
+  }
+}

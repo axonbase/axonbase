@@ -8,12 +8,18 @@ COPY axonbase-parser/pom.xml axonbase-parser/
 COPY axonbase-core/pom.xml axonbase-core/
 COPY axonbase-server/pom.xml axonbase-server/
 COPY axonbase-sdk-java/pom.xml axonbase-sdk-java/
+COPY axonbase-spring-data/pom.xml axonbase-spring-data/
+COPY axonbase-cli/pom.xml axonbase-cli/
+COPY axonbase-jdbc/pom.xml axonbase-jdbc/
 COPY axonbase-common/src axonbase-common/src
 COPY axonbase-value/src axonbase-value/src
 COPY axonbase-parser/src axonbase-parser/src
 COPY axonbase-core/src axonbase-core/src
 COPY axonbase-server/src axonbase-server/src
 COPY axonbase-sdk-java/src axonbase-sdk-java/src
+COPY axonbase-spring-data/src axonbase-spring-data/src
+COPY axonbase-cli/src axonbase-cli/src
+COPY axonbase-jdbc/src axonbase-jdbc/src
 RUN mvn -B -q -pl axonbase-server -am install -DskipTests \
  && mvn -q -pl axonbase-server dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/build/deps
 
@@ -28,4 +34,4 @@ COPY --from=build /build/axonbase-server/target/classes /app/classes/axonbase-se
 COPY --from=build /build/deps /app/deps
 EXPOSE 8000
 ENTRYPOINT ["sh", "-c", "java -cp '/app/classes/axonbase-common:/app/classes/axonbase-value:/app/classes/axonbase-parser:/app/classes/axonbase-core:/app/classes/axonbase-server:/app/deps/*' com.axonbase.server.Main \"$@\"", "--"]
-CMD ["start", "--path", "/data", "--port", "8000"]
+CMD ["start", "--path", "/data", "--port", "8000", "--bind", "0.0.0.0"]

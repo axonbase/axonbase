@@ -1,8 +1,11 @@
 package com.axonbase.core.catalog;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+
+import com.axonbase.parser.ast.Expr;
 
 /**
  * Catálogo de definicións dunha base de datos. O catálogo mód reservase
@@ -12,8 +15,26 @@ public final class Catalog {
 
     private final ConcurrentMap<String, TableDef> tables = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, AnalyzerDef> analyzers = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, DataRuleDef> dataRules = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, com.axonbase.core.audit.AiAuditDef> audits = new ConcurrentHashMap<>();
 
     public Catalog() {
+    }
+
+    public void defineAudit(com.axonbase.core.audit.AiAuditDef def) {
+        audits.put(def.name(), def);
+    }
+
+    public com.axonbase.core.audit.AiAuditDef audit(String name) {
+        return audits.get(name);
+    }
+
+    public boolean removeAudit(String name) {
+        return audits.remove(name) != null;
+    }
+
+    public List<com.axonbase.core.audit.AiAuditDef> audits() {
+        return List.copyOf(audits.values());
     }
 
     public void defineTable(TableDef def) {
@@ -98,19 +119,28 @@ public final class Catalog {
         private final boolean readonly;
         private final com.axonbase.parser.ast.Expr assertExpr;
         private final com.axonbase.parser.ast.Expr defaultExpr;
+        private final String references;
 
         public FieldDef(String name, String type, boolean readonly) {
-            this(name, type, readonly, null, null);
+            this(name, type, readonly, null, null, null);
         }
 
         public FieldDef(String name, String type, boolean readonly,
                         com.axonbase.parser.ast.Expr assertExpr,
                         com.axonbase.parser.ast.Expr defaultExpr) {
+            this(name, type, readonly, assertExpr, defaultExpr, null);
+        }
+
+        public FieldDef(String name, String type, boolean readonly,
+                        com.axonbase.parser.ast.Expr assertExpr,
+                        com.axonbase.parser.ast.Expr defaultExpr,
+                        String references) {
             this.name = name;
             this.type = type;
             this.readonly = readonly;
             this.assertExpr = assertExpr;
             this.defaultExpr = defaultExpr;
+            this.references = references;
         }
 
         public String name() {
@@ -132,66 +162,97 @@ public final class Catalog {
         public com.axonbase.parser.ast.Expr defaultExpr() {
             return defaultExpr;
         }
+
+        public String references() {
+            return references;
+        }
     }
 
     /** Definición dun índice. */
     public static final class IndexDef {
+        public static final int DEFAULT_HNSW_M = 8;
+        public static final int DEFAULT_HNSW_EFC = 32;
+        public static final int DEFAULT_HNSW_EFS = 32;
+
         private final String name;
         private final List<String> columns;
         private final boolean unique;
         private final boolean count;
         private final String searchAnalyzer;
         private final boolean geo;
+        private final boolean columnar;
         private final Integer vectorDimension;
         private final String vectorDistance;
+        private final int hnswM;
+        private final int hnswEfc;
+        private final int hnswEfs;
 
         public IndexDef(String name, List<String> columns, boolean unique, boolean count) {
-            this(name, columns, unique, count, null, false, null, null);
+            this(name, columns, unique, count, null, false, false, null, null);
         }
 
         public IndexDef(String name, List<String> columns, boolean unique, boolean count,
-                        String searchAnalyzer, boolean geo, Integer vectorDimension, String vectorDistance) {
+                        String searchAnalyzer, boolean geo, boolean columnar,
+                        Integer vectorDimension, String vectorDistance) {
+            this(name, columns, unique, count, searchAnalyzer, geo, columnar,
+                vectorDimension, vectorDistance, null, null, null);
+        }
+
+        public IndexDef(String name, List<String> columns, boolean unique, boolean count,
+                        String searchAnalyzer, boolean geo, boolean columnar,
+                        Integer vectorDimension, String vectorDistance,
+                        Integer hnswM, Integer hnswEfc, Integer hnswEfs) {
             this.name = name;
             this.columns = List.copyOf(columns);
             this.unique = unique;
             this.count = count;
             this.searchAnalyzer = searchAnalyzer;
             this.geo = geo;
+            this.columnar = columnar;
             this.vectorDimension = vectorDimension;
             this.vectorDistance = vectorDistance;
+            this.hnswM = hnswM == null ? DEFAULT_HNSW_M : hnswM;
+            this.hnswEfc = hnswEfc == null ? DEFAULT_HNSW_EFC : hnswEfc;
+            this.hnswEfs = hnswEfs == null ? DEFAULT_HNSW_EFS : hnswEfs;
         }
 
-        public String name() {
-            return name;
-        }
-
-        public List<String> columns() {
-            return columns;
-        }
-
-        public boolean unique() {
-            return unique;
-        }
-
-        public boolean count() {
-            return count;
-        }
-
-        public String searchAnalyzer() {
-            return searchAnalyzer;
-        }
-
-        public boolean search() {
-            return searchAnalyzer != null;
-        }
-
+        public String name() { return name; }
+        public List<String> columns() { return columns; }
+        public boolean unique() { return unique; }
+        public boolean count() { return count; }
+        public String searchAnalyzer() { return searchAnalyzer; }
+        public boolean search() { return searchAnalyzer != null; }
         public boolean geo() { return geo; }
-
+        public boolean columnar() { return columnar; }
         public boolean vector() { return vectorDimension != null; }
-
         public Integer vectorDimension() { return vectorDimension; }
-
         public String vectorDistance() { return vectorDistance; }
+        public int hnswM() { return hnswM; }
+        public int hnswEfc() { return hnswEfc; }
+        public int hnswEfs() { return hnswEfs; }
+    }
+
+    /** Definição de uma Data Rule (filtro no nível de linha e coluna). */
+    public record DataRuleDef(String name, Expr predicate, List<String> maskPatterns) {
+        public DataRuleDef {
+            maskPatterns = maskPatterns == null ? List.of() : List.copyOf(maskPatterns);
+        }
+    }
+
+    public void defineDataRule(DataRuleDef def) {
+        dataRules.put(def.name(), def);
+    }
+
+    public DataRuleDef dataRule(String name) {
+        return dataRules.get(name);
+    }
+
+    public boolean removeDataRule(String name) {
+        return dataRules.remove(name) != null;
+    }
+
+    public List<DataRuleDef> dataRules() {
+        return List.copyOf(dataRules.values());
     }
 
     /** Configuração de normalização para um índice full-text. */

@@ -27,7 +27,8 @@ public final class Variables {
     }
 
     public AxonValue getOrMissing(String name) {
-        return vars.get(name);
+        AxonValue v = vars.get(name);
+        return v == null ? AxonValue.none() : v;
     }
 
     public Map<String, AxonValue> copy() {

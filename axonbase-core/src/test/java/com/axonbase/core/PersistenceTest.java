@@ -69,12 +69,18 @@ class PersistenceTest {
         first.execute("DEFINE EVENT audit ON TABLE person WHEN $event = \"CREATE\" "
             + "THEN (CREATE changes CONTENT { kind: \"person\" })", s, null);
         first.execute("DEFINE USER alice ON DATABASE PASSWORD \"secreta\" ROLES editor", s, null);
+        first.execute("DEFINE USER cert ON DATABASE CERTIFICATE clients FINGERPRINT \"SHA256:ABCD\"", s, null);
         first.execute("DEFINE ACCESS login ON DATABASE", s, null);
 
         Datastore recovered = new Datastore(new FileBackend(path));
         assertTrue(recovered.namespaces().contains("test"));
         assertTrue(recovered.databases("test").contains("dev"));
         assertNotNull(recovered.authCatalog().verify("alice", "secreta", "test", "dev"));
+        var certificateUser = recovered.authCatalog().user("cert", "test", "dev");
+        assertNotNull(certificateUser);
+        assertEquals("clients", certificateUser.certificate());
+        assertEquals("SHA256:ABCD", certificateUser.fingerprint());
+        assertTrue(certificateUser.certificateBased());
         assertNotNull(recovered.authCatalog().access("login", "test", "dev"));
         AxonValue info = recovered.execute("INFO FOR TABLE person", session(), null);
         assertTrue(info.asObject().get("fields").asObject().containsKey("age"));

@@ -16,6 +16,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -134,49 +135,62 @@ class ControlReplayTest {
     /** Caminho completo por TCP: DDL no líder chega ao catálogo do seguidor. */
     @Test
     void ddlReplicadoPorTcpChegaAoCatalogoDoSeguidor() throws Exception {
-        List<Integer> ports = reservePorts(2);
-        InetSocketAddress a1 = new InetSocketAddress("127.0.0.1", ports.get(0));
-        InetSocketAddress a2 = new InetSocketAddress("127.0.0.1", ports.get(1));
-        MemoryBackend b1 = new MemoryBackend();
-        MemoryBackend b2 = new MemoryBackend();
-        try (ClusterRuntime n1 = new ClusterRuntime(new ClusterConfig("n1", "g", a1, List.of(a2)),
-                Files.createTempDirectory("tcp-n1"), b1);
-             ClusterRuntime n2 = new ClusterRuntime(new ClusterConfig("n2", "g", a2, List.of(a1)),
-                Files.createTempDirectory("tcp-n2"), b2)) {
-            Datastore ds1 = new Datastore(b1);
-            Datastore ds2 = new Datastore(b2);
-            n1.appliedBatchListener(ds1.appliedBatchListener());
-            n2.appliedBatchListener(ds2.appliedBatchListener());
-            ds1.commitCoordinator(n1, "n1");
-            ds2.commitCoordinator(n2, "n2");
+        for (int setupAttempt = 0; setupAttempt < 3; setupAttempt++) {
+            try {
+                List<Integer> ports = reservePorts(2);
+                InetSocketAddress a1 = new InetSocketAddress("127.0.0.1", ports.get(0));
+                InetSocketAddress a2 = new InetSocketAddress("127.0.0.1", ports.get(1));
+                MemoryBackend b1 = new MemoryBackend();
+                MemoryBackend b2 = new MemoryBackend();
+                try (ClusterRuntime n1 = new ClusterRuntime(new ClusterConfig("n1", "g", a1, List.of(a2)),
+                        Files.createTempDirectory("tcp-n1"), b1);
+                     ClusterRuntime n2 = new ClusterRuntime(new ClusterConfig("n2", "g", a2, List.of(a1)),
+                        Files.createTempDirectory("tcp-n2"), b2)) {
+                    Datastore ds1 = new Datastore(b1);
+                    Datastore ds2 = new Datastore(b2);
+                    n1.appliedBatchListener(ds1.appliedBatchListener());
+                    n2.appliedBatchListener(ds2.appliedBatchListener());
+                    ds1.commitCoordinator(n1, "n1");
+                    ds2.commitCoordinator(n2, "n2");
 
-            ClusterRuntime leaderRuntime = null;
-            for (int attempt = 0; attempt < 60 && leaderRuntime == null; attempt++) {
-                if (n1.role() == ClusterRole.LEADER) {
-                    leaderRuntime = n1;
-                } else if (n2.role() == ClusterRole.LEADER) {
-                    leaderRuntime = n2;
-                } else {
-                    Thread.sleep(75);
+                    ClusterRuntime leaderRuntime = null;
+                    for (int attempt = 0; attempt < 60 && leaderRuntime == null; attempt++) {
+                        if (n1.role() == ClusterRole.LEADER) {
+                            leaderRuntime = n1;
+                        } else if (n2.role() == ClusterRole.LEADER) {
+                            leaderRuntime = n2;
+                        } else {
+                            Thread.sleep(75);
+                        }
+                    }
+                    assertNotNull(leaderRuntime, "nenhum líder eleito");
+                    Datastore leader = leaderRuntime == n1 ? ds1 : ds2;
+                    Datastore follower = leaderRuntime == n1 ? ds2 : ds1;
+
+                    leader.execute("DEFINE TABLE person SCHEMAFULL", session(), null);
+                    leader.execute("DEFINE FIELD age ON TABLE person TYPE int DEFAULT 18", session(), null);
+                    leader.execute("DEFINE USER alice ON DATABASE PASSWORD \"s3cr3t\"", session(), null);
+                    leader.execute("CREATE person:1 CONTENT { age: 30 }", session(), null);
+
+                    for (int attempt = 0; attempt < 40 && follower.namespaces().isEmpty(); attempt++) {
+                        Thread.sleep(75);
+                    }
+                    AxonValue info = follower.execute("INFO FOR TABLE person", session(), null);
+                    assertTrue(info.asObject().get("fields").asObject().containsKey("age"));
+                    assertNotNull(follower.authCatalog().verify("alice", "s3cr3t", "n", "d"));
+                    AxonValue rows = follower.execute("SELECT * FROM person", session(), null);
+                    for (int attempt = 0; attempt < 40 && rows.asArray().isEmpty(); attempt++) {
+                        Thread.sleep(75);
+                        rows = follower.execute("SELECT * FROM person", session(), null);
+                    }
+                    assertEquals(1, rows.asArray().size());
+                }
+                return;
+            } catch (BindException e) {
+                if (setupAttempt == 2) {
+                    throw e;
                 }
             }
-            assertNotNull(leaderRuntime, "nenhum líder eleito");
-            Datastore leader = leaderRuntime == n1 ? ds1 : ds2;
-            Datastore follower = leaderRuntime == n1 ? ds2 : ds1;
-
-            leader.execute("DEFINE TABLE person SCHEMAFULL", session(), null);
-            leader.execute("DEFINE FIELD age ON TABLE person TYPE int DEFAULT 18", session(), null);
-            leader.execute("DEFINE USER alice ON DATABASE PASSWORD \"s3cr3t\"", session(), null);
-            leader.execute("CREATE person:1 CONTENT { age: 30 }", session(), null);
-
-            for (int attempt = 0; attempt < 40 && follower.namespaces().isEmpty(); attempt++) {
-                Thread.sleep(75);
-            }
-            AxonValue info = follower.execute("INFO FOR TABLE person", session(), null);
-            assertTrue(info.asObject().get("fields").asObject().containsKey("age"));
-            assertNotNull(follower.authCatalog().verify("alice", "s3cr3t", "n", "d"));
-            assertEquals(1,
-                follower.execute("SELECT * FROM person", session(), null).asArray().size());
         }
     }
 

@@ -1,6 +1,7 @@
 package com.axonbase.core.engine;
 
 import com.axonbase.common.AxonError;
+import com.axonbase.common.Messages;
 import com.axonbase.value.AxonValue;
 
 import java.math.BigDecimal;
@@ -42,6 +43,7 @@ public final class Functions {
             case "math::inf" -> AxonValue.num(Double.MAX_VALUE);
             case "math::neg_inf" -> AxonValue.num(-Double.MAX_VALUE);
             case "time::now" -> AxonValue.datetime(Instant.now());
+            case "now" -> AxonValue.datetime(Instant.now());
             case "rand::uuid" -> AxonValue.str(UUID.randomUUID().toString());
             default -> null;
         };
@@ -203,12 +205,14 @@ public final class Functions {
             case "geo::contains" -> GeoVector.contains(arg(args, 0), arg(args, 1));
             case "vector::distance::euclidean" -> GeoVector.euclidean(arg(args, 0), arg(args, 1));
             case "vector::distance::manhattan" -> GeoVector.manhattan(arg(args, 0), arg(args, 1));
+            case "vector::distance::cosine" -> GeoVector.cosineDistance(arg(args, 0), arg(args, 1));
             case "vector::similarity::cosine" -> GeoVector.cosine(arg(args, 0), arg(args, 1));
 
             // ----------------------------------------------------------
             // time
             // ----------------------------------------------------------
             case "time::now" -> AxonValue.datetime(Instant.now());
+            case "now" -> AxonValue.datetime(Instant.now());
             case "time::unix" -> AxonValue.num(instant(arg(args, 0)).getEpochSecond());
             case "time::millis" -> AxonValue.num(instant(arg(args, 0)).toEpochMilli());
             case "time::year" -> AxonValue.num(zoned(arg(args, 0)).getYear());
@@ -671,7 +675,7 @@ public final class Functions {
             }
             return sb.toString();
         } catch (NoSuchAlgorithmException e) {
-            throw AxonError.internal("algoritmo de hash não disponível: " + algorithm);
+            throw AxonError.internal(Messages.get("stmt_hash_algorithm_unavailable", algorithm));
         }
     }
 
@@ -702,14 +706,17 @@ public final class Functions {
         "record::id", "record::table", "record::tb", "record::exists", "meta::id", "meta::tb",
         "geometry::point", "geometry::line", "geometry::polygon", "geo::distance", "geo::area",
         "geo::contains", "vector::distance::euclidean", "vector::distance::manhattan",
+        "vector::distance::cosine",
         "vector::similarity::cosine",
         "search::score", "search::highlight",
-        "time::now", "time::unix", "time::millis", "time::year", "time::month", "time::day",
+        "graph::connected", "graph::path",
+        "time::now", "now", "time::unix", "time::millis", "time::year", "time::month", "time::day",
         "time::hour", "time::minute", "time::second", "time::wday", "time::yday",
         "time::from::unix", "time::from::millis",
         "rand", "rand::bool", "rand::float", "rand::int", "rand::string", "rand::uuid", "rand::enum",
         "crypto::md5", "crypto::sha1", "crypto::sha256", "crypto::sha512",
         "encoding::base64::encode", "encoding::base64::decode",
+        "kv::get", "kv::set", "kv::del", "kv::scan",
         "value::coalesce", "value::default");
 
     /** Lista ordenada dos nomes, usada pelo {@code INFO FOR ROOT}. */

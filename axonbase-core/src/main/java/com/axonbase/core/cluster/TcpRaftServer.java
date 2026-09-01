@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 
+import com.axonbase.common.Messages;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -21,7 +22,7 @@ public final class TcpRaftServer implements AutoCloseable {
     public int port() { return server.getLocalPort(); }
     private void accept() {
         while (open) try { Socket socket = server.accept(); workers.execute(() -> handle(socket)); }
-        catch (IOException ignored) { if (open) throw new IllegalStateException("listener Raft falhou", ignored); }
+        catch (IOException ignored) { if (open) throw new IllegalStateException(Messages.get("cluster_raft_listener_failed"), ignored); }
     }
     private void handle(Socket socket) {
         try (socket; var in = new DataInputStream(socket.getInputStream()); var out = new DataOutputStream(socket.getOutputStream())) {

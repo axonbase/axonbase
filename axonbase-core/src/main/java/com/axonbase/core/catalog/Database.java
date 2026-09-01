@@ -1,5 +1,6 @@
 package com.axonbase.core.catalog;
 
+import com.axonbase.core.audit.AiAuditCatalog;
 import com.axonbase.core.storage.KvBackend;
 import com.axonbase.core.storage.MemoryBackend;
 
@@ -13,12 +14,14 @@ public final class Database {
     private final String db;
     private final Catalog catalog;
     private final KvBackend records;
+    private final AiAuditCatalog auditCatalog;
 
     public Database(String ns, String db, KvBackend backend) {
         this.ns = ns;
         this.db = db;
         this.catalog = new Catalog();
         this.records = backend != null ? backend : new MemoryBackend();
+        this.auditCatalog = new AiAuditCatalog(backend != null ? backend : new MemoryBackend());
     }
 
     public String ns() {
@@ -35,5 +38,9 @@ public final class Database {
 
     public KvBackend records() {
         return records;
+    }
+
+    public AiAuditCatalog auditCatalog() {
+        return auditCatalog;
     }
 }

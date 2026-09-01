@@ -20,13 +20,26 @@ public final class RaftApplier {
 
     public static void apply(VersionedKvBackend backend, CommittedBatch batch,
                              AppliedBatchListener listener) {
-        boolean observed = listener != null && listener != AppliedBatchListener.NONE;
-        Map<String, byte[]> previous = observed ? snapshotOf(backend, batch) : Map.of();
+        AppliedBatchListener.AppliedBatch applied = applyAndCapture(backend, batch);
+        if (listener != null) {
+            listener.onApplied(applied);
+        }
+    }
+
+    /** Aplica o batch e devolve o evento para despacho posterior, fora de locks Raft. */
+    public static AppliedBatchListener.AppliedBatch applyAndCapture(VersionedKvBackend backend,
+                                                                     CommittedBatch batch) {
+        Map<String, byte[]> previous = snapshotOf(backend, batch);
+        // Um snapshot é autoritativo: substitui o estado por inteiro para que chaves
+        // órfãs presentes no seguidor (e ausentes no líder) sejam removidas.
+        if (batch.fullSnapshot()) {
+            for (String key : backend.keysWithPrefix("")) {
+                backend.delete(key);
+            }
+        }
         backend.commit(Map.of(), batch.puts(), batch.deletes());
         backend.flush();
-        if (listener != null) {
-            listener.onApplied(new AppliedBatchListener.AppliedBatch(batch, previous));
-        }
+        return new AppliedBatchListener.AppliedBatch(batch, previous);
     }
 
     /** Lê o estado anterior das chaves tocadas, antes de sobrescrevê-las. */
