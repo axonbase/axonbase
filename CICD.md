@@ -35,7 +35,7 @@ bash scripts/publish-maven.sh
 
 ### Procedimento de release Maven
 
-O script publica o POM pai e as bibliotecas públicas necessárias para resolver as dependências: `axonbase-common`, `axonbase-value`, `axonbase-sdk-java`, `axonbase-jdbc` e `axonbase-spring-data`.
+O script instala localmente o banco e suas dependências internas para satisfazer a dependência de teste do SDK. Essa etapa não gera Javadocs nem compila testes dos módulos privados. Em seguida, publica apenas o POM pai e as bibliotecas públicas necessárias para resolver as dependências: `axonbase-common`, `axonbase-value`, `axonbase-sdk-java`, `axonbase-jdbc` e `axonbase-spring-data`. A etapa de deploy não compila testes, pois os testes de integração do SDK dependem do servidor privado.
 
 1. Atualize a versão no `pom.xml` raiz.
 2. Execute os testes necessários e faça commit das alterações.

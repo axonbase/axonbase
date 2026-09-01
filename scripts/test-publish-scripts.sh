@@ -38,7 +38,8 @@ chmod +x "$temp_dir/bin/git" "$temp_dir/bin/mvn" "$temp_dir/bin/docker"
 
 bash "$root_dir/scripts/publish-maven.sh"
 command_log=$(<"$COMMAND_LOG")
-[[ "$command_log" == *"mvn clean deploy -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -am -DskipTests"* ]]
+[[ "$command_log" == *"mvn clean install -pl axonbase-server -am -Dmaven.test.skip=true -Dmaven.javadoc.skip=true"* ]]
+[[ "$command_log" == *"mvn deploy -pl :axonbase,axonbase-common,axonbase-value,axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -Dmaven.test.skip=true"* ]]
 
 : > "$COMMAND_LOG"
 bash "$root_dir/scripts/publish-docker.sh"

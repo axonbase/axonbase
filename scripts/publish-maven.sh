@@ -17,9 +17,14 @@ if [[ $(git describe --exact-match --tags HEAD) != "$expected_tag" ]]; then
   exit 1
 fi
 
-mvn clean deploy \
-  -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data \
+mvn clean install \
+  -pl axonbase-server \
   -am \
-  -DskipTests
+  -Dmaven.test.skip=true \
+  -Dmaven.javadoc.skip=true
+
+mvn deploy \
+  -pl :axonbase,axonbase-common,axonbase-value,axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data \
+  -Dmaven.test.skip=true
 
 printf 'Bundle uploaded. Review and publish it at https://central.sonatype.com/publishing/deployments\n'
