@@ -14,6 +14,9 @@ COPY axonbase-sdk-dotnet/ axonbase-sdk-dotnet/
 RUN dotnet build axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj --configuration Release --no-restore
 RUN dotnet run --project axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj --configuration Release --no-build
 
+FROM dotnet-test AS dotnet-pack
+RUN dotnet pack axonbase-sdk-dotnet/AxonBaseSdk/AxonBaseSdk.csproj --configuration Release --no-restore --output /packages
+
 FROM composer:2 AS php-test
 WORKDIR /src/axonbase-sdk-php
 COPY axonbase-sdk-php/composer.json ./

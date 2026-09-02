@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alvaro-brito-products/axonbase/axonbase-sdk-go/axonbase"
+	"github.com/axonbase/axonbase/axonbase-sdk-go/axonbase"
 )
 
 const (

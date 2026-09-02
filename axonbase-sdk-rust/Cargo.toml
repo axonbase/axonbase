@@ -1,8 +1,13 @@
 [package]
 name = "axonbase-sdk"
 version = "0.1.0"
-description = "AxonBase SDK para Rust — cliente WebSocket JSON-RPC"
+description = "AxonBase WebSocket JSON-RPC client for Rust"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/axonbase/axonbase"
+homepage = "https://github.com/axonbase/axonbase"
+keywords = ["axonbase", "database", "websocket", "json-rpc"]
+categories = ["api-bindings", "database"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

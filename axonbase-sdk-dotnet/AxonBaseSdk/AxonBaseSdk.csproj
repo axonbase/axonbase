@@ -3,11 +3,21 @@
     <TargetFramework>net9.0</TargetFramework>
     <RootNamespace>AxonBaseSdk</RootNamespace>
     <AssemblyName>AxonBaseSdk</AssemblyName>
+    <PackageId>AxonBase.Sdk</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>AxonBase</Authors>
+    <Description>AxonBase WebSocket JSON-RPC client for .NET.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/axonbase/axonbase</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/axonbase/axonbase</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>12</LangVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Tests.cs" />
+    <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

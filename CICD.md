@@ -1,5 +1,7 @@
 # Publicação dos SDKs AxonBase
 
+O procedimento operacional atual para cada registry está em [RELEASES.md](RELEASES.md).
+
 Este documento descreve o passo a passo para publicar cada SDK no registry da respectiva linguagem. Antes de qualquer publicação, execute a suíte de validação completa.
 
 ## Pré-requisitos globais

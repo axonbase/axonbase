@@ -1,4 +1,4 @@
-module github.com/alvaro-brito-products/axonbase/axonbase-sdk-go
+module github.com/axonbase/axonbase/axonbase-sdk-go
 
 go 1.22
 

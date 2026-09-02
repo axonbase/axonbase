@@ -5,10 +5,11 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [project]
 name = "axonbase-sdk"
 version = "0.1.0"
-description = "AxonBase SDK para Python — cliente WebSocket JSON-RPC"
+description = "AxonBase WebSocket JSON-RPC client for Python"
 requires-python = ">=3.10"
 dependencies = ["websockets>=14.0"]
 license = {text = "MIT"}
+authors = [{name = "AxonBase"}]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
@@ -17,7 +18,9 @@ langchain = ["langchain-core>=0.2"]
 agno = ["agno>=1.0"]
 
 [project.urls]
-homepage = "https://github.com/alvaro-brito-products/axonbase"
+Homepage = "https://github.com/axonbase/axonbase"
+Repository = "https://github.com/axonbase/axonbase"
+Issues = "https://github.com/axonbase/axonbase/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
