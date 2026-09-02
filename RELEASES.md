@@ -51,9 +51,9 @@ O npm (Node Package Manager) recebe `@axonbase/sdk`. A organizacao `@axonbase` p
 
 ```bash
 npm login
-git tag axonbase-sdk-nodejs/v0.1.0
-git push origin axonbase-sdk-nodejs/v0.1.0
-VERSION=0.1.0 bash scripts/publish-nodejs.sh
+git tag axonbase-sdk-nodejs/v0.1.1
+git push origin axonbase-sdk-nodejs/v0.1.1
+VERSION=0.1.1 bash scripts/publish-nodejs.sh
 ```
 
 ## Rust

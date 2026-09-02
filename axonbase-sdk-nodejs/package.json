@@ -1,10 +1,10 @@
 {
   "name": "@axonbase/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AxonBase WebSocket JSON-RPC client for Node.js and TypeScript.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": ["dist", "LICENSE"],
   "scripts": {
     "build": "tsc",
     "test": "tsx --test tests/client.test.ts tests/saga-participant.test.ts tests/saga.test.ts",
