@@ -62,9 +62,9 @@ O crates.io recebe `axonbase-sdk`.
 
 ```bash
 cargo login <TOKEN>
-git tag axonbase-sdk-rust/v0.1.0
-git push origin axonbase-sdk-rust/v0.1.0
-VERSION=0.1.0 bash scripts/publish-rust.sh
+git tag axonbase-sdk-rust/v0.1.1
+git push origin axonbase-sdk-rust/v0.1.1
+VERSION=0.1.1 bash scripts/publish-rust.sh
 ```
 
 ## .NET
