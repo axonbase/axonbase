@@ -42,7 +42,7 @@ fi
 
 command_log=$(<"$COMMAND_LOG")
 [[ "$command_log" == *"python3 -m pytest"* ]]
-[[ "$command_log" == *"twine upload axonbase-sdk-python/dist/*"* ]]
+[[ "$command_log" == *"python3 -m twine upload axonbase-sdk-python/dist/*"* ]]
 [[ "$command_log" == *"npm publish --access public"* ]]
 [[ "$command_log" == *"cargo publish"* ]]
 [[ "$command_log" == *"docker buildx build --target dotnet-pack --output type=local,dest="* ]]

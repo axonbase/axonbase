@@ -38,9 +38,9 @@ O Python Package Index (PyPI) recebe o pacote `axonbase-sdk`.
 
 ```bash
 python3 -m pip install -e "./axonbase-sdk-python[test]" build twine
-git tag axonbase-sdk-python/v0.1.0
-git push origin axonbase-sdk-python/v0.1.0
-VERSION=0.1.0 bash scripts/publish-python.sh
+git tag axonbase-sdk-python/v0.1.1
+git push origin axonbase-sdk-python/v0.1.1
+VERSION=0.1.1 bash scripts/publish-python.sh
 ```
 
 Configure antes uma credencial do PyPI para o `twine`, por exemplo em `~/.pypirc` ou por token de ambiente.
