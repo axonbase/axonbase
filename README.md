@@ -22,16 +22,16 @@ Multi-model database written in Java 21+, combining document, graph, relational,
 
 All 8 SDKs expose the same public API with feature parity, tested independently:
 
-| Language | Package | Status |
+| Language | Registry | Install |
 |---|---|---|
-| Java | `com.axondatabase:axonbase-sdk-java` | Reference SDK |
-| Node.js / TypeScript | `@axonbase/sdk` | Full parity |
-| Python | `axonbase-sdk` | Full parity + DBAPI 2.0 + SQLAlchemy + LangChain + Agno |
-| Go | `github.com/axonbase/axonbase-sdk-go` | Full parity |
-| Rust | `axonbase-sdk` | Full parity |
-| .NET | `AxonBase.Sdk` | Full parity |
-| PHP | `axonbase/sdk` | Full parity |
-| Ruby / Rails | `axonbase-sdk` | Full parity |
+| Java | Maven Central | `mvn dependency:get -Dartifact=com.axondatabase:axonbase-sdk-java:0.2.1` |
+| Node.js / TypeScript | npm | `npm install @axonbase/sdk@0.1.1` |
+| Python | PyPI | `python -m pip install axonbase-sdk==0.1.1` |
+| Go | Go module proxy | `go get github.com/axonbase/axonbase/axonbase-sdk-go@v0.1.0` |
+| Rust | crates.io | `cargo add axonbase-sdk@0.1.1` |
+| .NET | NuGet | `dotnet add package AxonBase.Sdk --version 0.1.0` |
+| PHP | Packagist | `composer require axonbase/sdk:^0.1` |
+| Ruby / Rails | RubyGems | `gem install axonbase-sdk -v 0.1.0` |
 
 Every SDK implements: `connect`, `use`, `signin`, `authenticate`, `query`, `select`, `create`, `insert`, `update`, `upsert`, `delete`, `relate`, `begin`/`commit`/`cancel`, `kv_get`/`kv_set`/`kv_del`/`kv_scan`, `live`/`kill`, `certificateBegin`/`certificateComplete`, mTLS, typed RPC errors, Migrator (.axql), and `SagaTransaction`/`SagaParticipantTransaction`.
 
