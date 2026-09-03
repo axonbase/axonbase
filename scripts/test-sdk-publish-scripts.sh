@@ -45,7 +45,7 @@ command_log=$(<"$COMMAND_LOG")
 [[ "$command_log" == *"python3 -m twine upload axonbase-sdk-python/dist/*"* ]]
 [[ "$command_log" == *"npm publish --access public"* ]]
 [[ "$command_log" == *"cargo publish"* ]]
-[[ "$command_log" == *"docker buildx build --target dotnet-pack --output type=local,dest="* ]]
+[[ "$command_log" == *"docker buildx build --target dotnet-package --output type=local,dest="* ]]
 [[ "$command_log" == *"docker run --rm -e NUGET_API_KEY"* ]]
 [[ "$command_log" == *"gem push axonbase-sdk-0.1.0.gem"* ]]
 [[ "$command_log" == *"docker build --target dotnet-test --file Dockerfile.sdk-tests ."* ]]

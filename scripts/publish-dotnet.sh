@@ -11,7 +11,7 @@ package_dir=$(mktemp -d)
 trap 'rm -rf "$package_dir"' EXIT
 
 docker buildx build \
-  --target dotnet-pack \
+  --target dotnet-package \
   --output "type=local,dest=$package_dir" \
   --file Dockerfile.sdk-tests \
   .
