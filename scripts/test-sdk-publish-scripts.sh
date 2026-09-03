@@ -13,7 +13,7 @@ cat > "$temp_dir/bin/git" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
   "status --porcelain") ;;
-  "describe --exact-match --tags HEAD") printf '%s\n' "$RELEASE_TAG" ;;
+  "tag --points-at HEAD") printf '%s\n' "$RELEASE_TAG" ;;
   "push origin "*) ;;
   *) exit 1 ;;
 esac

@@ -14,8 +14,11 @@ require_release() {
   fi
 
   local expected_tag="${tag_prefix}/v${VERSION}"
-  if [[ $(git describe --exact-match --tags HEAD) != "$expected_tag" ]]; then
-    printf 'Refusing to publish: HEAD must be tagged %s.\n' "$expected_tag" >&2
-    exit 1
-  fi
+  local tag
+  while IFS= read -r tag; do
+    [[ "$tag" == "$expected_tag" ]] && return
+  done < <(git tag --points-at HEAD)
+
+  printf 'Refusing to publish: HEAD must be tagged %s.\n' "$expected_tag" >&2
+  exit 1
 }
