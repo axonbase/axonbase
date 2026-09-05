@@ -111,13 +111,11 @@ const rows = await axon.select('person');
 - **Healthcare**: Data Rules for patient PII protection, AI Audit for access governance, full-text search over clinical notes, sagas for distributed care workflows
 - **IoT**: columnar indexes for real-time sensor aggregation, geo for fleet tracking, live queries for telemetry streaming, Raft cluster for high availability
 
-## Documentation
+## About the author
 
-- `USAGE.md` — CLI, HTTP, SDK usage guide
-- `CONNECTOR.md` — wire protocol specification
-- `FEATURES.md` — full feature inventory
-- `CICD.md` — SDK publishing guide
-- `PLAN.md` — implementation roadmap
+**Álvaro Brito** is a Backend & AI Engineer with more than 10 years of Java experience, architecting secure, scalable microservices and delivering modern LLM and RAG solutions. He combines deep proficiency in Node.js, TypeScript, Python, Express, and PostgreSQL with infrastructure-grade execution on AWS, Docker, Terraform, and event-driven architectures. He builds observable AI workflows with LangChain and Langfuse, instrumenting LLM evaluations and operational metrics with Prometheus and Grafana to improve quality and reliability. His work turns complex workflows into production-ready platforms through CI/CD automation, real-time orchestration, and high-throughput data flows with FastAPI and Kafka.
+
+LinkedIn: https://www.linkedin.com/in/alvarogomes/
 
 ## License
 
