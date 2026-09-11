@@ -75,11 +75,7 @@ public final class AxonServer {
     private volatile long startedAtNanos;
     private Server jetty;
     private volatile boolean stopping;
-    private final ExecutorService queryExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "ax-query");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ExecutorService queryExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     private AxonServer(Datastore ds, String secret, int port, String bind, AuthService auth,
                        boolean requireAuth, ServerConfig config) {
@@ -649,6 +645,15 @@ public final class AxonServer {
 
                     if (!user.matches("[0-9]{11}|[0-9]{14}")) {
                         html.append("<div class=\"info\">").append(Messages.get("cert_invalid_cpf", escHtml(user))).append("</div>");
+                        html.append("</body></html>");
+                        html(resp, 200, html.toString());
+                        return;
+                    }
+
+                    long remainingSec = auth.remainingCooldown(user, store);
+                    if (remainingSec > 0) {
+                        html.append("<div class=\"info\" style=\"border-color:var(--danger)\"><strong>").append(Messages.get("cert_credential_unavailable")).append("</strong>");
+                        html.append("<p>").append(Messages.get("cert_rate_limited", remainingSec)).append("</p></div>");
                         html.append("</body></html>");
                         html(resp, 200, html.toString());
                         return;
