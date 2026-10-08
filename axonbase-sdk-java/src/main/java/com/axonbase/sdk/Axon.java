@@ -10,7 +10,6 @@ import org.eclipse.jetty.io.ClientConnector;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.WebSocketAdapter;
-import org.eclipse.jetty.websocket.api.WebSocketCloseException;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 
 import java.net.URI;
@@ -53,8 +52,8 @@ public final class Axon implements AutoCloseable {
     /** Connects with optional PKCS12 client identity and JKS server truststore. */
     public static Axon connect(String url, String keyStorePath, String keyStorePassword,
                                String trustStorePath, String trustStorePassword) {
+        WebSocketClient client = null;
         try {
-            WebSocketClient client;
             if (url.startsWith("wss://")) {
                 var ssl = new SslContextFactory.Client();
                 if (keyStorePath != null && !keyStorePath.isBlank()) {
@@ -80,6 +79,7 @@ public final class Axon implements AutoCloseable {
             client.connect(new Holder(axon), URI.create(url)).get(30, TimeUnit.SECONDS);
             return axon;
         } catch (Exception e) {
+            if (client != null) try { client.stop(); } catch (Exception ignored) {}
             throw new AxonSdkException(Messages.get("sdk_connect_failed", url, e.getClass().getName(), e.getMessage()), e);
         }
     }
@@ -140,7 +140,7 @@ public final class Axon implements AutoCloseable {
     }
 
     public AxonValue create(String table, AxonValue content) {
-        return query("CREATE " + table + " CONTENT " + AxonJson.write(content));
+        return query("CREATE " + quoteIdent(table) + " CONTENT " + AxonJson.write(content));
     }
 
     public AxonValue select(String sql) {
@@ -148,11 +148,16 @@ public final class Axon implements AutoCloseable {
     }
 
     public AxonValue update(String table, String setClause, String whereClause) {
-        return query("UPDATE " + table + " SET " + setClause + " WHERE " + whereClause);
+        return query("UPDATE " + quoteIdent(table) + " SET " + setClause + " WHERE " + whereClause);
     }
 
     public AxonValue delete(String table, String whereClause) {
-        return query("DELETE " + table + " WHERE " + whereClause);
+        return query("DELETE " + quoteIdent(table) + " WHERE " + whereClause);
+    }
+
+    private static String quoteIdent(String name) {
+        // Identifier quoting: wrap in backticks, escape embedded backticks
+        return "`" + name.replace("`", "``") + "`";
     }
 
     public String signin(String user, String pass) {
@@ -214,6 +219,8 @@ public final class Axon implements AutoCloseable {
         void onChange(String id, String action, AxonValue result);
     }
 
+    private static final int MAX_EARLY_NOTES = 1024;
+
     private final Map<String, LiveHandler> liveHandlers = new ConcurrentHashMap<>();
     private final Map<String, java.util.List<AxonValue>> earlyNotes = new ConcurrentHashMap<>();
 
@@ -229,9 +236,13 @@ public final class Axon implements AutoCloseable {
     public String live(String table, boolean diff, LiveHandler handler) {
         AxonValue id = call("live", new Object[]{table, diff});
         String key = id.isString() ? id.asString() : String.valueOf(id);
-        liveHandlers.put(key, handler);
-        // notificações que chegaram antes do registro do handler
-        java.util.List<AxonValue> early = earlyNotes.remove(key);
+        // Handler registration and early-note draining: drain first, then register,
+        // so any notification that checks the handler map finds it
+        java.util.List<AxonValue> early;
+        synchronized (this) {
+            early = earlyNotes.remove(key);
+            liveHandlers.put(key, handler);
+        }
         if (early != null) {
             early.forEach(n -> dispatchNotification(key, n));
         }
@@ -255,11 +266,25 @@ public final class Axon implements AutoCloseable {
         }
         AxonValue idv = note.asObject().get("id");
         String id = idv != null && idv.isString() ? idv.asString() : "";
+        if (id.isEmpty()) return;
         if (liveHandlers.containsKey(id)) {
             dispatchNotification(id, note);
         } else {
-            earlyNotes.computeIfAbsent(id, k -> java.util.Collections.synchronizedList(
-                new java.util.ArrayList<>())).add(note);
+            synchronized (this) {
+                // Double-check after acquiring lock
+                if (liveHandlers.containsKey(id)) {
+                    dispatchNotification(id, note);
+                    return;
+                }
+                java.util.List<AxonValue> buf = earlyNotes.get(id);
+                if (buf == null) {
+                    buf = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+                    earlyNotes.put(id, buf);
+                }
+                if (buf.size() < MAX_EARLY_NOTES) {
+                    buf.add(note);
+                }
+            }
         }
     }
 

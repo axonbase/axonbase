@@ -16,20 +16,22 @@ public class AxonStatement implements Statement {
     protected final String ns;
     protected final String db;
     protected final boolean translate;
+    protected final AxonConnection connection;
     protected AxonValue currentResult;
     protected boolean closed;
     protected boolean hasResultSet;
     protected int maxRows;
     protected int queryTimeout;
 
-    public AxonStatement(Axon axon, String ns, String db) {
-        this(axon, ns, db, false);
+    public AxonStatement(Axon axon, String ns, String db, AxonConnection connection) {
+        this(axon, ns, db, connection, false);
     }
 
-    public AxonStatement(Axon axon, String ns, String db, boolean translate) {
+    public AxonStatement(Axon axon, String ns, String db, AxonConnection connection, boolean translate) {
         this.axon = axon;
         this.ns = ns;
         this.db = db;
+        this.connection = connection;
         this.translate = translate;
     }
 
@@ -47,6 +49,7 @@ public class AxonStatement implements Statement {
 
     @Override
     public boolean execute(String sql) throws SQLException {
+        if (closed) throw new SQLException(Messages.get("jdbc_statement_closed"));
         try {
             if (sql == null) return false;
             String translated = translate ? SqlTranslator.translate(sql) : sql;
@@ -98,7 +101,7 @@ public class AxonStatement implements Statement {
     public boolean isClosed() throws SQLException { return closed; }
 
     @Override
-    public Connection getConnection() throws SQLException { return null; }
+    public Connection getConnection() throws SQLException { return connection; }
 
     @Override public void setFetchDirection(int direction) throws SQLException {}
     @Override public int getFetchDirection() throws SQLException { return ResultSet.FETCH_FORWARD; }

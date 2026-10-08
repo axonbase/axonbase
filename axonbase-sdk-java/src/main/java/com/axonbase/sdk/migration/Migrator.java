@@ -67,12 +67,16 @@ public class Migrator {
             throw new IllegalArgumentException(Messages.get("sdk_migration_directory_not_found", path));
         }
         List<Migration> migrations = new ArrayList<>();
+        Set<String> seenVersions = new HashSet<>();
         try (Stream<Path> files = Files.list(dir)) {
             files.filter(f -> f.toString().endsWith(".axql"))
                  .sorted()
                  .forEach(f -> {
                      String name = f.getFileName().toString();
                      String version = name.contains("_") ? name.substring(0, name.indexOf('_')) : name.replace(".axql", "");
+                     if (!seenVersions.add(version)) {
+                         throw new RuntimeException(Messages.get("sdk_migration_duplicate_version", version));
+                     }
                      try {
                          String sql = Files.readString(f).trim();
                          String checksum = sha256(Files.readAllBytes(f));

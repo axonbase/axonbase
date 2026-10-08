@@ -321,6 +321,9 @@ public final class Messages {
           ,Map.entry("jdbc_leave_saga_failed", "falha ao sair da saga")
           ,Map.entry("jdbc_driver_registration_failed", "erro ao registrar driver JDBC AxonBase")
           ,Map.entry("jdbc_invalid_identifier", "identificador SQL inválido: %s")
+          ,Map.entry("jdbc_statement_closed", "statement fechado")
+          ,Map.entry("jdbc_param_not_set", "parâmetro %d não definido")
+          ,Map.entry("jdbc_param_invalid_index", "índice de parâmetro inválido: %d")
           ,Map.entry("jdbc_parent_logger_unsupported", "getParentLogger não é suportado")
           ,Map.entry("sdk_connect_failed", "falha ao conectar a %s: %s: %s")
           ,Map.entry("sdk_certificate_begin_response_invalid", "resposta certificate.begin inválida")
@@ -345,6 +348,7 @@ public final class Messages {
           ,Map.entry("sdk_migration_directory_not_found", "diretório de migrações não encontrado: %s")
           ,Map.entry("sdk_migration_read_failed", "falha ao ler migração: %s")
           ,Map.entry("sdk_migration_checksum_changed", "checksum da migração alterado: %s")
+          ,Map.entry("sdk_migration_duplicate_version", "versão de migração duplicada: %s")
           ,Map.entry("spring_saga_scope_required", "sagaScope não pode ser nulo")
           ,Map.entry("spring_transaction_manager_required", "transactionManager não pode ser nulo")
           ,Map.entry("spring_work_required", "work não pode ser nulo")
@@ -353,6 +357,7 @@ public final class Messages {
           ,Map.entry("spring_no_active_saga", "nenhuma SAGA ativa para a correlação: %s")
           ,Map.entry("spring_datasource_required", "dataSource não pode ser nulo")
           ,Map.entry("spring_join_saga_failed", "falha ao entrar na saga para correlação: %s")
+          ,Map.entry("spring_ws_insecure_url", "URL insegura: use wss:// para conexões autenticadas")
 
     );
 
@@ -664,8 +669,11 @@ public final class Messages {
           ,Map.entry("jdbc_unwrap_unsupported", "unwrap not supported for %s")
           ,Map.entry("jdbc_join_saga_failed", "failed to join saga %s: %s")
           ,Map.entry("jdbc_leave_saga_failed", "failed to leave saga")
-          ,Map.entry("jdbc_driver_registration_failed", "failed to register AxonBase JDBC driver")
+,Map.entry("jdbc_driver_registration_failed", "failed to register AxonBase JDBC driver")
           ,Map.entry("jdbc_invalid_identifier", "invalid SQL identifier: %s")
+          ,Map.entry("jdbc_statement_closed", "statement is closed")
+          ,Map.entry("jdbc_param_not_set", "parameter %d not set")
+          ,Map.entry("jdbc_param_invalid_index", "invalid parameter index: %d")
           ,Map.entry("jdbc_parent_logger_unsupported", "getParentLogger is not supported")
           ,Map.entry("sdk_connect_failed", "failed to connect to %s: %s: %s")
           ,Map.entry("sdk_certificate_begin_response_invalid", "invalid certificate.begin response")
@@ -690,12 +698,16 @@ public final class Messages {
           ,Map.entry("sdk_migration_directory_not_found", "migration directory not found: %s")
           ,Map.entry("sdk_migration_read_failed", "failed to read migration: %s")
           ,Map.entry("sdk_migration_checksum_changed", "migration checksum changed: %s")
+          ,Map.entry("sdk_migration_duplicate_version", "duplicate migration version: %s")
           ,Map.entry("spring_saga_scope_required", "sagaScope must not be null")
           ,Map.entry("spring_transaction_manager_required", "transactionManager must not be null")
           ,Map.entry("spring_work_required", "work must not be null")
           ,Map.entry("spring_saga_name_required", "sagaName must not be blank")
           ,Map.entry("spring_correlation_id_blank", "correlationId must not be blank")
           ,Map.entry("spring_no_active_saga", "no active SAGA for correlation: %s")
+          ,Map.entry("spring_datasource_required", "dataSource must not be null")
+          ,Map.entry("spring_join_saga_failed", "failed to join saga for correlation: %s")
+          ,Map.entry("spring_ws_insecure_url", "insecure URL: use wss:// for authenticated connections")
 
     );
 

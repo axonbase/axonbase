@@ -238,7 +238,8 @@ public class SqlTranslator {
         cols = cols.replaceAll("(?i)COUNT\\s*\\(\\s*[^)]+\\s*\\)", "count()");
 
         // Remove table alias prefix from columns (e.g. p.name → name)
-        cols = cols.replaceAll("\\w+\\.", "");
+        // Only outside string literals to avoid corrupting literal text
+        cols = removeAliasPrefixes(cols);
 
         // Remove FROM table alias
         String fromClause = table;
@@ -314,6 +315,42 @@ public class SqlTranslator {
         Matcher m = TRUNCATE.matcher(sql);
         if (!m.matches()) return sql;
         return "DELETE " + m.group(1);
+    }
+
+    private static String removeAliasPrefixes(String cols) {
+        StringBuilder sb = new StringBuilder();
+        boolean inStr = false;
+        char quote = 0;
+        for (int i = 0; i < cols.length(); i++) {
+            char c = cols.charAt(i);
+            if (inStr) {
+                sb.append(c);
+                if (c == quote) inStr = false;
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                inStr = true;
+                quote = c;
+                sb.append(c);
+                continue;
+            }
+            // Not in a string: check for alias pattern
+            if (Character.isLetter(c) || c == '_') {
+                int start = i;
+                while (i + 1 < cols.length() && (Character.isLetterOrDigit(cols.charAt(i + 1)) || cols.charAt(i + 1) == '_')) {
+                    i++;
+                }
+                // Check for dot after the identifier
+                if (i + 1 < cols.length() && cols.charAt(i + 1) == '.') {
+                    i++; // skip past the dot too — for loop increment will position correctly
+                    continue;
+                }
+                sb.append(cols, start, i + 1);
+                continue;
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     // ------------------------------------------------------------------

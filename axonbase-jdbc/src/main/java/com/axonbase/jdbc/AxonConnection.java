@@ -54,12 +54,13 @@ public class AxonConnection implements Connection, SagaScope {
         this.ns = info.getProperty("ns", "axonbase");
         this.db = info.getProperty("db", "main");
 
+        Axon axon = null;
         try {
             String ks = info.getProperty("keystore");
             String ksp = info.getProperty("keystorePassword");
             String ts = info.getProperty("truststore");
             String tsp = info.getProperty("truststorePassword");
-            this.axon = Axon.connect(wsUrl, ks, ksp, ts, tsp);
+            axon = Axon.connect(wsUrl, ks, ksp, ts, tsp);
             axon.use(this.ns, this.db);
             String user = info.getProperty("user");
             String pass = info.getProperty("password");
@@ -67,9 +68,12 @@ public class AxonConnection implements Connection, SagaScope {
                 String token = axon.signin(user, pass);
                 if (token != null) axon.authenticate(token);
             }
+            this.axon = axon;
         } catch (AxonSdkException e) {
+            if (axon != null) axon.close();
             throw new SQLException(Messages.get("jdbc_connection_failed", e.getMessage()), e);
         } catch (Exception e) {
+            if (axon != null) axon.close();
             throw new SQLException(Messages.get("jdbc_connection_failed", e.getMessage()), e);
         }
     }
@@ -104,12 +108,12 @@ public class AxonConnection implements Connection, SagaScope {
 
     @Override
     public Statement createStatement() throws SQLException {
-        return new AxonStatement(axon, ns, db, translate);
+        return new AxonStatement(axon, ns, db, this, translate);
     }
 
     @Override
     public PreparedStatement prepareStatement(String sql) throws SQLException {
-        return new AxonPreparedStatement(axon, ns, db, sql, translate);
+        return new AxonPreparedStatement(axon, ns, db, this, sql, translate);
     }
 
     @Override

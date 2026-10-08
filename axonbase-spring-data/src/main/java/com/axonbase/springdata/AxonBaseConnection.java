@@ -1,5 +1,6 @@
 package com.axonbase.springdata;
 
+import com.axonbase.common.Messages;
 import com.axonbase.sdk.Axon;
 
 /** Creates an authenticated Axon client suitable for injection into Spring Data components. */
@@ -18,6 +19,9 @@ public final class AxonBaseConnection {
         }
         if ((user == null) != (password == null)) {
             throw new IllegalArgumentException("Both user and password are required for authentication");
+        }
+        if (!url.startsWith("wss://")) {
+            throw new IllegalArgumentException(Messages.get("spring_ws_insecure_url"));
         }
         Axon axon = Axon.connect(url);
         try {

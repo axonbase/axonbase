@@ -1,5 +1,6 @@
 package com.axonbase.jdbc;
 
+import com.axonbase.common.Messages;
 import com.axonbase.sdk.Axon;
 import java.sql.*;
 import java.io.InputStream;
@@ -12,17 +13,17 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
     private final String sqlTemplate;
     private final List<Object> params = new ArrayList<>();
 
-    public AxonPreparedStatement(Axon axon, String ns, String db, String sql) {
-        super(axon, ns, db, false);
+    public AxonPreparedStatement(Axon axon, String ns, String db, AxonConnection connection, String sql) {
+        super(axon, ns, db, connection, false);
         this.sqlTemplate = sql;
     }
 
-    public AxonPreparedStatement(Axon axon, String ns, String db, String sql, boolean translate) {
-        super(axon, ns, db, translate);
+    public AxonPreparedStatement(Axon axon, String ns, String db, AxonConnection connection, String sql, boolean translate) {
+        super(axon, ns, db, connection, translate);
         this.sqlTemplate = sql;
     }
 
-    private String buildSql() {
+    private String buildSql() throws SQLException {
         StringBuilder sb = new StringBuilder();
         int p = 0;
         boolean inString = false;
@@ -43,7 +44,10 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
                 continue;
             }
             if (c == '?') {
-                Object val = p < params.size() ? params.get(p++) : null;
+                if (p >= params.size()) {
+                    throw new SQLException(Messages.get("jdbc_param_not_set", p + 1));
+                }
+                Object val = params.get(p++);
                 if (val == null) sb.append("null");
                 else if (val instanceof Number || val instanceof Boolean) sb.append(val);
                 else sb.append('\'').append(val.toString().replace("'", "''")).append('\'');
@@ -63,6 +67,7 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
     public int executeUpdate() throws SQLException { return super.executeUpdate(buildSql()); }
 
     private void setParam(int index, Object value) {
+        if (index < 1) throw new IllegalArgumentException("parameter index must be >= 1, got " + index);
         while (params.size() < index) params.add(null);
         params.set(index - 1, value);
     }
