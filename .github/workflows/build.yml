@@ -28,8 +28,8 @@ jobs:
           java-version: '21'
           cache: maven
       - run: |
-          mvn -B install -pl axonbase-sdk-java,axonbase-spring-data -am -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -q
-          mvn -B test -pl axonbase-sdk-java,axonbase-spring-data -Dgpg.skip=true -Dmaven.javadoc.skip=true
+          mvn -B install -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -am -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -q
+          mvn -B test -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -Dgpg.skip=true -Dmaven.javadoc.skip=true
 
   nodejs:
     name: Node.js SDK

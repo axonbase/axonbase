@@ -56,7 +56,7 @@
         <module>axonbase-sdk-java</module>
         <module>axonbase-spring-data</module>
         <module>axonbase-cli</module>
-        <!--module>axonbase-jdbc</module-->
+        <module>axonbase-jdbc</module>
     </modules>
 
     <properties>
