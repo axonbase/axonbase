@@ -249,6 +249,7 @@ jobs:
     needs: [version, publish-java, publish-nodejs, publish-python, publish-dotnet, publish-ruby, publish-rust, publish-go, publish-php]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
