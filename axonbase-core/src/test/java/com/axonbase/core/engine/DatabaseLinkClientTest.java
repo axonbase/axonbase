@@ -1,6 +1,7 @@
 package com.axonbase.core.engine;
 
 import com.axonbase.value.AxonValue;
+import com.axonbase.value.AxonJson;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
@@ -20,7 +21,9 @@ class DatabaseLinkClientTest {
         AtomicReference<String> authorization = new AtomicReference<>();
         HttpServer server = server(exchange -> {
             if (exchange.getRequestURI().getPath().equals("/signin")) {
-                assertEquals("{\"user\":\"remote\",\"pass\":\"secret\"}", read(exchange));
+                AxonValue credentials = AxonJson.decode(read(exchange).getBytes(StandardCharsets.UTF_8));
+                assertEquals("remote", credentials.asObject().get("user").asString());
+                assertEquals("secret", credentials.asObject().get("pass").asString());
                 respond(exchange, "{\"token\":\"remote-token\"}");
                 return;
             }

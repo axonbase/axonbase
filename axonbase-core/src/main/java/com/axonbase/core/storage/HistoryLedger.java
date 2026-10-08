@@ -41,7 +41,7 @@ public final class HistoryLedger {
 
     /**
      * Retorna o snapshot de uma chave no timestamp dado.
-     * Busca a entry com timestamp <= alvo (a vigente na época).
+     * Busca a entry com timestamp &lt;= alvo (a vigente na época).
      */
     public Optional<byte[]> snapshotAt(String key, long timestampEpochMillis) {
         var entries = ledger.get(key);

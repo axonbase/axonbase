@@ -12,12 +12,12 @@ import java.util.List;
  * Utilidades para o índice colunar: codificación de valores en orde
  * lexicográfica (sortable encoding) e construción de claves KV.
  *
- * <p>Formato de clave:
+ * <p>Formato de clave:</p>
  * <pre>
  *   CI|{ns}|{db}|{table}|{index}|{column}|{typeByte}{encodedData}{rowKey}
  * </pre>
  * Cada tipo de valor ten un tamaño fixo ou un prefixo de lonxitude, o que
- * fai o formato autodelimitante sen necesidade de separadores adicionais.</p>
+ * fai o formato autodelimitante sen necesidade de separadores adicionais.
  */
 public final class ColumnarIndex {
 
