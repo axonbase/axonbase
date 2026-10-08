@@ -118,7 +118,7 @@ jobs:
           EOF
       - run: |
           mvn --version
-          mvn -B -Pcentral-publishing deploy -DskipTests -Dmaven.javadoc.skip=true
+          mvn -B -Pcentral-publishing deploy -DskipTests
 
   publish-nodejs:
     needs: [validate]
