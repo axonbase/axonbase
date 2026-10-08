@@ -185,7 +185,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          if curl -fs "https://crates.io/api/v1/crates/axonbase-sdk/${VERSION}" >/dev/null 2>&1; then
+          if cargo search axonbase-sdk 2>/dev/null | grep -q "axonbase-sdk = \"${VERSION}\""; then
             echo "crates.io: axonbase-sdk@${VERSION} already published, skipping"
             exit 0
           fi
