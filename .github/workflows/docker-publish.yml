@@ -48,7 +48,7 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
-          tags: axonbase/axonbase:${{ needs.version.outputs.ver }}-amd64${{ needs.version.outputs.suffix }}
+          tags: axonbase/axonbase:${{ needs.version.outputs.ver }}${{ needs.version.outputs.suffix }}-amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -72,7 +72,7 @@ jobs:
           file: ./Dockerfile
           platforms: linux/arm64
           push: true
-          tags: axonbase/axonbase:${{ needs.version.outputs.ver }}-arm64${{ needs.version.outputs.suffix }}
+          tags: axonbase/axonbase:${{ needs.version.outputs.ver }}${{ needs.version.outputs.suffix }}-arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
