@@ -6,6 +6,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.InetSocketAddress;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -16,7 +17,10 @@ public final class TcpRaftServer implements AutoCloseable {
     private final ExecutorService workers = Executors.newCachedThreadPool();
     private volatile boolean open = true;
     public TcpRaftServer(int port, Handler handler) throws IOException {
-        this.server = new ServerSocket(port); this.handler = handler;
+        this.server = new ServerSocket();
+        this.server.setReuseAddress(true);
+        this.server.bind(new InetSocketAddress(port));
+        this.handler = handler;
         workers.execute(this::accept);
     }
     public int port() { return server.getLocalPort(); }

@@ -8,17 +8,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import com.axonbase.core.security.AuthCatalog;
 import com.axonbase.common.Messages;
 
-/**
- * Servicio de autenticación: valida credenciais contra {@link UserStore} e
- * verifica JWT (JSON Web Token). O {@code signin} devolve un token asinado con
- * o segredo do servidor; {@code authenticate} valida un token xa existente.
- */
 public final class AuthService {
+
+    private static final long COOLDOWN_MS = 600_000L;
 
     private final String secret;
     private final UserStore users;
     private final Map<String, TemporaryCredential> temporaryCredentials = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
+    private final Map<String, Long> lastCredentialIssuance = new ConcurrentHashMap<>();
 
     /** Cache JWT por credencial temporária para reuso na mesma sessão. */
     private final Map<String, String> credentialJwts = new ConcurrentHashMap<>();
@@ -116,12 +114,29 @@ public final class AuthService {
                 + ",\"user_names\":" + users.catalog().users().stream().map(u -> u.name()).toList() + "}");
             throw new IllegalArgumentException(Messages.get("cert_user_missing"));
         }
+        String userKey = user + "@" + certificateStore;
+        Long lastIssue = lastCredentialIssuance.get(userKey);
+        long now = System.currentTimeMillis();
+        if (lastIssue != null && (now - lastIssue) < COOLDOWN_MS) {
+            long remaining = (COOLDOWN_MS - (now - lastIssue)) / 1000;
+            throw new IllegalArgumentException(Messages.get("cert_rate_limited", remaining));
+        }
         byte[] entropy = new byte[32];
         random.nextBytes(entropy);
         String credential = "axontc_" + Base64.getUrlEncoder().withoutPadding().encodeToString(entropy);
         temporaryCredentials.put(credential, new TemporaryCredential(user,
             identity.certificate(), identity.fingerprint(), System.currentTimeMillis() + 60_000L));
+        lastCredentialIssuance.put(userKey, now);
         return credential;
+    }
+
+    /** Retorna os segundos restantes do cooldown, ou 0 se puder emitir. */
+    public long remainingCooldown(String user, String store) {
+        String userKey = user + "@" + store;
+        Long lastIssue = lastCredentialIssuance.get(userKey);
+        if (lastIssue == null) return 0;
+        long remaining = COOLDOWN_MS - (System.currentTimeMillis() - lastIssue);
+        return remaining > 0 ? remaining / 1000 : 0;
     }
 
     private void cleanup() {

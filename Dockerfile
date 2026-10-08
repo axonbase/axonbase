@@ -20,8 +20,8 @@ COPY axonbase-sdk-java/src axonbase-sdk-java/src
 COPY axonbase-spring-data/src axonbase-spring-data/src
 COPY axonbase-cli/src axonbase-cli/src
 COPY axonbase-jdbc/src axonbase-jdbc/src
-RUN mvn -B -q -pl axonbase-server -am install -DskipTests \
- && mvn -q -pl axonbase-server dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/build/deps
+RUN mvn -B -q -pl axonbase-server -am install -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true \
+ && mvn -q -pl axonbase-server dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/build/deps -Dgpg.skip=true -Dmaven.javadoc.skip=true
 
 # Runtime stage
 FROM eclipse-temurin:21-jre

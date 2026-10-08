@@ -304,6 +304,7 @@ public final class Executor {
             case DropDatabaseLink ddl2 -> runDropDatabaseLink(ddl2);
             case CreateSaga cs -> runCreateSaga(cs);
             case DescribeSaga ds -> runDescribeSaga(ds);
+            case Statement.DescribeTable dt -> runDescribeTable(dt);
             case Statement.ShowSagaTransaction st -> runShowSagaTransaction(st);
             case Statement.BeginSaga bs -> runBeginSaga(bs);
             case Statement.CommitSaga cs2 -> runCommitSaga(cs2);
@@ -313,6 +314,8 @@ public final class Executor {
             case Statement.ShowDataRules ignored -> runShowDataRules();
             case Statement.DefineAiAudit aa -> runDefineAiAudit(aa);
             case Statement.DropAiAudit da -> runDropAiAudit(da);
+            case Statement.RemoveTable rt -> runRemoveTable(rt);
+            case Statement.CreateTable ct -> runCreateTable(ct);
             case Statement.ShowAiAudit sa -> runShowAiAudit(sa);
             case Statement.SetReasonAudit sra -> runSetReasonAudit(sra);
             case Statement.SetAuditCase sac -> runSetAuditCase(sac);
@@ -743,8 +746,10 @@ public final class Executor {
         RecordId rid = new RecordId(table, key);
         obj.put("id", ridAsValue(rid));
         applyFieldSchema(db, table, obj, false);
+        injectDataRuleFields(obj);
         AxonValue record = AxonValue.object(obj);
         Document document = new Document(rid, record);
+        ds.auditLog(session, "CREATE", table, rid, null, record);
         if (!dataRuleFilter(document) || !allowed(document, table, "create")) {
             throw errorStmt("permission denied");
         }
@@ -841,7 +846,8 @@ public final class Executor {
                 : v.isString() ? tryDouble(v.asString()) : null;
             case "string" -> v.isString() ? v : AxonValue.str(v.toString());
             case "bool" -> v.isBool() ? v : null;
-            case "datetime" -> v.isDatetime() ? v : null;
+            case "datetime" -> v.isDatetime() ? v
+                : v.isString() ? tryInstant(v.asString()) : null;
             case "array" -> v.isArray() ? v : null;
             case "object" -> v.isObject() ? v : null;
             case "geometry" -> isGeometry(v) ? v : null;
@@ -857,8 +863,16 @@ public final class Executor {
 
     private AxonValue tryLong(String s) {
         try {
-            return AxonValue.num(Long.parseLong(s.trim()));
+            return AxonValue.num(Long.parseLong(s));
         } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private AxonValue tryInstant(String s) {
+        try {
+            return AxonValue.datetime(java.time.Instant.parse(s));
+        } catch (Exception e) {
             return null;
         }
     }
@@ -885,27 +899,31 @@ public final class Executor {
         Expr.RecordId qRid = uTarget instanceof Expr.RecordId r && r.table() instanceof Expr.Qualified ? r : null;
         if (uTarget instanceof Expr.Qualified || qRid != null) {
             Expr.Qualified q = qRid != null ? (Expr.Qualified) qRid.table() : (Expr.Qualified) uTarget;
-            // Saga: capture BEFORE state for remote write
-            String sagaCorr = sagaCorrelation();
-            if (sagaCorr != null && qRid == null) {
-                throw errorStmt(Messages.get("stmt_saga_record_required"));
-            }
-            if (sagaCorr != null) {
-                try {
-                    Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
-                    if (linkDef != null) {
-                        String selectSql = "SELECT * FROM " + q.table() + ":"
-                            + com.axonbase.parser.Render.expr(qRid.key());
-                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
-                        AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
-                        sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
-                    }
-                } catch (Exception e) {
-                    System.err.println("Saga remote step recording failed: " + e.getMessage());
+            String sessionNs = session.namespace();
+            boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
+            if (!isLocal) {
+                // Saga: capture BEFORE state for remote write
+                String sagaCorr = sagaCorrelation();
+                if (sagaCorr != null && qRid == null) {
+                    throw errorStmt(Messages.get("stmt_saga_record_required"));
                 }
+                if (sagaCorr != null) {
+                    try {
+                        Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
+                        if (linkDef != null) {
+                            String selectSql = "SELECT * FROM " + q.table() + ":"
+                                + com.axonbase.parser.Render.expr(qRid.key());
+                            List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                            AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                            sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
+                                q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
+                        }
+                    } catch (Exception e) {
+                        System.err.println("Saga remote step recording failed: " + e.getMessage());
+                    }
+                }
+                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
             }
-            return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
         }
         boolean retNone = u.ret() != null && u.ret().kind() == ReturnKind.NONE;
         List<RecordId> targets = resolveTargets(u.target());
@@ -919,9 +937,11 @@ public final class Executor {
                 continue;
             }
             if (!dataRuleFilter(doc)) {
+                ds.auditLog(session, "UPDATE", rid.table(), rid, doc.current(), null);
                 continue;
             }
             if (!allowed(doc, tableName(u.target()), "update")) {
+                ds.auditLog(session, "UPDATE_BLOCKED", rid.table(), rid, doc.current(), null);
                 continue;
             }
             // Saga: capture BEFORE state
@@ -939,6 +959,7 @@ public final class Executor {
                 applyMutate(current, u.data(), doc);
             }
             applyFieldSchema(db, tableName(u.target()), current, true);
+            injectDataRuleFields(current);
             AxonValue next = AxonValue.object(current);
             doc.setCurrent(next);
             enforceUnique(db, rid, doc.initial(), next);
@@ -948,6 +969,7 @@ public final class Executor {
             indexColumnar(db, rid, doc.initial(), next);
             notifyLive(db, rid, LiveBus.UPDATE, doc.initial(), next);
             fireEvents(db, rid, LiveBus.UPDATE, doc.initial(), next);
+            ds.auditLog(session, "UPDATE", rid.table(), rid, doc.initial(), next);
             if (u.ret() != null && u.ret().kind() == ReturnKind.BEFORE) {
                 results.add(doc.initial());
             } else {
@@ -975,26 +997,30 @@ public final class Executor {
         Expr.RecordId dqRid = dTarget instanceof Expr.RecordId r && r.table() instanceof Expr.Qualified ? r : null;
         if (dTarget instanceof Expr.Qualified || dqRid != null) {
             Expr.Qualified q = dqRid != null ? (Expr.Qualified) dqRid.table() : (Expr.Qualified) dTarget;
-            String sagaCorr = sagaCorrelation();
-            if (sagaCorr != null && dqRid == null) {
-                throw errorStmt(Messages.get("stmt_saga_record_required"));
-            }
-            if (sagaCorr != null) {
-                try {
-                    Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
-                    if (linkDef != null) {
-                        String selectSql = "SELECT * FROM " + q.table() + ":"
-                            + com.axonbase.parser.Render.expr(dqRid.key());
-                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
-                        AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
-                        sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                            q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
-                    }
-                } catch (Exception e) {
-                    System.err.println("Saga remote step recording failed: " + e.getMessage());
+            String sessionNs = session.namespace();
+            boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
+            if (!isLocal) {
+                String sagaCorr = sagaCorrelation();
+                if (sagaCorr != null && dqRid == null) {
+                    throw errorStmt(Messages.get("stmt_saga_record_required"));
                 }
+                if (sagaCorr != null) {
+                    try {
+                        Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
+                        if (linkDef != null) {
+                            String selectSql = "SELECT * FROM " + q.table() + ":"
+                                + com.axonbase.parser.Render.expr(dqRid.key());
+                            List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                            AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                            sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
+                                q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
+                        }
+                    } catch (Exception e) {
+                        System.err.println("Saga remote step recording failed: " + e.getMessage());
+                    }
+                }
+                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d));
             }
-            return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d));
         }
         List<RecordId> targets = resolveTargets(d.target());
         List<AxonValue> deleted = new ArrayList<>();
@@ -1007,9 +1033,11 @@ public final class Executor {
                 continue;
             }
             if (!dataRuleFilter(doc)) {
+                ds.auditLog(session, "DELETE", rid.table(), rid, doc.current(), null);
                 continue;
             }
             if (!allowed(doc, tableName(d.target()), "delete")) {
+                ds.auditLog(session, "DELETE_BLOCKED", rid.table(), rid, doc.current(), null);
                 continue;
             }
             // Saga: capture BEFORE state
@@ -1023,6 +1051,7 @@ public final class Executor {
             indexColumnar(db, rid, doc.current(), null);
             notifyLive(db, rid, LiveBus.DELETE, doc.current(), null);
             fireEvents(db, rid, LiveBus.DELETE, doc.current(), null);
+            ds.auditLog(session, "DELETE", rid.table(), rid, doc.current(), null);
             if (d.ret() != null && d.ret().kind() == ReturnKind.BEFORE) {
                 deleted.add(doc.current());
             }
@@ -1034,11 +1063,25 @@ public final class Executor {
         switch (data) {
             case Data.SetClause sc -> {
                 for (Assignment a : sc.assignments()) {
+                    String fieldName;
                     if (a.path() instanceof Expr.Ident id) {
-                        current.put(id.name(), evalOnDocument(a.value(), doc));
+                        fieldName = id.name();
                     } else if (a.path() instanceof Expr.Idiom idiom) {
-                        current.put(idiomToString(idiom), evalOnDocument(a.value(), doc));
+                        fieldName = fieldOf(idiom);
+                    } else {
+                        continue;
                     }
+                    AxonValue newValue = evalOnDocument(a.value(), doc);
+                    AxonValue existing = current.get(fieldName);
+                    if (existing != null && existing.isNumber() && newValue.isString()) {
+                        try {
+                            String s = newValue.asString().trim();
+                            newValue = s.contains(".") || s.contains("e") || s.contains("E")
+                                ? AxonValue.num(Double.parseDouble(s))
+                                : AxonValue.num(Long.parseLong(s));
+                        } catch (NumberFormatException ignored) {}
+                    }
+                    current.put(fieldName, newValue);
                 }
             }
             case Data.Merge m -> {
@@ -1076,8 +1119,10 @@ public final class Executor {
 
     private AxonValue runSelect(Statement.Select sel) {
         // Check if FROM is AUDIT_CASES virtual table
-        if (sel.from() instanceof Expr.Ident id && isAuditCasesTable(id.name())) {
-            return runSelectAuditCases(sel);
+        if (sel.from() instanceof Expr.Ident id) {
+            String tableName = id.name();
+            if (isAuditCasesTable(tableName)) return runSelectAuditCases(sel);
+            if (isAuditLogTable(tableName)) return runSelectAuditLog(sel);
         }
         // Check if FROM references a DATABASE LINK → delegate entire query
         if (sel.from() instanceof Expr.RecordId selRid && selRid.table() instanceof Expr.Qualified selQ) {
@@ -1167,7 +1212,19 @@ public final class Executor {
             out.replaceAll(this::applyDataRuleMask);
         }
         if (out.size() == 1 && (sel.only() || (sel.from() != null && isSingleTarget(sel.from())))) {
+            if (ds.auditSelect() && sel.from() != null) {
+                String tableName = tableName(sel.from());
+                if (tableName != null && !tableName.isBlank()) {
+                    ds.auditLog(session, "SELECT", tableName, null, null, null);
+                }
+            }
             return out.get(0);
+        }
+        if (ds.auditSelect() && sel.from() != null) {
+            String tableName = tableName(sel.from());
+            if (tableName != null && !tableName.isBlank()) {
+                ds.auditLog(session, "SELECT", tableName, null, null, null);
+            }
         }
         return AxonValue.array(out);
     }
@@ -2607,6 +2664,39 @@ return score;
         return AxonValue.nul();
     }
 
+    private AxonValue runCreateTable(Statement.CreateTable ct) {
+        Database db = db();
+        if (ct.ifNotExists() && db.catalog().table(ct.name()) != null) {
+            return AxonValue.nul();
+        }
+        Catalog.TableDef previous = db.catalog().table(ct.name());
+        Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), false);
+        if (previous != null) {
+            def.fields().putAll(previous.fields());
+            def.indexes().putAll(previous.indexes());
+            def.events().putAll(previous.events());
+        }
+        db.catalog().defineTable(def);
+
+        for (Statement.ColumnDef col : ct.columns()) {
+            if ("id".equalsIgnoreCase(col.name())) {
+                continue;
+            }
+            Catalog.FieldDef fd = new Catalog.FieldDef(
+                col.name(),
+                col.type(),
+                false,
+                col.checkExpr(),
+                col.defaultExpr(),
+                col.references()
+            );
+            def.fields().put(col.name(), fd);
+        }
+
+        control(db, ControlCommand.Kind.TABLE, ct.name(), com.axonbase.parser.Render.stmt(ct));
+        return AxonValue.nul();
+    }
+
     private AxonValue runDefineField(DefineField df) {
         Database db = db();
         Catalog.TableDef def = ensureTable(db, df.table());
@@ -2766,6 +2856,102 @@ return score;
         return AxonValue.object(info);
     }
 
+    private AxonValue runDescribeTable(Statement.DescribeTable dt) {
+        Database db = db();
+        Catalog.TableDef def = db.catalog().table(dt.table());
+        if (def == null) throw errorStmt(Messages.get("stmt_table_undefined", dt.table()));
+        List<AxonValue> rows = new ArrayList<>();
+        for (Catalog.FieldDef f : def.fields().values().stream()
+                .sorted(java.util.Comparator.comparing(Catalog.FieldDef::name)).toList()) {
+            Map<String, AxonValue> row = new LinkedHashMap<>();
+            row.put("name", AxonValue.str(def.name()));
+            row.put("schema", AxonValue.str(def.schemafull() ? "SCHEMAFULL" : "SCHEMALESS"));
+            row.put("field", AxonValue.str(f.name()));
+            row.put("type", f.type() == null ? AxonValue.str("any") : AxonValue.str(f.type()));
+            row.put("readonly", AxonValue.bool(f.readonly()));
+            if (f.defaultExpr() != null) {
+                row.put("default", AxonValue.str(com.axonbase.parser.Render.expr(f.defaultExpr())));
+            } else {
+                row.put("default", AxonValue.nul());
+            }
+            if (f.assertExpr() != null) {
+                row.put("assert", AxonValue.str(com.axonbase.parser.Render.expr(f.assertExpr())));
+            } else {
+                row.put("assert", AxonValue.nul());
+            }
+            if (f.references() != null) {
+                row.put("references", AxonValue.str(f.references()));
+            } else {
+                row.put("references", AxonValue.nul());
+            }
+            rows.add(AxonValue.object(row));
+        }
+        if (!def.schemafull()) {
+            Map<String, String> inferred = inferredFields(db, def);
+            for (Map.Entry<String, String> field : inferred.entrySet()) {
+                Map<String, AxonValue> row = new LinkedHashMap<>();
+                row.put("name", AxonValue.str(def.name()));
+                row.put("schema", AxonValue.str("SCHEMALESS"));
+                row.put("field", AxonValue.str(field.getKey()));
+                row.put("type", AxonValue.str(field.getValue()));
+                row.put("readonly", AxonValue.bool(false));
+                row.put("default", AxonValue.nul());
+                row.put("assert", AxonValue.nul());
+                row.put("references", AxonValue.nul());
+                rows.add(AxonValue.object(row));
+            }
+        }
+        rows.sort(java.util.Comparator.comparing(row -> row.asObject().get("field").asString()));
+        if (rows.isEmpty()) {
+            rows.add(AxonValue.object(Map.of(
+                "name", AxonValue.str(def.name()),
+                "schema", AxonValue.str(def.schemafull() ? "SCHEMAFULL" : "SCHEMALESS"),
+                "field", AxonValue.nul(),
+                "type", AxonValue.nul(),
+                "readonly", AxonValue.nul(),
+                "default", AxonValue.nul(),
+                "assert", AxonValue.nul(),
+                "references", AxonValue.nul())));
+        }
+        return AxonValue.array(rows);
+    }
+
+    private Map<String, String> inferredFields(Database db, Catalog.TableDef def) {
+        Map<String, String> fields = new java.util.TreeMap<>();
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + def.name() + "\u0000";
+        for (String key : records(db).keysWithPrefix(prefix)) {
+            Optional<byte[]> raw = records(db).get(key);
+            if (raw.isEmpty()) continue;
+            AxonValue record = decode(raw.get());
+            if (!record.isObject()) continue;
+            for (Map.Entry<String, AxonValue> entry : record.asObject().entrySet()) {
+                if (def.fields().containsKey(entry.getKey())) continue;
+                String type = inferredType(entry.getValue());
+                fields.merge(entry.getKey(), type, (previous, current) ->
+                    previous.equals(current) ? previous : "any");
+            }
+        }
+        return fields;
+    }
+
+    private static String inferredType(AxonValue value) {
+        return switch (value.type()) {
+            case BOOL -> "bool";
+            case NUMBER -> value.isInteger() ? "int" : "number";
+            case STRING -> "string";
+            case DURATION -> "duration";
+            case DATETIME -> "datetime";
+            case UUID -> "uuid";
+            case ARRAY -> "array";
+            case SET -> "set";
+            case OBJECT -> "object";
+            case BYTES -> "bytes";
+            case RECORD_ID -> "record";
+            case TABLE -> "table";
+            case NONE, NULL -> "any";
+        };
+    }
+
     private AxonValue runShowSagaTransaction(ShowSagaTransaction st) {
         // Query the saga ledger
         AxonValue saga = ds.execute(
@@ -2852,7 +3038,8 @@ return score;
 
     private AxonValue runCreateDataRule(Statement.CreateDataRule cd) {
         Database db = db();
-        db.catalog().defineDataRule(new Catalog.DataRuleDef(cd.name(), cd.predicate(), cd.maskPatterns()));
+        Map<String, Expr> injections = extractInjections(cd.predicate());
+        db.catalog().defineDataRule(new Catalog.DataRuleDef(cd.name(), cd.predicate(), cd.maskPatterns(), injections));
         control(db, ControlCommand.Kind.TABLE, cd.name(), com.axonbase.parser.Render.stmt(cd));
         return AxonValue.nul();
     }
@@ -2861,6 +3048,19 @@ return score;
         Database db = db();
         if (!db.catalog().removeDataRule(dr.name())) {
             throw errorStmt(Messages.get("stmt_data_rule_missing", dr.name()));
+        }
+        return AxonValue.nul();
+    }
+
+    private AxonValue runRemoveTable(Statement.RemoveTable rt) {
+        Database db = db();
+        String table = rt.name();
+        if (!db.catalog().removeTable(table)) {
+            throw errorStmt(Messages.get("stmt_table_undefined", table));
+        }
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        for (String key : records(db).keysWithPrefix(prefix)) {
+            records(db).delete(key);
         }
         return AxonValue.nul();
     }
@@ -2907,6 +3107,52 @@ return score;
             return java.util.Arrays.asList(rules.asString().split(","));
         }
         return List.of();
+    }
+
+    /**
+     * Extrai mapeamentos de injeção do predicado de uma data rule.
+     * Reconhece padrões {@code campo = $auth.campo} e {@code campo = literal}.
+     */
+    private Map<String, Expr> extractInjections(Expr predicate) {
+        Map<String, Expr> injections = new java.util.LinkedHashMap<>();
+        extractEqInjection(predicate, injections);
+        return injections;
+    }
+
+    private void extractEqInjection(Expr expr, Map<String, Expr> out) {
+        if (expr instanceof Expr.Binary b && b.op() == Expr.BinaryOp.EQ) {
+            if (b.left() instanceof Expr.Ident id) {
+                out.putIfAbsent(id.name(), b.right());
+            }
+        } else if (expr instanceof Expr.Binary b && b.op() == Expr.BinaryOp.AND) {
+            extractEqInjection(b.left(), out);
+            extractEqInjection(b.right(), out);
+        }
+    }
+
+    /** Coleta os pares (campo, expr) a injetar do usuário autenticado. */
+    private Map<String, Expr> dataRuleInjections() {
+        AxonValue auth = session.auth();
+        if (auth == null || !auth.isObject()) return Map.of();
+        Database db = db();
+        Map<String, Expr> all = new java.util.LinkedHashMap<>();
+        for (String name : dataRuleNames(auth)) {
+            Catalog.DataRuleDef def = db.catalog().dataRule(name);
+            if (def != null) {
+                all.putAll(def.injections());
+            }
+        }
+        return all;
+    }
+
+    /** Injeta nos campos do novo registro os valores mapeados pelas data rules do usuário. */
+    private void injectDataRuleFields(Map<String, AxonValue> obj) {
+        for (var entry : dataRuleInjections().entrySet()) {
+            AxonValue value = eval(entry.getValue());
+            if (value != null && !value.isNone()) {
+                obj.put(entry.getKey(), value);
+            }
+        }
     }
 
     /** Aplica mascaramento nos campos do resultado conforme os padrões das regras do usuário. */
@@ -3023,12 +3269,16 @@ return score;
         if (target instanceof Expr.Qualified q) {
             String ns = session.namespace();
             if (ns == null) return List.of();
-            Database targetDb = ds.ensureDatabase(session, ns, q.link());
-            String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + q.table() + "\u0000";
+            String table = q.link().equals(ns) ? q.table() : q.link();
+            Database targetDb = db();
+            if (!q.link().equals(ns)) {
+                targetDb = ds.ensureDatabase(session, ns, q.link());
+            }
+            String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + table + "\u0000";
             List<RecordId> out = new ArrayList<>();
             for (String k : records(targetDb).keysWithPrefix(prefix)) {
                 String keyPart = k.substring(prefix.length());
-                out.add(new RecordId(q.table(), parseKey(keyPart)));
+                out.add(new RecordId(table, parseKey(keyPart)));
             }
             return out;
         }
@@ -3087,6 +3337,11 @@ return score;
             return id.name();
         }
         if (e instanceof Expr.Idiom i) {
+            for (int idx = i.parts().size() - 1; idx >= 0; idx--) {
+                if (i.parts().get(idx) instanceof Expr.Part.Field f) {
+                    return f.name();
+                }
+            }
             return idiomToString(i);
         }
         return "field";
@@ -3130,9 +3385,13 @@ return score;
         return switch (e) {
             case Expr.Literal l -> l.value();
             case Expr.Ident id -> {
+                String name = id.name();
+                if ("current_timestamp".equalsIgnoreCase(name) || "now".equalsIgnoreCase(name)) {
+                    yield AxonValue.datetime(java.time.Instant.now());
+                }
                 Database db = db();
-                Catalog.TableDef def = db.catalog().table(id.name());
-                yield AxonValue.table(def != null ? def.name() : id.name());
+                Catalog.TableDef def = db.catalog().table(name);
+                yield AxonValue.table(def != null ? def.name() : name);
             }
             case Expr.Qualified q -> AxonValue.table(q.table());
             case Expr.Param p -> session.vars().getOrMissing(p.name());
@@ -3179,11 +3438,13 @@ return score;
         }
         if (base instanceof Expr.Ident id) {
             if (id.name().equals("*")) {
-                // o id do documento em memória pode ter sido serializado como texto,
-                // por isso preferimos o RecordId tipado que o Document já carrega
                 return ridAsValue(doc.id());
             }
-            return fieldValue(doc.current(), id.name());
+            AxonValue fv = fieldValue(doc.current(), id.name());
+            if (!fv.isNone() && !fv.isNull()) {
+                return fv;
+            }
+            return doc.current();
         }
         return eval(base);
     }
@@ -3480,9 +3741,22 @@ return score;
     }
 
     private boolean equal(AxonValue a, AxonValue b) {
-        // número 3 == float 3.0
         if (a.isNumber() && b.isNumber()) {
             return a.compareTo(b) == 0;
+        }
+        if (a.isNumber() && b.isString()) {
+            try {
+                return a.compareTo(AxonValue.num(new java.math.BigDecimal(b.asString()))) == 0;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        if (a.isString() && b.isNumber()) {
+            try {
+                return new java.math.BigDecimal(a.asString()).compareTo(b.asDecimal()) == 0;
+            } catch (NumberFormatException e) {
+                return false;
+            }
         }
         return a.equals(b);
     }
@@ -4586,6 +4860,46 @@ for (int level = 0; level <= top; level++) {
         }
         obj.put("events", AxonValue.array(eventsArr));
         return new Document(new RecordId(VIRTUAL_TABLE, AxonValue.str(auditCase.hash())), AxonValue.object(obj));
+    }
+
+    // ---- AUDIT_LOG virtual table ----
+
+    private boolean isAuditLogTable(String table) {
+        return "AUDIT_LOG".equalsIgnoreCase(table);
+    }
+
+    private AxonValue runSelectAuditLog(Statement.Select sel) {
+        Database db = db();
+        List<AxonValue> entries = ds.readAuditEntries(db.ns(), db.db());
+        java.util.Collections.reverse(entries);
+        List<Document> docs = new java.util.ArrayList<>();
+        for (AxonValue entry : entries) {
+            AxonValue id = entry.asObject().get("id");
+            String idStr = id != null ? id.asString() : "0";
+            RecordId recordId = new RecordId("audit_log", AxonValue.str(idStr));
+            docs.add(new Document(recordId, entry));
+        }
+        if (sel.cond() != null) {
+            docs.removeIf(doc -> !truthy(evalCond(sel.cond(), doc)));
+        }
+        if (!sel.orders().isEmpty()) {
+            var cmp = orderComparator(sel.orders());
+            docs.sort(cmp);
+        }
+        int start = sel.start() != null ? (int) eval(sel.start()).asLong() : 0;
+        int limit = sel.limit() != null ? (int) eval(sel.limit()).asLong() : docs.size();
+        int stop = Math.min(docs.size(), start + limit);
+        List<AxonValue> out = new ArrayList<>();
+        for (int i = Math.min(start, docs.size()); i < stop; i++) {
+            out.add(sel.only() ? docs.get(i).current() : project(sel, docs.get(i)));
+        }
+        if (!sel.only()) {
+            out.replaceAll(this::applyDataRuleMask);
+        }
+        if (out.size() == 1 && (sel.only() || isSingleTarget(sel.from()))) {
+            return out.get(0);
+        }
+        return AxonValue.array(out);
     }
 
     // ---- AI Audit SQL Interception ----

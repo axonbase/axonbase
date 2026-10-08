@@ -8,16 +8,18 @@ import java.util.HashMap;
 import java.util.Map;
 
 public record ServerConfig(String path, String secret, String user, String password,
-                             int port, String bind, boolean requireAuth, String clusterId,
-                             String nodeId, String raftBind, String raftPeers,
-                             long queryTimeout, long txnTimeout, int rateLimit,
-                             String corsOrigins, String tlsCert, String tlsKey, String tlsCa,
-                             long shutdownTimeout, int httpThreads, int httpQueue,
-                            String s3Endpoint, String s3Bucket, String s3Prefix,
-                            String s3Access, String s3Secret, long s3Interval,
-                            String s3EncryptKey, int s3Retention,
-                            int plainPort, String lang,
-                            String aiProvider, String aiModel, String aiApiKey, String aiBaseUrl) {
+                              int port, String bind, boolean requireAuth, String clusterId,
+                              String nodeId, String raftBind, String raftPeers,
+                              long queryTimeout, long txnTimeout, int rateLimit,
+                              String corsOrigins, String tlsCert, String tlsKey, String tlsCa,
+                              long shutdownTimeout, int httpThreads, int httpQueue,
+                             String s3Endpoint, String s3Bucket, String s3Prefix,
+                             String s3Access, String s3Secret, long s3Interval,
+                             String s3EncryptKey, int s3Retention,
+                             int plainPort, String lang,
+                             String aiProvider, String aiModel, String aiApiKey, String aiBaseUrl,
+                             boolean auditEnabled, String auditUserFrom,
+                             boolean auditSelect, int auditMaxBody) {
 
     public static final String DEFAULT_FILE = "axonbase.conf";
 
@@ -28,7 +30,8 @@ public record ServerConfig(String path, String secret, String user, String passw
             10000L, 4, 100,
             "", "", "", "", "", 0L,
             "", 10, 0, "pt-BR",
-            "", "", "", "");
+            "", "", "", "",
+            false, "auth", false, 65536);
     }
 
     public static ServerConfig load(Path file, Map<String, String> env) throws IOException {
@@ -36,8 +39,8 @@ public record ServerConfig(String path, String secret, String user, String passw
         return new ServerConfig(
             envOr(env, "AXON_PATH", base.path()),
             envOr(env, "AXON_SECRET", base.secret()),
-            envOr(env, "AXON_USER", base.user()),
-            envOr(env, "AXON_PASS", base.password()),
+            base.user(),
+            base.password(),
             portOr(env.get("AXON_PORT"), base.port()),
             envOr(env, "AXON_BIND", base.bind()),
             boolOr(env.get("AXON_REQUIRE_AUTH"), base.requireAuth()),
@@ -68,15 +71,19 @@ public record ServerConfig(String path, String secret, String user, String passw
             envOr(env, "AXON_AI_PROVIDER", base.aiProvider()),
             envOr(env, "AXON_AI_MODEL", base.aiModel()),
             envOr(env, "AXON_AI_API_KEY", base.aiApiKey()),
-            envOr(env, "AXON_AI_BASE_URL", base.aiBaseUrl()));
+            envOr(env, "AXON_AI_BASE_URL", base.aiBaseUrl()),
+            boolOr(env.get("AXON_AUDIT_ENABLED"), base.auditEnabled()),
+            envOr(env, "AXON_AUDIT_USER_FROM", base.auditUserFrom()),
+            boolOr(env.get("AXON_AUDIT_SELECT"), base.auditSelect()),
+            intOr(env.get("AXON_AUDIT_MAX_BODY"), base.auditMaxBody()));
     }
 
     private static ServerConfig fromMap(Map<String, String> values, ServerConfig defaults) {
         return new ServerConfig(
             value(values, "path", defaults.path()),
             value(values, "secret", defaults.secret()),
-            value(values, "user", defaults.user()),
-            value(values, "pass", value(values, "password", defaults.password())),
+            defaults.user(),
+            defaults.password(),
             portOr(values.get("port"), defaults.port()),
             value(values, "bind", defaults.bind()),
             boolOr(values.get("require_auth"), defaults.requireAuth()),
@@ -107,7 +114,11 @@ public record ServerConfig(String path, String secret, String user, String passw
             value(values, "ai_provider", defaults.aiProvider()),
             value(values, "ai_model", defaults.aiModel()),
             value(values, "ai_api_key", defaults.aiApiKey()),
-            value(values, "ai_base_url", defaults.aiBaseUrl()));
+            value(values, "ai_base_url", defaults.aiBaseUrl()),
+            boolOr(values.get("audit_enabled"), defaults.auditEnabled()),
+            value(values, "audit_user_from", defaults.auditUserFrom()),
+            boolOr(values.get("audit_select"), defaults.auditSelect()),
+            intOr(values.get("audit_max_body"), defaults.auditMaxBody()));
     }
 
     private static Map<String, String> read(Path file) throws IOException {

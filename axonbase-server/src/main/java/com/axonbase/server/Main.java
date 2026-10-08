@@ -46,8 +46,6 @@ public final class Main {
         Messages.setLanguage(config.lang());
         String path = config.path();
         String secret = config.secret();
-        String user = config.user();
-        String pass = config.password();
         int port = config.port();
         String bind = config.bind();
         boolean requireAuth = config.requireAuth();
@@ -56,8 +54,6 @@ public final class Main {
             switch (args[i]) {
                 case "--path", "-p" -> path = args[++i];
                 case "--secret" -> secret = args[++i];
-                case "--user", "-u" -> user = args[++i];
-                case "--pass", "--password" -> pass = args[++i];
                 case "--port" -> port = Integer.parseInt(args[++i]);
                 case "--bind", "-b" -> bind = args[++i];
                 case "--config" -> i++;
@@ -67,7 +63,7 @@ public final class Main {
         }
 
         // Rebuild the config with CLI overrides while preserving all other settings.
-        config = new ServerConfig(path, secret, user, pass, port, bind, requireAuth,
+        config = new ServerConfig(path, secret, "root", "root", port, bind, requireAuth,
             config.clusterId(), config.nodeId(), config.raftBind(), config.raftPeers(),
             config.queryTimeout(), config.txnTimeout(), config.rateLimit(),
             config.corsOrigins(), config.tlsCert(), config.tlsKey(), config.tlsCa(),
@@ -76,7 +72,9 @@ public final class Main {
             config.s3Access(), config.s3Secret(), config.s3Interval(),
             config.s3EncryptKey(), config.s3Retention(),
             config.plainPort(), config.lang(),
-            config.aiProvider(), config.aiModel(), config.aiApiKey(), config.aiBaseUrl());
+            config.aiProvider(), config.aiModel(), config.aiApiKey(), config.aiBaseUrl(),
+            config.auditEnabled(), config.auditUserFrom(),
+            config.auditSelect(), config.auditMaxBody());
 
         KvBackend backend = switch (path) {
             case "memory" -> new MemoryBackend();
@@ -88,6 +86,8 @@ public final class Main {
         Datastore ds = new Datastore(backend);
         ds.aiProvider(new com.axonbase.core.audit.AiProviderClient(
             config.aiProvider(), config.aiModel(), config.aiApiKey(), config.aiBaseUrl()));
+        ds.auditConfig(config.auditEnabled(), config.auditUserFrom(),
+            config.auditSelect(), config.auditMaxBody());
 
         // Try S3 restore BEFORE creating default databases (they would make the
         // backend non-empty and skip the restore).

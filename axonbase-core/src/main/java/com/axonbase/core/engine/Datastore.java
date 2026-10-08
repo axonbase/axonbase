@@ -80,6 +80,12 @@ public final class Datastore {
     private final Deque<String> locallyOriginated = new ArrayDeque<>();
     private static final int ORIGINATED_MEMORY = 256;
 
+    // Operation audit configuration
+    private boolean auditEnabled;
+    private String auditUserFrom = "auth";
+    private boolean auditSelect;
+    private int auditMaxBody = 65536;
+
     public Datastore(KvBackend backend) {
         this.backend = backend != null ? backend : new MemoryBackend();
         this.controlStore = new ControlStore(this.backend);
@@ -104,6 +110,112 @@ public final class Datastore {
 
     public AiProviderClient aiProvider() {
         return aiProvider;
+    }
+
+    public void auditConfig(boolean enabled, String userFrom, boolean select, int maxBody) {
+        this.auditEnabled = enabled;
+        this.auditUserFrom = userFrom != null ? userFrom : "auth";
+        this.auditSelect = select;
+        this.auditMaxBody = maxBody > 0 ? maxBody : 65536;
+    }
+
+    public boolean auditEnabled() { return auditEnabled; }
+    public boolean auditSelect() { return auditSelect; }
+    public int auditMaxBody() { return auditMaxBody; }
+    public String auditUserFrom() { return auditUserFrom; }
+
+    /** Retorna as entradas de auditoria para um namespace e banco. */
+    public List<AxonValue> readAuditEntries(String ns, String db) {
+        String prefix = "!audit_op|" + (ns == null ? "" : ns) + "|" + (db == null ? "" : db) + "|";
+        List<AxonValue> entries = new ArrayList<>();
+        for (String key : backend.keysWithPrefix(prefix)) {
+            Optional<byte[]> raw = backend.get(key);
+            if (raw.isPresent()) {
+                try {
+                    entries.add(AxonJson.decode(raw.get()));
+                } catch (Exception e) {
+                    // skip corrupted entries
+                }
+            }
+        }
+        return entries;
+    }
+
+    public void auditLog(Session session, String action, String table, RecordId rid,
+                          AxonValue before, AxonValue after) {
+        if (!auditEnabled) return;
+        String ns = session.namespace();
+        String dbName = session.database();
+        if (ns == null || ns.isBlank() || dbName == null || dbName.isBlank()) return;
+        String user;
+        if ("auth".equals(auditUserFrom)) {
+            user = sessionUserId(session).asString();
+        } else if (auditUserFrom != null && auditUserFrom.startsWith("session_var:")) {
+            String varName = auditUserFrom.substring(12);
+            AxonValue v = session.vars().get(varName);
+            user = v != null && v.isString() ? v.asString() : "unknown";
+        } else {
+            user = sessionUserId(session).asString();
+        }
+        if (user == null || user.isBlank()) user = "unknown";
+        try {
+            String prefix = "!audit_op|" + ns + "|" + dbName + "|";
+            long id = nextAuditId(prefix);
+            while (true) {
+                Map<String, AxonValue> entry = new LinkedHashMap<>();
+                entry.put("id", AxonValue.str(String.format("%010d", id)));
+                entry.put("ns", AxonValue.str(ns));
+                entry.put("db", AxonValue.str(dbName));
+                entry.put("user", AxonValue.str(user));
+                entry.put("action", AxonValue.str(action));
+                entry.put("table", AxonValue.str(table));
+                entry.put("rid", ridAsValue(rid));
+                entry.put("ts", AxonValue.num(System.currentTimeMillis()));
+                if (before != null) entry.put("before", truncatePayload(before, auditMaxBody));
+                if (after != null) entry.put("after", truncatePayload(after, auditMaxBody));
+                String key = prefix + String.format("%010d", id);
+                if (backend.putIfAbsent(key, AxonJson.encode(AxonValue.object(entry)))) break;
+                id++;
+            }
+        } catch (Exception e) {
+            System.err.println("{\"event\":\"audit_log_failed\",\"error\":\"" +
+                e.getMessage() + "\"}");
+        }
+    }
+
+    private long nextAuditId(String prefix) {
+        long lastId = 0;
+        for (String key : backend.keysWithPrefix(prefix)) {
+            try {
+                lastId = Math.max(lastId, Long.parseLong(key.substring(prefix.length())));
+            } catch (NumberFormatException ignored) {
+                // Ignore malformed keys outside the audit sequence format.
+            }
+        }
+        return lastId + 1;
+    }
+
+    private static AxonValue sessionUserId(Session session) {
+        AxonValue auth = session.auth();
+        if (auth != null && auth.isObject()) {
+            AxonValue user = auth.asObject().get("user");
+            if (user != null && user.isString()) return user;
+            AxonValue id = auth.asObject().get("id");
+            if (id != null && id.isString()) return id;
+        }
+        return AxonValue.str("anonymous");
+    }
+
+    private static AxonValue ridAsValue(RecordId rid) {
+        return rid == null ? AxonValue.nul()
+            : AxonValue.str(rid.table() + ":" + (rid.key() instanceof AxonValue kv ? kv.asString() : String.valueOf(rid.key())));
+    }
+
+    private static AxonValue truncatePayload(AxonValue value, int maxBytes) {
+        if (value == null) return AxonValue.nul();
+        byte[] encoded = AxonJson.encode(value);
+        if (encoded.length <= maxBytes) return value;
+        return AxonValue.str(new String(encoded, 0, maxBytes, StandardCharsets.UTF_8) + "...");
     }
 
     /** Executes an administrative JKS registration without persisting its secret. */

@@ -546,6 +546,10 @@ public final class RpcDispatcher {
                     var verified = certificateChallenges.complete(new CertificateChallengeService.Challenge(
                         completion.id(), completion.challenge(), Instant.EPOCH), completion.store(),
                         session.namespace(), session.database(), completion.chain(), completion.signature(), trustStore);
+                    long remainingSec = auth.remainingCooldown(completion.user(), completion.store());
+                    if (remainingSec > 0) {
+                        throw new IllegalArgumentException(Messages.get("cert_rate_limited", remainingSec));
+                    }
                     result = AxonValue.str(auth.issueTemporaryCredential(completion.user(), completion.store(), verified.fingerprint()));
                 } catch (RuntimeException e) {
                     error = e.getMessage();

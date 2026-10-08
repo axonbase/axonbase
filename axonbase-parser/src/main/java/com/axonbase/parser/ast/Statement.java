@@ -77,6 +77,17 @@ public sealed interface Statement {
             implements Statement {
     }
 
+    record ColumnDef(String name, String type, boolean primaryKey, boolean notNull,
+                     Expr defaultExpr, Expr checkExpr, String references) {
+    }
+
+    record CreateTable(String name, boolean ifNotExists, boolean schemafull,
+                       List<ColumnDef> columns) implements Statement {
+        public CreateTable {
+            columns = columns == null ? List.of() : List.copyOf(columns);
+        }
+    }
+
     record DefineField(String name, String table, String type, Expr assertExpr, boolean readonly,
                        Expr valueExpr, Expr defaultExpr, String references) implements Statement {
     }
@@ -172,6 +183,10 @@ public sealed interface Statement {
     record DescribeSaga(String name) implements Statement {
     }
 
+    /** DESCRIBE &lt;tabela&gt;: nome, modo de schema e campos da tabela. */
+    record DescribeTable(String table) implements Statement {
+    }
+
     /** SHOW SAGA TRANSACTION &lt;nome&gt; 'corr-id': ledger da transação. */
     record ShowSagaTransaction(String name, String correlationId) implements Statement {
     }
@@ -247,6 +262,10 @@ public sealed interface Statement {
     }
 
     record DropAiAudit(String name) implements Statement {
+    }
+
+    /** REMOVE TABLE {@code <nome>} */
+    record RemoveTable(String name) implements Statement {
     }
 
     record ShowAiAudit(String name) implements Statement {

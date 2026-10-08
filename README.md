@@ -103,6 +103,24 @@ await axon.create('person', { name: 'Ana', age: 30 });
 const rows = await axon.select('person');
 ```
 
+## Inspect a table
+
+Use `DESCRIBE <table>` to inspect a table definition. The result is a row set that JDBC clients can display directly. Every row contains the table name, its schema mode, and field metadata.
+
+```sql
+DESCRIBE person;
+```
+
+For a `SCHEMAFULL` table, `DESCRIBE` returns fields declared with `DEFINE FIELD`. For a `SCHEMALESS` table, it also infers fields and types from stored documents. Declared fields take precedence over inferred metadata.
+
+```text
+name    schema      field         type
+person  SCHEMALESS  age           int
+person  SCHEMALESS  id            string
+person  SCHEMALESS  municipio_id  string
+person  SCHEMALESS  name          string
+```
+
 ## Use cases
 
 - **Financial services**: sagas for distributed ledger transactions, Data Rules for PII masking, AI Audit for Bacen/LGPD compliance, ICP-Brasil certificates

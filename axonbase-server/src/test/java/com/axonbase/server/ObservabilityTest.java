@@ -119,10 +119,11 @@ class ObservabilityTest {
     void rateLimitExcedeDevolve429() throws Exception {
         Datastore ds = Datastore.memory();
         ds.createDatabase("test", "dev");
-        ServerConfig cfg = new ServerConfig("memory", "secret", "root", "root",
-            0, "127.0.0.1", false, "", "", "", "",
-            30000L, 300000L, 1, "", "", "", "",
-            10000L, 4, 100, "", "", "", "", "", 0L, "", 10, 0, "pt-BR", "", "", "", "");
+ServerConfig cfg = new ServerConfig("memory", "secret", "root", "root",
+             0, "127.0.0.1", false, "", "", "", "",
+             30000L, 300000L, 1, "", "", "", "",
+             10000L, 4, 100, "", "", "", "", "", 0L, "", 10, 0, "pt-BR", "", "", "", "",
+             false, "auth", false, 65536);
         AxonServer srv = AxonServer.start(ds, "secret", cfg);
         try {
             int port = srv.port();
@@ -151,10 +152,11 @@ class ObservabilityTest {
     @Test
     void corsHeadersPresentesQuandoConfigurado() throws Exception {
         Datastore ds = Datastore.memory();
-        ServerConfig cfg = new ServerConfig("memory", "secret", "root", "root",
-            0, "127.0.0.1", false, "", "", "", "",
-            30000L, 300000L, 0, "http://example.com", "", "", "",
-            10000L, 4, 100, "", "", "", "", "", 0L, "", 10, 0, "pt-BR", "", "", "", "");
+ServerConfig cfg = new ServerConfig("memory", "secret", "root", "root",
+             0, "127.0.0.1", false, "", "", "", "",
+             30000L, 300000L, 0, "http://example.com", "", "", "",
+             10000L, 4, 100, "", "", "", "", "", 0L, "", 10, 0, "pt-BR", "", "", "", "",
+             false, "auth", false, 65536);
         AxonServer srv = AxonServer.start(ds, "secret", cfg);
         try {
             int port = srv.port();

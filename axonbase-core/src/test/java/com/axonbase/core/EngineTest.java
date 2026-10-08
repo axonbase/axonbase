@@ -3,6 +3,7 @@ package com.axonbase.core;
 import com.axonbase.common.AxonError;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.value.AxonValue;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -186,6 +187,72 @@ class EngineTest {
     }
 
     @Test
+    void updateComAliasDataGrip() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE person CONTENT { name: \"Ana\", age: 30 }", s, null);
+        ds.execute("CREATE person CONTENT { name: \"Bia\" }", s, null);
+        ds.execute("UPDATE test.person t SET t.name = \"Ana 2\" WHERE t.name = \"Ana\" AND t.age = 30", s, null);
+        AxonValue rows = ds.execute("SELECT VALUE name FROM person WHERE name = \"Ana 2\"", s, null);
+        assertEquals(1, rows.asArray().size());
+        assertEquals("Ana 2", rows.asArray().get(0).asString());
+    }
+
+    @Test
+    void removeTableRemoveTabelaERegistros() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE person CONTENT { name: \"Ana\" }", s, null);
+        assertEquals(1, ds.execute("SELECT * FROM person", s, null).asArray().size());
+        ds.execute("REMOVE TABLE person", s, null);
+        assertEquals(0, ds.execute("SELECT * FROM person", s, null).asArray().size());
+    }
+
+    @Test
+    void dropTableRemoveTabelaERegistros() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE person CONTENT { name: \"Ana\" }", s, null);
+        assertEquals(1, ds.execute("SELECT * FROM person", s, null).asArray().size());
+        ds.execute("DROP TABLE person", s, null);
+        assertEquals(0, ds.execute("SELECT * FROM person", s, null).asArray().size());
+    }
+
+    @Test
+    void createTableEInsertValuesSqlFirst() {
+        Datastore ds = ns();
+        Session s = session();
+
+        // 1. CREATE TABLE com SQL padrão
+        ds.execute("CREATE TABLE customer ("
+            + "id VARCHAR(64) PRIMARY KEY, "
+            + "name VARCHAR(255) NOT NULL, "
+            + "age INT DEFAULT 18 CHECK (age >= 0), "
+            + "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            + ") WITH (SCHEMA = 'FULL')", s, null);
+
+        // 2. DESCRIBE deve mostrar os campos criados
+        AxonValue desc = ds.execute("DESCRIBE customer", s, null);
+        assertTrue(desc.isArray());
+        assertTrue(desc.asArray().size() >= 3);
+
+        // 3. INSERT INTO customer (cols...) VALUES (...)
+        ds.execute("INSERT INTO customer (id, name, age) VALUES ('c_1', 'Alice', 30), ('c_2', 'Bob', 25)", s, null);
+
+        // 4. SELECT com WHERE e ORDER BY
+        AxonValue rows = ds.execute("SELECT name, age FROM customer ORDER BY age DESC", s, null);
+        assertEquals(2, rows.asArray().size());
+        assertEquals("Alice", rows.asArray().get(0).asObject().get("name").asString());
+        assertEquals(30, rows.asArray().get(0).asObject().get("age").asLong());
+        assertEquals("Bob", rows.asArray().get(1).asObject().get("name").asString());
+
+        // 5. Teste de violacao de CHECK (age >= 0)
+        assertThrows(Exception.class, () -> {
+            ds.execute("INSERT INTO customer (id, name, age) VALUES ('c_3', 'Invalido', -5)", s, null);
+        });
+    }
+
+    @Test
     void transactionCancelReverte() {
         Datastore ds = ns();
         Session s = session();
@@ -234,20 +301,262 @@ class EngineTest {
     }
 
     @Test
+    void auditCriaEntradasParaCreateUpdateDelete() {
+        Datastore ds = ns();
+        ds.auditConfig(true, "auth", false, 65536);
+        Session s = session();
+        s.auth(AxonValue.object(java.util.Map.of("id", AxonValue.str("alice"))));
+
+        ds.execute("CREATE person CONTENT { name: \"Ana\", age: 30 }", s, null);
+        ds.execute("CREATE person CONTENT { name: \"Bob\", age: 25 }", s, null);
+        ds.execute("UPDATE person SET age = 31 WHERE name = \"Ana\"", s, null);
+        ds.execute("DELETE person WHERE name = \"Bob\"", s, null);
+
+        List<AxonValue> entries = ds.readAuditEntries("test", "dev");
+        assertEquals(4, entries.size());
+
+        // CREATE first record
+        AxonValue create1 = entries.get(0);
+        assertEquals("alice", create1.asObject().get("user").asString());
+        assertEquals("CREATE", create1.asObject().get("action").asString());
+        assertEquals("person", create1.asObject().get("table").asString());
+        assertTrue(create1.asObject().get("before") == null);
+        assertEquals("Ana", create1.asObject().get("after").asObject().get("name").asString());
+
+        // CREATE second record
+        AxonValue create2 = entries.get(1);
+        assertEquals("CREATE", create2.asObject().get("action").asString());
+
+        // UPDATE
+        AxonValue update = entries.get(2);
+        assertEquals("UPDATE", update.asObject().get("action").asString());
+        assertEquals(30L, update.asObject().get("before").asObject().get("age").asLong());
+        assertEquals(31L, update.asObject().get("after").asObject().get("age").asLong());
+
+        // DELETE
+        AxonValue delete = entries.get(3);
+        assertEquals("DELETE", delete.asObject().get("action").asString());
+        assertEquals("Bob", delete.asObject().get("before").asObject().get("name").asString());
+        assertTrue(delete.asObject().get("after") == null);
+    }
+
+    @Test
+    void auditNaoCriaEntradasQuandoDesabilitado() {
+        Datastore ds = ns();
+        ds.auditConfig(false, "auth", false, 65536);
+        Session s = session();
+        s.auth(AxonValue.object(java.util.Map.of("id", AxonValue.str("alice"))));
+
+        ds.execute("CREATE person CONTENT { name: \"Ana\" }", s, null);
+        List<AxonValue> entries = ds.readAuditEntries("test", "dev");
+        assertEquals(0, entries.size());
+    }
+
+    @Test
+    void auditCriaSelectQuandoConfigurado() {
+        Datastore ds = ns();
+        ds.auditConfig(true, "auth", true, 65536);
+        Session s = session();
+        s.auth(AxonValue.object(java.util.Map.of("id", AxonValue.str("alice"))));
+
+        ds.execute("CREATE person CONTENT { name: \"Ana\" }", s, null);
+        ds.execute("SELECT * FROM person", s, null);
+
+        List<AxonValue> entries = ds.readAuditEntries("test", "dev");
+        assertEquals(2, entries.size());
+        assertEquals("SELECT", entries.get(1).asObject().get("action").asString());
+    }
+
+    @Test
+    void auditMantemEntradasDepoisDoReinicio() {
+        var backend = new com.axonbase.core.storage.MemoryBackend();
+        Session s = session();
+
+        Datastore first = new Datastore(backend);
+        first.createDatabase("test", "dev");
+        first.auditConfig(true, "auth", false, 65536);
+        first.execute("CREATE person CONTENT { name: \"Ana\" }", s, null);
+
+        Datastore restarted = new Datastore(backend);
+        restarted.createDatabase("test", "dev");
+        restarted.auditConfig(true, "auth", false, 65536);
+        restarted.execute("CREATE person CONTENT { name: \"Bia\" }", s, null);
+
+        List<AxonValue> entries = restarted.readAuditEntries("test", "dev");
+        assertEquals(2, entries.size());
+        assertEquals("0000000001", entries.get(0).asObject().get("id").asString());
+        assertEquals("0000000002", entries.get(1).asObject().get("id").asString());
+    }
+
+    @Test
+    void auditLogConsultaViaVirtualTable() {
+        Datastore ds = ns();
+        ds.auditConfig(true, "auth", false, 65536);
+        Session s = session();
+        s.auth(AxonValue.object(java.util.Map.of("id", AxonValue.str("alice"))));
+
+        ds.execute("CREATE person CONTENT { name: \"Ana\", age: 30 }", s, null);
+        ds.execute("UPDATE person SET age = 31 WHERE name = \"Ana\"", s, null);
+
+        AxonValue rows = ds.execute("SELECT * FROM AUDIT_LOG", s, null);
+        assertTrue(rows.isArray());
+        assertEquals(2, rows.asArray().size());
+
+        // AUDIT_LOG returns newest first
+        AxonValue first = rows.asArray().get(0);
+        assertEquals("alice", first.asObject().get("user").asString());
+        assertEquals("UPDATE", first.asObject().get("action").asString());
+
+        AxonValue second = rows.asArray().get(1);
+        assertEquals("CREATE", second.asObject().get("action").asString());
+    }
+
+    @Test
+    void auditLogFiltraPorAcao() {
+        Datastore ds = ns();
+        ds.auditConfig(true, "auth", false, 65536);
+        Session s = session();
+        s.auth(AxonValue.object(java.util.Map.of("id", AxonValue.str("alice"))));
+
+        ds.execute("CREATE person CONTENT { name: \"Ana\" }", s, null);
+        ds.execute("UPDATE person SET name = \"Ana 2\" WHERE name = \"Ana\"", s, null);
+        ds.execute("DELETE person WHERE name = \"Ana 2\"", s, null);
+
+        AxonValue creates = ds.execute("SELECT * FROM AUDIT_LOG WHERE action = \"CREATE\"", s, null);
+        assertEquals(1, creates.asArray().size());
+        assertEquals("Ana", creates.asArray().get(0).asObject().get("after").asObject().get("name").asString());
+
+        AxonValue deletes = ds.execute("SELECT * FROM AUDIT_LOG WHERE action = \"DELETE\"", s, null);
+        assertEquals(1, deletes.asArray().size());
+    }
+
+    @Test
+    void describeTableMostraCamposETipos() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("DEFINE TABLE person SCHEMAFULL", s, null);
+        ds.execute("DEFINE FIELD name ON TABLE person TYPE string", s, null);
+        ds.execute("DEFINE FIELD age ON TABLE person TYPE int DEFAULT 18", s, null);
+        ds.execute("DEFINE FIELD email ON TABLE person TYPE string ASSERT $value CONTAINS \"@\"", s, null);
+
+        AxonValue desc = ds.execute("DESCRIBE person", s, null);
+        assertTrue(desc.isArray());
+        assertEquals(3, desc.asArray().size());
+
+        // Fields are sorted alphabetically: age, email, name
+        AxonValue ageField = desc.asArray().get(0);
+        assertEquals("person", ageField.asObject().get("name").asString());
+        assertEquals("SCHEMAFULL", ageField.asObject().get("schema").asString());
+        assertEquals("age", ageField.asObject().get("field").asString());
+        assertEquals("int", ageField.asObject().get("type").asString());
+        assertEquals("18", ageField.asObject().get("default").asString());
+
+        AxonValue emailField = desc.asArray().get(1);
+        assertEquals("email", emailField.asObject().get("field").asString());
+        assertTrue(emailField.asObject().get("assert").isString());
+
+        AxonValue nameField = desc.asArray().get(2);
+        assertEquals("name", nameField.asObject().get("field").asString());
+        assertEquals("string", nameField.asObject().get("type").asString());
+    }
+
+    @Test
+    void describeTableMostraSchemaLessMesmoSemCamposDefinidos() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE person CONTENT { name: \"Ana\", age: 30 }", s, null);
+
+        AxonValue desc = ds.execute("DESCRIBE person", s, null);
+
+        assertTrue(desc.isArray());
+        assertEquals(3, desc.asArray().size());
+        assertEquals("age", desc.asArray().get(0).asObject().get("field").asString());
+        assertEquals("int", desc.asArray().get(0).asObject().get("type").asString());
+        assertEquals("id", desc.asArray().get(1).asObject().get("field").asString());
+        assertEquals("string", desc.asArray().get(1).asObject().get("type").asString());
+        AxonValue name = desc.asArray().get(2);
+        assertEquals("name", name.asObject().get("field").asString());
+        assertEquals("string", name.asObject().get("type").asString());
+        assertEquals("SCHEMALESS", name.asObject().get("schema").asString());
+    }
+
+    @Test
     void dataRuleBloqueiaCreateEInsertQuandoPredicadoNaoPassa() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE DATA RULE adult_only APPLY age > 18", s, null);
+        s.auth(AxonValue.object(java.util.Map.of("data_rules", AxonValue.str("adult_only"))));
+
+        assertThrows(AxonError.class, () ->
+            ds.execute("CREATE doc CONTENT { age: 15 }", s, null));
+        assertThrows(AxonError.class, () ->
+            ds.execute("INSERT INTO doc [{ age: 15 }]", s, null));
+
+        ds.execute("CREATE doc CONTENT { age: 25 }", s, null);
+        ds.execute("INSERT INTO doc [{ age: 30 }]", s, null);
+        assertEquals(2, ds.execute("SELECT * FROM doc", s, null).asArray().size());
+    }
+
+    @Test
+    void dataRuleInjetaCampoAutenticadoEmCreateEInsert() {
         Datastore ds = ns();
         Session s = session();
         ds.execute("CREATE DATA RULE published_only APPLY published = true", s, null);
         s.auth(AxonValue.object(java.util.Map.of("data_rules", AxonValue.str("published_only"))));
 
-        assertThrows(AxonError.class, () ->
-            ds.execute("CREATE doc CONTENT { published: false }", s, null));
-        assertThrows(AxonError.class, () ->
-            ds.execute("INSERT INTO doc [{ published: false }]", s, null));
+        // O predicado published = true extrai a injeção: published é sempre true.
+        // O valor false do usuário é sobrescrito.
+        ds.execute("CREATE doc CONTENT { published: false }", s, null);
+        AxonValue rows = ds.execute("SELECT * FROM doc", s, null);
+        assertEquals(1, rows.asArray().size());
+        assertEquals(true, rows.asArray().get(0).asObject().get("published").asBool());
 
-        ds.execute("CREATE doc CONTENT { published: true }", s, null);
-        ds.execute("INSERT INTO doc [{ published: true }]", s, null);
-        assertEquals(2, ds.execute("SELECT * FROM doc", s, null).asArray().size());
+        // INSERT também injeta.
+        ds.execute("INSERT INTO doc [{ published: false }, { published: true }]", s, null);
+        rows = ds.execute("SELECT * FROM doc", s, null);
+        assertEquals(3, rows.asArray().size());
+        for (AxonValue row : rows.asArray()) {
+            assertEquals(true, row.asObject().get("published").asBool());
+        }
+
+        // SELECT filtra conforme a data rule: só publicados.
+        // Como todos têm true, todos aparecem no SELECT.
+    }
+
+    @Test
+    void dataRuleInjetaCampoForaDoPredicadoLiteral() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE DATA RULE region_sp APPLY sales_rep_id = 42", s, null);
+        s.auth(AxonValue.object(java.util.Map.of("data_rules", AxonValue.str("region_sp"))));
+
+        // Sem fornecer o campo, a data rule o preenche.
+        ds.execute("CREATE article CONTENT { title: \"Novo\" }", s, null);
+        AxonValue rows = ds.execute("SELECT * FROM article", s, null);
+        assertEquals(1, rows.asArray().size());
+        assertEquals(42L, rows.asArray().get(0).asObject().get("sales_rep_id").asLong());
+        assertEquals("Novo", rows.asArray().get(0).asObject().get("title").asString());
+
+        // O valor informado pelo usuário é sobrescrito pelo da data rule.
+        ds.execute("CREATE article CONTENT { title: \"Burla\", sales_rep_id: 99 }", s, null);
+        AxonValue all = ds.execute("SELECT * FROM article", s, null);
+        assertEquals(2, all.asArray().size());
+        for (AxonValue row : all.asArray()) {
+            assertEquals(42L, row.asObject().get("sales_rep_id").asLong());
+        }
+
+        // INSERT múltiplo também injeta.
+        ds.execute("INSERT INTO article [{ title: \"A\" }, { title: \"B\" }]", s, null);
+        AxonValue inserted = ds.execute("SELECT * FROM article", s, null);
+        assertEquals(4, inserted.asArray().size());
+
+        // UPDATE também injeta (sobrescreve o valor alterado).
+        ds.execute("UPDATE article SET sales_rep_id = 99", s, null);
+        AxonValue afterUpdate = ds.execute("SELECT * FROM article", s, null);
+        assertEquals(4, afterUpdate.asArray().size());
+        for (AxonValue row : afterUpdate.asArray()) {
+            assertEquals(42L, row.asObject().get("sales_rep_id").asLong());
+        }
     }
 
     @Test

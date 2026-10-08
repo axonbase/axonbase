@@ -233,9 +233,15 @@ public final class Catalog {
     }
 
     /** Definição de uma Data Rule (filtro no nível de linha e coluna). */
-    public record DataRuleDef(String name, Expr predicate, List<String> maskPatterns) {
+    public record DataRuleDef(String name, Expr predicate, List<String> maskPatterns,
+                              Map<String, Expr> injections) {
         public DataRuleDef {
             maskPatterns = maskPatterns == null ? List.of() : List.copyOf(maskPatterns);
+            injections = injections == null ? Map.of() : Map.copyOf(injections);
+        }
+
+        public DataRuleDef(String name, Expr predicate, List<String> maskPatterns) {
+            this(name, predicate, maskPatterns, Map.of());
         }
     }
 

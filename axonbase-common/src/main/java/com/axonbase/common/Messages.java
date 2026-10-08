@@ -17,6 +17,7 @@ public final class Messages {
         Map.entry("cert_login_eyebrow", "AxonBase Secure Access"),
         Map.entry("cert_login_subtitle", "Certificado validado. Use esta credencial temporária para iniciar uma sessão segura."),
         Map.entry("cert_credential_ready", "Credencial pronta"),
+        Map.entry("cert_credential_unavailable", "Credencial indisponível"),
         Map.entry("cert_verified", "Verificado"),
         Map.entry("cert_expires_template", "Expira em __SECONDS__ segundos"),
         Map.entry("cert_connection", "Conexão JDBC"),
@@ -72,6 +73,7 @@ public final class Messages {
         ,Map.entry("cert_store_required", "store JKS é obrigatório: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "parâmetros ns e db são obrigatórios")
         ,Map.entry("cert_user_missing", "usuário de certificado não existe no escopo ativo")
+        ,Map.entry("cert_rate_limited", "Nova credencial disponível em %d segundos. Cada credencial só pode ser gerada a cada 10 minutos.")
 
         ,Map.entry("audit_not_configured", "AI Audit não configurado. Defina AXON_AI_PROVIDER, AXON_AI_MODEL e AXON_AI_API_KEY.")
         ,Map.entry("audit_rule_gen_error", "Erro ao gerar regras pela IA: %s")
@@ -247,6 +249,7 @@ public final class Messages {
         ,Map.entry("parser_expected_keyword", "esperada a palavra-chave '%s' na posição %d")
         ,Map.entry("parser_unexpected_statement", "sentença inesperada na posição %d: '%s'")
         ,Map.entry("parser_unexpected_describe", "DESCRIBE inesperado na posição %d: '%s'")
+        ,Map.entry("parser_unexpected_remove", "REMOVE inesperado na posição %d: '%s'")
         ,Map.entry("parser_show_data_expected_rules", "SHOW DATA esperava RULES na posição %d")
         ,Map.entry("parser_unexpected_show", "SHOW inesperado na posição %d: '%s'")
         ,Map.entry("parser_expected_word", "esperada a palavra '%s' na posição %d")
@@ -353,6 +356,7 @@ public final class Messages {
         Map.entry("cert_login_eyebrow", "AxonBase Secure Access"),
         Map.entry("cert_login_subtitle", "Certificate validated. Use this temporary credential to start a secure session."),
         Map.entry("cert_credential_ready", "Credential ready"),
+        Map.entry("cert_credential_unavailable", "Credential unavailable"),
         Map.entry("cert_verified", "Verified"),
         Map.entry("cert_expires_template", "Expires in __SECONDS__ seconds"),
         Map.entry("cert_connection", "JDBC connection"),
@@ -408,6 +412,7 @@ public final class Messages {
         ,Map.entry("cert_store_required", "JKS store is required: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "ns and db parameters are required")
         ,Map.entry("cert_user_missing", "certificate user does not exist in the active scope")
+        ,Map.entry("cert_rate_limited", "New credential available in %d seconds. Each credential can only be generated every 10 minutes.")
 
         ,Map.entry("audit_not_configured", "AI Audit not configured. Set AXON_AI_PROVIDER, AXON_AI_MODEL and AXON_AI_API_KEY.")
         ,Map.entry("audit_rule_gen_error", "Error generating rules with AI: %s")
@@ -583,6 +588,7 @@ public final class Messages {
         ,Map.entry("parser_expected_keyword", "expected keyword '%s' at position %d")
         ,Map.entry("parser_unexpected_statement", "unexpected statement at position %d: '%s'")
         ,Map.entry("parser_unexpected_describe", "unexpected DESCRIBE at position %d: '%s'")
+        ,Map.entry("parser_unexpected_remove", "unexpected REMOVE at position %d: '%s'")
         ,Map.entry("parser_show_data_expected_rules", "SHOW DATA expected RULES at position %d")
         ,Map.entry("parser_unexpected_show", "unexpected SHOW at position %d: '%s'")
         ,Map.entry("parser_expected_word", "expected word '%s' at position %d")

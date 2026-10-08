@@ -20,6 +20,11 @@ target/
 .axonbase/
 data/
 
+# Keys and environment files
+*.env
+.keys.*
+.env.*
+
 # Python
 __pycache__/
 *.py[cod]

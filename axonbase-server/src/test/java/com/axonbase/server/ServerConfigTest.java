@@ -19,12 +19,12 @@ class ServerConfigTest {
             + "bind = 0.0.0.0\nrequire_auth = false\nsecret = arquivo\n");
         try {
             ServerConfig config = ServerConfig.load(file, Map.of(
-                "AXON_PORT", "8888", "AXON_SECRET", "ambiente", "AXON_USER", "admin"));
+                "AXON_PORT", "8888", "AXON_SECRET", "ambiente"));
             assertEquals("data/axon", config.path());
             assertEquals(8888, config.port());
             assertEquals("0.0.0.0", config.bind());
             assertEquals("ambiente", config.secret());
-            assertEquals("admin", config.user());
+            assertEquals("root", config.user());
             assertFalse(config.requireAuth());
         } finally {
             Files.deleteIfExists(file);

@@ -11,7 +11,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("AxonQL: parsing e round-trip")
 class AxonQlTest {
@@ -60,6 +62,46 @@ class AxonQlTest {
     @Test
     void roundTripDefineTable() {
         assertRoundTrip("DEFINE TABLE user SCHEMAFULL");
+    }
+
+    @Test
+    void parseCreateTableSqlFirst() {
+        String sql = "CREATE TABLE person ("
+            + "id VARCHAR(64) PRIMARY KEY, "
+            + "name VARCHAR(255) NOT NULL, "
+            + "age INT DEFAULT 18 CHECK (age >= 0), "
+            + "location GEOMETRY(POINT), "
+            + "embedding VECTOR(1536), "
+            + "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            + ") WITH (SCHEMA = 'FULL')";
+        Query q = AxonQl.parse(sql);
+        assertEquals(1, q.statements().size());
+        Statement.CreateTable ct = assertInstanceOf(Statement.CreateTable.class, q.statements().get(0));
+        assertEquals("person", ct.name());
+        assertTrue(ct.schemafull());
+        assertEquals(6, ct.columns().size());
+
+        Statement.ColumnDef idCol = ct.columns().get(0);
+        assertEquals("id", idCol.name());
+        assertEquals("string", idCol.type());
+        assertTrue(idCol.primaryKey());
+
+        Statement.ColumnDef ageCol = ct.columns().get(2);
+        assertEquals("age", ageCol.name());
+        assertEquals("int", ageCol.type());
+        assertNotNull(ageCol.defaultExpr());
+        assertNotNull(ageCol.checkExpr());
+    }
+
+    @Test
+    void parseInsertValuesSqlFirst() {
+        String sql = "INSERT INTO person (id, name, age) VALUES ('u_1', 'Ana', 30), ('u_2', 'Bob', 25)";
+        Query q = AxonQl.parse(sql);
+        assertEquals(1, q.statements().size());
+        Statement.Insert ins = assertInstanceOf(Statement.Insert.class, q.statements().get(0));
+        assertEquals("person", ins.table());
+        Expr.ArrayLit arr = assertInstanceOf(Expr.ArrayLit.class, ins.data());
+        assertEquals(2, arr.items().size());
     }
 
     @Test

@@ -241,6 +241,9 @@ public final class Parser {
         if (t.isKeyword("describe")) {
             return parseDescribe();
         }
+        if (t.isKeyword("remove")) {
+            return parseRemove();
+        }
         if (t.isKeyword("show")) {
             return parseShow();
         }
@@ -334,7 +337,8 @@ public final class Parser {
             String name = expectIdentOrString();
             return new Statement.DescribeSaga(name);
         }
-        throw error(Messages.get("parser_unexpected_describe", peek().start(), peek().text()));
+        String table = expectIdentOrString();
+        return new Statement.DescribeTable(table);
     }
 
     private Statement parseShow() {
@@ -445,6 +449,9 @@ public final class Parser {
 
     private Statement parseCreate() {
         pos++;
+        if (matchKeyword("table")) {
+            return parseCreateTable();
+        }
         if (matchKeyword("saga")) {
             return parseSagaCreate();
         }
@@ -518,12 +525,224 @@ public final class Parser {
         return new Statement.Create(only, target, data, ret);
     }
 
+    private Statement parseCreateTable() {
+        boolean ifNotExists = false;
+        if (matchKeyword("if")) {
+            expectKeyword("not");
+            expectKeyword("exists");
+            ifNotExists = true;
+        }
+        String table = expectIdentOrString();
+        expect(TokenType.LPAREN);
+
+        List<Statement.ColumnDef> columns = new ArrayList<>();
+        List<String> primaryKeyCols = new ArrayList<>();
+
+        while (!at(TokenType.RPAREN) && !at(TokenType.EOF)) {
+            // Check for table-level constraints
+            if (matchKeyword("constraint")) {
+                expectIdentOrString(); // skip constraint name
+            }
+
+            if (matchKeyword("primary")) {
+                expectKeyword("key");
+                expect(TokenType.LPAREN);
+                primaryKeyCols.add(expectIdentOrString());
+                while (match(COMMA)) {
+                    primaryKeyCols.add(expectIdentOrString());
+                }
+                expect(TokenType.RPAREN);
+            } else if (matchKeyword("check")) {
+                expect(TokenType.LPAREN);
+                parseExpr(); // table check
+                expect(TokenType.RPAREN);
+            } else if (matchKeyword("foreign")) {
+                expectKeyword("key");
+                expect(TokenType.LPAREN);
+                expectIdentOrString();
+                expect(TokenType.RPAREN);
+                expectKeyword("references");
+                expectIdentOrString();
+                if (match(TokenType.LPAREN)) {
+                    expectIdentOrString();
+                    expect(TokenType.RPAREN);
+                }
+            } else {
+                // Column definition: <name> <type> [<constraints>]
+                String colName = expectIdentOrString();
+                String colType = parseSqlColumnType();
+
+                boolean isPk = false;
+                boolean isNotNull = false;
+                Expr defaultExpr = null;
+                Expr checkExpr = null;
+                String references = null;
+
+                while (true) {
+                    if (matchKeyword("primary")) {
+                        expectKeyword("key");
+                        isPk = true;
+                    } else if (matchKeyword("not")) {
+                        expectKeyword("null");
+                        isNotNull = true;
+                    } else if (matchKeyword("null")) {
+                        // ignore nullable marker
+                    } else if (matchKeyword("default")) {
+                        defaultExpr = parseExpr();
+                    } else if (matchKeyword("check")) {
+                        expect(TokenType.LPAREN);
+                        checkExpr = rewriteCheckExpr(parseExpr(), colName);
+                        expect(TokenType.RPAREN);
+                    } else if (matchKeyword("references")) {
+                        references = expectIdentOrString();
+                        if (match(TokenType.LPAREN)) {
+                            expectIdentOrString();
+                            expect(TokenType.RPAREN);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                columns.add(new Statement.ColumnDef(colName, colType, isPk, isNotNull, defaultExpr, checkExpr, references));
+            }
+
+            if (!match(COMMA)) {
+                break;
+            }
+        }
+        expect(TokenType.RPAREN);
+
+        // Optional WITH (SCHEMA = 'FULL' | 'SCHEMALESS' | 'FLEXIBLE')
+        boolean schemafull = true;
+        if (matchKeyword("with")) {
+            expect(TokenType.LPAREN);
+            while (!at(TokenType.RPAREN) && !at(TokenType.EOF)) {
+                if (matchKeyword("schema")) {
+                    expect(TokenType.EQ);
+                    String s = expectIdentOrString();
+                    if ("schemaless".equalsIgnoreCase(s) || "flexible".equalsIgnoreCase(s)) {
+                        schemafull = false;
+                    } else if ("full".equalsIgnoreCase(s) || "schemafull".equalsIgnoreCase(s)) {
+                        schemafull = true;
+                    }
+                } else {
+                    take(); // skip unknown option
+                }
+                if (!match(COMMA)) break;
+            }
+            expect(TokenType.RPAREN);
+        }
+
+        // Apply table-level primary keys if present
+        if (!primaryKeyCols.isEmpty()) {
+            List<Statement.ColumnDef> updated = new ArrayList<>();
+            for (Statement.ColumnDef c : columns) {
+                if (primaryKeyCols.contains(c.name())) {
+                    updated.add(new Statement.ColumnDef(c.name(), c.type(), true, c.notNull(), c.defaultExpr(), c.checkExpr(), c.references()));
+                } else {
+                    updated.add(c);
+                }
+            }
+            columns = updated;
+        }
+
+        return new Statement.CreateTable(table, ifNotExists, schemafull, columns);
+    }
+
+    private String parseSqlColumnType() {
+        String baseType = expectTypeWord().toLowerCase();
+        // Check for (length / precision / subtype): e.g. VARCHAR(255), GEOMETRY(POINT), VECTOR(1536)
+        if (match(TokenType.LPAREN)) {
+            while (!at(TokenType.RPAREN) && !at(TokenType.EOF)) {
+                take();
+            }
+            expect(TokenType.RPAREN);
+        }
+        return switch (baseType) {
+            case "varchar", "char", "text", "clob", "string" -> "string";
+            case "int", "integer", "bigint", "smallint", "tinyint" -> "int";
+            case "decimal", "numeric" -> "decimal";
+            case "float", "double", "real" -> "float";
+            case "bool", "boolean" -> "bool";
+            case "timestamp", "datetime", "date" -> "datetime";
+            case "uuid" -> "uuid";
+            case "bytes", "blob", "binary" -> "bytes";
+            case "geometry", "point" -> "geometry";
+            case "vector" -> "vector";
+            default -> baseType;
+        };
+    }
+
+    private static Expr rewriteCheckExpr(Expr expr, String colName) {
+        if (expr instanceof Expr.Ident id && id.name().equalsIgnoreCase(colName)) {
+            return new Expr.Param("value");
+        }
+        if (expr instanceof Expr.Binary b) {
+            return new Expr.Binary(b.op(), rewriteCheckExpr(b.left(), colName), rewriteCheckExpr(b.right(), colName));
+        }
+        if (expr instanceof Expr.Unary u) {
+            return new Expr.Unary(u.op(), rewriteCheckExpr(u.operand(), colName));
+        }
+        return expr;
+    }
+
     private Statement parseInsert() {
         pos++;
         boolean ignore = matchKeyword("ignore");
         boolean relation = matchKeyword("relation");
         expectKeyword("into");
         String table = expectIdent();
+
+        // Standard SQL: INSERT INTO table (col1, col2, ...) VALUES (val1, val2), (val3, val4)
+        if (at(TokenType.LPAREN)) {
+            pos++;
+            List<String> cols = new ArrayList<>();
+            cols.add(expectIdentOrString());
+            while (match(COMMA)) {
+                cols.add(expectIdentOrString());
+            }
+            expect(TokenType.RPAREN);
+
+            expectKeyword("values");
+
+            List<Expr> rows = new ArrayList<>();
+            while (true) {
+                expect(TokenType.LPAREN);
+                List<Expr.ObjectLit.Entry> entries = new ArrayList<>();
+                for (int i = 0; i < cols.size(); i++) {
+                    if (i > 0) expect(COMMA);
+                    Expr val = parseExpr();
+                    entries.add(new Expr.ObjectLit.Entry(cols.get(i), val));
+                }
+                expect(TokenType.RPAREN);
+                rows.add(new Expr.ObjectLit(entries));
+
+                if (!match(COMMA)) break;
+            }
+            Expr data = new Expr.ArrayLit(rows);
+            ReturnSpec ret = parseReturnSpec();
+            return new Statement.Insert(ignore, relation, table, data, ret);
+        } else if (matchKeyword("values")) {
+            // INSERT INTO table VALUES (...)
+            List<Expr> rows = new ArrayList<>();
+            while (true) {
+                expect(TokenType.LPAREN);
+                List<Expr> vals = new ArrayList<>();
+                vals.add(parseExpr());
+                while (match(COMMA)) {
+                    vals.add(parseExpr());
+                }
+                expect(TokenType.RPAREN);
+                rows.add(new Expr.ArrayLit(vals));
+                if (!match(COMMA)) break;
+            }
+            Expr data = new Expr.ArrayLit(rows);
+            ReturnSpec ret = parseReturnSpec();
+            return new Statement.Insert(ignore, relation, table, data, ret);
+        }
+
+        // AxonQL format: INSERT INTO table [{...}, {...}] or {...}
         Expr data = parseExpr();
         ReturnSpec ret = parseReturnSpec();
         return new Statement.Insert(ignore, relation, table, data, ret);
@@ -533,6 +752,7 @@ public final class Parser {
         pos++;
         boolean only = matchKeyword("only");
         Expr target = parseTarget();
+        consumeAlias();
         Data data = null;
         if (matchKeyword("content")) {
             data = new Data.Content(parseExpr());
@@ -556,6 +776,7 @@ public final class Parser {
     private Statement parseDelete() {
         pos++;
         Expr target = parseTarget();
+        consumeAlias();
         Expr cond = null;
         if (matchKeyword("where")) {
             cond = parseExpr();
@@ -1018,10 +1239,27 @@ public final class Parser {
                 return new Statement.DropDatabaseLink(name);
             }
         }
+        if (matchKeyword("table")) {
+            String name = expectIdent();
+            return new Statement.RemoveTable(name);
+        }
         throw error(Messages.get("parser_unexpected_drop", peek().start(), peek().text()));
     }
 
-    /** Escopo de DEFINE USER/ACCESS: ON ROOT, ON NAMESPACE [nome], ON DATABASE [nome]. */
+    private Statement parseRemove() {
+        pos++;
+        if (matchKeyword("table")) {
+            String name = expectIdent();
+            return new Statement.RemoveTable(name);
+        }
+        if (matchKeyword("ai")) {
+            expectKeyword("audit");
+            String name = expectIdent();
+            return new Statement.DropAiAudit(name);
+        }
+        throw error(Messages.get("parser_unexpected_remove", peek().start(), peek().text()));
+    }
+
     private AuthTarget parseAuthTarget() {
         expectKeyword("on");
         if (matchKeyword("root")) {

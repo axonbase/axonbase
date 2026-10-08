@@ -55,6 +55,24 @@ public final class Render {
                 data(sb, c.data());
                 ret(sb, c.ret());
             }
+            case Statement.CreateTable ct -> {
+                sb.append("CREATE TABLE ");
+                if (ct.ifNotExists()) {
+                    sb.append("IF NOT EXISTS ");
+                }
+                sb.append(ct.name()).append(" (");
+                for (int i = 0; i < ct.columns().size(); i++) {
+                    if (i > 0) sb.append(", ");
+                    Statement.ColumnDef col = ct.columns().get(i);
+                    sb.append(col.name()).append(' ').append(col.type().toUpperCase());
+                    if (col.primaryKey()) sb.append(" PRIMARY KEY");
+                    if (col.notNull()) sb.append(" NOT NULL");
+                    if (col.defaultExpr() != null) sb.append(" DEFAULT ").append(expr(col.defaultExpr()));
+                    if (col.checkExpr() != null) sb.append(" CHECK (").append(expr(col.checkExpr())).append(')');
+                    if (col.references() != null) sb.append(" REFERENCES ").append(col.references());
+                }
+                sb.append(") WITH (SCHEMA = '").append(ct.schemafull() ? "FULL" : "SCHEMALESS").append("')");
+            }
             case Statement.CreateJks jks -> {
                 sb.append("CREATE JKS ").append(jks.name())
                     .append(" PATH \"").append(escape(jks.path())).append("\" PASSWORD \"")
@@ -349,6 +367,7 @@ public final class Render {
                 }
             }
             case Statement.DescribeSaga ds -> sb.append("DESCRIBE SAGA ").append(ds.name());
+            case Statement.DescribeTable dt -> sb.append("DESCRIBE ").append(dt.table());
             case Statement.ShowSagaTransaction st -> {
                 sb.append("SHOW SAGA TRANSACTION ").append(st.name())
                     .append(" '").append(escape(st.correlationId())).append('\'');
@@ -389,6 +408,9 @@ public final class Render {
             }
             case Statement.DropAiAudit da -> {
                 sb.append("DROP AI AUDIT ").append(da.name());
+            }
+            case Statement.RemoveTable rt -> {
+                sb.append("REMOVE TABLE ").append(rt.name());
             }
             case Statement.ShowAiAudit sa -> {
                 sb.append("SHOW AI AUDIT ").append(sa.name());
