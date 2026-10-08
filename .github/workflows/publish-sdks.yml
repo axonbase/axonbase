@@ -106,7 +106,7 @@ jobs:
           cat > ~/.m2/settings.xml <<EOF
           <settings><servers><server><id>central</id><username>${{ secrets.SONATYPE_USERNAME }}</username><password>${{ secrets.SONATYPE_PASSWORD }}</password></server></servers><profiles><profile><id>gpg</id><activation><activeByDefault>true</activeByDefault></activation><properties><gpg.executable>gpg</gpg.executable><gpg.passphrase>${{ secrets.GPG_PASSPHRASE }}</gpg.passphrase></properties></profile></profiles></settings>
           EOF
-      - run: mvn -B -Pcentral-publishing deploy -pl :axonbase,axonbase-common,axonbase-value,axonbase-parser,axonbase-core,axonbase-server,axonbase-sdk-java,axonbase-spring-data -DskipTests -Dmaven.javadoc.skip=true
+      - run: mvn -B -Pcentral-publishing deploy -DskipTests -Dmaven.javadoc.skip=true
 
   publish-nodejs:
     needs: [validate]
