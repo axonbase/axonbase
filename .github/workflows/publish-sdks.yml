@@ -106,7 +106,7 @@ jobs:
           cat > ~/.m2/settings.xml <<EOF
           <settings><servers><server><id>central</id><username>${{ secrets.SONATYPE_USERNAME }}</username><password>${{ secrets.SONATYPE_PASSWORD }}</password></server></servers><profiles><profile><id>gpg</id><activation><activeByDefault>true</activeByDefault></activation><properties><gpg.executable>gpg</gpg.executable><gpg.passphrase>${{ secrets.GPG_PASSPHRASE }}</gpg.passphrase></properties></profile></profiles></settings>
           EOF
-      - run: mvn -B -Pcentral-publishing deploy -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -am -DskipTests
+      - run: mvn -B -Pcentral-publishing deploy -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -am -DskipTests -Dmaven.javadoc.skip=true
 
   publish-nodejs:
     needs: [validate]
@@ -120,7 +120,13 @@ jobs:
       - working-directory: axonbase-sdk-nodejs
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm ci && npm publish --access public
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@axonbase/sdk@${VERSION}" version >/dev/null 2>&1; then
+            echo "npm: @axonbase/sdk@${VERSION} already published, skipping"
+            exit 0
+          fi
+          npm ci && npm publish --access public
 
   publish-python:
     needs: [validate]
@@ -160,7 +166,12 @@ jobs:
       - working-directory: axonbase-sdk-ruby
         env:
           GEM_HOST_API_KEY: ${{ secrets.GEM_HOST_API_KEY }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
+          if gem list -r -a axonbase-sdk 2>/dev/null | grep -q "axonbase-sdk (${VERSION}"; then
+            echo "rubygems: axonbase-sdk@${VERSION} already published, skipping"
+            exit 0
+          fi
           gem build axonbase-sdk.gemspec
           gem push *.gem
 
@@ -172,7 +183,13 @@ jobs:
       - working-directory: axonbase-sdk-rust
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if curl -fs "https://crates.io/api/v1/crates/axonbase-sdk/${VERSION}" >/dev/null 2>&1; then
+            echo "crates.io: axonbase-sdk@${VERSION} already published, skipping"
+            exit 0
+          fi
+          cargo publish
 
   publish-go:
     needs: [version, validate]
