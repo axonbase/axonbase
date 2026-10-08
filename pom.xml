@@ -7,7 +7,7 @@
 
     <groupId>com.axondatabase</groupId>
     <artifactId>axonbase</artifactId>
-    <version>0.2.2</version>
+    <version>0.2.3</version>
     <packaging>pom</packaging>
 
     <name>AxonBase</name>

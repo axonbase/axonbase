@@ -384,6 +384,13 @@ public final class Render {
                 sb.append("CANCEL SAGA ").append(cs3.name())
                     .append(" WITH CORRELATION '").append(escape(cs3.correlationId())).append('\'');
             }
+            case Statement.JoinSaga js -> {
+                sb.append("JOIN SAGA ").append(js.name())
+                    .append(" WITH CORRELATION '").append(escape(js.correlationId())).append('\'');
+            }
+            case Statement.LeaveSaga ignored -> {
+                sb.append("LEAVE SAGA");
+            }
             case Statement.CreateDataRule cd -> {
                 sb.append("CREATE DATA RULE ").append(cd.name()).append(" APPLY ")
                     .append(expr(cd.predicate()));

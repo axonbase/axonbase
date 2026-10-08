@@ -291,7 +291,7 @@ public class SqlTranslator {
     static String translateDrop(String sql) {
         Matcher m = DROP.matcher(sql);
         if (!m.matches()) return sql;
-        return "DELETE " + m.group(1);
+        return "REMOVE TABLE " + m.group(1);
     }
 
     // ------------------------------------------------------------------

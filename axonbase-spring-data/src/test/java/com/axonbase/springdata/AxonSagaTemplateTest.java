@@ -1,23 +1,27 @@
 package com.axonbase.springdata;
 
-import com.axonbase.value.AxonValue;
+import com.axonbase.jdbc.SagaBinding;
+import com.axonbase.jdbc.SagaScope;
 import org.junit.jupiter.api.Test;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 class AxonSagaTemplateTest {
     @Test
     void joinsAnActiveSagaWithinTheLocalTransactionWithoutOwningItsLifecycle() {
         List<String> events = new ArrayList<>();
-        AxonSagaTemplate template = new AxonSagaTemplate(new ActiveSagaScope(events), new RecordingTransactionManager(events));
+        AxonSagaTemplate template = new AxonSagaTemplate(
+            new RecordingScopeFactory(events, true),
+            new RecordingTransactionManager(events));
 
         String result = template.execute("orders", "corr-1", status -> {
             events.add("work");
@@ -25,72 +29,53 @@ class AxonSagaTemplateTest {
         });
 
         assertEquals("saved", result);
-        assertEquals(List.of("show", "begin-local", "bind", "work", "clear", "commit-local"), events);
+        assertEquals(List.of("begin-local", "join-saga", "work", "leave-saga", "commit-local"), events);
     }
 
     @Test
-    void rejectsAnInactiveSagaBeforeStartingTheLocalTransaction() {
+    void rejectsAnInactiveSagaAndRollsBackTheLocalTransaction() {
         List<String> events = new ArrayList<>();
-        AxonSagaTemplate template = new AxonSagaTemplate(new InactiveSagaScope(events), new RecordingTransactionManager(events));
+        AxonSagaTemplate template = new AxonSagaTemplate(
+            new RecordingScopeFactory(events, false),
+            new RecordingTransactionManager(events));
 
-        assertThrows(IllegalStateException.class, () -> template.execute("orders", "corr-1", status -> "saved"));
-        assertEquals(List.of("show"), events);
+        assertThrows(IllegalStateException.class,
+            () -> template.execute("orders", "corr-1", status -> "saved"));
+        assertEquals(List.of("begin-local", "join-saga", "rollback-local"), events);
     }
 
     @Test
-    void clearsTheCorrelationAndRollsBackTheLocalTransactionWhenWorkFails() {
+    void rollsBackTheLocalTransactionWhenWorkFails() {
         List<String> events = new ArrayList<>();
-        AxonSagaTemplate template = new AxonSagaTemplate(new ActiveSagaScope(events), new RecordingTransactionManager(events));
+        AxonSagaTemplate template = new AxonSagaTemplate(
+            new RecordingScopeFactory(events, true),
+            new RecordingTransactionManager(events));
 
         assertThrows(IllegalStateException.class, () -> template.execute("orders", "corr-1", status -> {
             events.add("work");
             throw new IllegalStateException("repository failure");
         }));
 
-        assertEquals(List.of("show", "begin-local", "bind", "work", "clear", "rollback-local"), events);
+        assertEquals(List.of("begin-local", "join-saga", "work", "leave-saga", "rollback-local"), events);
     }
 
-    private static class ActiveSagaScope implements AxonSagaTemplate.SagaCorrelationScope {
+    private static final class RecordingScopeFactory implements AxonSagaTemplate.SagaScopeFactory {
         private final List<String> events;
+        private final boolean active;
 
-        private ActiveSagaScope(List<String> events) {
+        private RecordingScopeFactory(List<String> events, boolean active) {
             this.events = events;
+            this.active = active;
         }
 
         @Override
-        public AxonValue show(String sagaName, String correlationId) {
-            events.add("show");
-            return saga(sagaName, correlationId, "RUNNING");
+        public SagaBinding joinSaga(String sagaName, String correlationId) {
+            events.add("join-saga");
+            if (!active) {
+                throw new IllegalStateException("no active SAGA for correlation: " + correlationId);
+            }
+            return () -> events.add("leave-saga");
         }
-
-        @Override
-        public void bind(String correlationId) {
-            events.add("bind");
-        }
-
-        @Override
-        public void clear() {
-            events.add("clear");
-        }
-    }
-
-    private static final class InactiveSagaScope extends ActiveSagaScope {
-        private InactiveSagaScope(List<String> events) {
-            super(events);
-        }
-
-        @Override
-        public AxonValue show(String sagaName, String correlationId) {
-            super.show(sagaName, correlationId);
-            return saga(sagaName, correlationId, "COMMITTED");
-        }
-    }
-
-    private static AxonValue saga(String name, String correlationId, String status) {
-        return AxonValue.object(java.util.Map.of("saga", AxonValue.object(java.util.Map.of(
-            "name", AxonValue.str(name),
-            "correlation_id", AxonValue.str(correlationId),
-            "status", AxonValue.str(status)))));
     }
 
     private static final class RecordingTransactionManager implements PlatformTransactionManager {

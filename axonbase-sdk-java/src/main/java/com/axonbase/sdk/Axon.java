@@ -10,6 +10,7 @@ import org.eclipse.jetty.io.ClientConnector;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.WebSocketAdapter;
+import org.eclipse.jetty.websocket.api.WebSocketCloseException;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 
 import java.net.URI;
@@ -30,7 +31,7 @@ import java.util.function.Supplier;
  */
 public final class Axon implements AutoCloseable {
 
-    private static final String VERSION = "0.1.0-SNAPSHOT";
+    private static final String VERSION = "0.2.3";
 
     private final Map<Integer, CompletableFuture<String>> pending = new ConcurrentHashMap<>();
     private final AtomicInteger nextId = new AtomicInteger(0);
@@ -240,9 +241,12 @@ public final class Axon implements AutoCloseable {
     /** Cancela uma live query. */
     public boolean kill(String id) {
         AxonValue r = call("kill", new Object[]{id});
-        liveHandlers.remove(id);
-        earlyNotes.remove(id);
-        return r.isBool() && r.asBool();
+        boolean ok = r.isBool() && r.asBool();
+        if (ok) {
+            liveHandlers.remove(id);
+            earlyNotes.remove(id);
+        }
+        return ok;
     }
 
     private void onNotification(AxonValue note) {
@@ -370,7 +374,25 @@ public final class Axon implements AutoCloseable {
         if (v == null) {
             sb.append("null");
         } else if (v instanceof String s) {
-            sb.append('"').append(s.replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+            sb.append('"');
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                switch (c) {
+                    case '\\' -> sb.append("\\\\");
+                    case '"' -> sb.append("\\\"");
+                    case '\n' -> sb.append("\\n");
+                    case '\r' -> sb.append("\\r");
+                    case '\t' -> sb.append("\\t");
+                    case '\b' -> sb.append("\\b");
+                    case '\f' -> sb.append("\\f");
+                    default -> {
+                        if (c < 0x10) sb.append("\\u000").append(Integer.toHexString(c));
+                        else if (c < 0x20) sb.append("\\u00").append(Integer.toHexString(c));
+                        else sb.append(c);
+                    }
+                }
+            }
+            sb.append('"');
         } else if (v instanceof Number || v instanceof Boolean) {
             sb.append(v);
         } else if (v instanceof AxonValue av) {
@@ -453,6 +475,24 @@ public final class Axon implements AutoCloseable {
         @Override
         public void onWebSocketText(String message) {
             owner.handleText(message);
+        }
+
+        @Override
+        public void onWebSocketClose(int statusCode, String reason) {
+            owner.session = null;
+            var snapshot = Map.copyOf(owner.pending);
+            owner.pending.clear();
+            snapshot.values().forEach(f -> f.completeExceptionally(
+                new AxonSdkException(Messages.get("sdk_websocket_closed"))));
+        }
+
+        @Override
+        public void onWebSocketError(Throwable cause) {
+            owner.session = null;
+            var snapshot = Map.copyOf(owner.pending);
+            owner.pending.clear();
+            snapshot.values().forEach(f -> f.completeExceptionally(
+                new AxonSdkException(Messages.get("sdk_websocket_closed"), cause)));
         }
     }
 }

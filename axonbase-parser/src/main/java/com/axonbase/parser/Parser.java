@@ -289,6 +289,18 @@ public final class Parser {
         if (t.isKeyword("rollback")) {
             return parseRollbackTo();
         }
+        if (t.isKeyword("join")) {
+            if (peek(1) != null && peek(1).isKeyword("saga")) {
+                return parseJoinSaga();
+            }
+            throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
+        }
+        if (t.isKeyword("leave")) {
+            if (peek(1) != null && peek(1).isKeyword("saga")) {
+                return parseLeaveSaga();
+            }
+            throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
+        }
         throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
     }
 
@@ -391,6 +403,22 @@ public final class Parser {
         expectKeyword("correlation");
         String corrId = expectString();
         return new Statement.CancelSaga(name, corrId);
+    }
+
+    private Statement parseJoinSaga() {
+        pos++; // join
+        pos++; // saga
+        String name = expectIdentOrString();
+        expectKeyword("with");
+        expectKeyword("correlation");
+        String corrId = expectString();
+        return new Statement.JoinSaga(name, corrId);
+    }
+
+    private Statement parseLeaveSaga() {
+        pos++; // leave
+        pos++; // saga
+        return new Statement.LeaveSaga();
     }
 
     // ------------------------------------------------------------------

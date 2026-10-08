@@ -203,6 +203,14 @@ public sealed interface Statement {
     record CancelSaga(String name, String correlationId) implements Statement {
     }
 
+    /** JOIN SAGA &lt;nome&gt; WITH CORRELATION 'corr-id'. */
+    record JoinSaga(String name, String correlationId) implements Statement {
+    }
+
+    /** LEAVE SAGA. */
+    record LeaveSaga() implements Statement {
+    }
+
     record Info(String kind, String table) implements Statement {
     }
 

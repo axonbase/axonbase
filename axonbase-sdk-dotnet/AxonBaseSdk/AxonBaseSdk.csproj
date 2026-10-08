@@ -4,7 +4,7 @@
     <RootNamespace>AxonBaseSdk</RootNamespace>
     <AssemblyName>AxonBaseSdk</AssemblyName>
     <PackageId>AxonBase.Sdk</PackageId>
-    <Version>0.2.2</Version>
+    <Version>0.2.3</Version>
     <Authors>AxonBase</Authors>
     <Description>AxonBase WebSocket JSON-RPC client for .NET.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

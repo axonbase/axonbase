@@ -62,6 +62,8 @@ import com.axonbase.parser.ast.Statement.ShowSagaTransaction;
 import com.axonbase.parser.ast.Statement.BeginSaga;
 import com.axonbase.parser.ast.Statement.CommitSaga;
 import com.axonbase.parser.ast.Statement.CancelSaga;
+import com.axonbase.parser.ast.Statement.JoinSaga;
+import com.axonbase.parser.ast.Statement.LeaveSaga;
 import com.axonbase.parser.ast.Statement.Info;
 import com.axonbase.parser.ast.Statement.Kill;
 import com.axonbase.parser.ast.Statement.OrderTerm;
@@ -309,6 +311,8 @@ public final class Executor {
             case Statement.BeginSaga bs -> runBeginSaga(bs);
             case Statement.CommitSaga cs2 -> runCommitSaga(cs2);
             case Statement.CancelSaga cs3 -> runCancelSaga(cs3);
+            case Statement.JoinSaga js -> runJoinSaga(js);
+            case Statement.LeaveSaga ignored -> runLeaveSaga();
             case Statement.CreateDataRule cd -> runCreateDataRule(cd);
             case Statement.DropDataRule dr -> runDropDataRule(dr);
             case Statement.ShowDataRules ignored -> runShowDataRules();
@@ -2994,6 +2998,21 @@ return score;
         coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true);
         sagaLedger.cancelSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
+    }
+
+    private AxonValue runJoinSaga(JoinSaga js) {
+        if (!sagaLedger.isSagaActive(js.correlationId())) {
+            throw errorStmt(Messages.get("stmt_saga_inactive", js.correlationId()));
+        }
+        session.sagaBegin(js.name(), js.correlationId());
+        session.vars().set("saga_corr", AxonValue.str(js.correlationId()));
+        return AxonValue.object(Map.of("status", AxonValue.str("RUNNING")));
+    }
+
+    private AxonValue runLeaveSaga() {
+        session.sagaEnd();
+        session.vars().set("saga_corr", AxonValue.nul());
+        return AxonValue.object(Map.of("ok", AxonValue.str("1")));
     }
 
     private void coordinateSagaParticipants(String sagaName, String correlationId, String action, boolean reverse) {

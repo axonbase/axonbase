@@ -46,11 +46,11 @@ class SqlTranslatorTest {
     }
 
     @Test void dropTable() {
-        assertEquals("DELETE person", SqlTranslator.translate("DROP TABLE person IF EXISTS"));
+        assertEquals("REMOVE TABLE person", SqlTranslator.translate("DROP TABLE person IF EXISTS"));
     }
 
     @Test void dropTableSimple() {
-        assertEquals("DELETE person", SqlTranslator.translate("DROP TABLE person"));
+        assertEquals("REMOVE TABLE person", SqlTranslator.translate("DROP TABLE person"));
     }
 
     @Test void selectWithWhereOrderLimit() {

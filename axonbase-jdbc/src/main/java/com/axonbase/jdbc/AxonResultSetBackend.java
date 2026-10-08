@@ -13,6 +13,7 @@ public class AxonResultSetBackend {
     private final List<Map<String, AxonValue>> rows = new ArrayList<>();
     private final List<String> columns = new ArrayList<>();
     private int rowIndex = -1;
+    private boolean closed;
 
     public AxonResultSetBackend(AxonValue value) {
         if (value == null) return;
@@ -26,7 +27,6 @@ public class AxonResultSetBackend {
                     }
                     rows.add(row);
                 } else {
-                    // SELECT VALUE retorna arrays de escalares (string, datetime, etc)
                     Map<String, AxonValue> row = new LinkedHashMap<>();
                     row.put("value", item);
                     if (!columns.contains("value")) columns.add("value");
@@ -38,7 +38,6 @@ public class AxonResultSetBackend {
             for (String key : row.keySet()) if (!columns.contains(key)) columns.add(key);
             rows.add(row);
         } else {
-            // Caso extremo: um único valor escalar
             Map<String, AxonValue> row = new LinkedHashMap<>();
             row.put("value", value);
             if (!columns.contains("value")) columns.add("value");
@@ -50,37 +49,58 @@ public class AxonResultSetBackend {
         return JdbcProxy.create(ResultSetMetaData.class, new AxonResultSetMetaData(columns));
     }
 
-    public boolean next() { rowIndex++; return rowIndex < rows.size(); }
-    public void close() {}
-    public boolean isClosed() { return false; }
+    public boolean next() {
+        if (closed) throw new IllegalStateException("ResultSet is closed");
+        rowIndex++; return rowIndex < rows.size();
+    }
+    public void close() { closed = true; rows.clear(); columns.clear(); }
+    public boolean isClosed() { return closed; }
     public boolean wasNull() { return false; }
 
-    private Map<String, AxonValue> currentRow() { return rowIndex >= 0 && rowIndex < rows.size() ? rows.get(rowIndex) : Map.of(); }
-    private AxonValue col(String label) {
-        Map<String, AxonValue> row = currentRow(); AxonValue v = row.get(label);
+    private Map<String, AxonValue> currentRow() throws SQLException {
+        if (closed) throw new SQLException("ResultSet is closed");
+        if (rowIndex < 0 || rowIndex >= rows.size()) {
+            throw new SQLException("no current row: cursor " + (rowIndex < 0 ? "before first" : "after last"));
+        }
+        return rows.get(rowIndex);
+    }
+    private AxonValue col(String label) throws SQLException {
+        Map<String, AxonValue> row = currentRow();
+        AxonValue v = row.get(label);
         if (v == null && label.indexOf('.') > 0) v = row.get(label.substring(label.indexOf('.') + 1));
         return v;
     }
-    private String colLabel(int i) { return i <= columns.size() ? columns.get(i - 1) : ""; }
+    private String colLabel(int i) throws SQLException {
+        if (i < 1 || i > columns.size()) {
+            throw new SQLException("column index " + i + " out of range [1.." + columns.size() + "]");
+        }
+        return columns.get(i - 1);
+    }
 
-    public String getString(int i) { return getString(colLabel(i)); }
-    public String getString(String label) {
+    public String getString(int i) throws SQLException { return getString(colLabel(i)); }
+    public String getString(String label) throws SQLException {
         AxonValue v = col(label);
         if (v == null) return null;
         if (v.isString()) return v.asString();
         if (v.isDatetime()) return v.asInstant().toString();
         return v.isRecordId() ? v.asRecordId().toString() : v.toString();
     }
-    public int getInt(int i) { return (int) getLong(i); }
-    public int getInt(String label) { return (int) getLong(label); }
-    public long getLong(int i) { return getLong(colLabel(i)); }
-    public long getLong(String label) { AxonValue v = col(label); return v != null && v.isNumber() ? v.asLong() : 0; }
-    public double getDouble(int i) { return getDouble(colLabel(i)); }
-    public double getDouble(String label) { AxonValue v = col(label); return v != null && v.isNumber() ? v.asDouble() : 0; }
-    public boolean getBoolean(int i) { return getBoolean(colLabel(i)); }
-    public boolean getBoolean(String label) { AxonValue v = col(label); return v != null && v.isBool() && v.asBool(); }
-    public Object getObject(int i) { return getObject(colLabel(i)); }
-    public Object getObject(String label) {
+    public int getInt(int i) throws SQLException { return (int) getLong(i); }
+    public int getInt(String label) throws SQLException { return (int) getLong(label); }
+    public long getLong(int i) throws SQLException { return getLong(colLabel(i)); }
+    public long getLong(String label) throws SQLException {
+        AxonValue v = col(label); return v != null && v.isNumber() ? v.asLong() : 0;
+    }
+    public double getDouble(int i) throws SQLException { return getDouble(colLabel(i)); }
+    public double getDouble(String label) throws SQLException {
+        AxonValue v = col(label); return v != null && v.isNumber() ? v.asDouble() : 0;
+    }
+    public boolean getBoolean(int i) throws SQLException { return getBoolean(colLabel(i)); }
+    public boolean getBoolean(String label) throws SQLException {
+        AxonValue v = col(label); return v != null && v.isBool() && v.asBool();
+    }
+    public Object getObject(int i) throws SQLException { return getObject(colLabel(i)); }
+    public Object getObject(String label) throws SQLException {
         AxonValue v = col(label); if (v == null) return null;
         return switch (v.type()) {
             case STRING -> v.asString(); case NUMBER -> v.isInteger() ? v.asLong() : v.asDouble();
@@ -90,7 +110,11 @@ public class AxonResultSetBackend {
             default -> v.toString();
         };
     }
-    public int findColumn(String label) { int idx = columns.indexOf(label); return idx >= 0 ? idx + 1 : 1; }
+    public int findColumn(String label) throws SQLException {
+        int idx = columns.indexOf(label);
+        if (idx < 0) throw new SQLException("column not found: " + label);
+        return idx + 1;
+    }
     public int getRow() { return rowIndex + 1; }
 
     public boolean first() { rowIndex = 0; return rowIndex < rows.size(); }

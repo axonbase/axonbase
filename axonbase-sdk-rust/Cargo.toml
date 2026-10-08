@@ -1,6 +1,6 @@
 [package]
 name = "axonbase-sdk"
-version = "0.2.2"
+version = "0.2.3"
 description = "AxonBase WebSocket JSON-RPC client for Rust"
 readme = "README.md"
 edition = "2024"

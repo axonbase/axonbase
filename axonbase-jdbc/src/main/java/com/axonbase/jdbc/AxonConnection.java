@@ -13,7 +13,7 @@ import java.util.concurrent.Executor;
 /**
  * Conexão JDBC do AxonBase. Mantém uma conexão WebSocket para o servidor.
  */
-public class AxonConnection implements Connection {
+public class AxonConnection implements Connection, SagaScope {
 
     private final Axon axon;
     private final String ns;
@@ -71,6 +71,32 @@ public class AxonConnection implements Connection {
             throw new SQLException(Messages.get("jdbc_connection_failed", e.getMessage()), e);
         } catch (Exception e) {
             throw new SQLException(Messages.get("jdbc_connection_failed", e.getMessage()), e);
+        }
+    }
+
+    @Override
+    public SagaBinding joinSaga(String sagaName, String correlationId) throws SQLException {
+        if (closed) throw new SQLException(Messages.get("jdbc_connection_closed"));
+        try {
+            axon.query("JOIN SAGA " + sagaName + " WITH CORRELATION '" + correlationId.replace("'", "''") + "'");
+            return new SagaBinding() {
+                @Override
+                public void close() throws SQLException {
+                    if (!closed) leaveSaga();
+                }
+            };
+        } catch (Exception e) {
+            throw new SQLException(Messages.get("jdbc_join_saga_failed", sagaName, correlationId), e);
+        }
+    }
+
+    @Override
+    public void leaveSaga() throws SQLException {
+        if (closed) throw new SQLException(Messages.get("jdbc_connection_closed"));
+        try {
+            axon.query("LEAVE SAGA");
+        } catch (Exception e) {
+            throw new SQLException(Messages.get("jdbc_leave_saga_failed"), e);
         }
     }
 
@@ -184,16 +210,27 @@ public class AxonConnection implements Connection {
     public Savepoint setSavepoint() throws SQLException { return setSavepoint(null); }
     @Override
     public Savepoint setSavepoint(String name) throws SQLException {
-        try { axon.query("SAVEPOINT " + (name != null ? name : "sp")); } catch (Exception e) { throw new SQLException(e); }
-        return new AxonSavepoint(name);
+        String sp = name != null ? sanitize(name) : "sp";
+        try { axon.query("SAVEPOINT " + sp); } catch (Exception e) { throw new SQLException(e); }
+        return new AxonSavepoint(sp);
     }
     @Override
     public void rollback(Savepoint savepoint) throws SQLException {
-        try { axon.query("ROLLBACK TO " + savepoint.getSavepointName()); } catch (Exception e) { throw new SQLException(e); }
+        String sp = savepoint != null ? sanitize(savepoint.getSavepointName()) : "sp";
+        try { axon.query("ROLLBACK TO " + sp); } catch (Exception e) { throw new SQLException(e); }
     }
     @Override
     public void releaseSavepoint(Savepoint savepoint) throws SQLException {
-        try { axon.query("RELEASE " + savepoint.getSavepointName()); } catch (Exception e) { throw new SQLException(e); }
+        String sp = savepoint != null ? sanitize(savepoint.getSavepointName()) : "sp";
+        try { axon.query("RELEASE " + sp); } catch (Exception e) { throw new SQLException(e); }
+    }
+
+    private static String sanitize(String name) throws SQLException {
+        if (name == null || name.isBlank()) return "sp";
+        if (!name.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+            throw new SQLException(Messages.get("jdbc_invalid_identifier", name));
+        }
+        return name;
     }
 
     @Override
@@ -239,7 +276,10 @@ public class AxonConnection implements Connection {
     @Override    public void abort(Executor executor) throws SQLException { close(); }
     @Override    public void setNetworkTimeout(Executor executor, int milliseconds) throws SQLException {}
     @Override    public int getNetworkTimeout() throws SQLException { return 0; }
-    @Override    public <T> T unwrap(Class<T> iface) throws SQLException { return iface.cast(this); }
+    @Override    public <T> T unwrap(Class<T> iface) throws SQLException {
+        if (iface.isInstance(this)) return iface.cast(this);
+        throw new SQLException(Messages.get("jdbc_unwrap_unsupported", iface.getName()));
+    }
     @Override    public boolean isWrapperFor(Class<?> iface) throws SQLException { return iface.isInstance(this); }
 
     private static boolean translate(Properties info) {

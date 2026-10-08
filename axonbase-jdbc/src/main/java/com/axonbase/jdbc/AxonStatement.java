@@ -50,14 +50,6 @@ public class AxonStatement implements Statement {
         try {
             if (sql == null) return false;
             String translated = translate ? SqlTranslator.translate(sql) : sql;
-            String upper = translated.toUpperCase().trim();
-            if ((upper.startsWith("SELECT ") || upper.startsWith("SELECT'"))
-                && !upper.startsWith("SELECT VALUE")
-                && !upper.contains(" FROM ") && !upper.contains("\nFROM ")) {
-                currentResult = AxonValue.array(List.of(AxonValue.object(Map.of("ok", AxonValue.str("1")))));
-                hasResultSet = true;
-                return true;
-            }
             if (axon == null || !axon.isConnected()) {
                 throw new SQLException(Messages.get("jdbc_connection_closed"));
             }

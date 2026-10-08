@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name = "axonbase-sdk"
-  spec.version = "0.2.2"
+  spec.version = "0.2.3"
   spec.summary = "AxonBase WebSocket JSON-RPC client"
   spec.authors = ["AxonBase"]
   spec.license = "MIT"

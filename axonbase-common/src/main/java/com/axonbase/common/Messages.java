@@ -316,7 +316,11 @@ public final class Messages {
           ,Map.entry("jdbc_prepare_call_unsupported", "prepareCall não é suportado")
           ,Map.entry("jdbc_connection_closed", "conexão fechada ou WebSocket desconectado")
           ,Map.entry("jdbc_execute_failed", "erro ao executar: %s")
+          ,Map.entry("jdbc_unwrap_unsupported", "unwrap não suportado para %s")
+          ,Map.entry("jdbc_join_saga_failed", "falha ao entrar na saga %s: %s")
+          ,Map.entry("jdbc_leave_saga_failed", "falha ao sair da saga")
           ,Map.entry("jdbc_driver_registration_failed", "erro ao registrar driver JDBC AxonBase")
+          ,Map.entry("jdbc_invalid_identifier", "identificador SQL inválido: %s")
           ,Map.entry("jdbc_parent_logger_unsupported", "getParentLogger não é suportado")
           ,Map.entry("sdk_connect_failed", "falha ao conectar a %s: %s: %s")
           ,Map.entry("sdk_certificate_begin_response_invalid", "resposta certificate.begin inválida")
@@ -347,6 +351,8 @@ public final class Messages {
           ,Map.entry("spring_saga_name_required", "sagaName não pode estar em branco")
           ,Map.entry("spring_correlation_id_blank", "correlationId não pode estar em branco")
           ,Map.entry("spring_no_active_saga", "nenhuma SAGA ativa para a correlação: %s")
+          ,Map.entry("spring_datasource_required", "dataSource não pode ser nulo")
+          ,Map.entry("spring_join_saga_failed", "falha ao entrar na saga para correlação: %s")
 
     );
 
@@ -655,7 +661,11 @@ public final class Messages {
           ,Map.entry("jdbc_prepare_call_unsupported", "prepareCall is not supported")
           ,Map.entry("jdbc_connection_closed", "connection is closed or WebSocket is disconnected")
           ,Map.entry("jdbc_execute_failed", "failed to execute: %s")
+          ,Map.entry("jdbc_unwrap_unsupported", "unwrap not supported for %s")
+          ,Map.entry("jdbc_join_saga_failed", "failed to join saga %s: %s")
+          ,Map.entry("jdbc_leave_saga_failed", "failed to leave saga")
           ,Map.entry("jdbc_driver_registration_failed", "failed to register AxonBase JDBC driver")
+          ,Map.entry("jdbc_invalid_identifier", "invalid SQL identifier: %s")
           ,Map.entry("jdbc_parent_logger_unsupported", "getParentLogger is not supported")
           ,Map.entry("sdk_connect_failed", "failed to connect to %s: %s: %s")
           ,Map.entry("sdk_certificate_begin_response_invalid", "invalid certificate.begin response")

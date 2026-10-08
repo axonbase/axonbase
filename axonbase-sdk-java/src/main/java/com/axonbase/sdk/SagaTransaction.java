@@ -81,10 +81,15 @@ public class SagaTransaction implements AutoCloseable {
         // 1. Get current state (before) from the business database
         axon.use(ns, db);
         AxonValue before = axon.query("SELECT * FROM " + esc(table) + ":" + esc(recordId));
+        // SELECT * returns an array; extract the first record if present
+        AxonValue beforeRecord = before;
+        if (before != null && before.isArray() && !before.asArray().isEmpty()) {
+            beforeRecord = before.asArray().get(0);
+        }
 
         // 2. Record step in system.saga
         axon.use("system", "saga");
-        String beforeJson = before != null && before.isObject() ? before.toString() : "{}";
+        String beforeJson = beforeRecord != null && beforeRecord.isObject() ? beforeRecord.toString() : "{}";
         axon.query("CREATE saga_step CONTENT {"
             + "correlation_id: '" + esc(correlationId) + "',"
             + "step_order: " + System.currentTimeMillis() + ","

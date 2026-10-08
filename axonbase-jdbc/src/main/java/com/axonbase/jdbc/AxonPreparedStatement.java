@@ -25,9 +25,24 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
     private String buildSql() {
         StringBuilder sb = new StringBuilder();
         int p = 0;
+        boolean inString = false;
+        char quote = 0;
         for (int i = 0; i < sqlTemplate.length(); i++) {
             char c = sqlTemplate.charAt(i);
-            if (c == '?' && (i == 0 || sqlTemplate.charAt(i - 1) != '\'')) {
+            if (inString) {
+                sb.append(c);
+                if (c == quote) {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                inString = true;
+                quote = c;
+                sb.append(c);
+                continue;
+            }
+            if (c == '?') {
                 Object val = p < params.size() ? params.get(p++) : null;
                 if (val == null) sb.append("null");
                 else if (val instanceof Number || val instanceof Boolean) sb.append(val);

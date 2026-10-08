@@ -41,19 +41,23 @@ public class Migrator {
 
     public Map<String, String> applied() {
         Map<String, String> result = new LinkedHashMap<>();
+        AxonValue rows;
         try {
-            AxonValue rows = axon.query("SELECT version, checksum FROM _migration ORDER BY version ASC;");
-            if (rows.isArray()) {
-                for (AxonValue row : rows.asArray()) {
-                    if (row.isObject()) {
-                        var obj = row.asObject();
-                        String v = obj.containsKey("version") ? obj.get("version").asString() : null;
-                        String c = obj.containsKey("checksum") ? obj.get("checksum").asString() : null;
-                        if (v != null && c != null) result.put(v, c);
-                    }
+            rows = axon.query("SELECT version, checksum FROM _migration ORDER BY version ASC;");
+        } catch (Exception e) {
+            // Table may not exist yet — return empty
+            return result;
+        }
+        if (rows.isArray()) {
+            for (AxonValue row : rows.asArray()) {
+                if (row.isObject()) {
+                    var obj = row.asObject();
+                    String v = obj.containsKey("version") ? obj.get("version").asString() : null;
+                    String c = obj.containsKey("checksum") ? obj.get("checksum").asString() : null;
+                    if (v != null && c != null) result.put(v, c);
                 }
             }
-        } catch (Exception ignored) {}
+        }
         return result;
     }
 
