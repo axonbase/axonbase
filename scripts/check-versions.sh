@@ -7,7 +7,7 @@ version=$(<"$root_dir/VERSION")
 require_version() {
   local file=$1
   local pattern=$2
-  if ! rg -q -- "$pattern" "$root_dir/$file"; then
+  if ! grep -qF "$pattern" "$root_dir/$file"; then
     printf 'Version mismatch in %s: expected %s\n' "$file" "$version" >&2
     exit 1
   fi
