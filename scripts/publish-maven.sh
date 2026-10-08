@@ -23,9 +23,10 @@ mvn clean install \
   -Dmaven.test.skip=true \
   -Dmaven.javadoc.skip=true
 
+mvn -B install -pl axonbase-jdbc -am -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -q
+
 mvn -Pcentral-publishing deploy \
-  -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data \
-  -am \
-  -DskipTests -Dmaven.javadoc.skip=true -Dgpg.skip=true
+  -pl axonbase-jdbc \
+  -DskipTests -Dmaven.javadoc.skip=true
 
 printf 'Bundle uploaded. Review and publish it at https://central.sonatype.com/publishing/deployments\n'
