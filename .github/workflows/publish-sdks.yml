@@ -64,12 +64,14 @@ jobs:
         with:
           php-version: '8.3'
       - if: matrix.connector == 'java'
-        run: mvn -B verify -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -am -Dgpg.skip=true -Dmaven.javadoc.skip=true
+        run: |
+          mvn -B install -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -am -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -q
+          mvn -B test -pl axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -Dgpg.skip=true -Dmaven.javadoc.skip=true
       - if: matrix.connector == 'nodejs'
         working-directory: axonbase-sdk-nodejs
         run: npm ci && npm test && npm run build && npm pack --dry-run
       - if: matrix.connector == 'python'
-        run: python -m pip install -e 'axonbase-sdk-python[test]' build twine && python -m pytest axonbase-sdk-python/tests && python -m build axonbase-sdk-python && python -m twine check axonbase-sdk-python/dist/*
+        run: python -m pip install -e 'axonbase-sdk-python[test]' build twine sqlalchemy openai && python -m pytest axonbase-sdk-python/tests && python -m build axonbase-sdk-python && python -m twine check axonbase-sdk-python/dist/*
       - if: matrix.connector == 'dotnet'
         run: dotnet run --project axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj -c Release && dotnet pack axonbase-sdk-dotnet/AxonBaseSdk/AxonBaseSdk.csproj -c Release -o ./artifacts/nuget
       - if: matrix.connector == 'ruby'
