@@ -42,8 +42,9 @@
           <execution>
             <phase>package</phase>
             <goals><goal>shade</goal></goals>
-            <configuration>
-              <transformers>
+<configuration>
+                <createDependencyReducedPom>false</createDependencyReducedPom>
+                <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <manifestEntries>
                     <Driver-Class>com.axonbase.jdbc.AxonDriver</Driver-Class>

@@ -1,6 +1,8 @@
 # Build stage
 FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /build
+
+# Primeiro copia e resolve as dependências para aproveitar o cache de camadas.
 COPY pom.xml .
 COPY axonbase-common/pom.xml axonbase-common/
 COPY axonbase-value/pom.xml axonbase-value/
@@ -11,6 +13,9 @@ COPY axonbase-sdk-java/pom.xml axonbase-sdk-java/
 COPY axonbase-spring-data/pom.xml axonbase-spring-data/
 COPY axonbase-cli/pom.xml axonbase-cli/
 COPY axonbase-jdbc/pom.xml axonbase-jdbc/
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn -B -q -pl axonbase-core,axonbase-server -am dependency:resolve -Dgpg.skip=true -Dmaven.javadoc.skip=true || true
+
 COPY axonbase-common/src axonbase-common/src
 COPY axonbase-value/src axonbase-value/src
 COPY axonbase-parser/src axonbase-parser/src
@@ -20,7 +25,8 @@ COPY axonbase-sdk-java/src axonbase-sdk-java/src
 COPY axonbase-spring-data/src axonbase-spring-data/src
 COPY axonbase-cli/src axonbase-cli/src
 COPY axonbase-jdbc/src axonbase-jdbc/src
-RUN mvn -B -q -pl axonbase-server -am install -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true \
+RUN --mount=type=cache,target=/root/.m2/repository \
+    mvn -B -q -pl axonbase-server -am install -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true -T 1C \
  && mvn -q -pl axonbase-server dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/build/deps -Dgpg.skip=true -Dmaven.javadoc.skip=true
 
 # Runtime stage
