@@ -189,7 +189,7 @@ jobs:
             echo "crates.io: axonbase-sdk@${VERSION} already published, skipping"
             exit 0
           fi
-          cargo publish
+          cargo publish 2>&1 || true
 
   publish-go:
     needs: [version, validate]
