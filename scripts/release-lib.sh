@@ -29,7 +29,8 @@ require_release() {
   local tag
   while IFS= read -r tag; do
     [[ "$tag" == "$expected_tag" ]] && return
-  done < <(git tag --points-at HEAD)
+-  done < <(git tag --points-at HEAD --list "$expected_tag")
++  done < <(git tag --points-at HEAD --list "$expected_tag" *)
 
   printf 'Refusing to publish: HEAD must be tagged %s.\n' "$expected_tag" >&2
   exit 1

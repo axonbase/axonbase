@@ -12,7 +12,7 @@ fi
 version=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
 expected_tag="v$version"
 
-if [[ $(git describe --exact-match --tags HEAD) != "$expected_tag" ]]; then
+if [[ $(git describe --exact-match --tags HEAD --match 'v*' 2>/dev/null) != "$expected_tag" ]]; then
   printf 'Refusing to publish: HEAD must be tagged %s.\n' "$expected_tag" >&2
   exit 1
 fi
