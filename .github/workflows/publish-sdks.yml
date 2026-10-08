@@ -168,7 +168,7 @@ jobs:
         run: dotnet nuget push './artifacts/nuget/*.nupkg' --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   publish-ruby:
-    needs: [validate]
+    needs: [version, validate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,7 +188,7 @@ jobs:
           gem push *.gem
 
   publish-rust:
-    needs: [validate]
+    needs: [version, validate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -201,7 +201,7 @@ jobs:
             echo "crates.io: axonbase-sdk@${VERSION} already published, skipping"
             exit 0
           fi
-          cargo publish 2>&1 || true
+          cargo publish
 
   publish-go:
     needs: [version, validate]
