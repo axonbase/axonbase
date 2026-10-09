@@ -244,6 +244,15 @@ public final class Parser {
         if (t.isKeyword("remove")) {
             return parseRemove();
         }
+        if (t.isKeyword("alter")) {
+            return parseAlter();
+        }
+        if (t.isKeyword("grant")) {
+            return parseGrantAccess();
+        }
+        if (t.isKeyword("revoke")) {
+            return parseRevokeAccess();
+        }
         if (t.isKeyword("show")) {
             return parseShow();
         }
@@ -522,18 +531,26 @@ public final class Parser {
             }
             return new Statement.CreateJks(name, path, password, collector, oids);
         }
-        if (matchKeyword("ai")) {
-            expectKeyword("audit");
-            String name = expectIdent();
-            expectKeyword("set");
-            expectKeyword("warning");
-            expectKeyword("when");
-            String warningWhen = expectString();
-            expectKeyword("set");
-            expectKeyword("danger");
-            expectKeyword("when");
-            String dangerWhen = expectString();
-            return new Statement.DefineAiAudit(name, warningWhen, dangerWhen);
+        // Check for CREATE DDL statements with lookahead (to avoid ambiguity with CREATE <table>)
+        if (peekDdlCreate("index", "on")) {
+            pos++; // consume "index"
+            return parseCreateIndex();
+        }
+        if (peekDdlCreate("event", "on")) {
+            pos++; // consume "event"
+            return parseCreateEvent();
+        }
+        if (peekDdlCreate("analyzer", null, "lowercase", "stemming", "stopwords")) {
+            pos++; // consume "analyzer"
+            return parseCreateAnalyzer();
+        }
+        if (peekDdlCreate("user", "on")) {
+            pos++; // consume "user"
+            return parseCreateUser();
+        }
+        if (atKeyword("database") && peek(1) != null && peek(1).isKeyword("link")) {
+            pos++; pos++; // consume "database" + "link"
+            return parseCreateDatabaseLink();
         }
         if (matchKeyword("data")) {
             if (matchKeyword("rule")) {
@@ -1247,6 +1264,332 @@ public final class Parser {
         throw error(Messages.get("parser_unexpected_define", peek().start(), peek().text()));
     }
 
+    // ------------------------------------------------------------------
+    // New SQL-standard CREATE variants
+    // ------------------------------------------------------------------
+
+    private Statement parseCreateIndex() {
+        String name = expectIdent();
+        expectKeyword("on");
+        expectKeyword("table");
+        String table = expectIdent();
+        expectKeyword("columns");
+        List<String> columns = new ArrayList<>();
+        columns.add(parseFieldPath());
+        while (match(COMMA)) {
+            columns.add(parseFieldPath());
+        }
+        boolean unique = matchKeyword("unique");
+        boolean count = !unique && matchKeyword("count");
+        String searchAnalyzer = null;
+        boolean geo = false;
+        boolean columnar = false;
+        Integer vectorDimension = null;
+        String vectorDistance = null;
+        Integer hnswM = null;
+        Integer hnswEfc = null;
+        Integer hnswEfs = null;
+        if (!unique && !count && matchKeyword("search")) {
+            expectKeyword("analyzer");
+            searchAnalyzer = expectIdent();
+        } else if (!unique && !count && matchKeyword("geo")) {
+            geo = true;
+        } else if (!unique && !count && matchKeyword("columnar")) {
+            columnar = true;
+        } else if (!unique && !count && matchKeyword("hnsw")) {
+            expectKeyword("dimension");
+            vectorDimension = ((Number) expect(TokenType.INT).literal()).intValue();
+            if (matchKeyword("dist")) {
+                vectorDistance = expectIdent();
+            } else {
+                vectorDistance = "euclidean";
+            }
+            while (true) {
+                if (hnswM == null && (hnswM = matchParamInt("m")) != null) continue;
+                if (hnswEfc == null && (hnswEfc = matchParamInt("efc")) != null) continue;
+                if (hnswEfs == null && (hnswEfs = matchParamInt("efs")) != null) continue;
+                break;
+            }
+        }
+        return new Statement.CreateIndex(name, table, columns, unique, count, searchAnalyzer,
+            geo, columnar, vectorDimension, vectorDistance, hnswM, hnswEfc, hnswEfs);
+    }
+
+    private Statement parseCreateEvent() {
+        String name = expectIdent();
+        expectKeyword("on");
+        expectKeyword("table");
+        String table = expectIdent();
+        expectKeyword("when");
+        Expr when = parseExpr();
+        expectKeyword("then");
+        List<Statement> then = parseParenStatements();
+        return new Statement.CreateEvent(name, table, when, then);
+    }
+
+    private Statement parseCreateAnalyzer() {
+        String name = expectIdent();
+        boolean lowercase = false;
+        boolean stemming = false;
+        List<String> stopwords = new ArrayList<>();
+        while (true) {
+            if (matchKeyword("lowercase")) {
+                lowercase = true;
+            } else if (matchKeyword("stemming")) {
+                stemming = true;
+            } else if (matchKeyword("stopwords")) {
+                Token word = expect(TokenType.STRING);
+                stopwords.add((String) word.literal());
+                while (match(COMMA)) {
+                    Token next = expect(TokenType.STRING);
+                    stopwords.add((String) next.literal());
+                }
+            } else {
+                break;
+            }
+        }
+        return new Statement.CreateAnalyzer(name, lowercase, stopwords, stemming);
+    }
+
+    private Statement parseCreateUser() {
+        String name = expectIdentOrString();
+        AuthTarget target = parseAuthTarget();
+        Expr password = null;
+        String passhash = null;
+        String certificate = null;
+        String fingerprint = null;
+        if (matchKeyword("passhash")) {
+            passhash = expectString();
+        } else if (matchKeyword("password")) {
+            password = parseExpr();
+        } else if (matchKeyword("certificate")) {
+            certificate = expectIdent();
+            if (matchKeyword("fingerprint")) {
+                fingerprint = expectString();
+            }
+        } else {
+            throw error(Messages.get("parser_define_user_expected_credential"));
+        }
+        List<String> roles = new ArrayList<>();
+        if (matchKeyword("roles")) {
+            roles.add(expectIdent());
+            while (match(COMMA)) {
+                roles.add(expectIdent());
+            }
+        }
+        List<String> dataRules = new ArrayList<>();
+        if (matchKeyword("apply")) {
+            expectKeyword("data");
+            expectKeyword("rule");
+            dataRules.add(expectIdent());
+            while (match(COMMA)) {
+                dataRules.add(expectIdent());
+            }
+        }
+        String auditName = null;
+        if (matchKeyword("audited")) {
+            expectKeyword("by");
+            auditName = expectIdent();
+        }
+        return new Statement.CreateUser(name, target.scope(), target.namespace(),
+            target.database(), password, passhash, certificate, fingerprint, roles, dataRules, auditName);
+    }
+
+    private Statement parseCreateDatabaseLink() {
+        String name = expectIdentOrString();
+        expectKeyword("connect");
+        expectKeyword("by");
+        String url = expectString();
+        String linkNs = "";
+        String linkDb = "";
+        String linkUser = "";
+        String linkPassword = "";
+        if (matchKeyword("with")) {
+            linkNs = parseKvAfterWith("ns");
+            linkDb = parseKvAfterWith("db");
+            linkUser = parseKvAfterWith("user");
+            linkPassword = parseKvAfterWith("password");
+        }
+        return new Statement.CreateDatabaseLink(name, url, linkNs, linkDb, linkUser, linkPassword);
+    }
+
+    // ------------------------------------------------------------------
+    // ALTER TABLE
+    // ------------------------------------------------------------------
+
+    private Statement parseAlter() {
+        pos++;
+        if (matchKeyword("table")) {
+            String name = expectIdentOrString();
+            List<Statement.AlterOp> ops = new ArrayList<>();
+            while (true) {
+                if (matchKeyword("add")) {
+                    matchKeyword("column");
+                    String colName = expectIdentOrString();
+                    String colType = parseSqlColumnType();
+                    boolean isPk = false;
+                    boolean isNotNull = false;
+                    Expr defaultExpr = null;
+                    Expr checkExpr = null;
+                    String references = null;
+                    while (true) {
+                        if (matchKeyword("primary")) { expectKeyword("key"); isPk = true; }
+                        else if (matchKeyword("not")) { expectKeyword("null"); isNotNull = true; }
+                        else if (matchKeyword("null")) { /* ignore */ }
+                        else if (matchKeyword("default")) { defaultExpr = parseExpr(); }
+                        else if (matchKeyword("check")) { expect(TokenType.LPAREN); checkExpr = rewriteCheckExpr(parseExpr(), colName); expect(TokenType.RPAREN); }
+                        else if (matchKeyword("references")) {
+                            references = expectIdentOrString();
+                            if (match(TokenType.LPAREN)) { expectIdentOrString(); expect(TokenType.RPAREN); }
+                        } else { break; }
+                    }
+                    ops.add(new Statement.AddColumn(colName, colType, isPk, isNotNull, defaultExpr, checkExpr, references));
+                } else if (matchKeyword("drop")) {
+                    matchKeyword("column");
+                    String colName = expectIdentOrString();
+                    ops.add(new Statement.DropColumn(colName));
+                } else if (matchKeyword("modify")) {
+                    matchKeyword("column");
+                    String colName = expectIdentOrString();
+                    String colType = parseSqlColumnType();
+                    boolean isNotNull = false;
+                    Expr defaultExpr = null;
+                    Expr checkExpr = null;
+                    while (true) {
+                        if (matchKeyword("not")) { expectKeyword("null"); isNotNull = true; }
+                        else if (matchKeyword("null")) { /* ignore */ }
+                        else if (matchKeyword("default")) { defaultExpr = parseExpr(); }
+                        else if (matchKeyword("check")) { expect(TokenType.LPAREN); checkExpr = rewriteCheckExpr(parseExpr(), colName); expect(TokenType.RPAREN); }
+                        else { break; }
+                    }
+                    ops.add(new Statement.ModifyColumn(colName, colType, isNotNull, defaultExpr, checkExpr));
+                } else {
+                    break;
+                }
+                if (!match(COMMA)) break;
+            }
+            if (ops.isEmpty()) {
+                throw error(Messages.get("parser_alter_table_no_ops", peek().start()));
+            }
+            return new Statement.AlterTable(name, ops);
+        }
+        if (matchKeyword("saga")) {
+            String name = expectIdentOrString();
+            expectKeyword("with");
+            expectKeyword("databases");
+            List<String> links = new ArrayList<>();
+            links.add(expectString());
+            while (match(COMMA)) {
+                links.add(expectString());
+            }
+            return new Statement.CreateSaga(name, links);
+        }
+        if (matchKeyword("index")) {
+            // Future: ALTER INDEX <name> ... for now return the DEFINE INDEX record
+            String name = expectIdent();
+            expectKeyword("on");
+            expectKeyword("table");
+            String table = expectIdent();
+            expectKeyword("columns");
+            List<String> columns = new ArrayList<>();
+            columns.add(parseFieldPath());
+            while (match(COMMA)) columns.add(parseFieldPath());
+            boolean unique = matchKeyword("unique");
+            boolean count = !unique && matchKeyword("count");
+            String searchAnalyzer = null;
+            boolean geo = false;
+            boolean columnar = false;
+            Integer vectorDimension = null;
+            String vectorDistance = null;
+            Integer hnswM = null;
+            Integer hnswEfc = null;
+            Integer hnswEfs = null;
+            if (!unique && !count && matchKeyword("search")) { expectKeyword("analyzer"); searchAnalyzer = expectIdent(); }
+            else if (!unique && !count && matchKeyword("geo")) { geo = true; }
+            else if (!unique && !count && matchKeyword("columnar")) { columnar = true; }
+            else if (!unique && !count && matchKeyword("hnsw")) {
+                expectKeyword("dimension");
+                vectorDimension = ((Number) expect(TokenType.INT).literal()).intValue();
+                if (matchKeyword("dist")) { vectorDistance = expectIdent(); } else { vectorDistance = "euclidean"; }
+                while (true) {
+                    if (hnswM == null && (hnswM = matchParamInt("m")) != null) continue;
+                    if (hnswEfc == null && (hnswEfc = matchParamInt("efc")) != null) continue;
+                    if (hnswEfs == null && (hnswEfs = matchParamInt("efs")) != null) continue;
+                    break;
+                }
+            }
+            return new Statement.CreateIndex(name, table, columns, unique, count, searchAnalyzer, geo, columnar, vectorDimension, vectorDistance, hnswM, hnswEfc, hnswEfs);
+        }
+        if (matchKeyword("event")) {
+            String name = expectIdent();
+            expectKeyword("on");
+            expectKeyword("table");
+            String table = expectIdent();
+            expectKeyword("when");
+            Expr when = parseExpr();
+            expectKeyword("then");
+            List<Statement> then = parseParenStatements();
+            return new Statement.CreateEvent(name, table, when, then);
+        }
+        if (matchKeyword("analyzer")) {
+            String name = expectIdent();
+            boolean lowercase = false;
+            boolean stemming = false;
+            List<String> stopwords = new ArrayList<>();
+            while (true) {
+                if (matchKeyword("lowercase")) { lowercase = true; }
+                else if (matchKeyword("stemming")) { stemming = true; }
+                else if (matchKeyword("stopwords")) {
+                    stopwords.add((String) expect(TokenType.STRING).literal());
+                    while (match(COMMA)) { stopwords.add((String) expect(TokenType.STRING).literal()); }
+                } else { break; }
+            }
+            return new Statement.CreateAnalyzer(name, lowercase, stopwords, stemming);
+        }
+        if (matchKeyword("user")) {
+            return parseCreateUser();
+        }
+        if (matchKeyword("database")) {
+            if (matchKeyword("link")) {
+                String name = expectIdentOrString();
+                expectKeyword("connect");
+                expectKeyword("by");
+                String url = expectString();
+                String linkNs = "";
+                String linkDb = "";
+                String linkUser = "";
+                String linkPassword = "";
+                if (matchKeyword("with")) {
+                    linkNs = parseKvAfterWith("ns");
+                    linkDb = parseKvAfterWith("db");
+                    linkUser = parseKvAfterWith("user");
+                    linkPassword = parseKvAfterWith("password");
+                }
+                return new Statement.AlterDatabaseLink(name, url, linkNs, linkDb, linkUser, linkPassword);
+            }
+        }
+        throw error(Messages.get("parser_unexpected_alter", peek().start(), peek().text()));
+    }
+
+    // ------------------------------------------------------------------
+    // GRANT / REVOKE ACCESS
+    // ------------------------------------------------------------------
+
+    private Statement parseGrantAccess() {
+        pos++;
+        expectKeyword("access");
+        String name = expectIdent();
+        AuthTarget target = parseAuthTarget();
+        return new Statement.GrantAccess(name, target.scope(), target.namespace(), target.database());
+    }
+
+    private Statement parseRevokeAccess() {
+        pos++;
+        expectKeyword("access");
+        String name = expectIdent();
+        return new Statement.RevokeAccess(name);
+    }
+
     private Statement parseDrop() {
         pos++;
         if (matchKeyword("ai")) {
@@ -1268,8 +1611,28 @@ public final class Parser {
             }
         }
         if (matchKeyword("table")) {
+            String name = expectIdentOrString();
+            return new Statement.DropTable(name);
+        }
+        if (matchKeyword("index")) {
             String name = expectIdent();
-            return new Statement.RemoveTable(name);
+            return new Statement.DropIndex(name);
+        }
+        if (matchKeyword("event")) {
+            String name = expectIdent();
+            return new Statement.DropEvent(name);
+        }
+        if (matchKeyword("analyzer")) {
+            String name = expectIdent();
+            return new Statement.DropAnalyzer(name);
+        }
+        if (matchKeyword("user")) {
+            String name = expectIdentOrString();
+            return new Statement.DropUser(name);
+        }
+        if (matchKeyword("saga")) {
+            String name = expectIdentOrString();
+            return new Statement.DropSaga(name);
         }
         throw error(Messages.get("parser_unexpected_drop", peek().start(), peek().text()));
     }
@@ -2016,12 +2379,37 @@ public final class Parser {
         return new Expr.SetLit(items);
     }
 
+    /** Verifica se o padrão é DDL (ex.: {@code CREATE INDEX <name> ON ...}) sem consumir tokens. */
+    private boolean peekDdlCreate(String keyword, String expectedAfterName) {
+        if (!atKeyword(keyword)) return false;
+        Token name = peek(1);
+        if (name == null || !(name.is(IDENT) || name.is(TokenType.STRING) || name.is(KEYWORD))) return false;
+        if (expectedAfterName == null) return true;
+        Token after = peek(2);
+        return after != null && after.isKeyword(expectedAfterName);
+    }
+
+    /** {@code CREATE ANALYZER <name> [option1|option2|...] } */
+    private boolean peekDdlCreate(String keyword, String ignored, String... ddlKeywords) {
+        if (!atKeyword(keyword)) return false;
+        Token name = peek(1);
+        if (name == null || !(name.is(IDENT) || name.is(TokenType.STRING) || name.is(KEYWORD))) return false;
+        Token after = peek(2);
+        if (after == null) return false;
+        for (String kw : ddlKeywords) {
+            if (after.isKeyword(kw)) return true;
+        }
+        return false;
+    }
+
     private boolean isStatementKeyword(Token t) {
         return t.isKeyword("select") || t.isKeyword("create") || t.isKeyword("update")
             || t.isKeyword("delete") || t.isKeyword("insert") || t.isKeyword("define")
             || t.isKeyword("let") || t.isKeyword("return") || t.isKeyword("if")
             || t.isKeyword("for") || t.isKeyword("info") || t.isKeyword("relate")
-            || t.isKeyword("begin") || t.isKeyword("commit") || t.isKeyword("cancel");
+            || t.isKeyword("begin") || t.isKeyword("commit") || t.isKeyword("cancel")
+            || t.isKeyword("alter") || t.isKeyword("drop") || t.isKeyword("grant")
+            || t.isKeyword("revoke");
     }
 
     private boolean isObjectLiteralAhead() {

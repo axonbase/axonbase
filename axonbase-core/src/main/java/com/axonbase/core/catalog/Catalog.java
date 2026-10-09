@@ -65,6 +65,10 @@ public final class Catalog {
         return List.copyOf(analyzers.values());
     }
 
+    public boolean removeAnalyzer(String name) {
+        return analyzers.remove(name) != null;
+    }
+
     /** Definición de táboa: SCHEMAFULL/SCHEMALESS, drop, campos, índices, eventos. */
     public static final class TableDef {
         private final String name;

@@ -416,12 +416,128 @@ public final class Render {
             case Statement.DropAiAudit da -> {
                 sb.append("DROP AI AUDIT ").append(da.name());
             }
-            case Statement.RemoveTable rt -> {
-                sb.append("REMOVE TABLE ").append(rt.name());
-            }
             case Statement.ShowAiAudit sa -> {
                 sb.append("SHOW AI AUDIT ").append(sa.name());
             }
+            case Statement.RemoveTable rt -> {
+                sb.append("REMOVE TABLE ").append(rt.name());
+            }
+            case Statement.DropTable dt -> {
+                sb.append("DROP TABLE ").append(dt.name());
+            }
+            case Statement.AlterTable at -> {
+                sb.append("ALTER TABLE ").append(at.name());
+                for (var op : at.operations()) {
+                    switch (op) {
+                        case Statement.AddColumn ac -> {
+                            sb.append(" ADD COLUMN ").append(ac.name()).append(' ').append(ac.type().toUpperCase());
+                            if (ac.primaryKey()) sb.append(" PRIMARY KEY");
+                            if (ac.notNull()) sb.append(" NOT NULL");
+                            if (ac.defaultExpr() != null) sb.append(" DEFAULT ").append(expr(ac.defaultExpr()));
+                            if (ac.checkExpr() != null) sb.append(" CHECK (").append(expr(ac.checkExpr())).append(')');
+                            if (ac.references() != null) sb.append(" REFERENCES ").append(ac.references());
+                        }
+                        case Statement.DropColumn dc -> sb.append(" DROP COLUMN ").append(dc.name());
+                        case Statement.ModifyColumn mc -> {
+                            sb.append(" MODIFY COLUMN ").append(mc.name()).append(' ').append(mc.type().toUpperCase());
+                            if (mc.notNull()) sb.append(" NOT NULL");
+                            if (mc.defaultExpr() != null) sb.append(" DEFAULT ").append(expr(mc.defaultExpr()));
+                            if (mc.checkExpr() != null) sb.append(" CHECK (").append(expr(mc.checkExpr())).append(')');
+                        }
+                    }
+                }
+            }
+            case Statement.CreateIndex ci -> {
+                sb.append("CREATE INDEX ").append(ci.name()).append(" ON TABLE ").append(ci.table())
+                    .append(" COLUMNS ").append(String.join(", ", ci.columns()));
+                if (ci.unique()) { sb.append(" UNIQUE"); }
+                else if (ci.count()) { sb.append(" COUNT"); }
+                else if (ci.searchAnalyzer() != null) { sb.append(" SEARCH ANALYZER ").append(ci.searchAnalyzer()); }
+                else if (ci.geo()) { sb.append(" GEO"); }
+                else if (ci.columnar()) { sb.append(" COLUMNAR"); }
+                else if (ci.vectorDimension() != null) {
+                    sb.append(" HNSW DIMENSION ").append(ci.vectorDimension()).append(" DIST ").append(ci.vectorDistance());
+                    if (ci.m() != null) sb.append(" M ").append(ci.m());
+                    if (ci.efConstruction() != null) sb.append(" EFC ").append(ci.efConstruction());
+                    if (ci.efSearch() != null) sb.append(" EFS ").append(ci.efSearch());
+                }
+            }
+            case Statement.DropIndex di -> sb.append("DROP INDEX ").append(di.name());
+            case Statement.CreateEvent ce -> {
+                sb.append("CREATE EVENT ").append(ce.name()).append(" ON TABLE ").append(ce.table())
+                    .append(" WHEN ").append(expr(ce.when())).append(" THEN (");
+                for (int i = 0; i < ce.then().size(); i++) {
+                    if (i > 0) sb.append("; ");
+                    statement(sb, ce.then().get(i));
+                }
+                sb.append(')');
+            }
+            case Statement.DropEvent de -> sb.append("DROP EVENT ").append(de.name());
+            case Statement.CreateAnalyzer ca -> {
+                sb.append("CREATE ANALYZER ").append(ca.name());
+                if (ca.lowercase()) sb.append(" LOWERCASE");
+                if (!ca.stopwords().isEmpty()) {
+                    sb.append(" STOPWORDS ");
+                    for (int i = 0; i < ca.stopwords().size(); i++) {
+                        if (i > 0) sb.append(", ");
+                        sb.append('"').append(escape(ca.stopwords().get(i))).append('"');
+                    }
+                }
+                if (ca.stemming()) sb.append(" STEMMING");
+            }
+            case Statement.DropAnalyzer da -> sb.append("DROP ANALYZER ").append(da.name());
+            case Statement.CreateUser cu -> {
+                sb.append("CREATE USER ");
+                if (cu.name().matches("[\\p{L}_][\\p{L}\\p{N}_!]*")) {
+                    sb.append(cu.name());
+                } else {
+                    sb.append('"').append(escape(cu.name())).append('"');
+                }
+                sb.append(" ON ");
+                authScope(sb, cu.scope(), cu.namespace(), cu.database());
+                if (cu.certificateBased()) {
+                    sb.append(" CERTIFICATE ").append(cu.certificate());
+                    if (cu.fingerprint() != null) {
+                        sb.append(" FINGERPRINT \"").append(escape(cu.fingerprint())).append('"');
+                    }
+                } else if (cu.hashed()) {
+                    sb.append(" PASSHASH \"").append(escape(cu.passhash())).append('"');
+                } else {
+                    sb.append(" PASSWORD ").append(expr(cu.password()));
+                }
+                if (!cu.roles().isEmpty()) {
+                    sb.append(" ROLES ").append(String.join(", ", cu.roles()));
+                }
+                if (!cu.dataRules().isEmpty()) {
+                    sb.append(" APPLY DATA RULE ").append(String.join(", ", cu.dataRules()));
+                }
+                if (cu.auditName() != null && !cu.auditName().isBlank()) {
+                    sb.append(" AUDITED BY ").append(cu.auditName());
+                }
+            }
+            case Statement.DropUser du -> sb.append("DROP USER ").append(du.name());
+            case Statement.GrantAccess ga -> {
+                sb.append("GRANT ACCESS ").append(ga.name()).append(" ON ");
+                authScope(sb, ga.scope(), ga.namespace(), ga.database());
+            }
+            case Statement.RevokeAccess ra -> sb.append("REVOKE ACCESS ").append(ra.name());
+            case Statement.CreateDatabaseLink cdl -> {
+                sb.append("CREATE DATABASE LINK \"").append(escape(cdl.name())).append('"')
+                    .append(" CONNECT BY \"").append(escape(cdl.url())).append('"')
+                    .append(" WITH ns = \"").append(escape(cdl.ns())).append('"')
+                    .append(" db = \"").append(escape(cdl.db())).append('"')
+                    .append(" user = \"").append(escape(cdl.user())).append('"')
+                    .append(" password = \"").append(escape(cdl.password())).append('"');
+            }
+            case Statement.AlterDatabaseLink adl -> {
+                sb.append("ALTER DATABASE LINK \"").append(escape(adl.name())).append('"')
+                    .append(" CONNECT BY \"").append(escape(adl.url())).append('"')
+                    .append(" WITH ns = \"").append(escape(adl.ns())).append('"')
+                    .append(" db = \"").append(escape(adl.db())).append('"')
+                    .append(" user = \"").append(escape(adl.user())).append('"')
+                    .append(" password = \"").append(escape(adl.password())).append('"');
+            }
+            case Statement.DropSaga ds -> sb.append("DROP SAGA ").append(ds.name());
             case Statement.SetReasonAudit sra -> {
                 sb.append("SET REASON AUDIT CASE '").append(escape(sra.hash()))
                     .append("' '").append(escape(sra.reason())).append("'");

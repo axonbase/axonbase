@@ -323,6 +323,34 @@ public final class Executor {
             case Statement.ShowAiAudit sa -> runShowAiAudit(sa);
             case Statement.SetReasonAudit sra -> runSetReasonAudit(sra);
             case Statement.SetAuditCase sac -> runSetAuditCase(sac);
+            // New SQL-standard records -> delegate to existing run methods
+            case Statement.DropTable dt -> runRemoveTable(
+                new Statement.RemoveTable(dt.name()));
+            case Statement.AlterTable at -> runAlterTable(at);
+            case Statement.CreateIndex ci -> runDefineIndex(
+                new Statement.DefineIndex(ci.name(), ci.table(), ci.columns(), ci.unique(), ci.count(),
+                    ci.searchAnalyzer(), ci.geo(), ci.columnar(), ci.vectorDimension(), ci.vectorDistance(),
+                    ci.m(), ci.efConstruction(), ci.efSearch()));
+            case Statement.DropIndex di -> runDropIndex(di);
+            case Statement.CreateEvent ce -> runDefineEvent(
+                new Statement.DefineEvent(ce.name(), ce.table(), ce.when(), ce.then()));
+            case Statement.DropEvent de -> runDropEvent(de);
+            case Statement.CreateAnalyzer ca -> runDefineAnalyzer(
+                new Statement.DefineAnalyzer(ca.name(), ca.lowercase(), ca.stopwords(), ca.stemming()));
+            case Statement.DropAnalyzer da -> runDropAnalyzer(da);
+            case Statement.CreateUser cu -> runDefineUser(
+                new Statement.DefineUser(cu.name(), cu.scope(), cu.namespace(), cu.database(),
+                    cu.password(), cu.passhash(), cu.certificate(), cu.fingerprint(),
+                    cu.roles(), cu.dataRules(), cu.auditName()));
+            case Statement.DropUser du -> runDropUser(du);
+            case Statement.GrantAccess ga -> runDefineAccess(
+                new Statement.DefineAccess(ga.name(), ga.scope(), ga.namespace(), ga.database()));
+            case Statement.RevokeAccess ra -> runRevokeAccess(ra);
+            case Statement.CreateDatabaseLink cdl -> runDefineDatabaseLink(
+                new Statement.DefineDatabaseLink(cdl.name(), cdl.url(), cdl.ns(), cdl.db(), cdl.user(), cdl.password()));
+            case Statement.AlterDatabaseLink adl -> runDefineDatabaseLink(
+                new Statement.DefineDatabaseLink(adl.name(), adl.url(), adl.ns(), adl.db(), adl.user(), adl.password()));
+            case Statement.DropSaga ds -> runDropSaga(ds);
         };
     }
 
@@ -3099,6 +3127,93 @@ return score;
             )));
         }
         return AxonValue.array(items);
+    }
+
+    // ------------------------------------------------------------------
+    // New SQL-standard run methods
+    // ------------------------------------------------------------------
+
+    private AxonValue runAlterTable(Statement.AlterTable at) {
+        Database db = db();
+        Catalog.TableDef def = ensureTable(db, at.name());
+        for (Statement.AlterOp op : at.operations()) {
+            switch (op) {
+                case Statement.AddColumn ac -> {
+                    def.fields().put(ac.name(), new Catalog.FieldDef(ac.name(), ac.type(), false,
+                        ac.checkExpr(), ac.defaultExpr(), ac.references()));
+                }
+                case Statement.DropColumn dc -> {
+                    if (def.fields().remove(dc.name()) == null) {
+                        throw errorStmt(Messages.get("stmt_field_missing", dc.name(), at.name()));
+                    }
+                }
+                case Statement.ModifyColumn mc -> {
+                    Catalog.FieldDef existing = def.fields().get(mc.name());
+                    if (existing == null) {
+                        throw errorStmt(Messages.get("stmt_field_missing", mc.name(), at.name()));
+                    }
+                    def.fields().put(mc.name(), new Catalog.FieldDef(mc.name(), mc.type(),
+                        existing.readonly(),
+                        mc.checkExpr() != null ? mc.checkExpr() : existing.assertExpr(),
+                        mc.defaultExpr() != null ? mc.defaultExpr() : existing.defaultExpr(),
+                        existing.references()));
+                }
+            }
+        }
+        control(db, ControlCommand.Kind.TABLE, at.name(), com.axonbase.parser.Render.stmt(at));
+        return AxonValue.nul();
+    }
+
+    private AxonValue runDropIndex(Statement.DropIndex di) {
+        Database db = db();
+        for (Catalog.TableDef def : db.catalog().tables()) {
+            if (def.indexes().remove(di.name()) != null) {
+                control(db, ControlCommand.Kind.INDEX, di.name(),
+                    "DROP INDEX " + di.name());
+                return AxonValue.nul();
+            }
+        }
+        throw errorStmt(Messages.get("stmt_index_missing", di.name()));
+    }
+
+    private AxonValue runDropEvent(Statement.DropEvent de) {
+        Database db = db();
+        for (Catalog.TableDef def : db.catalog().tables()) {
+            if (def.events().remove(de.name()) != null) {
+                return AxonValue.nul();
+            }
+        }
+        throw errorStmt(Messages.get("stmt_event_missing", de.name()));
+    }
+
+    private AxonValue runDropAnalyzer(Statement.DropAnalyzer da) {
+        Database db = db();
+        if (!db.catalog().removeAnalyzer(da.name())) {
+            throw errorStmt(Messages.get("stmt_analyzer_missing", da.name()));
+        }
+        return AxonValue.nul();
+    }
+
+    private AxonValue runDropUser(Statement.DropUser du) {
+        Database db = db();
+        String ns = session.namespace();
+        String database = session.database();
+        this.ds.authCatalog().removeUser(du.name(), ns, database);
+        control(db, ControlCommand.Kind.USER, du.name(),
+            com.axonbase.parser.Render.stmt(du));
+        return AxonValue.nul();
+    }
+
+    private AxonValue runRevokeAccess(Statement.RevokeAccess ra) {
+        String ns = session.namespace();
+        String database = session.database();
+        this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+        return AxonValue.nul();
+    }
+
+    private AxonValue runDropSaga(Statement.DropSaga d) {
+        this.ds.dropSaga(d.name());
+        return AxonValue.nul();
     }
 
     /** Coleta os predicados das Data Rules associadas ao usuário da sessão. */

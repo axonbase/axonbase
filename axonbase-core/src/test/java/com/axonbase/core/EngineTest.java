@@ -740,4 +740,72 @@ class EngineTest {
             "RETURN graph::connected(person:1, person:4, \"knows\", 1)", s, null);
         assertEquals(false, limited.asBool());
     }
+
+    // ------------------------------------------------------------------
+    // New SQL-standard execution tests
+    // ------------------------------------------------------------------
+
+    @Test
+    void createIndexAtRuntime() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE TABLE t (id VARCHAR(64) PRIMARY KEY, name STRING, age INT) WITH (SCHEMA = 'FLEXIBLE')", s, null);
+        ds.execute("CREATE INDEX idx_name ON TABLE t COLUMNS name UNIQUE", s, null);
+        ds.execute("CREATE INDEX idx_count ON TABLE t COLUMNS id COUNT", s, null);
+        AxonValue rows = ds.execute("SELECT * FROM t", s, null);
+        assertTrue(rows.isArray());
+    }
+
+    @Test
+    void dropTableAtRuntime() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE TABLE t (id VARCHAR(64) PRIMARY KEY) WITH (SCHEMA = 'FLEXIBLE')", s, null);
+        ds.execute("INSERT INTO t (id) VALUES ('a')", s, null);
+        ds.execute("DROP TABLE t", s, null);
+        // After drop, querying the table should produce no results
+        AxonValue rows = ds.execute("SELECT * FROM t", s, null);
+        assertTrue(rows.isArray());
+        assertTrue(rows.asArray().isEmpty());
+    }
+
+    @Test
+    void alterTableAddColumnAtRuntime() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE TABLE t (id VARCHAR(64) PRIMARY KEY) WITH (SCHEMA = 'FLEXIBLE')", s, null);
+        ds.execute("ALTER TABLE t ADD COLUMN name STRING", s, null);
+        ds.execute("CREATE t:main CONTENT { name: \"Alice\" }", s, null);
+        AxonValue row = ds.execute("SELECT name FROM t", s, null);
+        assertTrue(row.isArray());
+        assertEquals("Alice", row.asArray().get(0).asObject().get("name").asString());
+    }
+
+    @Test
+    void alterTableDropColumnAtRuntime() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE TABLE t (id VARCHAR(64) PRIMARY KEY, age INT) WITH (SCHEMA = 'FLEXIBLE')", s, null);
+        ds.execute("CREATE t:1 CONTENT { age: 30 }", s, null);
+        ds.execute("ALTER TABLE t DROP COLUMN age", s, null);
+        AxonValue row = ds.execute("SELECT * FROM t", s, null);
+        assertTrue(row.isArray());
+    }
+
+    @Test
+    void alterEventAtRuntime() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE TABLE t (id VARCHAR(64) PRIMARY KEY, val INT) WITH (SCHEMA = 'FLEXIBLE')", s, null);
+        ds.execute("ALTER EVENT e1 ON TABLE t WHEN $before.val != $after.val THEN (CREATE t:log CONTENT { msg: \"changed\" })", s, null);
+    }
+
+    @Test
+    void createAnalyzerAtRuntime() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE ANALYZER simple LOWERCASE", s, null);
+        ds.execute("CREATE TABLE article (id VARCHAR(64) PRIMARY KEY, body STRING) WITH (SCHEMA = 'FLEXIBLE')", s, null);
+        ds.execute("CREATE INDEX ft ON TABLE article COLUMNS body SEARCH ANALYZER simple", s, null);
+    }
 }

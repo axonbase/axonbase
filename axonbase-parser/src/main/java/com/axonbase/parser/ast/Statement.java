@@ -276,6 +276,127 @@ public sealed interface Statement {
     record RemoveTable(String name) implements Statement {
     }
 
+    // ------------------------------------------------------------------
+    // SQL Standard syntax (CREATE/ALTER/DROP)
+    // ------------------------------------------------------------------
+
+    /** DROP TABLE {@code <name>} */
+    record DropTable(String name) implements Statement {
+    }
+
+    sealed interface AlterOp {
+    }
+
+    record AddColumn(String name, String type, boolean primaryKey, boolean notNull,
+                     Expr defaultExpr, Expr checkExpr, String references) implements AlterOp {
+    }
+
+    record DropColumn(String name) implements AlterOp {
+    }
+
+    record ModifyColumn(String name, String type, boolean notNull,
+                        Expr defaultExpr, Expr checkExpr) implements AlterOp {
+    }
+
+    /** ALTER TABLE {@code <name>} {op1, op2, ...} */
+    record AlterTable(String name, List<AlterOp> operations) implements Statement {
+        public AlterTable {
+            operations = List.copyOf(operations);
+        }
+    }
+
+    /** CREATE INDEX (padrão SQL) */
+    record CreateIndex(String name, String table, List<String> columns, boolean unique, boolean count,
+                       String searchAnalyzer, boolean geo, boolean columnar,
+                       Integer vectorDimension, String vectorDistance,
+                       Integer m, Integer efConstruction, Integer efSearch)
+            implements Statement {
+        public CreateIndex {
+            columns = List.copyOf(columns);
+        }
+    }
+
+    /** DROP INDEX {@code <name>} */
+    record DropIndex(String name) implements Statement {
+    }
+
+    /** CREATE EVENT SQL padrão */
+    record CreateEvent(String name, String table, Expr when, List<Statement> then)
+            implements Statement {
+    }
+
+    /** DROP EVENT {@code <name>} */
+    record DropEvent(String name) implements Statement {
+    }
+
+    /** CREATE ANALYZER SQL padrão */
+    record CreateAnalyzer(String name, boolean lowercase, List<String> stopwords, boolean stemming)
+            implements Statement {
+    }
+
+    /** DROP ANALYZER {@code <name>} */
+    record DropAnalyzer(String name) implements Statement {
+    }
+
+    /** CREATE USER SQL padrão */
+    record CreateUser(String name, AuthScope scope, String namespace, String database,
+                      Expr password, String passhash, String certificate, String fingerprint,
+                      List<String> roles, List<String> dataRules, String auditName) implements Statement {
+
+        public CreateUser {
+            int credentials = (password == null ? 0 : 1) + (passhash == null ? 0 : 1)
+                + (certificate == null ? 0 : 1);
+            if (credentials != 1) {
+                throw new IllegalArgumentException(Messages.get("parser_define_user_credential_count"));
+            }
+            if (fingerprint != null && certificate == null) {
+                throw new IllegalArgumentException(Messages.get("parser_fingerprint_requires_certificate"));
+            }
+            roles = roles == null ? List.of() : List.copyOf(roles);
+            dataRules = dataRules == null ? List.of() : List.copyOf(dataRules);
+        }
+
+        public CreateUser(String name, AuthScope scope, String namespace, String database,
+                          Expr password, String passhash, List<String> roles) {
+            this(name, scope, namespace, database, password, passhash, null, null, roles, null, null);
+        }
+
+        public boolean hashed() {
+            return passhash != null;
+        }
+
+        public boolean certificateBased() {
+            return certificate != null;
+        }
+    }
+
+    /** DROP USER {@code <name>} */
+    record DropUser(String name) implements Statement {
+    }
+
+    /** GRANT ACCESS (substitui DEFINE ACCESS) */
+    record GrantAccess(String name, AuthScope scope, String namespace, String database)
+            implements Statement {
+    }
+
+    /** REVOKE ACCESS {@code <name>} */
+    record RevokeAccess(String name) implements Statement {
+    }
+
+    /** CREATE DATABASE LINK SQL padrão */
+    record CreateDatabaseLink(String name, String url, String ns, String db,
+                              String user, String password) implements Statement {
+    }
+
+    /** ALTER DATABASE LINK {@code <name>} CONNECT BY ... */
+    record AlterDatabaseLink(String name, String url, String ns, String db,
+                             String user, String password) implements Statement {
+    }
+
+    /** DROP SAGA {@code <name>} */
+    record DropSaga(String name) implements Statement {
+    }
+
     record ShowAiAudit(String name) implements Statement {
     }
 

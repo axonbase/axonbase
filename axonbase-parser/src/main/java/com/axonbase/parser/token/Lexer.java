@@ -33,7 +33,8 @@ public final class Lexer {
         "data", "rule", "rules", "apply", "mask", "fields", "columnar",
         "ai", "audit", "warning", "danger", "reason", "case", "cases",
         "authorized", "denied", "audited", "remove",
-        "values", "primary", "key", "check", "schema", "flexible"
+        "values", "primary", "key", "check", "schema", "flexible",
+        "alter", "add", "column", "modify", "revoke", "grant"
     );
 
     private static final List<String> DUR_UNITS = List.of("ms", "us", "ns", "y", "w", "d", "h", "m", "s");

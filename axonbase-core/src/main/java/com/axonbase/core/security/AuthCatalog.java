@@ -186,6 +186,30 @@ public final class AuthCatalog {
         return accesses.values().stream().sorted(java.util.Comparator.comparing(Access::name)).toList();
     }
 
+    /** Remove um usuário em qualquer escopo compatível com ns/db. */
+    public boolean removeUser(String name, String namespace, String database) {
+        for (Scope scope : List.of(Scope.DATABASE, Scope.NAMESPACE, Scope.ROOT)) {
+            String ns = scope == Scope.ROOT ? null : (scope == Scope.NAMESPACE ? namespace : namespace);
+            String db = scope == Scope.DATABASE ? database : null;
+            if (users.remove(userKey(name, scope, ns, db)) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Remove um access method em qualquer escopo compatível com ns/db. */
+    public boolean removeAccess(String name, String namespace, String database) {
+        for (Scope scope : List.of(Scope.DATABASE, Scope.NAMESPACE, Scope.ROOT)) {
+            String ns = scope == Scope.ROOT ? null : (scope == Scope.NAMESPACE ? namespace : namespace);
+            String db = scope == Scope.DATABASE ? database : null;
+            if (accesses.remove(accessKey(name, scope, ns, db)) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Restaura uma identidade já protegida por hash, sem reprocessar a senha. */
     public void restoreUser(User user) {
         users.put(userKey(user.name(), user.scope(), user.namespace(), user.database()), user);

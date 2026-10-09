@@ -383,4 +383,184 @@ class AxonQlTest {
             full.statements().get(2));
         assertEquals("sp3", sp.name());
     }
+
+    // ------------------------------------------------------------------
+    // New SQL-standard syntax tests
+    // ------------------------------------------------------------------
+
+    @Test
+    void roundTripDropTable() {
+        assertRoundTrip("DROP TABLE person");
+    }
+
+    @Test
+    void dropTableEquivalentToRemoveTable() {
+        Query drop = AxonQl.parse("DROP TABLE person");
+        Query remove = AxonQl.parse("REMOVE TABLE person");
+        assertEquals(1, drop.statements().size());
+        assertEquals(1, remove.statements().size());
+        assertInstanceOf(Statement.DropTable.class, drop.statements().get(0));
+        assertInstanceOf(Statement.RemoveTable.class, remove.statements().get(0));
+        assertEquals("person", ((Statement.DropTable) drop.statements().get(0)).name());
+    }
+
+    @Test
+    void roundTripCreateIndex() {
+        assertRoundTrip("CREATE INDEX email ON TABLE user COLUMNS email UNIQUE");
+        assertRoundTrip("CREATE INDEX body_search ON TABLE article COLUMNS body SEARCH ANALYZER pt");
+        assertRoundTrip("CREATE INDEX point_geo ON TABLE place COLUMNS point GEO");
+        assertRoundTrip("CREATE INDEX embedding_hnsw ON TABLE item COLUMNS embedding HNSW DIMENSION 3 DIST euclidean");
+        assertRoundTrip("CREATE INDEX idx_name ON TABLE person COLUMNS name COUNT");
+        assertRoundTrip("CREATE INDEX col_price ON TABLE product COLUMNS price COLUMNAR");
+    }
+
+    @Test
+    void roundTripDropIndex() {
+        assertRoundTrip("DROP INDEX idx_name");
+        assertRoundTrip("DROP INDEX my_index");
+    }
+
+    @Test
+    void roundTripCreateEvent() {
+        assertRoundTrip("CREATE EVENT audit ON TABLE user WHEN $before.email != $after.email THEN (CREATE event SET user = $value)");
+    }
+
+    @Test
+    void roundTripDropEvent() {
+        assertRoundTrip("DROP EVENT audit");
+    }
+
+    @Test
+    void roundTripCreateAnalyzer() {
+        assertRoundTrip("CREATE ANALYZER pt LOWERCASE STOPWORDS \"o\", \"a\" STEMMING");
+        assertRoundTrip("CREATE ANALYZER simple LOWERCASE");
+        assertRoundTrip("CREATE ANALYZER en LOWERCASE STOPWORDS \"the\", \"a\"");
+    }
+
+    @Test
+    void roundTripDropAnalyzer() {
+        assertRoundTrip("DROP ANALYZER pt");
+    }
+
+    @Test
+    void roundTripCreateUser() {
+        assertRoundTrip("CREATE USER alice ON ROOT PASSWORD \"secret\" ROLES editor");
+        assertRoundTrip("CREATE USER bob ON DATABASE PASSWORD \"pass\" ROLES writer");
+        assertRoundTrip("CREATE USER admin ON NAMESPACE app CERTIFICATE clients FINGERPRINT \"AB:CD\" ROLES owner");
+    }
+
+    @Test
+    void roundTripDropUser() {
+        assertRoundTrip("DROP USER alice");
+    }
+
+    @Test
+    void roundTripGrantRevokeAccess() {
+        assertRoundTrip("GRANT ACCESS app_login ON NAMESPACE app");
+        assertRoundTrip("REVOKE ACCESS app_login");
+    }
+
+    @Test
+    void roundTripAlterTableAddColumn() {
+        assertEquals("ALTER TABLE person ADD COLUMN email STRING NOT NULL",
+            AxonQl.render(AxonQl.parse("ALTER TABLE person ADD COLUMN email VARCHAR(255) NOT NULL")));
+        assertEquals("ALTER TABLE product ADD COLUMN price DECIMAL DEFAULT 0",
+            AxonQl.render(AxonQl.parse("ALTER TABLE product ADD COLUMN price DECIMAL(10,2) DEFAULT 0.0")));
+        assertEquals("ALTER TABLE user ADD COLUMN age INT DEFAULT 18 CHECK ($value >= 0)",
+            AxonQl.render(AxonQl.parse("ALTER TABLE user ADD COLUMN age INT DEFAULT 18 CHECK (age >= 0)")));
+    }
+
+    @Test
+    void roundTripAlterTableDropColumn() {
+        assertRoundTrip("ALTER TABLE person DROP COLUMN email");
+        assertRoundTrip("ALTER TABLE product DROP COLUMN price");
+    }
+
+    @Test
+    void roundTripAlterTableMultipleOps() {
+        // The canonical render does not output commas between ALTER TABLE ops
+        assertEquals("ALTER TABLE person ADD COLUMN email STRING DROP COLUMN age",
+            AxonQl.render(AxonQl.parse("ALTER TABLE person ADD COLUMN email VARCHAR(255), DROP COLUMN age")));
+    }
+
+    @Test
+    void roundTripCreateDatabaseLink() {
+        assertRoundTrip("CREATE DATABASE LINK \"bank1\" CONNECT BY \"ws://127.0.0.1:8011/rpc/ws\" WITH ns = \"test\" db = \"bank1\" user = \"\" password = \"\"");
+    }
+
+    @Test
+    void roundTripDropSaga() {
+        assertRoundTrip("DROP SAGA transfer");
+    }
+
+    @Test
+    void alterTableGuardaOperacoes() {
+        Query q = AxonQl.parse("ALTER TABLE user ADD COLUMN email VARCHAR(255) NOT NULL, DROP COLUMN age, MODIFY COLUMN name STRING");
+        Statement.AlterTable at = assertInstanceOf(Statement.AlterTable.class, q.statements().get(0));
+        assertEquals("user", at.name());
+        assertEquals(3, at.operations().size());
+        assertInstanceOf(Statement.AddColumn.class, at.operations().get(0));
+        assertInstanceOf(Statement.DropColumn.class, at.operations().get(1));
+        assertInstanceOf(Statement.ModifyColumn.class, at.operations().get(2));
+        assertEquals("email", ((Statement.AddColumn) at.operations().get(0)).name());
+        assertEquals("age", ((Statement.DropColumn) at.operations().get(1)).name());
+    }
+
+    @Test
+    void createIndexGuardaPropriedades() {
+        Query q = AxonQl.parse("CREATE INDEX idx ON TABLE t COLUMNS c HNSW DIMENSION 128 DIST cosine M 16 EFC 200 EFS 300");
+        Statement.CreateIndex ci = assertInstanceOf(Statement.CreateIndex.class, q.statements().get(0));
+        assertEquals("idx", ci.name());
+        assertEquals("t", ci.table());
+        assertEquals("c", ci.columns().get(0));
+        assertEquals(128, (int) ci.vectorDimension());
+        assertEquals("cosine", ci.vectorDistance());
+        assertEquals(16, (int) ci.m());
+        assertEquals(200, (int) ci.efConstruction());
+        assertEquals(300, (int) ci.efSearch());
+    }
+
+    @Test
+    void createEventGuardaWhenEThen() {
+        Query q = AxonQl.parse("CREATE EVENT e1 ON TABLE t WHEN $before.x != $after.x THEN (CREATE log SET msg = $value)");
+        Statement.CreateEvent ce = assertInstanceOf(Statement.CreateEvent.class, q.statements().get(0));
+        assertEquals("e1", ce.name());
+        assertEquals("t", ce.table());
+        assertNotNull(ce.when());
+        assertEquals(1, ce.then().size());
+    }
+
+    @Test
+    void grantAccessGuardaEscopo() {
+        Query q = AxonQl.parse("GRANT ACCESS my_access ON ROOT");
+        Statement.GrantAccess ga = assertInstanceOf(Statement.GrantAccess.class, q.statements().get(0));
+        assertEquals("my_access", ga.name());
+        assertEquals(Statement.AuthScope.ROOT, ga.scope());
+    }
+
+    @Test
+    void revokeAccessGuardaNome() {
+        Query q = AxonQl.parse("REVOKE ACCESS my_access");
+        Statement.RevokeAccess ra = assertInstanceOf(Statement.RevokeAccess.class, q.statements().get(0));
+        assertEquals("my_access", ra.name());
+    }
+
+    @Test
+    void roundTripAlterEvent() {
+        // ALTER EVENT is canonically rendered as CREATE EVENT
+        assertEquals("CREATE EVENT audit ON TABLE user WHEN $before.email != $after.email THEN (CREATE event SET user = $value)",
+            AxonQl.render(AxonQl.parse("ALTER EVENT audit ON TABLE user WHEN $before.email != $after.email THEN (CREATE event SET user = $value)")));
+    }
+
+    @Test
+    void roundTripAlterIndex() {
+        // ALTER INDEX is canonically rendered as CREATE INDEX
+        assertEquals("CREATE INDEX idx ON TABLE t COLUMNS c UNIQUE",
+            AxonQl.render(AxonQl.parse("ALTER INDEX idx ON TABLE t COLUMNS c UNIQUE")));
+    }
+
+    @Test
+    void roundTripAlterDatabaseLink() {
+        assertRoundTrip("ALTER DATABASE LINK \"bank1\" CONNECT BY \"ws://127.0.0.1:8011/rpc/ws\" WITH ns = \"test\" db = \"bank1\" user = \"\" password = \"\"");
+    }
 }
