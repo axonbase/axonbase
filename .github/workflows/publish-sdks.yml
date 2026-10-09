@@ -253,4 +253,9 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
-        run: gh release create "v${VERSION}" --generate-notes --title "AxonBase ${VERSION}"
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists, skipping creation"
+          else
+            gh release create "v${VERSION}" --generate-notes --title "AxonBase ${VERSION}"
+          fi
