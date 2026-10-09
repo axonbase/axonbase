@@ -201,7 +201,7 @@ jobs:
             echo "crates.io: axonbase-sdk@${VERSION} already published, skipping"
             exit 0
           fi
-          cargo publish
+          cargo publish --allow-dirty
 
   publish-go:
     needs: [version, validate]
