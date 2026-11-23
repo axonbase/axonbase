@@ -1188,9 +1188,16 @@ public final class Executor {
         } else if (hy != null) {
             docs = hybridSourceDocs(db, sel, hy);
         } else {
+            // Cada nível só calcula o fallback se não puder usar o próprio índice. Antes o fallback
+            // (varredura completa) era calculado antes, e todo SELECT lia a tabela inteira.
+            boolean streamable = isStreamableWindow(sel);
             docs = uniqueLookupSourceDocs(db, sel,
-                vectorSourceDocs(db, sel, geoSourceDocs(db, sel,
-                    columnarSourceDocs(db, sel, searchSourceDocs(db, sel)))));
+                () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel,
+                    () -> columnarSourceDocs(db, sel,
+                        () -> streamable ? null : searchSourceDocs(db, sel)))));
+            if (docs == null) {
+                docs = streamWindowDocs(db, sel);
+            }
         }
         if (sel.cond() != null) {
             docs.removeIf(doc -> !truthy(evalCond(sel.cond(), doc)));
@@ -1254,6 +1261,55 @@ public final class Executor {
     // ------------------------------------------------------------------
     // JOIN: bucle aniñado sobre a fonte do FROM e a(s) fonte(s) enlazada(s)
     // ------------------------------------------------------------------
+
+    /**
+     * SELECT de tabela simples com LIMIT, sem ORDER BY, JOIN, agregação ou MATCH: dá para ler em
+     * ordem de chave e parar quando a janela START+LIMIT estiver completa.
+     */
+    private boolean isStreamableWindow(Statement.Select sel) {
+        return sel.from() instanceof Expr.Ident
+            && sel.limit() != null
+            && sel.orders().isEmpty()
+            && sel.joins().isEmpty()
+            && sel.group().isEmpty()
+            && sel.fields().stream().noneMatch(this::isAggregateCall)
+            && (sel.cond() == null || !isSearchMatch(sel.cond()));
+    }
+
+    /**
+     * Lê a tabela pelo iterador do storage e devolve só os documentos que passam por WHERE, Data
+     * Rules e permissões, parando ao completar {@code START + LIMIT}. Os filtros que o
+     * {@code runSelect} aplica depois são idempotentes sobre esse resultado.
+     */
+    private List<Document> streamWindowDocs(Database db, Statement.Select sel) {
+        String table = ((Expr.Ident) sel.from()).name();
+        ensureTable(db, table);
+        long wantedLong = (sel.start() != null ? eval(sel.start()).asLong() : 0L)
+            + eval(sel.limit()).asLong();
+        int wanted = (int) Math.min(Math.max(wantedLong, 0L), Integer.MAX_VALUE);
+        List<Document> out = new ArrayList<>();
+        if (wanted == 0) {
+            return out;
+        }
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        records(db).scanPrefix(prefix, key -> {
+            Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
+            if (doc == null) {
+                return true;
+            }
+            if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
+                return true;
+            }
+            List<Document> candidate = new ArrayList<>(List.of(doc));
+            applyDataRulesFilter(candidate);
+            if (candidate.isEmpty() || !allowed(doc, table, "select")) {
+                return true;
+            }
+            out.add(doc);
+            return out.size() < wanted;
+        });
+        return out;
+    }
 
     private List<Document> joinDocs(Database db, Statement.Select sel, List<Document> outer) {
         List<Document> current = outer;
@@ -1379,25 +1435,25 @@ public final class Executor {
      * devolve um conjunto de candidatos via efSearch; a ordenação final sobre
      * esses candidatos continua exata no ORDER BY do SELECT.
      */
-    private List<Document> vectorSourceDocs(Database db, Statement.Select sel, List<Document> fallback) {
+    private List<Document> vectorSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
         if (!(sel.from() instanceof Expr.Ident table) || sel.orders().isEmpty()
             || !(sel.orders().get(0).field() instanceof Expr.Call call)
             || !call.name().startsWith("vector::distance::") || call.args().isEmpty()
             || !(call.args().get(0) instanceof Expr.Ident field)) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.TableDef def = db.catalog().table(table.name());
         if (def == null) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.IndexDef index = def.indexes().values().stream()
             .filter(i -> i.vector() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
-            return fallback;
+            return fallback.get();
         }
         AxonValue query = call.args().size() > 1 ? eval(call.args().get(1)) : AxonValue.nul();
         if (!validVector(query, index.vectorDimension())) {
-            return fallback;
+            return fallback.get();
         }
         if (maxLevel(db, table.name(), index) < 0) {
             return new ArrayList<>();
@@ -1579,28 +1635,28 @@ public final class Executor {
     }
 
     /** Usa a grade GEO para pré-filtrar uma distância radial antes do WHERE exato. */
-    private List<Document> geoSourceDocs(Database db, Statement.Select sel, List<Document> fallback) {
+    private List<Document> geoSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
         if (!(sel.from() instanceof Expr.Ident table) || !(sel.cond() instanceof Expr.Binary comparison)
             || (comparison.op() != Expr.BinaryOp.LT && comparison.op() != Expr.BinaryOp.LE)
             || !(comparison.left() instanceof Expr.Call distance)
             || !distance.name().equals("geo::distance") || distance.args().size() != 2
             || !(distance.args().get(0) instanceof Expr.Ident field)) {
-            return fallback;
+            return fallback.get();
         }
         AxonValue center = eval(distance.args().get(1));
         AxonValue radius = eval(comparison.right());
         double[] point = geoPoint(center);
         if (point == null || !radius.isNumber()) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.TableDef def = db.catalog().table(table.name());
         if (def == null) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.IndexDef index = def.indexes().values().stream()
             .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
-            return fallback;
+            return fallback.get();
         }
         double meters = radius.asDouble();
         double latRange = meters / 111_320d;
@@ -2322,8 +2378,8 @@ return score;
         List<Document> docs = switch (plan.strategy()) {
             case PS_UNIQUE -> loadUniqueDocs(db, sel, plan.index());
             case PS_FULLTEXT -> searchSourceDocs(db, sel);
-            case PS_GEO -> geoSourceDocs(db, sel, fullScanDocs(db, sel));
-            case PS_VECTOR -> vectorSourceDocs(db, sel, fullScanDocs(db, sel));
+            case PS_GEO -> geoSourceDocs(db, sel, () -> fullScanDocs(db, sel));
+            case PS_VECTOR -> vectorSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_HYBRID -> hybridSourceDocs(db, sel, hybridSearch(sel));
             case PS_COLUMNAR -> columnarSourceDocs(db, sel);
             default -> fullScanDocs(db, sel);
@@ -2336,10 +2392,10 @@ return score;
      * `campo` consulta o prefixo {@code !uidx} directo, sen varrido completo.
      */
     private List<Document> uniqueLookupSourceDocs(Database db, Statement.Select sel,
-                                                  List<Document> fallback) {
+                                                  java.util.function.Supplier<List<Document>> fallback) {
         Catalog.IndexDef index = uniqueIndexFor(db, tableName(sel.from()), sel);
         if (index == null) {
-            return fallback;
+            return fallback.get();
         }
         return loadUniqueDocs(db, sel, index);
     }
@@ -3420,7 +3476,7 @@ return score;
             Statement.Select probe = new Statement.Select(List.of(), false, false, target, cond,
                 List.of(), List.of(), null, null, List.of(), List.of(), null);
             List<Document> indexed = uniqueLookupSourceDocs(db, probe,
-                columnarSourceDocs(db, probe, null));
+                () -> columnarSourceDocs(db, probe, () -> null));
             if (indexed != null) {
                 List<RecordId> out = new ArrayList<>(indexed.size());
                 for (Document doc : indexed) {
@@ -4681,13 +4737,13 @@ return score;
     }
 
     private List<Document> columnarSourceDocs(Database db, Statement.Select sel) {
-        return columnarSourceDocs(db, sel, List.of());
+        return columnarSourceDocs(db, sel, List::of);
     }
 
-    private List<Document> columnarSourceDocs(Database db, Statement.Select sel, List<Document> fallback) {
+    private List<Document> columnarSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
         String table = tableName(sel.from());
         Catalog.IndexDef index = columnarIndexFor(db, table, sel);
-        if (index == null) return fallback;
+        if (index == null) return fallback.get();
 
         if (sel.cond() instanceof Expr.Binary eq && eq.op() == Expr.BinaryOp.EQ
             && eq.left() instanceof Expr.Ident field
@@ -4710,10 +4766,10 @@ return score;
                 Document doc = loadDoc(db, new RecordId(table, parseKey(rowKey)));
                 if (doc != null) docs.add(doc);
             }
-            return docs.isEmpty() ? fallback : docs;
+            return docs.isEmpty() ? fallback.get() : docs;
         }
 
-        return fallback;
+        return fallback.get();
     }
 
 private String advancedPrefix(Database db, String table, String index, RecordId rid) {

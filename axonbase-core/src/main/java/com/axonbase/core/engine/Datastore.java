@@ -837,6 +837,11 @@ public final class Datastore {
         return sb.toString();
     }
 
+    /** Marca d'água de versão do backend, usada pelo backup incremental. 0 quando não há contador. */
+    public long backupVersion() {
+        return backend instanceof VersionedKvBackend versioned ? versioned.currentVersion() : 0L;
+    }
+
     /** {@code true} quando o backend suporta snapshots incrementais por versão. */
     public boolean incrementalSupported() {
         return backend instanceof VersionedKvBackend;

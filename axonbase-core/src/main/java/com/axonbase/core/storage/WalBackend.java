@@ -304,6 +304,7 @@ public final class WalBackend implements VersionedKvBackend {
     }
 
     @Override public synchronized long versionOf(String key) { return versions.getOrDefault(key, 0L); }
+    @Override public synchronized long currentVersion() { return clock; }
 
     public HistoryLedger history() { return history; }
 

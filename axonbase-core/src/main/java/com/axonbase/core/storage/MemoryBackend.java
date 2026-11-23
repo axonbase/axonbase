@@ -62,6 +62,11 @@ public final class MemoryBackend implements VersionedKvBackend {
     }
 
     @Override
+    public synchronized long currentVersion() {
+        return clock;
+    }
+
+    @Override
     public synchronized long versionOf(String key) {
         return versions.getOrDefault(key, 0L);
     }

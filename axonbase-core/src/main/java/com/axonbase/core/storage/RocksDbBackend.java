@@ -86,6 +86,10 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                     new ColumnFamilyDescriptor(VERSIONS_CF.getBytes(StandardCharsets.UTF_8), cfOpts));
                 def.close();
             }
+            // O contador de versão não é gravado. O número de sequência do RocksDB é monotônico entre
+            // restarts e nunca menor que uma versão já atribuída (cada versão é uma escrita), então
+            // recomeçar dele impede que chaves novas ganhem versão menor que as já copiadas no backup.
+            this.clock.set(db.getLatestSequenceNumber());
         } catch (Exception e) {
             throw new RuntimeException(Messages.get("rocksdb_open_failed", directory), e);
         }
@@ -186,7 +190,29 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         return keys;
     }
 
+    /** Iterador do RocksDB sem o monitor do backend: um scan longo não bloqueia as escritas. */
+    @Override
+    public void scanPrefix(String prefix, java.util.function.Predicate<String> visitor) {
+        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
+        try (RocksIterator it = db.newIterator(dataHandle)) {
+            it.seek(prefixBytes);
+            while (it.isValid()) {
+                byte[] keyBytes = it.key();
+                if (!startsWith(keyBytes, prefixBytes)
+                    || !visitor.test(new String(keyBytes, StandardCharsets.UTF_8))) {
+                    break;
+                }
+                it.next();
+            }
+        }
+    }
+
     // ---- VersionedKvBackend ----
+
+    @Override
+    public long currentVersion() {
+        return clock.get();
+    }
 
     @Override
     public long versionOf(String key) {
