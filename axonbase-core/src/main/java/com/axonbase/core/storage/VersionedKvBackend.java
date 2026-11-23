@@ -9,6 +9,15 @@ public interface VersionedKvBackend extends KvBackend {
 
     long versionOf(String key);
 
+    /**
+     * Maior versão já atribuída a uma chave. Serve de marca d'água para backup incremental:
+     * chaves alteradas depois dela têm versão maior. Backends sem contador devolvem 0, e o
+     * backup cai no completo.
+     */
+    default long currentVersion() {
+        return 0L;
+    }
+
     default Optional<VersionedValue> getVersioned(String key) {
         return get(key).map(value -> new VersionedValue(value, versionOf(key)));
     }

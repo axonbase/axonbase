@@ -266,6 +266,10 @@ public final class AxonServer {
 
         ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(new LoggingFilter()), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
+        // Mantém threads livres para /health, /ready e /admin mesmo com consultas lentas em andamento.
+        ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(
+            new AdmissionFilter(new AdmissionControl(AdmissionControl.limitFor(config.httpThreads())))),
+            "/*", EnumSet.of(DispatcherType.REQUEST));
 
         return ctx;
     }

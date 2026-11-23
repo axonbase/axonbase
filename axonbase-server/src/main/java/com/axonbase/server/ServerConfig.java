@@ -27,7 +27,7 @@ public record ServerConfig(String path, String secret, String user, String passw
         return new ServerConfig("memory", "axonbase-dev-secret", "root", "root",
             8000, "127.0.0.1", true, "", "", "", "",
             30000L, 300000L, 0, "", "", "", "",
-            10000L, 4, 100,
+            10000L, 32, 100,
             "", "", "", "", "", 0L,
             "", 10, 0, "pt-BR",
             "", "", "", "",

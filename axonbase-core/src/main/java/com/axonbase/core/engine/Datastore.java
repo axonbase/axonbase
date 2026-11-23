@@ -23,6 +23,7 @@ import com.axonbase.core.storage.VersionConflictException;
 import com.axonbase.core.storage.VersionedKvBackend;
 import com.axonbase.parser.AxonQl;
 import com.axonbase.parser.ast.Query;
+import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
@@ -361,6 +362,11 @@ public final class Datastore {
      * @param session sessão que originou a definição, ou {@code null} fora de sessão
      * @param command definição já renderizada em AxonQL
      */
+    /** {@code true} enquanto o plano de controle está sendo reexecutado nesta thread. */
+    public boolean isReplaying() {
+        return replaying.get();
+    }
+
     public void applyControl(Session session, ControlCommand command) {
         if (replaying.get()) {
             return;
@@ -599,12 +605,32 @@ public final class Datastore {
      * NOT_LEADER antes de executar qualquer coisa.</p>
      */
     public static boolean isMutation(String sql) {
-        String normalized = sql == null ? "" : sql.stripLeading().toUpperCase(Locale.ROOT);
-        return !(normalized.startsWith("SELECT") || normalized.startsWith("INFO")
-            || normalized.startsWith("RETURN") || normalized.startsWith("USE ")
-            || normalized.startsWith("BEGIN") || normalized.startsWith("COMMIT")
-            || normalized.startsWith("CANCEL") || normalized.startsWith("LIVE")
-            || normalized.startsWith("KILL"));
+        Query query;
+        try {
+            query = AxonQl.parse(sql);
+        } catch (RuntimeException e) {
+            // Texto que não parseia não é provado como leitura; o erro de sintaxe sai na execução.
+            return true;
+        }
+        return query.statements().isEmpty()
+            || query.statements().stream().anyMatch(statement -> !isReadOnly(statement));
+    }
+
+    private static boolean isReadOnly(Statement statement) {
+        return statement instanceof Statement.Select
+            || statement instanceof Statement.Explain
+            || statement instanceof Statement.Info
+            || statement instanceof Statement.Return
+            || statement instanceof Statement.Use
+            || statement instanceof Statement.Begin
+            || statement instanceof Statement.Commit
+            || statement instanceof Statement.Cancel
+            || statement instanceof Statement.Live
+            || statement instanceof Statement.Kill
+            || statement instanceof Statement.DescribeTable
+            || statement instanceof Statement.DescribeSaga
+            || statement instanceof Statement.ShowSagaTransaction
+            || statement instanceof Statement.ShowDataRules;
     }
 
     // ------------------------------------------------------------------
@@ -809,6 +835,11 @@ public final class Datastore {
             }
         }
         return sb.toString();
+    }
+
+    /** Marca d'água de versão do backend, usada pelo backup incremental. 0 quando não há contador. */
+    public long backupVersion() {
+        return backend instanceof VersionedKvBackend versioned ? versioned.currentVersion() : 0L;
     }
 
     /** {@code true} quando o backend suporta snapshots incrementais por versão. */

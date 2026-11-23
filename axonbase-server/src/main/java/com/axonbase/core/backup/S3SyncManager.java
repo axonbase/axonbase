@@ -149,8 +149,9 @@ public final class S3SyncManager implements AutoCloseable {
     public boolean backupNow() {
         synchronized (lock) {
             try {
-                Long idx = commitIndexSupplier.get();
-                long current = idx == null ? 0 : idx;
+                // Marca d'água lida ANTES do dump. A versão do backend é a mesma grandeza que
+                // backupIncremental compara; o índice de commit do Raft é outra e não serve aqui.
+                long current = datastore.backupVersion();
 
                 String dump;
                 boolean incremental = false;

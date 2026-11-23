@@ -29,6 +29,19 @@ public interface KvBackend {
     /** Devolve todas as chaves con o prefixo dado, en orde lexicográfico. */
     List<String> keysWithPrefix(String prefix);
 
+    /**
+     * Percorre as chaves com o prefixo em ordem lexicográfica e para quando {@code visitor}
+     * devolve {@code false}. A implementação padrão lista tudo antes; backends com iterador
+     * sobrescrevem para ler só o que for consumido.
+     */
+    default void scanPrefix(String prefix, java.util.function.Predicate<String> visitor) {
+        for (String key : keysWithPrefix(prefix)) {
+            if (!visitor.test(key)) {
+                return;
+            }
+        }
+    }
+
     /** Cando a implementación é persistente, forza a escritura ao disco. */
     default void flush() {
     }

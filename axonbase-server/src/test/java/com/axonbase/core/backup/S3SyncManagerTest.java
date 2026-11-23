@@ -85,6 +85,30 @@ public class S3SyncManagerTest {
     }
 
     @Test
+    void segundoBackupLevaSoAsChavesAlteradasDepoisDoPrimeiro() {
+        var store = new InMemoryBackupStore();
+        var stamp = new AtomicInteger(1);
+        var backend = new MemoryBackend();
+        Datastore ds = new Datastore(backend);
+        ds.createDatabase("test", "main");
+        backend.put("antigo", "1".getBytes());
+        var mgr = new S3SyncManager(ds, store, "bucket", "", 60_000L, 10, "",
+            () -> null, () -> String.format("20000000-0303%02d", stamp.getAndIncrement()));
+
+        assertTrue(mgr.backupNow());
+        backend.put("novo", "2".getBytes());
+        assertTrue(mgr.backupNow());
+
+        List<String> names = new java.util.ArrayList<>(store.listObjects("bucket", "cluster-"));
+        java.util.Collections.sort(names);
+        String first = new String(store.objects.get(names.get(0)), java.nio.charset.StandardCharsets.UTF_8);
+        String second = new String(store.objects.get(names.get(1)), java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(first.contains("\nantigo\t"));
+        assertTrue(second.contains("\nnovo\t"));
+        assertFalse(second.contains("\nantigo\t"), "o incremental não deve repetir o que o primeiro já levou");
+    }
+
+    @Test
     void encryptionRoundTrip() {
         String dump = "--axonbase-backup-v1--\nctrl\tdGVzdA==\nkey\tdmFsdWU=\n";
         String pw = "senha-forte";

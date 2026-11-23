@@ -940,25 +940,22 @@ public final class Executor {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
                 }
                 if (sagaCorr != null) {
-                    try {
-                        Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
-                        if (linkDef != null) {
-                            String selectSql = "SELECT * FROM " + q.table() + ":"
-                                + com.axonbase.parser.Render.expr(qRid.key());
-                            List<AxonValue> rows = linkClient.query(linkDef, selectSql);
-                            AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
-                            sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                                q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Saga remote step recording failed: " + e.getMessage());
+                    // Sem o passo registrado não há como compensar: a falha aborta a escrita.
+                    Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
+                    if (linkDef != null) {
+                        String selectSql = "SELECT * FROM " + q.table() + ":"
+                            + com.axonbase.parser.Render.expr(qRid.key());
+                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                        AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                        sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
+                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
                     }
                 }
                 return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
             }
         }
         boolean retNone = u.ret() != null && u.ret().kind() == ReturnKind.NONE;
-        List<RecordId> targets = resolveTargets(u.target());
+        List<RecordId> targets = resolveMutationTargets(db, u.target(), u.cond());
         List<AxonValue> results = new ArrayList<>();
         for (RecordId rid : targets) {
             Document doc = loadDoc(db, rid);
@@ -979,12 +976,8 @@ public final class Executor {
             // Saga: capture BEFORE state
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
-                try {
-                    sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "UPDATE");
-                } catch (Exception e) {
-                    // Log but don't fail the main operation
-                    System.err.println("Saga step recording failed (non-fatal): " + e.getMessage());
-                }
+                // Sem o passo registrado não há como compensar: a falha aborta a escrita.
+                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "UPDATE");
             }
             Map<String, AxonValue> current = new LinkedHashMap<>(doc.current().asObject());
             if (u.data() != null) {
@@ -1037,24 +1030,21 @@ public final class Executor {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
                 }
                 if (sagaCorr != null) {
-                    try {
-                        Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
-                        if (linkDef != null) {
-                            String selectSql = "SELECT * FROM " + q.table() + ":"
-                                + com.axonbase.parser.Render.expr(dqRid.key());
-                            List<AxonValue> rows = linkClient.query(linkDef, selectSql);
-                            AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
-                            sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                                q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Saga remote step recording failed: " + e.getMessage());
+                    // Sem o passo registrado não há como compensar: a falha aborta a escrita.
+                    Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
+                    if (linkDef != null) {
+                        String selectSql = "SELECT * FROM " + q.table() + ":"
+                            + com.axonbase.parser.Render.expr(dqRid.key());
+                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                        AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                        sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
+                            q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
                     }
                 }
                 return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d));
             }
         }
-        List<RecordId> targets = resolveTargets(d.target());
+        List<RecordId> targets = resolveMutationTargets(db, d.target(), d.cond());
         List<AxonValue> deleted = new ArrayList<>();
         for (RecordId rid : targets) {
             Document doc = loadDoc(db, rid);
@@ -1198,9 +1188,16 @@ public final class Executor {
         } else if (hy != null) {
             docs = hybridSourceDocs(db, sel, hy);
         } else {
+            // Cada nível só calcula o fallback se não puder usar o próprio índice. Antes o fallback
+            // (varredura completa) era calculado antes, e todo SELECT lia a tabela inteira.
+            boolean streamable = isStreamableWindow(sel);
             docs = uniqueLookupSourceDocs(db, sel,
-                vectorSourceDocs(db, sel, geoSourceDocs(db, sel,
-                    columnarSourceDocs(db, sel, searchSourceDocs(db, sel)))));
+                () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel,
+                    () -> columnarSourceDocs(db, sel,
+                        () -> streamable ? null : searchSourceDocs(db, sel)))));
+            if (docs == null) {
+                docs = streamWindowDocs(db, sel);
+            }
         }
         if (sel.cond() != null) {
             docs.removeIf(doc -> !truthy(evalCond(sel.cond(), doc)));
@@ -1264,6 +1261,55 @@ public final class Executor {
     // ------------------------------------------------------------------
     // JOIN: bucle aniñado sobre a fonte do FROM e a(s) fonte(s) enlazada(s)
     // ------------------------------------------------------------------
+
+    /**
+     * SELECT de tabela simples com LIMIT, sem ORDER BY, JOIN, agregação ou MATCH: dá para ler em
+     * ordem de chave e parar quando a janela START+LIMIT estiver completa.
+     */
+    private boolean isStreamableWindow(Statement.Select sel) {
+        return sel.from() instanceof Expr.Ident
+            && sel.limit() != null
+            && sel.orders().isEmpty()
+            && sel.joins().isEmpty()
+            && sel.group().isEmpty()
+            && sel.fields().stream().noneMatch(this::isAggregateCall)
+            && (sel.cond() == null || !isSearchMatch(sel.cond()));
+    }
+
+    /**
+     * Lê a tabela pelo iterador do storage e devolve só os documentos que passam por WHERE, Data
+     * Rules e permissões, parando ao completar {@code START + LIMIT}. Os filtros que o
+     * {@code runSelect} aplica depois são idempotentes sobre esse resultado.
+     */
+    private List<Document> streamWindowDocs(Database db, Statement.Select sel) {
+        String table = ((Expr.Ident) sel.from()).name();
+        ensureTable(db, table);
+        long wantedLong = (sel.start() != null ? eval(sel.start()).asLong() : 0L)
+            + eval(sel.limit()).asLong();
+        int wanted = (int) Math.min(Math.max(wantedLong, 0L), Integer.MAX_VALUE);
+        List<Document> out = new ArrayList<>();
+        if (wanted == 0) {
+            return out;
+        }
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        records(db).scanPrefix(prefix, key -> {
+            Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
+            if (doc == null) {
+                return true;
+            }
+            if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
+                return true;
+            }
+            List<Document> candidate = new ArrayList<>(List.of(doc));
+            applyDataRulesFilter(candidate);
+            if (candidate.isEmpty() || !allowed(doc, table, "select")) {
+                return true;
+            }
+            out.add(doc);
+            return out.size() < wanted;
+        });
+        return out;
+    }
 
     private List<Document> joinDocs(Database db, Statement.Select sel, List<Document> outer) {
         List<Document> current = outer;
@@ -1389,25 +1435,25 @@ public final class Executor {
      * devolve um conjunto de candidatos via efSearch; a ordenação final sobre
      * esses candidatos continua exata no ORDER BY do SELECT.
      */
-    private List<Document> vectorSourceDocs(Database db, Statement.Select sel, List<Document> fallback) {
+    private List<Document> vectorSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
         if (!(sel.from() instanceof Expr.Ident table) || sel.orders().isEmpty()
             || !(sel.orders().get(0).field() instanceof Expr.Call call)
             || !call.name().startsWith("vector::distance::") || call.args().isEmpty()
             || !(call.args().get(0) instanceof Expr.Ident field)) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.TableDef def = db.catalog().table(table.name());
         if (def == null) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.IndexDef index = def.indexes().values().stream()
             .filter(i -> i.vector() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
-            return fallback;
+            return fallback.get();
         }
         AxonValue query = call.args().size() > 1 ? eval(call.args().get(1)) : AxonValue.nul();
         if (!validVector(query, index.vectorDimension())) {
-            return fallback;
+            return fallback.get();
         }
         if (maxLevel(db, table.name(), index) < 0) {
             return new ArrayList<>();
@@ -1589,28 +1635,28 @@ public final class Executor {
     }
 
     /** Usa a grade GEO para pré-filtrar uma distância radial antes do WHERE exato. */
-    private List<Document> geoSourceDocs(Database db, Statement.Select sel, List<Document> fallback) {
+    private List<Document> geoSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
         if (!(sel.from() instanceof Expr.Ident table) || !(sel.cond() instanceof Expr.Binary comparison)
             || (comparison.op() != Expr.BinaryOp.LT && comparison.op() != Expr.BinaryOp.LE)
             || !(comparison.left() instanceof Expr.Call distance)
             || !distance.name().equals("geo::distance") || distance.args().size() != 2
             || !(distance.args().get(0) instanceof Expr.Ident field)) {
-            return fallback;
+            return fallback.get();
         }
         AxonValue center = eval(distance.args().get(1));
         AxonValue radius = eval(comparison.right());
         double[] point = geoPoint(center);
         if (point == null || !radius.isNumber()) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.TableDef def = db.catalog().table(table.name());
         if (def == null) {
-            return fallback;
+            return fallback.get();
         }
         Catalog.IndexDef index = def.indexes().values().stream()
             .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
-            return fallback;
+            return fallback.get();
         }
         double meters = radius.asDouble();
         double latRange = meters / 111_320d;
@@ -2332,8 +2378,8 @@ return score;
         List<Document> docs = switch (plan.strategy()) {
             case PS_UNIQUE -> loadUniqueDocs(db, sel, plan.index());
             case PS_FULLTEXT -> searchSourceDocs(db, sel);
-            case PS_GEO -> geoSourceDocs(db, sel, fullScanDocs(db, sel));
-            case PS_VECTOR -> vectorSourceDocs(db, sel, fullScanDocs(db, sel));
+            case PS_GEO -> geoSourceDocs(db, sel, () -> fullScanDocs(db, sel));
+            case PS_VECTOR -> vectorSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_HYBRID -> hybridSourceDocs(db, sel, hybridSearch(sel));
             case PS_COLUMNAR -> columnarSourceDocs(db, sel);
             default -> fullScanDocs(db, sel);
@@ -2346,10 +2392,10 @@ return score;
      * `campo` consulta o prefixo {@code !uidx} directo, sen varrido completo.
      */
     private List<Document> uniqueLookupSourceDocs(Database db, Statement.Select sel,
-                                                  List<Document> fallback) {
+                                                  java.util.function.Supplier<List<Document>> fallback) {
         Catalog.IndexDef index = uniqueIndexFor(db, tableName(sel.from()), sel);
         if (index == null) {
-            return fallback;
+            return fallback.get();
         }
         return loadUniqueDocs(db, sel, index);
     }
@@ -2746,9 +2792,18 @@ return score;
         if (di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", di.searchAnalyzer()));
         }
-        def.indexes().put(di.name(), new Catalog.IndexDef(di.name(), di.columns(), di.unique(), di.count(),
+        Catalog.IndexDef newIndex = new Catalog.IndexDef(di.name(), di.columns(), di.unique(), di.count(),
             di.searchAnalyzer(), di.geo(), di.columnar(), di.vectorDimension(), di.vectorDistance(),
-            di.m(), di.efConstruction(), di.efSearch()));
+            di.m(), di.efConstruction(), di.efSearch());
+        Catalog.IndexDef previous = def.indexes().get(di.name());
+        boolean sameUnique = previous != null && previous.unique() && di.unique()
+            && previous.columns().equals(di.columns());
+        // Redefinir o mesmo índice é idempotente: só um UNIQUE novo precisa olhar os dados. No replay
+        // do plano de controle as entradas já estão no KV, então não há o que preencher.
+        if (di.unique() && !sameUnique && !ds.isReplaying()) {
+            backfillUniqueIndex(db, di.table(), newIndex);
+        }
+        def.indexes().put(di.name(), newIndex);
         // índices podem ser criados depois dos registros: indexa o estado atual
         if (di.searchAnalyzer() != null || di.geo() || di.columnar() || di.vectorDimension() != null) {
             for (RecordId rid : resolveTargets(new Expr.Ident(di.table()))) {
@@ -2763,6 +2818,33 @@ return score;
         control(db, ControlCommand.Kind.INDEX, di.table() + ":" + di.name(),
             com.axonbase.parser.Render.stmt(di));
         return AxonValue.nul();
+    }
+
+    /**
+     * Preenche um índice UNIQUE criado sobre registros que já existem e recusa o índice se algum
+     * valor se repete. Valida tudo antes de gravar, para que uma duplicata não deixe entradas
+     * pela metade. Registros sem o campo ficam fora do índice, como na escrita normal.
+     */
+    private void backfillUniqueIndex(Database db, String table, Catalog.IndexDef index) {
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        List<String> entries = new ArrayList<>();
+        for (RecordId rid : resolveTargets(new Expr.Ident(table))) {
+            Document doc = loadDoc(db, rid);
+            if (doc == null) {
+                continue;
+            }
+            String prefix = uniqueIndexPrefix(db, table, index, doc.current());
+            if (prefix == null) {
+                continue;
+            }
+            if (!seen.add(prefix)) {
+                throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
+            }
+            entries.add(prefix + rid.key().keyString());
+        }
+        for (String entry : entries) {
+            records(db).put(entry, new byte[0]);
+        }
     }
 
     private AxonValue runDefineAnalyzer(Statement.DefineAnalyzer da) {
@@ -3383,6 +3465,28 @@ return score;
     // ------------------------------------------------------------------
     // Resolución de targets
     // ------------------------------------------------------------------
+
+    /**
+     * Alvos de UPDATE/DELETE. Em tabela inteira com {@code WHERE campo = literal}, usa os
+     * mesmos índices (UNIQUE e columnar) que o SELECT em vez de listar todas as chaves.
+     * O WHERE continua sendo reavaliado sobre cada documento pelo chamador.
+     */
+    private List<RecordId> resolveMutationTargets(Database db, Expr target, Expr cond) {
+        if (cond != null && target instanceof Expr.Ident) {
+            Statement.Select probe = new Statement.Select(List.of(), false, false, target, cond,
+                List.of(), List.of(), null, null, List.of(), List.of(), null);
+            List<Document> indexed = uniqueLookupSourceDocs(db, probe,
+                () -> columnarSourceDocs(db, probe, () -> null));
+            if (indexed != null) {
+                List<RecordId> out = new ArrayList<>(indexed.size());
+                for (Document doc : indexed) {
+                    out.add(doc.id());
+                }
+                return out;
+            }
+        }
+        return resolveTargets(target);
+    }
 
     private List<RecordId> resolveTargets(Expr target) {
         Database db = db();
@@ -4393,9 +4497,9 @@ return score;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
             if (nextPrefix != null) {
+                String ownEntry = nextPrefix + rid.key().keyString();
                 var existing = records(db).keysWithPrefix(nextPrefix);
-                if (!existing.isEmpty() && existing.stream()
-                    .noneMatch(key -> key.endsWith(rid.key().keyString()))) {
+                if (existing.stream().anyMatch(key -> !key.equals(ownEntry))) {
                     throw AxonError.internal(Messages.get("stmt_unique_index_violation", ix.name()));
                 }
             }
@@ -4633,13 +4737,13 @@ return score;
     }
 
     private List<Document> columnarSourceDocs(Database db, Statement.Select sel) {
-        return columnarSourceDocs(db, sel, List.of());
+        return columnarSourceDocs(db, sel, List::of);
     }
 
-    private List<Document> columnarSourceDocs(Database db, Statement.Select sel, List<Document> fallback) {
+    private List<Document> columnarSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
         String table = tableName(sel.from());
         Catalog.IndexDef index = columnarIndexFor(db, table, sel);
-        if (index == null) return fallback;
+        if (index == null) return fallback.get();
 
         if (sel.cond() instanceof Expr.Binary eq && eq.op() == Expr.BinaryOp.EQ
             && eq.left() instanceof Expr.Ident field
@@ -4662,10 +4766,10 @@ return score;
                 Document doc = loadDoc(db, new RecordId(table, parseKey(rowKey)));
                 if (doc != null) docs.add(doc);
             }
-            return docs.isEmpty() ? fallback : docs;
+            return docs.isEmpty() ? fallback.get() : docs;
         }
 
-        return fallback;
+        return fallback.get();
     }
 
 private String advancedPrefix(Database db, String table, String index, RecordId rid) {
