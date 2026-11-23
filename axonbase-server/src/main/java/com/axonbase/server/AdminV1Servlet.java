@@ -102,7 +102,12 @@ final class AdminV1Servlet extends HttpServlet {
             }
             if (method.equals("GET") && seg.size() == 1 && seg.get(0).equals("events")) {
                 needRoot(caller, Authz.Role.VIEWER);
-                sse(req, resp);
+                sse(req, resp, srv.events()::subscribe);
+                return;
+            }
+            if (method.equals("GET") && seg.size() == 2 && seg.get(0).equals("logs") && seg.get(1).equals("stream")) {
+                needRoot(caller, Authz.Role.VIEWER);
+                sse(req, resp, sink -> AxonLog.buffer().subscribe(e -> sink.accept(e.toJson())));
                 return;
             }
             AdminV1Response out = route(method, seg, req, caller);
@@ -227,6 +232,10 @@ final class AdminV1Servlet extends HttpServlet {
             needRoot(c, Authz.Role.VIEWER);
             return ok(expiringCertificates(req));
         }
+        if (get && head.equals("logs") && n == 1) {
+            needRoot(c, Authz.Role.VIEWER);
+            return ok(logs(req));
+        }
         AdminV1Response extra = AdminV1Extensions.route(srv, this, method, seg, req, c);
         if (extra != null) {
             return extra;
@@ -293,7 +302,9 @@ final class AdminV1Servlet extends HttpServlet {
     }
 
     /** Fluxo Server-Sent Events: cada evento do barramento vira uma linha {@code data:}. */
-    private void sse(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+    private void sse(HttpServletRequest req, HttpServletResponse resp,
+                     java.util.function.Function<java.util.function.Consumer<String>, AutoCloseable> source)
+            throws IOException {
         jakarta.servlet.AsyncContext async = req.startAsync();
         async.setTimeout(0);
         resp.setStatus(200);
@@ -306,7 +317,7 @@ final class AdminV1Servlet extends HttpServlet {
         out.flush();
         resp.flushBuffer();
         java.util.concurrent.atomic.AtomicReference<AutoCloseable> sub = new java.util.concurrent.atomic.AtomicReference<>();
-        sub.set(srv.events().subscribe(line -> {
+        sub.set(source.apply(line -> {
             synchronized (out) {
                 out.write(line.startsWith(":") ? line + "\n\n" : "data: " + line + "\n\n");
                 out.flush();
@@ -369,6 +380,33 @@ final class AdminV1Servlet extends HttpServlet {
             "uptimeSeconds", srv.uptimeSeconds(),
             "mode", clusterMode() ? "cluster" : "standalone",
             "config", conf);
+    }
+
+    /** Últimas linhas do buffer de log, com filtros {@code limit}, {@code level} (mínimo) e {@code since} (RFC 3339). */
+    private AxonValue logs(HttpServletRequest req) {
+        int limit = 500;
+        String l = req.getParameter("limit");
+        if (l != null && !l.isBlank()) {
+            try {
+                limit = Math.min(Math.max(1, Integer.parseInt(l.trim())), AxonLog.buffer().capacity());
+            } catch (NumberFormatException e) {
+                throw new ApiError(400, "BAD_REQUEST", Messages.get("admin_invalid_limit"));
+            }
+        }
+        long since = 0;
+        String sv = req.getParameter("since");
+        if (sv != null && !sv.isBlank()) {
+            try {
+                since = java.time.Instant.parse(sv.trim()).toEpochMilli();
+            } catch (java.time.format.DateTimeParseException e) {
+                throw new ApiError(400, "BAD_REQUEST", Messages.get("admin_invalid_since"));
+            }
+        }
+        List<Object> out = new ArrayList<>();
+        for (LogBuffer.Entry e : AxonLog.buffer().snapshot(limit, req.getParameter("level"), since)) {
+            out.add(e.toValue());
+        }
+        return AdminJson.of(out);
     }
 
     private boolean clusterMode() {
