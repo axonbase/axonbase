@@ -193,6 +193,8 @@ public final class Executor {
      * activa, usa esa transación; senón, o backend directo.
      */
     private KvBackend records(Database db) {
+        // Ponto único de acesso ao armazenamento: aqui a consulta cancelada (ou que estourou o timeout) para.
+        QueryContext.checkCancelled();
         Transaction tx = session.tx();
         return tx != null && tx.isOpen() ? tx : db.records();
     }

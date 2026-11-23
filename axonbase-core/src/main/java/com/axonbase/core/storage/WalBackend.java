@@ -344,14 +344,14 @@ public final class WalBackend implements VersionedKvBackend {
                                     java.util.Set<String> readPrefixes) {
         for (var expected : expectedVersions.entrySet()) {
             if (versionOf(expected.getKey()) != expected.getValue())
-                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()));
+                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()), expected.getKey());
         }
         for (String prefix : readPrefixes) {
             for (String key : keysWithPrefix(prefix)) {
                 if (expectedVersions.containsKey(key) || puts.containsKey(key) || deletes.contains(key)) {
                     continue;
                 }
-                throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key));
+                throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
             }
         }
         try { appendBatch(puts, deletes); } catch (IOException e) { throw new UncheckedIOException(e); }

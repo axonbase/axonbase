@@ -6,4 +6,10 @@ public final class VersionConflictException extends RuntimeException {
     public VersionConflictException(String message) {
         super(message);
     }
+
+    /** Registra o conflito em {@link ConflictStats}, com a chave que o causou. */
+    public VersionConflictException(String message, String key) {
+        super(message);
+        ConflictStats.record(key);
+    }
 }

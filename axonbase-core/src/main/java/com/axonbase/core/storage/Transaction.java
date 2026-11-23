@@ -32,6 +32,7 @@ public final class Transaction implements KvBackend {
     /** Pila de savepoints: estado de writes/deletes en cada checkpoint. */
     private final java.util.ArrayDeque<SavepointSnapshot> savepoints = new java.util.ArrayDeque<>();
     private boolean open = true;
+    private final long openedAtMs = System.currentTimeMillis();
 
     public Transaction(KvBackend base) {
         this.base = base;
@@ -40,6 +41,11 @@ public final class Transaction implements KvBackend {
     public boolean isOpen() {
         return open;
     }
+    /** Quando a transação foi aberta (epoch em milissegundos). */
+    public long openedAtMs() { return openedAtMs; }
+    /** Quantidade de escritas e de remoções pendentes (leitura aproximada, sem copiar). */
+    public int stagedWriteCount() { return staged.size(); }
+    public int stagedDeleteCount() { return deleted.size(); }
     public java.util.Map<String, byte[]> stagedWrites() { return java.util.Map.copyOf(staged); }
     public java.util.Set<String> stagedDeletes() { return java.util.Set.copyOf(deleted); }
 

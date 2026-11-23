@@ -254,7 +254,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         for (var expected : expectedVersions.entrySet()) {
             long current = versionOf(expected.getKey());
             if (current != expected.getValue()) {
-                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()));
+                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()), expected.getKey());
             }
         }
 
@@ -269,7 +269,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                     if (!expectedVersions.containsKey(key)
                         && !puts.containsKey(key)
                         && !deletes.contains(key)) {
-                        throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key));
+                        throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
                     }
                     it.next();
                 }

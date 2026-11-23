@@ -60,6 +60,10 @@ public final class AxonServer {
     private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicLong inflight = new java.util.concurrent.atomic.AtomicLong();
     private final ServerMetrics metrics = new ServerMetrics();
+    private final ActivityRegistry activity = new ActivityRegistry(ActivityConfig.from(System.getenv()));
+    {
+        metrics.slowSeconds(activity.config().slowQueryMs() / 1000.0);
+    }
     private volatile boolean metricsPerDatabase;
     private volatile boolean metricsRequireAuth;
     private volatile com.axonbase.core.backup.S3SyncManager backups;
@@ -261,6 +265,9 @@ public final class AxonServer {
             config.queryTimeout(), config.txnTimeout());
         rpc.dispatcher.metrics(metrics);
         ws.dispatcher().metrics(metrics);
+        rpc.dispatcher.activity(activity);
+        ws.dispatcher().activity(activity);
+        ws.activity(activity);
         dispatchers.add(rpc.dispatcher);
         dispatchers.add(ws.dispatcher());
         ctx.addServlet(new ServletHolder(rpc), "/rpc");
@@ -428,6 +435,10 @@ public final class AxonServer {
 
     Datastore ds() {
         return ds;
+    }
+
+    ActivityRegistry activity() {
+        return activity;
     }
 
     AuthService auth() {
@@ -677,6 +688,19 @@ public final class AxonServer {
               .append("axe_audit_pending_cases ").append(auditPending()).append("\n")
               .append("# TYPE axe_audit_blocked_users gauge\n")
               .append("axe_audit_blocked_users ").append(auditBlocked()).append("\n")
+              .append("# TYPE axe_queries_running gauge\n")
+              .append("axe_queries_running ").append(activity.runningCount()).append("\n")
+              .append("# TYPE axe_queries_cancelled_total counter\n")
+              .append("axe_queries_cancelled_total ").append(activity.cancelledTotal()).append("\n")
+              .append("# TYPE axe_sessions_open gauge\n")
+              .append("axe_sessions_open{type=\"ws\"} ").append(activity.wsCount()).append("\n")
+              .append("axe_sessions_open{type=\"token\"} ").append(auth == null ? 0 : auth.sessionCount()).append("\n")
+              .append("# TYPE axe_txn_open gauge\n")
+              .append("axe_txn_open ").append(activity.openTransactions()).append("\n")
+              .append("# TYPE axe_txn_conflicts_total counter\n")
+              .append("axe_txn_conflicts_total ").append(com.axonbase.core.storage.ConflictStats.total()).append("\n")
+              .append("# TYPE axe_slow_query_threshold_seconds gauge\n")
+              .append("axe_slow_query_threshold_seconds ").append(activity.config().slowQueryMs() / 1000.0).append("\n")
               // JVM metrics
               .append("# TYPE axe_jvm_heap_bytes gauge\n")
               .append("axe_jvm_heap_bytes ").append(memory.getHeapMemoryUsage().getUsed()).append("\n")
@@ -1011,11 +1035,15 @@ public final class AxonServer {
             AxonValue result = null;
             String error = null;
             long startedNanos = System.nanoTime();
+            ActivityRegistry.Running run = activity.begin(ActivityRegistry.userOf(s), s.namespace(), s.database(), body,
+                "http", req.getRemoteAddr(), null, s);
             if (config.queryTimeout() > 0) {
-                Future<AxonValue> future = queryExecutor.submit(() -> ds.execute(body, s, null));
+                Future<AxonValue> future = queryExecutor.submit(() -> executeTracked(run, body, s));
                 try {
                     result = future.get(config.queryTimeout(), TimeUnit.MILLISECONDS);
                 } catch (TimeoutException e) {
+                    // O sinal faz a consulta parar de verdade no próximo acesso ao armazenamento (só o interrupt não bastava).
+                    run.handle().cancel("timeout");
                     future.cancel(true);
                     error = Messages.get("query_timeout");
                 } catch (Exception e) {
@@ -1023,17 +1051,28 @@ public final class AxonServer {
                 }
             } else {
                 try {
-                    result = ds.execute(body, s, null);
+                    result = executeTracked(run, body, s);
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                 }
             }
+            activity.end(run, error != null, run.handle().cancelled());
             metrics.query(System.nanoTime() - startedNanos, error != null);
             if (error != null) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(error) + "\"}");
             } else {
                 json(resp, 200, AxonJson.write(result));
             }
+        }
+    }
+
+    /** Executa ligando a consulta à thread, para o motor poder checar o cancelamento. */
+    private AxonValue executeTracked(ActivityRegistry.Running run, String sql, Session s) {
+        com.axonbase.core.engine.QueryContext.Handle previous = com.axonbase.core.engine.QueryContext.attach(run.handle());
+        try {
+            return ds.execute(sql, s, null);
+        } finally {
+            com.axonbase.core.engine.QueryContext.detach(previous);
         }
     }
 
@@ -1114,6 +1153,7 @@ public final class AxonServer {
                 try {
                     respBody = future.get(config.queryTimeout(), TimeUnit.MILLISECONDS);
                 } catch (TimeoutException e) {
+                    activity.cancelOwner(s, "timeout");
                     future.cancel(true);
                     respBody = "{\"id\":null,\"error\":{\"code\":-32028,\"message\":\"" + esc(Messages.get("query_timeout")) + "\"}}";
                 } catch (Exception e) {

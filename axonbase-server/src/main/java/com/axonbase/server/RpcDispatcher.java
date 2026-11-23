@@ -65,6 +65,7 @@ public final class RpcDispatcher {
     private final CertificateChallengeService certificateChallenges;
     private final TrustStoreRegistry trustStores;
     private volatile ServerMetrics metrics;
+    private volatile ActivityRegistry activity;
     private volatile Supplier<ClusterStatusProvider.Status> clusterStatus =
         ClusterStatusProvider.Status::local;
 
@@ -92,6 +93,11 @@ public final class RpcDispatcher {
 
     /** Liga o dispatcher ao estado real do cluster, para recusar escritas fora do líder. */
     /** Liga a contagem de consultas e logins deste dispatcher. */
+    /** Liga o rastreamento de atividade (consultas em execução e lentas). Sem ele nada é rastreado. */
+    public void activity(ActivityRegistry activity) {
+        this.activity = activity;
+    }
+
     public void metrics(ServerMetrics metrics) {
         this.metrics = metrics;
     }
@@ -488,17 +494,32 @@ public final class RpcDispatcher {
                     ? params.asArray().get(1)
                     : AxonValue.object(Map.of());
                 long startedNanos = System.nanoTime();
+                ActivityRegistry tracker = activity;
+                ActivityRegistry.Running run = tracker == null ? null : tracker.begin(ActivityRegistry.userOf(session),
+                    session.namespace(), session.database(), sql, "ws", tracker.remoteOf(session), tracker.sessionIdOf(session),
+                    session);
+                com.axonbase.core.engine.QueryContext.Handle previousHandle = run == null ? null
+                    : com.axonbase.core.engine.QueryContext.attach(run.handle());
+                boolean failed = false;
                 try {
                     result = ds.execute(sql, session, mapOf(vars));
                     observeQuery(startedNanos, false);
                 } catch (NotLeaderException moved) {
+                    failed = true;
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
                 } catch (QuorumUnavailableException noQuorum) {
+                    failed = true;
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());
                 } catch (RuntimeException e) {
+                    failed = true;
                     observeQuery(startedNanos, true);
                     error = e.getMessage();
                     errorCode = errorCode(e);
+                } finally {
+                    if (run != null) {
+                        com.axonbase.core.engine.QueryContext.detach(previousHandle);
+                        tracker.end(run, failed, run.handle().cancelled());
+                    }
                 }
             }
             case "signin" -> {

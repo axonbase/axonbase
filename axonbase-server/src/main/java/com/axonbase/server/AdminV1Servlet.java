@@ -195,6 +195,9 @@ final class AdminV1Servlet extends HttpServlet {
                 return noContent();
             }
         }
+        if (head.equals("activity")) {
+            return activity(method, seg, req, c);
+        }
         if (get && head.equals("cluster") && n == 1) {
             needRoot(c, Authz.Role.VIEWER);
             return ok(cluster());
@@ -1086,6 +1089,174 @@ final class AdminV1Servlet extends HttpServlet {
         resp.setContentType("application/json");
         resp.setCharacterEncoding("UTF-8");
         resp.getWriter().write(AxonJson.write(body));
+    }
+
+    // ------------------------------------------------------------------
+    // atividade: consultas em execução e lentas, sessões, transações e conflitos
+    // ------------------------------------------------------------------
+
+    /**
+     * Visibilidade do que o nó está fazendo e ações operacionais. Leitura: VIEWER. Cancelar consulta e reverter transação:
+     * OPERATOR. Encerrar sessão: ADMIN. O texto da consulta só vai para OPERATOR ou ADMIN (VIEWER recebe o fingerprint).
+     * O AxonBase não tem locks (concorrência otimista): a disputa aparece como transações abertas e conflitos de versão.
+     */
+    private AdminV1Response activity(String method, List<String> seg, HttpServletRequest req, Caller c) {
+        ActivityRegistry reg = srv.activity();
+        int n = seg.size();
+        boolean get = method.equals("GET");
+        boolean post = method.equals("POST");
+        boolean delete = method.equals("DELETE");
+        boolean withSql = c.role().compareTo(Authz.Role.OPERATOR) >= 0;
+        if (get && n == 2) {
+            needRoot(c, Authz.Role.VIEWER);
+            switch (seg.get(1)) {
+                case "summary" -> {
+                    return ok(AdminJson.obj("running", reg.runningCount(), "slowTotal", reg.slowTotal(),
+                        "cancelledTotal", reg.cancelledTotal(), "sessionsWs", reg.wsCount(),
+                        "sessionsToken", srv.auth() == null ? 0 : srv.auth().sessionCount(), "openTransactions", reg.openTransactions(),
+                        "conflictsTotal", com.axonbase.core.storage.ConflictStats.total(),
+                        "slowThresholdMs", reg.config().slowQueryMs(), "captureSql", reg.config().captureSql(),
+                        "txnTimeoutMs", srv.config().txnTimeout(), "queryTimeoutMs", srv.config().queryTimeout()));
+                }
+                case "queries" -> {
+                    List<Object> out = new ArrayList<>();
+                    for (ActivityRegistry.Running r : reg.running()) {
+                        out.add(AdminJson.obj("id", r.id(), "user", r.user(), "ns", r.ns(), "db", r.db(),
+                            "startedAt", AdminJson.iso(r.startedAtMs()), "elapsedMs", r.elapsedMs(),
+                            "protocol", r.protocol(), "remote", r.remote(), "sessionId", r.sessionId(),
+                            "fingerprint", r.fingerprint(), "sql", withSql ? r.sql() : null,
+                            "cancelRequested", r.handle().cancelled()));
+                    }
+                    return ok(AdminJson.of(out));
+                }
+                case "slow" -> {
+                    long since = sinceMs(req);
+                    List<Object> out = new ArrayList<>();
+                    for (ActivityRegistry.SlowEntry e : reg.slow(limit(req), since)) {
+                        out.add(AdminJson.obj("id", e.id(), "at", AdminJson.iso(e.tsMs()), "durationMs", e.durationMs(),
+                            "user", e.user(), "ns", e.ns(), "db", e.db(), "protocol", e.protocol(),
+                            "fingerprint", e.fingerprint(), "sql", withSql ? e.sql() : null,
+                            "error", e.error(), "cancelled", e.cancelled()));
+                    }
+                    return ok(AdminJson.of(out));
+                }
+                case "top" -> {
+                    List<Object> out = new ArrayList<>();
+                    for (ActivityRegistry.Stat st : reg.top(req.getParameter("orderBy"), limit(req))) {
+                        out.add(AdminJson.obj("fingerprint", st.fingerprint(), "ns", st.ns(), "db", st.db(),
+                            "count", st.count(), "errors", st.errors(), "totalMs", st.totalMs(), "meanMs", st.meanMs(),
+                            "p95Ms", st.p95Ms(), "maxMs", st.maxMs(), "lastSeenAt", AdminJson.iso(st.lastSeenMs())));
+                    }
+                    return ok(AdminJson.of(out));
+                }
+                case "sessions" -> {
+                    String currentJti = c.claims() == null ? null : String.valueOf(c.claims().get("jti"));
+                    List<Object> out = new ArrayList<>();
+                    for (ActivityRegistry.WsSession w : reg.wsSessions()) {
+                        out.add(AdminJson.obj("id", w.id(), "type", "ws", "user", w.user(), "ns", w.ns(), "db", w.db(),
+                            "since", AdminJson.iso(w.connectedAtMs()), "lastActivityAt", AdminJson.iso(w.lastActivityMs()),
+                            "remote", w.remote(), "inTransaction", w.inTransaction(), "busy", reg.sessionBusy(w.id()),
+                            "current", false));
+                    }
+                    for (com.axonbase.server.auth.AuthService.TokenSession t : srv.auth() == null
+                        ? List.<com.axonbase.server.auth.AuthService.TokenSession>of() : srv.auth().sessions()) {
+                        out.add(AdminJson.obj("id", t.id(), "type", "token", "user", t.user(), "scope", t.scope(),
+                            "ns", t.ns(), "db", t.db(), "since", AdminJson.iso(t.issuedAtMs()),
+                            "lastActivityAt", AdminJson.iso(t.lastSeenMs()), "expiresAt", AdminJson.iso(t.expiresAtMs()),
+                            "current", t.id().equals(currentJti)));
+                    }
+                    return ok(AdminJson.of(out));
+                }
+                case "transactions" -> {
+                    List<Object> out = new ArrayList<>();
+                    long now = System.currentTimeMillis();
+                    for (ActivityRegistry.WsSession w : reg.wsSessions()) {
+                        if (w.inTransaction()) {
+                            long opened = w.txOpenedAtMs();
+                            out.add(AdminJson.obj("sessionId", w.id(), "user", w.user(), "ns", w.ns(), "db", w.db(),
+                                "openedAt", AdminJson.iso(opened), "ageMs", opened == 0 ? 0 : now - opened,
+                                "writes", w.txWrites(), "deletes", w.txDeletes(), "busy", reg.sessionBusy(w.id()),
+                                "remote", w.remote()));
+                        }
+                    }
+                    return ok(AdminJson.of(out));
+                }
+                case "conflicts" -> {
+                    List<Object> by = new ArrayList<>();
+                    for (var e : com.axonbase.core.storage.ConflictStats.byTarget()) {
+                        by.add(AdminJson.obj("target", e.target(), "count", e.count()));
+                    }
+                    return ok(AdminJson.obj("total", com.axonbase.core.storage.ConflictStats.total(), "byTarget", by));
+                }
+                default -> throw notFound();
+            }
+        }
+        // cancelar consulta
+        if (post && n == 4 && seg.get(1).equals("queries") && seg.get(3).equals("cancel")) {
+            needRoot(c, Authz.Role.OPERATOR);
+            if (!reg.cancel(seg.get(2), c.name())) {
+                throw new ApiError(404, "NOT_FOUND", Messages.get("admin_activity_not_found"));
+            }
+            AxonLog.log("warn", "activity_query_cancel", "consulta cancelada", Map.of("id", seg.get(2), "by", c.name()));
+            return ok(AdminJson.obj("cancelled", true));
+        }
+        // reverter transação
+        if (post && n == 4 && seg.get(1).equals("transactions") && seg.get(3).equals("rollback")) {
+            needRoot(c, Authz.Role.OPERATOR);
+            ActivityRegistry.WsSession w = reg.wsSession(seg.get(2));
+            if (w == null || !w.inTransaction()) {
+                throw new ApiError(404, "NOT_FOUND", Messages.get("admin_activity_not_found"));
+            }
+            if (reg.sessionBusy(w.id())) {
+                throw new ApiError(409, "CONFLICT", Messages.get("admin_activity_busy"));
+            }
+            w.rollback();
+            AxonLog.log("warn", "activity_txn_rollback", "transação revertida",
+                Map.of("session", w.id(), "user", String.valueOf(w.user()), "by", c.name()));
+            return ok(AdminJson.obj("rolledBack", true));
+        }
+        // encerrar sessão
+        if (delete && n == 3 && seg.get(1).equals("sessions")) {
+            needRoot(c, Authz.Role.ADMIN);
+            String id = seg.get(2);
+            String root = srv.config().user();
+            ActivityRegistry.WsSession w = reg.wsSession(id);
+            if (w != null) {
+                if (w.user() != null && w.user().equals(root)) {
+                    throw new ApiError(409, "CONFLICT", Messages.get("admin_activity_root"));
+                }
+                w.kill(c.name());
+            } else {
+                com.axonbase.server.auth.AuthService.TokenSession t = srv.auth().session(id);
+                if (t == null) {
+                    throw new ApiError(404, "NOT_FOUND", Messages.get("admin_activity_not_found"));
+                }
+                String currentJti = c.claims() == null ? null : String.valueOf(c.claims().get("jti"));
+                if (id.equals(currentJti)) {
+                    throw new ApiError(409, "CONFLICT", Messages.get("admin_activity_self"));
+                }
+                if (t.user() != null && t.user().equals(root)) {
+                    throw new ApiError(409, "CONFLICT", Messages.get("admin_activity_root"));
+                }
+                srv.auth().endSession(id);
+            }
+            AxonLog.log("warn", "activity_session_end", "sessão encerrada", Map.of("session", id, "by", c.name()));
+            return noContent();
+        }
+        throw notFound();
+    }
+
+    /** {@code since}: instante RFC 3339 ou milissegundos desde a época. Ausente = sem filtro. */
+    private static long sinceMs(HttpServletRequest req) {
+        String raw = req.getParameter("since");
+        if (raw == null || raw.isBlank()) {
+            return 0;
+        }
+        try {
+            return raw.matches("\\d+") ? Long.parseLong(raw) : java.time.Instant.parse(raw).toEpochMilli();
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new ApiError(400, "BAD_REQUEST", Messages.get("admin_invalid_from"));
+        }
     }
 
     private static void writeError(HttpServletResponse resp, ApiError e) throws IOException {
