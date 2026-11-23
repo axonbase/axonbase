@@ -77,6 +77,9 @@ public final class S3Encryption {
     /** Decripta um array de bytes de backup, com a mesma troca de header do {@link #decrypt}. */
     public static byte[] decryptBytes(byte[] dump, String password) {
         String text = new String(dump, StandardCharsets.UTF_8);
+        if (text.startsWith(StreamEncryption.HEADER)) {
+            return decryptBlocks(dump, password);
+        }
         if (!text.startsWith(ENCRYPTED_HEADER)) {
             return dump;
         }
@@ -104,10 +107,36 @@ public final class S3Encryption {
         }
     }
 
+    /** Decripta um backup no formato de blocos v2 que já está inteiro em memória (restore S3). */
+    private static byte[] decryptBlocks(byte[] dump, String password) {
+        if (password == null || password.isBlank()) {
+            throw AxonError.internal(Messages.get("backup_encryption_key_required"));
+        }
+        int nl = 0;
+        while (nl < dump.length && dump[nl] != '\n') {
+            nl++;
+        }
+        try (var in = StreamEncryption.decrypting(
+                new java.io.ByteArrayInputStream(dump, Math.min(nl + 1, dump.length), dump.length), password)) {
+            return in.readAllBytes();
+        } catch (java.io.IOException e) {
+            throw AxonError.internal(Messages.get("backup_decrypt_failed", e.getMessage()));
+        }
+    }
+
     private static Cipher cipher(int mode, byte[] key, byte[] nonce) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(mode, new SecretKeySpec(key, "AES"), new GCMParameterSpec(TAG_BITS, nonce));
         return cipher;
+    }
+
+    /** Chave AES-256 derivada da senha, para o formato em blocos do {@link StreamEncryption}. */
+    static byte[] deriveKeyBytes(String password) {
+        try {
+            return deriveKey(password);
+        } catch (Exception e) {
+            throw AxonError.internal(Messages.get("backup_encrypt_failed", e.getMessage()));
+        }
     }
 
     private static byte[] deriveKey(String password) throws Exception {

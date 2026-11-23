@@ -144,12 +144,15 @@ public final class Datastore {
 
     /** Há algum registro de dados (chave de registro contém NUL)? Custo linear. */
     public boolean hasRecords() {
-        for (String key : backend.keysWithPrefix("")) {
+        boolean[] found = {false};
+        backend.scanPrefix("", key -> {
             if (key.indexOf('\u0000') >= 0) {
-                return true;
+                found[0] = true;
+                return false;
             }
-        }
-        return false;
+            return true;
+        });
+        return found[0];
     }
 
     /** Total de chaves no armazenamento (registros, catálogo e metadados). Custo linear. */
@@ -853,17 +856,42 @@ public final class Datastore {
 
     /** Restaura um {@link #backupCluster()}: limpa tudo e reconstrói. */
     public void restoreCluster(String dump) {
-        java.util.List<String> lines = java.util.Arrays.asList(dump.split("\n", -1));
-        if (lines.isEmpty() || !"--axonbase-backup-v1--".equals(lines.get(0))) {
+        try {
+            restoreCluster(new java.io.BufferedReader(new java.io.StringReader(dump)));
+        } catch (java.io.IOException e) {
             throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
         }
-        for (String key : backend.keysWithPrefix("")) {
-            backend.delete(key);
+    }
+
+    /** Marca das linhas de deleção do backup incremental: {@code !del<TAB>base64(chave)}. */
+    static final String DELETE_MARK = "!del";
+
+    /**
+     * Restaura um backup lendo linha a linha, sem materializar o dump. O cabeçalho é validado antes
+     * de qualquer escrita; depois o armazenamento é limpo e as linhas são aplicadas em ordem
+     * (inclusive as deleções de backups incrementais mesclados).
+     */
+    public void restoreCluster(java.io.BufferedReader reader) throws java.io.IOException {
+        String header = reader.readLine();
+        if (!"--axonbase-backup-v1--".equals(header)) {
+            throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
         }
+        // limpa em lotes para não listar todas as chaves de uma vez
+        List<String> batch = new ArrayList<>();
+        do {
+            batch.clear();
+            backend.scanPrefix("", key -> {
+                batch.add(key);
+                return batch.size() < 10_000;
+            });
+            for (String key : batch) {
+                backend.delete(key);
+            }
+        } while (!batch.isEmpty());
         java.util.Base64.Decoder b64 = java.util.Base64.getDecoder();
         boolean restoredControl = false;
-        for (int i = 1; i < lines.size(); i++) {
-            String line = lines.get(i);
+        String line;
+        while ((line = reader.readLine()) != null) {
             if (line.isBlank()) {
                 continue;
             }
@@ -877,6 +905,8 @@ public final class Datastore {
                 controlState.restore(com.axonbase.core.control.CatalogCodec.decode(
                     new String(value, java.nio.charset.StandardCharsets.UTF_8)));
                 restoredControl = true;
+            } else if (DELETE_MARK.equals(key)) {
+                backend.delete(new String(value, java.nio.charset.StandardCharsets.UTF_8));
             } else {
                 backend.put(key, value);
             }
@@ -886,6 +916,69 @@ public final class Datastore {
             controlStore.save(controlState, backend);
         }
         backend.flush();
+    }
+
+    /**
+     * Escreve o backup em streaming no formato {@code .axbak} (texto, uma linha por chave, valores em
+     * Base64), varrendo o backend com {@link KvBackend#scanPrefix}: a memória não cresce com o tamanho.
+     *
+     * @param since versão a partir da qual incluir chaves alteradas ({@code <= 0} faz backup completo);
+     *              backends sem versão sempre fazem backup completo. Deleções posteriores a {@code since}
+     *              saem como linhas {@code !del} quando o backend as reporta.
+     * @return {@code true} se o backup escrito é incremental
+     */
+    public boolean backupTo(java.io.OutputStream out, long since) throws java.io.IOException {
+        VersionedKvBackend versioned = backend instanceof VersionedKvBackend v ? v : null;
+        boolean incremental = since > 0 && versioned != null;
+        java.io.Writer w = new java.io.BufferedWriter(
+            new java.io.OutputStreamWriter(out, java.nio.charset.StandardCharsets.UTF_8), 1 << 16);
+        java.util.Base64.Encoder b64 = java.util.Base64.getEncoder();
+        w.write("--axonbase-backup-v1--\n");
+        w.write("ctrl\t");
+        w.write(b64.encodeToString(com.axonbase.core.control.CatalogCodec.encode(controlState.snapshot())
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        w.write('\n');
+        java.io.IOException[] failure = new java.io.IOException[1];
+        backend.scanPrefix("", key -> {
+            try {
+                if (incremental && versioned.versionOf(key) <= since) {
+                    return true;
+                }
+                java.util.Optional<byte[]> raw = backend.get(key);
+                if (raw.isPresent()) {
+                    w.write(key);
+                    w.write('\t');
+                    w.write(b64.encodeToString(raw.get()));
+                    w.write('\n');
+                }
+                return true;
+            } catch (java.io.IOException e) {
+                failure[0] = e;
+                return false;
+            }
+        });
+        if (failure[0] != null) {
+            throw failure[0];
+        }
+        if (incremental) {
+            versioned.scanDeletedSince(since, key -> {
+                try {
+                    w.write(DELETE_MARK);
+                    w.write('\t');
+                    w.write(b64.encodeToString(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                    w.write('\n');
+                    return true;
+                } catch (java.io.IOException e) {
+                    failure[0] = e;
+                    return false;
+                }
+            });
+            if (failure[0] != null) {
+                throw failure[0];
+            }
+        }
+        w.flush();
+        return incremental;
     }
 
     /**
@@ -920,6 +1013,11 @@ public final class Datastore {
                     .append(b64.encodeToString(raw.get())).append('\n');
             }
         }
+        versionedBackend.scanDeletedSince(lastIndex, key -> {
+            sb.append(DELETE_MARK).append('\t').append(b64.encodeToString(
+                key.getBytes(java.nio.charset.StandardCharsets.UTF_8))).append('\n');
+            return true;
+        });
         return sb.toString();
     }
 

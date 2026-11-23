@@ -110,6 +110,9 @@ final class AdminV1Servlet extends HttpServlet {
                 sse(req, resp, sink -> AxonLog.buffer().subscribe(e -> sink.accept(e.toJson())));
                 return;
             }
+            if (BackupStreamApi.handle(srv, this, method, seg, req, resp, caller)) {
+                return;
+            }
             AdminV1Response out = route(method, seg, req, caller);
             if (out.status() == 204) {
                 resp.setStatus(204);
@@ -1060,7 +1063,7 @@ final class AdminV1Servlet extends HttpServlet {
         return new AdminV1Response(204, null);
     }
 
-    private static void write(HttpServletResponse resp, int status, AxonValue body) throws IOException {
+    static void write(HttpServletResponse resp, int status, AxonValue body) throws IOException {
         resp.setStatus(status);
         resp.setContentType("application/json");
         resp.setCharacterEncoding("UTF-8");

@@ -306,6 +306,23 @@ public final class WalBackend implements VersionedKvBackend {
     @Override public synchronized long versionOf(String key) { return versions.getOrDefault(key, 0L); }
     @Override public synchronized long currentVersion() { return clock; }
 
+    @Override
+    public void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
+        List<String> deleted = new ArrayList<>();
+        synchronized (this) {
+            versions.forEach((k, v) -> {
+                if (v > since && !data.containsKey(k)) {
+                    deleted.add(k);
+                }
+            });
+        }
+        for (String k : deleted) {
+            if (!visitor.test(k)) {
+                return;
+            }
+        }
+    }
+
     public HistoryLedger history() { return history; }
 
     @Override
