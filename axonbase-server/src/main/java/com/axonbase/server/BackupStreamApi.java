@@ -99,9 +99,10 @@ final class BackupStreamApi {
             throw new AdminV1Servlet.ApiError(409, "CONFLICT", Messages.get("admin_restore_not_empty"));
         }
         BufferedInputStream body = new BufferedInputStream(req.getInputStream(), 1 << 16);
+        long restoredKeys;
         try (InputStream plain = openPlain(body, srv.config().s3EncryptKey());
              BufferedReader reader = new BufferedReader(new InputStreamReader(plain, StandardCharsets.UTF_8), 1 << 16)) {
-            srv.ds().restoreCluster(reader);
+            restoredKeys = srv.ds().restoreCluster(reader);
         } catch (AxonError | IOException | IllegalArgumentException e) {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST",
                 Messages.get("admin_backup_stream_invalid", e.getMessage()));
@@ -109,7 +110,7 @@ final class BackupStreamApi {
         if (srv.auth() != null) {
             srv.auth().ensureRoot(srv.config().user(), srv.config().password());
         }
-        AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true));
+        AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true, "restoredKeys", restoredKeys));
     }
 
     /**

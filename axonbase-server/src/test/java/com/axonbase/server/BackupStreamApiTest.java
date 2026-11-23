@@ -104,6 +104,10 @@ class BackupStreamApiTest {
             assertEquals(400, b.restore("", b.root, r.body()).statusCode());
             HttpResponse<String> ok = b.restore("?confirm=true", b.root, r.body());
             assertEquals(200, ok.statusCode(), ok.body());
+            // a resposta informa quantas chaves foram aplicadas (o painel mostra esse número)
+            java.util.regex.Matcher count = java.util.regex.Pattern.compile("\"restoredKeys\":(\\d+)").matcher(ok.body());
+            assertTrue(count.find(), ok.body());
+            assertTrue(Long.parseLong(count.group(1)) >= 2000, ok.body());
             assertEquals(2000, b.ds.metaKeys("k").size());
             assertTrue(b.ds.hasRecords());
             // nó com dados recusa sem force e aceita com force

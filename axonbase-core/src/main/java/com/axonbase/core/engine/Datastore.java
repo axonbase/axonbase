@@ -903,8 +903,10 @@ public final class Datastore {
      * Restaura um backup lendo linha a linha, sem materializar o dump. O cabeçalho é validado antes
      * de qualquer escrita; depois o armazenamento é limpo e as linhas são aplicadas em ordem
      * (inclusive as deleções de backups incrementais mesclados).
+     *
+     * @return quantas chaves foram aplicadas (gravações mais deleções), sem contar o plano de controle
      */
-    public void restoreCluster(java.io.BufferedReader reader) throws java.io.IOException {
+    public long restoreCluster(java.io.BufferedReader reader) throws java.io.IOException {
         String header = reader.readLine();
         if (!"--axonbase-backup-v1--".equals(header)) {
             throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
@@ -923,6 +925,7 @@ public final class Datastore {
         } while (!batch.isEmpty());
         java.util.Base64.Decoder b64 = java.util.Base64.getDecoder();
         boolean restoredControl = false;
+        long applied = 0;
         String line;
         while ((line = reader.readLine()) != null) {
             if (line.isBlank()) {
@@ -940,8 +943,10 @@ public final class Datastore {
                 restoredControl = true;
             } else if (DELETE_MARK.equals(key)) {
                 backend.delete(new String(value, java.nio.charset.StandardCharsets.UTF_8));
+                applied++;
             } else {
                 backend.put(key, value);
+                applied++;
             }
         }
         if (restoredControl) {
@@ -949,6 +954,7 @@ public final class Datastore {
             controlStore.save(controlState, backend);
         }
         backend.flush();
+        return applied;
     }
 
     /**
