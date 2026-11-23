@@ -1,15 +1,37 @@
-# AxonBase: configuração local de desenvolvimento.
-# Variáveis AXON_* substituem estes valores; flags da CLI substituem ambos.
+# AxonBase: configuração local de desenvolvimento (formato chave = valor, "#" comenta).
+# Precedência: flags da CLI > variáveis AXON_* > este arquivo > padrões.
+# Cada chave tem a variável equivalente AXON_<CHAVE em maiúsculas> (ex.: root_user -> AXON_ROOT_USER).
+# Chaves desconhecidas são ignoradas em silêncio: confira a grafia.
 
+# Armazenamento: "memory" ou o diretório do RocksDB (ex.: data).
 path = memory
 bind = 127.0.0.1
 port = 8000
+# Porta HTTP sem TLS quando tls_cert está definido (0 desliga).
+# plain_port = 8080
 require_auth = true
+# Idioma das mensagens: pt-BR (padrão) ou en.
+# lang = pt-BR
 
 # Nunca versione um segredo ou senha de produção neste arquivo.
+# Atenção: as chaves reais são root_user e root_password (não "user" e "pass").
 secret = axonbase-dev-secret
-user = root
-pass = root
+root_user = root
+root_password = root
+
+# Limites e HTTP (milissegundos, exceto contagens).
+# query_timeout = 30000
+# txn_timeout = 300000
+# rate_limit = 0
+# shutdown_timeout = 10000
+# http_threads = 32
+# http_queue = 100
+# cors_origins = https://painel.exemplo.com
+
+# TLS: keystore PKCS12 do servidor, senha, e truststore JKS de CAs (certificados de cliente).
+# tls_cert = certs/server/server.p12
+# tls_key = changeit
+# tls_ca = certs/truststores/icpbrasil.jks
 
 # Cluster opcional. Deixe cluster_id vazio para modo local.
 # cluster_id = primary
@@ -18,6 +40,7 @@ pass = root
 # raft_peers = 127.0.0.1:9001,127.0.0.1:9002
 
 # Backup S3 periódico. Deixe s3_bucket vazio para desligar.
+# s3_encrypt_key também criptografa (AES-256-GCM) o export por /admin/v1/backups/export.
 # s3_endpoint = http://localhost:9000
 # s3_bucket = axonbase
 # s3_prefix = backups
@@ -27,7 +50,11 @@ pass = root
 # s3_encrypt_key =
 # s3_retention = 10
 
-# AI Audit: necessário para CREATE AI AUDIT.
+# Auditoria de consultas (audit_enabled) e AI Audit (ai_*): necessário para CREATE AI AUDIT.
+# audit_enabled = false
+# audit_user_from = auth
+# audit_select = false
+# audit_max_body = 65536
 # Provedores suportados: claude | openai | gemini | ollama
 # ai_provider = claude
 # ai_model = claude-3-5-sonnet-20241022
