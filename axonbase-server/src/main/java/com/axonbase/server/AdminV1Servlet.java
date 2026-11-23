@@ -917,14 +917,21 @@ final class AdminV1Servlet extends HttpServlet {
             Path dir = srv.truststoreDir();
             Files.createDirectories(dir);
             Path target = dir.resolve(name + ".jks");
-            try (InputStream in = file.getInputStream()) {
-                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-            }
+            // grava num temporário, valida e só então troca de forma atômica: um reenvio inválido
+            // nunca destrói o truststore anterior
+            Path temp = Files.createTempFile(dir, name + "-", ".jks.tmp");
             try {
-                srv.registerTrustStore(name, target.toString(), password.toCharArray());
-            } catch (IllegalArgumentException e) {
-                Files.deleteIfExists(target);
-                throw new ApiError(400, "BAD_REQUEST", e.getMessage());
+                try (InputStream in = file.getInputStream()) {
+                    Files.copy(in, temp, StandardCopyOption.REPLACE_EXISTING);
+                }
+                try {
+                    srv.registerTrustStore(name, temp.toString(), password.toCharArray());
+                } catch (IllegalArgumentException e) {
+                    throw new ApiError(400, "BAD_REQUEST", e.getMessage());
+                }
+                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                Files.deleteIfExists(temp);
             }
             srv.ds().persistJks(name, target.toString());
             return AdminJson.obj("name", name);
