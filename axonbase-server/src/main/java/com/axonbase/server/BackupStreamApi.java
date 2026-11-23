@@ -24,6 +24,10 @@ import java.nio.charset.StandardCharsets;
 final class BackupStreamApi {
 
     private static final int SNIFF = 128;
+    /** Maior linha aceita no restore (uma chave com valor em Base64). */
+    static final int MAX_LINE_BYTES = 8 << 20;
+    /** Maior corpo aceito no restore. */
+    static final long MAX_BODY_BYTES = 64L << 30;
 
     private BackupStreamApi() {
     }
@@ -98,19 +102,88 @@ final class BackupStreamApi {
         if (!forced && srv.ds().hasRecords()) {
             throw new AdminV1Servlet.ApiError(409, "CONFLICT", Messages.get("admin_restore_not_empty"));
         }
-        BufferedInputStream body = new BufferedInputStream(req.getInputStream(), 1 << 16);
+        BufferedInputStream body = new BufferedInputStream(
+            new LimitedInput(req.getInputStream(), MAX_BODY_BYTES), 1 << 16);
         long restoredKeys;
-        try (InputStream plain = openPlain(body, srv.config().s3EncryptKey());
-             BufferedReader reader = new BufferedReader(new InputStreamReader(plain, StandardCharsets.UTF_8), 1 << 16)) {
-            restoredKeys = srv.ds().restoreCluster(reader);
-        } catch (AxonError | IOException | IllegalArgumentException e) {
-            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST",
-                Messages.get("admin_backup_stream_invalid", e.getMessage()));
-        }
-        if (srv.auth() != null) {
-            srv.auth().ensureRoot(srv.config().user(), srv.config().password());
+        java.nio.file.Path temp = java.nio.file.Files.createTempFile("axonbase-restore-", ".axbak");
+        try {
+            // 1) grava o corpo decifrado em arquivo temporário: consumir TUDO valida a cadeia AES-GCM
+            //    (inclusive o último bloco) e o limite de linha, antes de qualquer escrita no armazenamento
+            try (InputStream plain = openPlain(body, srv.config().s3EncryptKey())) {
+                copyValidating(plain, temp);
+            } catch (AxonError | IOException | IllegalArgumentException e) {
+                throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST",
+                    Messages.get("admin_backup_stream_invalid", e.getMessage()));
+            }
+            // 2) valida o cabeçalho ainda sem tocar nos dados
+            try (BufferedReader head = java.nio.file.Files.newBufferedReader(temp, StandardCharsets.UTF_8)) {
+                if (!"--axonbase-backup-v1--".equals(head.readLine())) {
+                    throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("admin_backup_stream_invalid",
+                        Messages.get("stmt_cluster_backup_invalid")));
+                }
+            }
+            // 3) só agora limpa e restaura, lendo do arquivo
+            try (BufferedReader reader = java.nio.file.Files.newBufferedReader(temp, StandardCharsets.UTF_8)) {
+                restoredKeys = srv.ds().restoreCluster(reader);
+            } catch (AxonError | IOException | IllegalArgumentException e) {
+                throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST",
+                    Messages.get("admin_backup_stream_invalid", e.getMessage()));
+            }
+        } finally {
+            java.nio.file.Files.deleteIfExists(temp);
+            // também no caminho de erro: uma restauração interrompida não pode deixar a base sem root
+            if (srv.auth() != null) {
+                srv.auth().ensureRoot(srv.config().user(), srv.config().password());
+            }
         }
         AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true, "restoredKeys", restoredKeys));
+    }
+
+    /** Copia validando o tamanho de cada linha; lança IOException se alguma passar do limite. */
+    private static void copyValidating(InputStream in, java.nio.file.Path target) throws IOException {
+        byte[] buf = new byte[1 << 16];
+        int lineBytes = 0;
+        try (OutputStream out = new java.io.BufferedOutputStream(java.nio.file.Files.newOutputStream(target), 1 << 16)) {
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                for (int i = 0; i < n; i++) {
+                    if (buf[i] == '\n') {
+                        lineBytes = 0;
+                    } else if (++lineBytes > MAX_LINE_BYTES) {
+                        throw new IOException(Messages.get("admin_restore_line_too_long", MAX_LINE_BYTES));
+                    }
+                }
+                out.write(buf, 0, n);
+            }
+        }
+    }
+
+    /** Limita o total de bytes lidos do corpo. */
+    private static final class LimitedInput extends java.io.FilterInputStream {
+        private long left;
+
+        LimitedInput(InputStream in, long max) {
+            super(in);
+            this.left = max;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int b = super.read();
+            if (b >= 0 && --left < 0) {
+                throw new IOException(Messages.get("admin_restore_body_too_large"));
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0 && (left -= n) < 0) {
+                throw new IOException(Messages.get("admin_restore_body_too_large"));
+            }
+            return n;
+        }
     }
 
     /**

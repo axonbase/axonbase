@@ -180,4 +180,47 @@ class BackupStreamApiTest {
             assertTrue(a.ds.metaGet("k1").isPresent());
         }
     }
+
+    @Test
+    void restoreCifradoTruncadoDa400ENaoApagaOsDados() throws Exception {
+        try (Node a = new Node("segredo"); Node alvo = new Node("segredo")) {
+            for (int i = 0; i < 3000; i++) {
+                a.ds.metaPut("k" + i, ("conteudo-" + i).repeat(5).getBytes(StandardCharsets.UTF_8));
+            }
+            byte[] full = a.export("", a.root).body();
+            byte[] truncado = java.util.Arrays.copyOf(full, full.length - 40);
+            alvo.ds.metaPut("intacto", new byte[] {1});
+            HttpResponse<String> r = alvo.restore("?confirm=true&force=true", alvo.root, truncado);
+            assertEquals(400, r.statusCode(), r.body());
+            assertTrue(alvo.ds.metaGet("intacto").isPresent());
+            assertEquals(0, alvo.ds.metaKeys("k").size());
+        }
+    }
+
+    @Test
+    void restoreCifradoAdulteradoDa400ENaoApagaOsDados() throws Exception {
+        try (Node a = new Node("segredo"); Node alvo = new Node("segredo")) {
+            for (int i = 0; i < 500; i++) {
+                a.ds.metaPut("k" + i, ("conteudo-" + i).getBytes(StandardCharsets.UTF_8));
+            }
+            byte[] full = a.export("", a.root).body();
+            full[full.length - 5] ^= 0x55;
+            alvo.ds.metaPut("intacto", new byte[] {1});
+            HttpResponse<String> r = alvo.restore("?confirm=true&force=true", alvo.root, full);
+            assertEquals(400, r.statusCode(), r.body());
+            assertTrue(alvo.ds.metaGet("intacto").isPresent());
+        }
+    }
+
+    @Test
+    void restoreRecusaLinhaGiganteSemApagarOsDados() throws Exception {
+        try (Node alvo = new Node("")) {
+            alvo.ds.metaPut("intacto", new byte[] {1});
+            String corpo = "--axonbase-backup-v1--\nk\t" + "A".repeat(20 * 1024 * 1024) + "\n";
+            HttpResponse<String> r = alvo.restore("?confirm=true&force=true", alvo.root,
+                corpo.getBytes(StandardCharsets.US_ASCII));
+            assertEquals(400, r.statusCode(), r.body());
+            assertTrue(alvo.ds.metaGet("intacto").isPresent());
+        }
+    }
 }
