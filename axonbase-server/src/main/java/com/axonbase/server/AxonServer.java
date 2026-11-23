@@ -223,6 +223,10 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new AdminTrustStoreServlet()), "/admin/truststores");
         ctx.addServlet(new ServletHolder(new CertificateLoginServlet()), "/certificate/login/*");
         ctx.addServlet(new ServletHolder(new ShardMoveServlet()), "/admin/shard/move");
+        ServletHolder adminV1 = new ServletHolder(new AdminV1Servlet(this));
+        adminV1.getRegistration().setMultipartConfig(new jakarta.servlet.MultipartConfigElement(
+            System.getProperty("java.io.tmpdir"), 8L << 20, 9L << 20, 1 << 20));
+        ctx.addServlet(adminV1, "/admin/v1/*");
         ctx.addServlet(new ServletHolder(new SqlServlet()), "/sql/*");
         ctx.addServlet(new ServletHolder(new TableServlet()), "/table/*");
         ctx.addServlet(new ServletHolder(new SigninServlet()), "/signin");
@@ -299,6 +303,49 @@ public final class AxonServer {
         return ((ServerConnector) jetty.getConnectors()[0]).getLocalPort();
     }
 
+    // ---- acesso para a API de gestão (mesmo pacote) ----
+
+    Datastore ds() {
+        return ds;
+    }
+
+    AuthService auth() {
+        return auth;
+    }
+
+    boolean requireAuth() {
+        return requireAuth;
+    }
+
+    ServerConfig config() {
+        return config;
+    }
+
+    TrustStoreRegistry trustStores() {
+        return trustStores;
+    }
+
+    com.axonbase.core.cluster.ClusterStatusProvider clusterStatus() {
+        return clusterStatus;
+    }
+
+    com.axonbase.core.cluster.ClusterRuntime clusterRuntime() {
+        return clusterRuntime;
+    }
+
+    long uptimeSeconds() {
+        return Math.max(0, System.nanoTime() - startedAtNanos) / 1_000_000_000L;
+    }
+
+    /** Diretório onde os JKS enviados pela API ficam gravados. */
+    java.nio.file.Path truststoreDir() {
+        String path = config.path();
+        java.nio.file.Path base = path == null || path.equals("memory") || path.isBlank()
+            ? java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "axonbase-truststores")
+            : java.nio.file.Path.of(path.startsWith("rocksdb:") ? path.substring(8) : path + ".truststores");
+        return path != null && path.startsWith("rocksdb:") ? base.resolveSibling(base.getFileName() + ".truststores") : base;
+    }
+
     /** Liga {@code axe_db_keys{ns,db}} (AXON_METRICS_PER_DATABASE), que tem custo linear por banco. */
     public void metricsPerDatabase(boolean enabled) {
         this.metricsPerDatabase = enabled;
@@ -322,7 +369,7 @@ public final class AxonServer {
     private long auditPending() {
         long n = 0;
         for (var db : ds.allDatabases()) {
-            n += db.auditCatalog().listCases().size();
+            n += db.auditCatalog().listCases().stream().filter(c -> "PENDING".equals(c.status())).count();
         }
         return n;
     }
@@ -1011,7 +1058,7 @@ public final class AxonServer {
         return s;
     }
 
-    private static AxonValue claimsValue(Map<String, Object> claims) {
+    static AxonValue claimsValue(Map<String, Object> claims) {
         Map<String, AxonValue> out = new java.util.LinkedHashMap<>();
         claims.forEach((key, value) -> out.put(key, value instanceof Number n
             ? AxonValue.num(n.longValue()) : value instanceof Boolean b

@@ -4971,6 +4971,10 @@ for (int level = 0; level <= top; level++) {
             throw errorStmt(Messages.get("audit_case_resolved", auditCase.status()));
         }
         String userId = sessionUserId();
+        // Quem está bloqueado por este caso não pode decidi-lo (nem outro caso sobre si).
+        if (userId.equals(auditCase.userId()) && cat.isBlocked(userId)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_self_decision"));
+        }
         auditCase.resolve(sac.status(), userId, sac.reason());
         cat.addEvent(sac.hash(), new com.axonbase.core.audit.AuditCaseEvent(
             sac.status().equals("AUTHORIZED") ? "AUTHORIZED" : "DENIED", userId, sac.reason(), System.currentTimeMillis()));

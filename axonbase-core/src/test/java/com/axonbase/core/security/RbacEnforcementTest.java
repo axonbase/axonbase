@@ -114,4 +114,29 @@ class RbacEnforcementTest {
             () -> ds.execute("SET AUDIT CASE \"abc\" AUTHORIZED REASON \"ok\"", s, null));
         assertTrue(e.getMessage().contains("operator"), e.getMessage());
     }
+
+    @Test
+    void usuarioBloqueadoNaoDecideOProprioCaso() {
+        Datastore ds = ds();
+        var cat = ds.requireDatabase(as("ROOT", null, null, "admin")).auditCatalog();
+        cat.addCase("h1", new com.axonbase.core.audit.AuditCase("h1", "tester", "DELETE t", "aud", "DANGER",
+            System.currentTimeMillis()));
+        cat.blockUser("tester", "aud", "DELETE t", "perigo", "sys");
+        Session s = as("DATABASE", "app", "main", "admin");
+        AxonError e = assertThrows(AxonError.class,
+            () -> ds.execute("SET AUDIT CASE \"h1\" AUTHORIZED REASON \"eu mesmo\"", s, null));
+        assertTrue(e.getMessage().contains("bloqueado") || e.getMessage().contains("blocked"), e.getMessage());
+    }
+
+    @Test
+    void removerUsuarioExatoPorEscopo() {
+        Datastore ds = ds();
+        ds.authCatalog().defineUser("u", AuthCatalog.Scope.ROOT, null, null, "x", java.util.List.of(), java.util.List.of());
+        ds.authCatalog().defineUser("u", AuthCatalog.Scope.DATABASE, "app", "main", "x", java.util.List.of(), java.util.List.of());
+        assertTrue(ds.dropUser(null, "u", AuthCatalog.Scope.ROOT, null, null));
+        org.junit.jupiter.api.Assertions.assertNotNull(ds.authCatalog().user("u", "app", "main"));
+        org.junit.jupiter.api.Assertions.assertEquals(AuthCatalog.Scope.DATABASE,
+            ds.authCatalog().user("u", "app", "main").scope());
+        org.junit.jupiter.api.Assertions.assertFalse(ds.dropUser(null, "u", AuthCatalog.Scope.ROOT, null, null));
+    }
 }

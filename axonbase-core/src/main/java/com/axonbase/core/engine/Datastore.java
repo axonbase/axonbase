@@ -114,6 +114,19 @@ public final class Datastore {
             .map(k -> k.substring("!meta|".length())).toList();
     }
 
+    /**
+     * Remove um usuário do escopo exato e registra o DROP no plano de controle.
+     *
+     * @return {@code false} quando o usuário não existe nesse escopo
+     */
+    public boolean dropUser(Session session, String name, AuthCatalog.Scope scope, String ns, String db) {
+        if (!authCatalog.removeUserExact(name, scope, ns, db)) {
+            return false;
+        }
+        applyControl(session, ControlCommand.of(ControlCommand.Kind.USER, ns, db, name, "DROP USER " + name));
+        return true;
+    }
+
     /** Total de chaves no armazenamento (registros, catálogo e metadados). Custo linear. */
     public long keyCount() {
         return backend.keysWithPrefix("").size();
@@ -373,6 +386,10 @@ public final class Datastore {
 
     public void defineSaga(String sagaName, SagaDef def) {
         sagas.put(sagaName, def);
+    }
+
+    public List<String> sagaNames() {
+        return List.copyOf(sagas.keySet());
     }
 
     public SagaDef saga(String sagaName) {

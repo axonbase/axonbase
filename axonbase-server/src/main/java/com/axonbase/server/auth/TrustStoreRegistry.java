@@ -17,7 +17,7 @@ import javax.naming.ldap.Rdn;
 /** In-memory JKS truststores and their certificate identity collection rules. */
 public final class TrustStoreRegistry {
 
-    private record RegisteredTrustStore(KeyStore store, String collector, List<String> oids) {
+    private record RegisteredTrustStore(KeyStore store, String collector, List<String> oids, long loadedAt) {
     }
 
     private final Map<String, RegisteredTrustStore> stores = new ConcurrentHashMap<>();
@@ -39,12 +39,42 @@ public final class TrustStoreRegistry {
             store.load(input, password);
             stores.put(name, new RegisteredTrustStore(store,
                 collector == null ? "NONE" : collector.toUpperCase(),
-                oids == null ? List.of() : List.copyOf(oids)));
+                oids == null ? List.of() : List.copyOf(oids), System.currentTimeMillis()));
         } catch (Exception e) {
             throw new IllegalArgumentException(Messages.get("cert_store_load_failed", name), e);
         } finally {
             Arrays.fill(password, '\0');
         }
+    }
+
+    /** Certificado de um truststore, com os campos que a API de gestão expõe. */
+    public record CertInfo(String subject, long notAfter) {
+    }
+
+    /** Resumo de um truststore carregado. */
+    public record StoreInfo(String name, long loadedAt, List<CertInfo> certificates) {
+    }
+
+    public List<StoreInfo> list() {
+        List<StoreInfo> out = new java.util.ArrayList<>();
+        for (Map.Entry<String, RegisteredTrustStore> e : new java.util.TreeMap<>(stores).entrySet()) {
+            List<CertInfo> certs = new java.util.ArrayList<>();
+            try {
+                for (String alias : java.util.Collections.list(e.getValue().store().aliases())) {
+                    if (e.getValue().store().getCertificate(alias) instanceof java.security.cert.X509Certificate x) {
+                        certs.add(new CertInfo(x.getSubjectX500Principal().getName(), x.getNotAfter().getTime()));
+                    }
+                }
+            } catch (java.security.KeyStoreException ignored) {
+                // truststore sem aliases legíveis aparece vazio
+            }
+            out.add(new StoreInfo(e.getKey(), e.getValue().loadedAt(), certs));
+        }
+        return out;
+    }
+
+    public boolean remove(String name) {
+        return stores.remove(name) != null;
     }
 
     public KeyStore get(String name) {
