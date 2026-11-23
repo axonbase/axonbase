@@ -43,7 +43,7 @@ public final class RpcDispatcher {
     /** Versión do protocolo de wire, independente da versión do artefacto. */
     public static final int PROTOCOL_VERSION = 1;
     /** Versión do artefacto servidor, exposta polo handshake e polo método version. */
-    public static final String SERVER_VERSION = "0.1.0-SNAPSHOT";
+    public static final String SERVER_VERSION = BuildInfo.version();
 
     /** Métodos RPC suportados, expostos no handshake (hello) e en testes. */
     static final List<String> METHODS = List.of(
@@ -64,6 +64,7 @@ public final class RpcDispatcher {
     private final long queryTimeoutMs;
     private final CertificateChallengeService certificateChallenges;
     private final TrustStoreRegistry trustStores;
+    private volatile ServerMetrics metrics;
     private volatile Supplier<ClusterStatusProvider.Status> clusterStatus =
         ClusterStatusProvider.Status::local;
 
@@ -90,6 +91,11 @@ public final class RpcDispatcher {
     }
 
     /** Liga o dispatcher ao estado real do cluster, para recusar escritas fora do líder. */
+    /** Liga a contagem de consultas e logins deste dispatcher. */
+    public void metrics(ServerMetrics metrics) {
+        this.metrics = metrics;
+    }
+
     public void clusterStatus(Supplier<ClusterStatusProvider.Status> status) {
         this.clusterStatus = status == null ? ClusterStatusProvider.Status::local : status;
     }
@@ -384,6 +390,13 @@ public final class RpcDispatcher {
         return v.toString();
     }
 
+    private void observeQuery(long startedNanos, boolean error) {
+        ServerMetrics m = metrics;
+        if (m != null) {
+            m.query(System.nanoTime() - startedNanos, error);
+        }
+    }
+
     public String dispatch(String body, Session session) {
         try {
             return dispatchUnchecked(body, session);
@@ -474,13 +487,16 @@ public final class RpcDispatcher {
                 AxonValue vars = params.asArray().size() > 1
                     ? params.asArray().get(1)
                     : AxonValue.object(Map.of());
+                long startedNanos = System.nanoTime();
                 try {
                     result = ds.execute(sql, session, mapOf(vars));
+                    observeQuery(startedNanos, false);
                 } catch (NotLeaderException moved) {
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
                 } catch (QuorumUnavailableException noQuorum) {
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());
                 } catch (RuntimeException e) {
+                    observeQuery(startedNanos, true);
                     error = e.getMessage();
                     errorCode = errorCode(e);
                 }
@@ -500,6 +516,9 @@ public final class RpcDispatcher {
                         ? cred.asObject().get("access").asString() : null;
                     String token = auth != null ? auth.signin(user, pass, session.namespace(),
                         session.database(), access) : null;
+                    if (metrics != null) {
+                        metrics.signin(token != null);
+                    }
                     if (token == null) {
                         error = Messages.get("auth_invalid");
                     } else {

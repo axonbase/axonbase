@@ -58,7 +58,12 @@ public final class AxonServer {
     private volatile com.axonbase.core.cluster.ClusterStatusProvider clusterStatus;
     private volatile com.axonbase.core.cluster.ClusterRuntime clusterRuntime;
     private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
-    private final java.util.concurrent.atomic.AtomicLong requests = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong inflight = new java.util.concurrent.atomic.AtomicLong();
+    private final ServerMetrics metrics = new ServerMetrics();
+    private volatile boolean metricsPerDatabase;
+    private volatile boolean metricsRequireAuth;
+    private volatile long storageKeysCached;
+    private volatile long storageKeysAt;
     private final java.util.concurrent.atomic.AtomicLong wsOpen = new java.util.concurrent.atomic.AtomicLong();
     private final AtomicLong wsFramesReceived = new AtomicLong();
     private final AtomicLong wsFramesSent = new AtomicLong();
@@ -66,12 +71,6 @@ public final class AxonServer {
     private final AtomicLong wsResponseCount = new AtomicLong();
     private final AtomicLong wsQueryErrors = new AtomicLong();
     private final AtomicLong wsNotLeaderErrors = new AtomicLong();
-    private final AtomicLong queryCount = new AtomicLong();
-    private final AtomicLong querySlowCount = new AtomicLong();
-    private final AtomicLong queryErrorCount = new AtomicLong();
-    private final AtomicLong signinCount = new AtomicLong();
-    private final AtomicLong signinFailCount = new AtomicLong();
-    private final AtomicLong storageKeys = new AtomicLong();
     private volatile long startedAtNanos;
     private Server jetty;
     private volatile boolean stopping;
@@ -232,6 +231,8 @@ public final class AxonServer {
             wsFramesReceived, wsFramesSent, wsResponseTimeNanos, wsResponseCount,
             wsQueryErrors, wsNotLeaderErrors,
             config.queryTimeout(), config.txnTimeout());
+        rpc.dispatcher.metrics(metrics);
+        ws.dispatcher().metrics(metrics);
         dispatchers.add(rpc.dispatcher);
         dispatchers.add(ws.dispatcher());
         ctx.addServlet(new ServletHolder(rpc), "/rpc");
@@ -267,6 +268,27 @@ public final class AxonServer {
             ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(corsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         }
 
+        jakarta.servlet.Filter metricsFilter = new jakarta.servlet.Filter() {
+            @Override
+            public void doFilter(jakarta.servlet.ServletRequest request,
+                                 jakarta.servlet.ServletResponse response,
+                                 jakarta.servlet.FilterChain chain)
+                    throws IOException, jakarta.servlet.ServletException {
+                HttpServletRequest rq = (HttpServletRequest) request;
+                HttpServletResponse rs = (HttpServletResponse) response;
+                inflight.incrementAndGet();
+                try {
+                    chain.doFilter(request, response);
+                } finally {
+                    inflight.decrementAndGet();
+                    String endpoint = rq.getServletPath();
+                    metrics.http(endpoint == null || endpoint.isEmpty() ? "/" : endpoint, rs.getStatus());
+                }
+            }
+            @Override public void init(jakarta.servlet.FilterConfig filterConfig) {}
+            @Override public void destroy() {}
+        };
+        ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(metricsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(new LoggingFilter()), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
 
@@ -275,6 +297,42 @@ public final class AxonServer {
 
     public int port() {
         return ((ServerConnector) jetty.getConnectors()[0]).getLocalPort();
+    }
+
+    /** Liga {@code axe_db_keys{ns,db}} (AXON_METRICS_PER_DATABASE), que tem custo linear por banco. */
+    public void metricsPerDatabase(boolean enabled) {
+        this.metricsPerDatabase = enabled;
+    }
+
+    /** Exige token em {@code /metrics} (AXON_METRICS_REQUIRE_AUTH). */
+    public void metricsRequireAuth(boolean enabled) {
+        this.metricsRequireAuth = enabled;
+    }
+
+    /** Total de chaves, recalculado no máximo a cada 15 s para não pesar a cada scrape. */
+    private long storageKeys() {
+        long now = System.currentTimeMillis();
+        if (now - storageKeysAt > 15_000) {
+            storageKeysCached = ds.keyCount();
+            storageKeysAt = now;
+        }
+        return storageKeysCached;
+    }
+
+    private long auditPending() {
+        long n = 0;
+        for (var db : ds.allDatabases()) {
+            n += db.auditCatalog().listCases().size();
+        }
+        return n;
+    }
+
+    private long auditBlocked() {
+        long n = 0;
+        for (var db : ds.allDatabases()) {
+            n += db.auditCatalog().listBlockedUsers().size();
+        }
+        return n;
     }
 
     public void clusterStatus(com.axonbase.core.cluster.ClusterStatusProvider provider) {
@@ -351,7 +409,7 @@ public final class AxonServer {
         }
         stopping = true;
         long deadline = System.currentTimeMillis() + config.shutdownTimeout();
-        while (System.currentTimeMillis() < deadline && requests.get() > 0) {
+        while (System.currentTimeMillis() < deadline && inflight.get() > 0) {
             Thread.sleep(100);
         }
         jetty.stop();
@@ -401,13 +459,16 @@ public final class AxonServer {
     private static final class VersionServlet extends HttpServlet {
         @Override
         protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            json(resp, 200, "\"0.1.0-SNAPSHOT\"");
+            json(resp, 200, "\"" + esc(BuildInfo.version()) + "\"");
         }
     }
 
     private final class MetricsServlet extends HttpServlet {
         @Override
         protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+            if (metricsRequireAuth && requireAuthenticated(withNames(req), resp)) {
+                return;
+            }
             var status = clusterStatus.status();
             double uptime = Math.max(0, System.nanoTime() - startedAtNanos) / 1_000_000_000.0;
             resp.setStatus(200);
@@ -419,9 +480,8 @@ public final class AxonServer {
             OperatingSystemMXBean os = ManagementFactory.getOperatingSystemMXBean();
 
             var sb = new StringBuilder();
-            sb.append("# TYPE axe_requests_total counter\n")
-              .append("axe_requests_total ").append(requests.get()).append("\n")
-              .append("# TYPE axe_ws_open gauge\n")
+            metrics.render(sb);
+            sb.append("# TYPE axe_ws_open gauge\n")
               .append("axe_ws_open ").append(wsOpen.get()).append("\n")
               .append("# TYPE axe_ws_frames_received_total counter\n")
               .append("axe_ws_frames_received_total ").append(wsFramesReceived.get()).append("\n")
@@ -435,21 +495,12 @@ public final class AxonServer {
               .append("axe_ws_query_errors_total ").append(wsQueryErrors.get()).append("\n")
               .append("# TYPE axe_ws_not_leader_errors_total counter\n")
               .append("axe_ws_not_leader_errors_total ").append(wsNotLeaderErrors.get()).append("\n")
-              // Query metrics
-              .append("# TYPE axe_query_total counter\n")
-              .append("axe_query_total ").append(queryCount.get()).append("\n")
-              .append("# TYPE axe_query_slow_total counter\n")
-              .append("axe_query_slow_total ").append(querySlowCount.get()).append("\n")
-              .append("# TYPE axe_query_error_total counter\n")
-              .append("axe_query_error_total ").append(queryErrorCount.get()).append("\n")
-              // Auth metrics
-              .append("# TYPE axe_auth_signin_total counter\n")
-              .append("axe_auth_signin_total ").append(signinCount.get()).append("\n")
-              .append("# TYPE axe_auth_signin_fail_total counter\n")
-              .append("axe_auth_signin_fail_total ").append(signinFailCount.get()).append("\n")
-              // Storage metrics
               .append("# TYPE axe_storage_keys_total gauge\n")
-              .append("axe_storage_keys_total ").append(storageKeys.get()).append("\n")
+              .append("axe_storage_keys_total ").append(storageKeys()).append("\n")
+              .append("# TYPE axe_audit_pending_cases gauge\n")
+              .append("axe_audit_pending_cases ").append(auditPending()).append("\n")
+              .append("# TYPE axe_audit_blocked_users gauge\n")
+              .append("axe_audit_blocked_users ").append(auditBlocked()).append("\n")
               // JVM metrics
               .append("# TYPE axe_jvm_heap_bytes gauge\n")
               .append("axe_jvm_heap_bytes ").append(memory.getHeapMemoryUsage().getUsed()).append("\n")
@@ -482,6 +533,26 @@ public final class AxonServer {
                   .append("axe_raft_quorum_unavailable_total ").append(rt.quorumUnavailable()).append("\n")
                   .append("# TYPE axe_raft_snapshot_bytes_total counter\n")
                   .append("axe_raft_snapshot_bytes_total ").append(rt.snapshotBytes()).append("\n");
+                sb.append("# TYPE axe_raft_peer_lag gauge\n");
+                var peers = rt.peerInfos();
+                for (var peer : peers) {
+                    sb.append("axe_raft_peer_lag{peer=\"").append(ServerMetrics.label(peer.address()))
+                      .append("\"} ").append(peer.lagEntries()).append("\n");
+                }
+                sb.append("# TYPE axe_raft_peer_last_contact_seconds gauge\n");
+                for (var peer : peers) {
+                    sb.append("axe_raft_peer_last_contact_seconds{peer=\"").append(ServerMetrics.label(peer.address()))
+                      .append("\"} ").append(peer.lastContactMs() < 0 ? -1 : peer.lastContactMs() / 1000.0)
+                      .append("\n");
+                }
+            }
+            if (metricsPerDatabase) {
+                sb.append("# TYPE axe_db_keys gauge\n");
+                for (var db : ds.allDatabases()) {
+                    sb.append("axe_db_keys{ns=\"").append(ServerMetrics.label(db.ns())).append("\",db=\"")
+                      .append(ServerMetrics.label(db.db())).append("\"} ")
+                      .append(ds.keyCount(db.ns(), db.db())).append("\n");
+                }
             }
             resp.getWriter().write(sb.toString());
         }
@@ -490,7 +561,6 @@ public final class AxonServer {
     private final class AdminClusterServlet extends HttpServlet {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            requests.incrementAndGet();
             Session s = withNames(req);
             if (requireAdmin(s, resp)) {
                 return;
@@ -540,7 +610,6 @@ public final class AxonServer {
     private final class AdminTrustStoreServlet extends HttpServlet {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            requests.incrementAndGet();
             if (requireRoot(withNames(req), resp)) {
                 return;
             }
@@ -584,7 +653,6 @@ public final class AxonServer {
     private final class CertificateLoginServlet extends HttpServlet {
         @Override
         protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            requests.incrementAndGet();
             String path = req.getPathInfo();
             if (path == null || path.startsWith("/")) {
                 path = path == null ? "" : path.substring(1);
@@ -732,7 +800,6 @@ public final class AxonServer {
     private final class ShardMoveServlet extends HttpServlet {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            requests.incrementAndGet();
             Session s = withNames(req);
             if (requireAdmin(s, resp)) {
                 return;
@@ -745,7 +812,6 @@ public final class AxonServer {
     private final class SqlServlet extends HttpServlet {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            requests.incrementAndGet();
             String body = readBody(req);
             if (com.axonbase.core.engine.Datastore.isMutation(body) && redirectWrites(req, resp)) {
                 return;
@@ -756,6 +822,7 @@ public final class AxonServer {
             }
             AxonValue result = null;
             String error = null;
+            long startedNanos = System.nanoTime();
             if (config.queryTimeout() > 0) {
                 Future<AxonValue> future = queryExecutor.submit(() -> ds.execute(body, s, null));
                 try {
@@ -773,6 +840,7 @@ public final class AxonServer {
                     error = e.getMessage();
                 }
             }
+            metrics.query(System.nanoTime() - startedNanos, error != null);
             if (error != null) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(error) + "\"}");
             } else {
@@ -827,6 +895,7 @@ public final class AxonServer {
             } else {
                 token = Jwt.sign(secret, Map.of("id", user), 3600_000L).value();
             }
+            metrics.signin(token != null);
             if (token == null) {
                 json(resp, 401, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_invalid")) + "\"}");
                 return;
@@ -849,7 +918,6 @@ public final class AxonServer {
 
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
-            requests.incrementAndGet();
             Session s = withNames(req);
             String body = readBody(req);
             String respBody;

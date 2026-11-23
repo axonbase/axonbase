@@ -114,6 +114,23 @@ public final class Datastore {
             .map(k -> k.substring("!meta|".length())).toList();
     }
 
+    /** Total de chaves no armazenamento (registros, catálogo e metadados). Custo linear. */
+    public long keyCount() {
+        return backend.keysWithPrefix("").size();
+    }
+
+    /** Chaves de registros de um banco. Custo linear no tamanho do banco. */
+    public long keyCount(String ns, String db) {
+        return backend.keysWithPrefix(ns + "\u0000" + db + "\u0000").size();
+    }
+
+    /** Todos os bancos conhecidos, para varreduras administrativas. */
+    public List<Database> allDatabases() {
+        List<Database> out = new ArrayList<>();
+        namespaces.values().forEach(m -> out.addAll(m.values()));
+        return out;
+    }
+
     public static Datastore memory() {
         return new Datastore(new MemoryBackend());
     }
