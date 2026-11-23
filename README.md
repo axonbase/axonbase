@@ -80,16 +80,29 @@ docker build --target dotnet-test --file Dockerfile.sdk-tests .
 
 ## Quick start
 
+The server refuses to start with the default root password or the default JWT secret when it listens on a non-loopback address (the Docker image binds `0.0.0.0`), so set both. Authentication is on by default: sign in first and send the token.
+
 ```bash
 # Run with Docker
-docker run -d --name axonbase -p 8000:8000 axonbase/axonbase:latest
+export AXON_ROOT_PASSWORD='choose-a-strong-password'
+export AXON_SECRET="$(openssl rand -hex 32)"
+docker run -d --name axonbase -p 8000:8000 \
+  -e AXON_ROOT_PASSWORD -e AXON_SECRET \
+  axonbase/axonbase:latest
+
+# Sign in (returns a JWT valid for 30 minutes)
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/signin \
+  -H 'Content-Type: application/json' \
+  -d "{\"user\":\"root\",\"pass\":\"$AXON_ROOT_PASSWORD\"}" | jq -r .token)
 
 # Execute AxonQL via HTTP
 curl -X POST http://127.0.0.1:8000/sql \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
   --data "CREATE person CONTENT {name: 'Ana', age: 30}"
 
 curl -X POST http://127.0.0.1:8000/sql \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Axon-Ns: test' -H 'Axon-Db: dev' \
   --data "SELECT * FROM person"
 ```
@@ -98,10 +111,13 @@ curl -X POST http://127.0.0.1:8000/sql \
 // Node.js SDK
 import { Axon } from '@axonbase/sdk';
 const axon = await Axon.connect('ws://127.0.0.1:8000/rpc/ws');
+await axon.signin('root', process.env.AXON_ROOT_PASSWORD);
 await axon.use('test', 'dev');
 await axon.create('person', { name: 'Ana', age: 30 });
 const rows = await axon.select('person');
 ```
+
+For local experiments only, `AXON_ALLOW_INSECURE_DEFAULTS=true` lifts the startup check, and `--no-auth` turns authentication off.
 
 ## Inspect a table
 
