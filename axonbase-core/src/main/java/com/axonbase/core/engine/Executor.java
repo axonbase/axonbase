@@ -940,25 +940,22 @@ public final class Executor {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
                 }
                 if (sagaCorr != null) {
-                    try {
-                        Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
-                        if (linkDef != null) {
-                            String selectSql = "SELECT * FROM " + q.table() + ":"
-                                + com.axonbase.parser.Render.expr(qRid.key());
-                            List<AxonValue> rows = linkClient.query(linkDef, selectSql);
-                            AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
-                            sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                                q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Saga remote step recording failed: " + e.getMessage());
+                    // Sem o passo registrado não há como compensar: a falha aborta a escrita.
+                    Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
+                    if (linkDef != null) {
+                        String selectSql = "SELECT * FROM " + q.table() + ":"
+                            + com.axonbase.parser.Render.expr(qRid.key());
+                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                        AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                        sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
+                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
                     }
                 }
                 return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
             }
         }
         boolean retNone = u.ret() != null && u.ret().kind() == ReturnKind.NONE;
-        List<RecordId> targets = resolveTargets(u.target());
+        List<RecordId> targets = resolveMutationTargets(db, u.target(), u.cond());
         List<AxonValue> results = new ArrayList<>();
         for (RecordId rid : targets) {
             Document doc = loadDoc(db, rid);
@@ -979,12 +976,8 @@ public final class Executor {
             // Saga: capture BEFORE state
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
-                try {
-                    sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "UPDATE");
-                } catch (Exception e) {
-                    // Log but don't fail the main operation
-                    System.err.println("Saga step recording failed (non-fatal): " + e.getMessage());
-                }
+                // Sem o passo registrado não há como compensar: a falha aborta a escrita.
+                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "UPDATE");
             }
             Map<String, AxonValue> current = new LinkedHashMap<>(doc.current().asObject());
             if (u.data() != null) {
@@ -1037,24 +1030,21 @@ public final class Executor {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
                 }
                 if (sagaCorr != null) {
-                    try {
-                        Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
-                        if (linkDef != null) {
-                            String selectSql = "SELECT * FROM " + q.table() + ":"
-                                + com.axonbase.parser.Render.expr(dqRid.key());
-                            List<AxonValue> rows = linkClient.query(linkDef, selectSql);
-                            AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
-                            sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                                q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Saga remote step recording failed: " + e.getMessage());
+                    // Sem o passo registrado não há como compensar: a falha aborta a escrita.
+                    Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
+                    if (linkDef != null) {
+                        String selectSql = "SELECT * FROM " + q.table() + ":"
+                            + com.axonbase.parser.Render.expr(dqRid.key());
+                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                        AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                        sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
+                            q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
                     }
                 }
                 return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d));
             }
         }
-        List<RecordId> targets = resolveTargets(d.target());
+        List<RecordId> targets = resolveMutationTargets(db, d.target(), d.cond());
         List<AxonValue> deleted = new ArrayList<>();
         for (RecordId rid : targets) {
             Document doc = loadDoc(db, rid);
@@ -2746,9 +2736,18 @@ return score;
         if (di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", di.searchAnalyzer()));
         }
-        def.indexes().put(di.name(), new Catalog.IndexDef(di.name(), di.columns(), di.unique(), di.count(),
+        Catalog.IndexDef newIndex = new Catalog.IndexDef(di.name(), di.columns(), di.unique(), di.count(),
             di.searchAnalyzer(), di.geo(), di.columnar(), di.vectorDimension(), di.vectorDistance(),
-            di.m(), di.efConstruction(), di.efSearch()));
+            di.m(), di.efConstruction(), di.efSearch());
+        Catalog.IndexDef previous = def.indexes().get(di.name());
+        boolean sameUnique = previous != null && previous.unique() && di.unique()
+            && previous.columns().equals(di.columns());
+        // Redefinir o mesmo índice é idempotente: só um UNIQUE novo precisa olhar os dados. No replay
+        // do plano de controle as entradas já estão no KV, então não há o que preencher.
+        if (di.unique() && !sameUnique && !ds.isReplaying()) {
+            backfillUniqueIndex(db, di.table(), newIndex);
+        }
+        def.indexes().put(di.name(), newIndex);
         // índices podem ser criados depois dos registros: indexa o estado atual
         if (di.searchAnalyzer() != null || di.geo() || di.columnar() || di.vectorDimension() != null) {
             for (RecordId rid : resolveTargets(new Expr.Ident(di.table()))) {
@@ -2763,6 +2762,33 @@ return score;
         control(db, ControlCommand.Kind.INDEX, di.table() + ":" + di.name(),
             com.axonbase.parser.Render.stmt(di));
         return AxonValue.nul();
+    }
+
+    /**
+     * Preenche um índice UNIQUE criado sobre registros que já existem e recusa o índice se algum
+     * valor se repete. Valida tudo antes de gravar, para que uma duplicata não deixe entradas
+     * pela metade. Registros sem o campo ficam fora do índice, como na escrita normal.
+     */
+    private void backfillUniqueIndex(Database db, String table, Catalog.IndexDef index) {
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        List<String> entries = new ArrayList<>();
+        for (RecordId rid : resolveTargets(new Expr.Ident(table))) {
+            Document doc = loadDoc(db, rid);
+            if (doc == null) {
+                continue;
+            }
+            String prefix = uniqueIndexPrefix(db, table, index, doc.current());
+            if (prefix == null) {
+                continue;
+            }
+            if (!seen.add(prefix)) {
+                throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
+            }
+            entries.add(prefix + rid.key().keyString());
+        }
+        for (String entry : entries) {
+            records(db).put(entry, new byte[0]);
+        }
     }
 
     private AxonValue runDefineAnalyzer(Statement.DefineAnalyzer da) {
@@ -3383,6 +3409,28 @@ return score;
     // ------------------------------------------------------------------
     // Resolución de targets
     // ------------------------------------------------------------------
+
+    /**
+     * Alvos de UPDATE/DELETE. Em tabela inteira com {@code WHERE campo = literal}, usa os
+     * mesmos índices (UNIQUE e columnar) que o SELECT em vez de listar todas as chaves.
+     * O WHERE continua sendo reavaliado sobre cada documento pelo chamador.
+     */
+    private List<RecordId> resolveMutationTargets(Database db, Expr target, Expr cond) {
+        if (cond != null && target instanceof Expr.Ident) {
+            Statement.Select probe = new Statement.Select(List.of(), false, false, target, cond,
+                List.of(), List.of(), null, null, List.of(), List.of(), null);
+            List<Document> indexed = uniqueLookupSourceDocs(db, probe,
+                columnarSourceDocs(db, probe, null));
+            if (indexed != null) {
+                List<RecordId> out = new ArrayList<>(indexed.size());
+                for (Document doc : indexed) {
+                    out.add(doc.id());
+                }
+                return out;
+            }
+        }
+        return resolveTargets(target);
+    }
 
     private List<RecordId> resolveTargets(Expr target) {
         Database db = db();
@@ -4393,9 +4441,9 @@ return score;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
             if (nextPrefix != null) {
+                String ownEntry = nextPrefix + rid.key().keyString();
                 var existing = records(db).keysWithPrefix(nextPrefix);
-                if (!existing.isEmpty() && existing.stream()
-                    .noneMatch(key -> key.endsWith(rid.key().keyString()))) {
+                if (existing.stream().anyMatch(key -> !key.equals(ownEntry))) {
                     throw AxonError.internal(Messages.get("stmt_unique_index_violation", ix.name()));
                 }
             }
