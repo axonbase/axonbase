@@ -88,16 +88,27 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
     @Override
     protected void configure(JettyWebSocketServletFactory factory) {
         factory.setIdleTimeout(Duration.ofMillis(txnTimeoutMs));
-        factory.setCreator((req, resp) -> new Endpoint(dispatcher, openConnections,
-            framesReceived, framesSent, responseTimeNanos, responseCount,
-            queryErrors, notLeaderErrors, queryTimeoutMs, executor));
+        factory.setCreator((req, resp) -> {
+            Endpoint endpoint = new Endpoint(dispatcher, openConnections,
+                framesReceived, framesSent, responseTimeNanos, responseCount,
+                queryErrors, notLeaderErrors, queryTimeoutMs, executor);
+            endpoint.activity(activity);
+            return endpoint;
+        });
+    }
+
+    private volatile ActivityRegistry activity;
+
+    /** Liga o registro de atividade: as conexões passam a aparecer em Sessões e podem ser encerradas. */
+    void activity(ActivityRegistry activity) {
+        this.activity = activity;
     }
 
     RpcDispatcher dispatcher() {
         return dispatcher;
     }
 
-    public static final class Endpoint extends WebSocketAdapter {
+    public static final class Endpoint extends WebSocketAdapter implements ActivityRegistry.WsSession {
 
         private final com.axonbase.core.Session session = com.axonbase.core.Session.create();
         private final RpcDispatcher dispatcher;
@@ -111,6 +122,61 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
         private final AtomicLong notLeaderErrors;
         private final long queryTimeoutMs;
         private final ExecutorService executor;
+        private final String id = java.util.UUID.randomUUID().toString();
+        private final long connectedAtMs = System.currentTimeMillis();
+        private volatile long lastActivityMs = connectedAtMs;
+        private volatile ActivityRegistry activity;
+        private volatile String remote;
+
+        void activity(ActivityRegistry activity) {
+            this.activity = activity;
+        }
+
+        @Override public String id() { return id; }
+        @Override public String user() { return ActivityRegistry.userOf(session); }
+        @Override public String ns() { return session.namespace(); }
+        @Override public String db() { return session.database(); }
+        @Override public long connectedAtMs() { return connectedAtMs; }
+        @Override public long lastActivityMs() { return lastActivityMs; }
+        @Override public String remote() { return remote; }
+        @Override public boolean inTransaction() { return session.inTransaction(); }
+
+        @Override
+        public long txOpenedAtMs() {
+            var tx = session.tx();
+            return tx == null || !tx.isOpen() ? 0 : tx.openedAtMs();
+        }
+
+        @Override
+        public int txWrites() {
+            var tx = session.tx();
+            return tx == null || !tx.isOpen() ? 0 : tx.stagedWriteCount();
+        }
+
+        @Override
+        public int txDeletes() {
+            var tx = session.tx();
+            return tx == null || !tx.isOpen() ? 0 : tx.stagedDeleteCount();
+        }
+
+        @Override
+        public void kill(String by) {
+            ActivityRegistry registry = activity;
+            if (registry != null) {
+                registry.cancelOwner(session, by);
+            }
+            Session ws = getSession();
+            if (ws != null && ws.isOpen()) {
+                ws.close(org.eclipse.jetty.websocket.api.StatusCode.POLICY_VIOLATION, "terminated by " + by);
+            }
+        }
+
+        @Override
+        public void rollback() {
+            if (session.inTransaction()) {
+                dispatcher.datastore().cancelSession(session);
+            }
+        }
 
         public Endpoint(RpcDispatcher dispatcher, AtomicLong openConnections,
                         AtomicLong framesReceived, AtomicLong framesSent,
@@ -134,6 +200,12 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
             super.onWebSocketConnect(session);
             openConnections.incrementAndGet();
             countedOpen.set(true);
+            var address = session.getRemoteAddress();
+            this.remote = address == null ? null : address.toString();
+            ActivityRegistry registry = activity;
+            if (registry != null) {
+                registry.register(this, this.session);
+            }
             send(dispatcher.hello());
             this.session.liveListener(this::push);
         }
@@ -145,6 +217,7 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
         @Override
         public void onWebSocketText(String message) {
             framesReceived.incrementAndGet();
+            lastActivityMs = System.currentTimeMillis();
             long startNanos = System.nanoTime();
             String response;
             if (queryTimeoutMs > 0) {
@@ -152,6 +225,10 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
                 try {
                     response = future.get(queryTimeoutMs, TimeUnit.MILLISECONDS);
                 } catch (TimeoutException e) {
+                    ActivityRegistry registry = activity;
+                    if (registry != null) {
+                        registry.cancelOwner(session, "timeout");
+                    }
                     future.cancel(true);
                     response = timeoutError(message);
                 } catch (ExecutionException e) {
@@ -230,6 +307,10 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
         private void cleanup() {
             if (countedOpen.compareAndSet(true, false)) {
                 openConnections.decrementAndGet();
+            }
+            ActivityRegistry registry = activity;
+            if (registry != null) {
+                registry.unregister(id, session);
             }
             session.liveListener(null);
             dispatcher.datastore().liveBus().killAll(session);

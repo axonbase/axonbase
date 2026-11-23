@@ -98,6 +98,7 @@ public final class AuthService {
             claims.put("access", access);
         }
         String jwt = Jwt.sign(secret, claims, 1_800_000L).value();
+        trackSession(claims, 1_800_000L);
 
         if (pass != null && pass.startsWith("axontc_")) {
             credentialJwts.put(pass, jwt);
@@ -202,6 +203,12 @@ public final class AuthService {
         if (claims.get("jti") != null && revokedJwts.containsKey(String.valueOf(claims.get("jti")))) {
             return null;
         }
+        if (claims.get("jti") != null) {
+            TokenSession seen = tokenSessions.get(String.valueOf(claims.get("jti")));
+            if (seen != null) {
+                seen.lastSeenMs = System.currentTimeMillis();
+            }
+        }
         return claims;
     }
 
@@ -226,6 +233,86 @@ public final class AuthService {
         }
         claims.put("exp", info.expiresAt() / 1000);
         return claims;
+    }
+
+    // ------------------------------------------------------------------
+    // inventário de sessões (tokens de acesso emitidos)
+    // ------------------------------------------------------------------
+
+    private static final int MAX_TRACKED_SESSIONS = 10_000;
+
+    /** Um token de acesso emitido por /signin ou signin do WebSocket. HTTP não tem sessão no servidor: a sessão é o token. */
+    public static final class TokenSession {
+        private final String id;
+        private final String user;
+        private final String scope;
+        private final String ns;
+        private final String db;
+        private final long issuedAtMs;
+        private final long expiresAtMs;
+        private volatile long lastSeenMs;
+
+        TokenSession(String id, String user, String scope, String ns, String db, long issuedAtMs, long expiresAtMs) {
+            this.id = id;
+            this.user = user;
+            this.scope = scope;
+            this.ns = ns;
+            this.db = db;
+            this.issuedAtMs = issuedAtMs;
+            this.expiresAtMs = expiresAtMs;
+            this.lastSeenMs = issuedAtMs;
+        }
+
+        public String id() { return id; }
+        public String user() { return user; }
+        public String scope() { return scope; }
+        public String ns() { return ns; }
+        public String db() { return db; }
+        public long issuedAtMs() { return issuedAtMs; }
+        public long expiresAtMs() { return expiresAtMs; }
+        public long lastSeenMs() { return lastSeenMs; }
+    }
+
+    private final Map<String, TokenSession> tokenSessions = new ConcurrentHashMap<>();
+
+    private void trackSession(Map<String, Object> claims, long ttlMs) {
+        long now = System.currentTimeMillis();
+        tokenSessions.values().removeIf(t -> t.expiresAtMs() < now);
+        if (tokenSessions.size() >= MAX_TRACKED_SESSIONS) {
+            return;
+        }
+        String jti = String.valueOf(claims.get("jti"));
+        tokenSessions.put(jti, new TokenSession(jti, String.valueOf(claims.get("id")),
+            String.valueOf(claims.getOrDefault("scope", "ROOT")),
+            claims.get("ns") == null ? null : String.valueOf(claims.get("ns")),
+            claims.get("db") == null ? null : String.valueOf(claims.get("db")), now, now + ttlMs));
+    }
+
+    /** Sessões (tokens) ainda válidas, da mais antiga para a mais nova. */
+    public java.util.List<TokenSession> sessions() {
+        long now = System.currentTimeMillis();
+        tokenSessions.values().removeIf(t -> t.expiresAtMs() < now);
+        java.util.List<TokenSession> out = new java.util.ArrayList<>(tokenSessions.values());
+        out.sort(java.util.Comparator.comparingLong(TokenSession::issuedAtMs));
+        return out;
+    }
+
+    public int sessionCount() {
+        return sessions().size();
+    }
+
+    public TokenSession session(String id) {
+        return tokenSessions.get(id);
+    }
+
+    /** Encerra a sessão revogando o token. {@code false} se ela não existe (ou já expirou). */
+    public boolean endSession(String id) {
+        TokenSession t = tokenSessions.remove(id);
+        if (t == null) {
+            return false;
+        }
+        revokeJwt(id, t.expiresAtMs() / 1000);
+        return true;
     }
 
     /** Tokens de serviço (criação, listagem e revogação). */

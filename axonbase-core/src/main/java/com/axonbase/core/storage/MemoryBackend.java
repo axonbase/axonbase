@@ -100,7 +100,7 @@ public final class MemoryBackend implements VersionedKvBackend {
                                     java.util.Set<String> readPrefixes) {
         for (var expected : expectedVersions.entrySet()) {
             if (versionOf(expected.getKey()) != expected.getValue()) {
-                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()));
+                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()), expected.getKey());
             }
         }
         for (String prefix : readPrefixes) {
@@ -108,7 +108,7 @@ public final class MemoryBackend implements VersionedKvBackend {
                 if (expectedVersions.containsKey(key) || puts.containsKey(key) || deletes.contains(key)) {
                     continue;
                 }
-                throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key));
+                throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
             }
         }
         for (String key : deletes) {
