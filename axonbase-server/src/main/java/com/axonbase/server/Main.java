@@ -154,6 +154,7 @@ public final class Main {
             java.util.function.Supplier<Long> commitIndex =
                 cluster != null ? cluster::commitIndex : () -> null;
             var s3 = new S3SyncManager(ds, config, commitIndex);
+            server.backups(s3);
             s3.start();
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {

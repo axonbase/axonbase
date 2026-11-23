@@ -127,6 +127,16 @@ public final class Datastore {
         return true;
     }
 
+    /** Há algum registro de dados (chave de registro contém NUL)? Custo linear. */
+    public boolean hasRecords() {
+        for (String key : backend.keysWithPrefix("")) {
+            if (key.indexOf('\u0000') >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Total de chaves no armazenamento (registros, catálogo e metadados). Custo linear. */
     public long keyCount() {
         return backend.keysWithPrefix("").size();

@@ -62,6 +62,7 @@ public final class AxonServer {
     private final ServerMetrics metrics = new ServerMetrics();
     private volatile boolean metricsPerDatabase;
     private volatile boolean metricsRequireAuth;
+    private volatile com.axonbase.core.backup.S3SyncManager backups;
     private volatile long storageKeysCached;
     private volatile long storageKeysAt;
     private final java.util.concurrent.atomic.AtomicLong wsOpen = new java.util.concurrent.atomic.AtomicLong();
@@ -301,6 +302,15 @@ public final class AxonServer {
 
     public int port() {
         return ((ServerConnector) jetty.getConnectors()[0]).getLocalPort();
+    }
+
+    /** Liga o gerenciador de backup à API de gestão e às métricas. */
+    public void backups(com.axonbase.core.backup.S3SyncManager manager) {
+        this.backups = manager;
+    }
+
+    com.axonbase.core.backup.S3SyncManager backups() {
+        return backups;
     }
 
     // ---- acesso para a API de gestão (mesmo pacote) ----
@@ -593,6 +603,18 @@ public final class AxonServer {
                       .append("\n");
                 }
             }
+            var bk = backups;
+            var bst = bk == null ? null : bk.status();
+            sb.append("# TYPE axe_backup_last_success_timestamp_seconds gauge\n")
+              .append("axe_backup_last_success_timestamp_seconds ")
+              .append(bst == null || bst.lastSuccessAtMillis() == null ? 0 : bst.lastSuccessAtMillis() / 1000).append("\n")
+              .append("# TYPE axe_backup_last_duration_seconds gauge\n")
+              .append("axe_backup_last_duration_seconds ").append(bst == null ? 0 : bst.lastDurationMs() / 1000.0).append("\n")
+              .append("# TYPE axe_backup_last_size_bytes gauge\n")
+              .append("axe_backup_last_size_bytes ").append(bst == null ? 0 : bst.lastSizeBytes()).append("\n")
+              .append("# TYPE axe_backup_runs_total counter\n")
+              .append("axe_backup_runs_total{result=\"success\"} ").append(bk == null ? 0 : bk.runsOk()).append("\n")
+              .append("axe_backup_runs_total{result=\"failure\"} ").append(bk == null ? 0 : bk.runsFailed()).append("\n");
             if (metricsPerDatabase) {
                 sb.append("# TYPE axe_db_keys gauge\n");
                 for (var db : ds.allDatabases()) {

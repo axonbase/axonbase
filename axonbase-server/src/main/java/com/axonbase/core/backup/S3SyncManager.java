@@ -14,6 +14,10 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -55,6 +59,35 @@ public final class S3SyncManager implements AutoCloseable {
     private volatile boolean started;
     private long lastBackedUpIndex;
     private boolean lastWasFull;
+
+    // ---- estado e histórico (API de gestão) ----
+    private static final String META_PREFIX = "backup|";
+    private final AtomicBoolean running = new AtomicBoolean();
+    private final AtomicBoolean manualPending = new AtomicBoolean();
+    private final AtomicLong runsOk = new AtomicLong();
+    private final AtomicLong runsFailed = new AtomicLong();
+    private volatile Long lastSuccessAt;
+    private volatile Long lastErrorAt;
+    private volatile String lastError;
+    private volatile long lastDurationMs;
+    private volatile long lastSizeBytes;
+    private volatile String lastType;
+    private volatile Long nextRunAt;
+    private volatile BiConsumer<String, Map<String, Object>> listener = (type, data) -> { };
+    private final java.util.concurrent.ExecutorService manualExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "s3-backup-manual");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /** Retrato do estado dos backups. */
+    public record Status(boolean running, Long lastSuccessAtMillis, Long lastErrorAtMillis, String lastError,
+                         long lastDurationMs, long lastSizeBytes, String lastType, Long nextRunAtMillis) {
+    }
+
+    /** Backup existente no armazenamento remoto. {@code sizeBytes} e {@code type} são nulos se desconhecidos. */
+    public record BackupEntry(String name, Long sizeBytes, long createdAtMillis, String type) {
+    }
 
     // ------------------------------------------------------------------
     // Construtores
@@ -110,7 +143,8 @@ public final class S3SyncManager implements AutoCloseable {
                 t.setDaemon(true);
                 return t;
             });
-            scheduler.scheduleWithFixedDelay(this::backupNow,
+            nextRunAt = System.currentTimeMillis() + intervalMillis;
+            scheduler.scheduleWithFixedDelay(() -> backupNow(false),
                 intervalMillis, intervalMillis, TimeUnit.MILLISECONDS);
         }
     }
@@ -136,6 +170,12 @@ public final class S3SyncManager implements AutoCloseable {
     @Override
     public void close() {
         stop();
+        manualExecutor.shutdownNow();
+    }
+
+    /** Indica se o backup remoto está configurado (sempre verdadeiro para uma instância). */
+    public boolean configured() {
+        return true;
     }
 
     // ------------------------------------------------------------------
@@ -147,14 +187,22 @@ public final class S3SyncManager implements AutoCloseable {
      * via streaming chunked, e aplica rotação.
      */
     public boolean backupNow() {
+        return backupNow(false);
+    }
+
+    /** Como {@link #backupNow()}; com {@code forceFull} ignora o modo incremental. */
+    public boolean backupNow(boolean forceFull) {
         synchronized (lock) {
+            running.set(true);
+            long startedAt = System.currentTimeMillis();
+            long t0 = System.nanoTime();
             try {
                 Long idx = commitIndexSupplier.get();
                 long current = idx == null ? 0 : idx;
 
                 String dump;
                 boolean incremental = false;
-                if (current > 0 && datastore.incrementalSupported()
+                if (!forceFull && current > 0 && datastore.incrementalSupported()
                     && lastBackedUpIndex > 0 && current > lastBackedUpIndex) {
                     dump = datastore.backupIncremental(lastBackedUpIndex);
                     incremental = true;
@@ -202,11 +250,118 @@ public final class S3SyncManager implements AutoCloseable {
                 lastWasFull = !incremental;
 
                 rotate(key);
+                String type = incremental ? "incremental" : "full";
+                recordSuccess(key, payload.length, type, startedAt, (System.nanoTime() - t0) / 1_000_000L);
                 return true;
             } catch (Exception e) {
                 System.err.println("Erro no backup S3: " + e.getMessage());
+                recordFailure(e, startedAt, (System.nanoTime() - t0) / 1_000_000L);
                 return false;
+            } finally {
+                running.set(false);
+                if (started) {
+                    nextRunAt = System.currentTimeMillis() + intervalMillis;
+                }
             }
+        }
+    }
+
+    private void recordSuccess(String key, long size, String type, long startedAt, long durationMs) {
+        long now = System.currentTimeMillis();
+        lastSuccessAt = now;
+        lastSizeBytes = size;
+        lastType = type;
+        lastDurationMs = durationMs;
+        lastError = null;
+        runsOk.incrementAndGet();
+        String name = baseName(key);
+        datastore.metaPut(META_PREFIX + name, (size + "|" + type + "|" + now).getBytes(StandardCharsets.UTF_8));
+        listener.accept("backup.finished", Map.of("name", name, "sizeBytes", size, "type", type,
+            "durationMs", durationMs));
+    }
+
+    private void recordFailure(Exception e, long startedAt, long durationMs) {
+        lastErrorAt = System.currentTimeMillis();
+        lastError = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        lastDurationMs = durationMs;
+        runsFailed.incrementAndGet();
+        listener.accept("backup.failed", Map.of("error", lastError, "durationMs", durationMs));
+    }
+
+    /** Registra o receptor de eventos {@code backup.finished} e {@code backup.failed}. */
+    public void listener(BiConsumer<String, Map<String, Object>> listener) {
+        this.listener = listener == null ? (type, data) -> { } : listener;
+    }
+
+    /**
+     * Dispara um backup em segundo plano.
+     *
+     * @return o id da execução, ou {@code null} se já há um backup em andamento
+     */
+    public String triggerAsync(boolean forceFull) {
+        if (running.get() || !manualPending.compareAndSet(false, true)) {
+            return null;
+        }
+        String runId = java.util.UUID.randomUUID().toString();
+        manualExecutor.execute(() -> {
+            try {
+                backupNow(forceFull);
+            } finally {
+                manualPending.set(false);
+            }
+        });
+        return runId;
+    }
+
+    public Status status() {
+        return new Status(running.get() || manualPending.get(), lastSuccessAt, lastErrorAt, lastError,
+            lastDurationMs, lastSizeBytes, lastType, nextRunAt);
+    }
+
+    public long runsOk() {
+        return runsOk.get();
+    }
+
+    public long runsFailed() {
+        return runsFailed.get();
+    }
+
+    /** Backups no armazenamento remoto, do mais antigo para o mais novo. */
+    public List<BackupEntry> listBackupEntries() {
+        List<BackupEntry> out = new ArrayList<>();
+        for (String key : listBackups()) {
+            String name = baseName(key);
+            Long size = null;
+            String type = null;
+            var meta = datastore.metaGet(META_PREFIX + name);
+            if (meta.isPresent()) {
+                String[] parts = new String(meta.get(), StandardCharsets.UTF_8).split("\\|");
+                if (parts.length >= 2) {
+                    try {
+                        size = Long.parseLong(parts[0]);
+                    } catch (NumberFormatException ignored) {
+                        size = null;
+                    }
+                    type = parts[1];
+                }
+            }
+            out.add(new BackupEntry(name, size, stampMillis(name), type));
+        }
+        return out;
+    }
+
+    private static String baseName(String key) {
+        int slash = key.lastIndexOf('/');
+        return slash < 0 ? key : key.substring(slash + 1);
+    }
+
+    private static long stampMillis(String name) {
+        try {
+            String stamp = name.substring("cluster-".length(), name.length() - ".axbak".length());
+            return LocalDateTime.parse(stamp, STAMP).atZone(java.time.ZoneId.systemDefault())
+                .toInstant().toEpochMilli();
+        } catch (RuntimeException e) {
+            return 0L;
         }
     }
 
@@ -218,9 +373,29 @@ public final class S3SyncManager implements AutoCloseable {
      * Backups mais recentes sobrescrevem chaves de backups anteriores.</p>
      */
     public boolean restoreFromS3() {
+        return restoreKeys(listBackups());
+    }
+
+    /**
+     * Restaura até o backup indicado (inclusive), aplicando os anteriores em ordem porque os
+     * incrementais dependem deles.
+     *
+     * @return {@code false} se o nome não existe ou não há dados
+     */
+    public boolean restoreTo(String name) {
+        List<String> all = listBackups();
+        int idx = -1;
+        for (int i = 0; i < all.size(); i++) {
+            if (baseName(all.get(i)).equals(name)) {
+                idx = i;
+            }
+        }
+        return idx >= 0 && restoreKeys(all.subList(0, idx + 1));
+    }
+
+    private boolean restoreKeys(List<String> keys) {
         synchronized (lock) {
             try {
-                List<String> keys = listBackups();
                 if (keys.isEmpty()) {
                     return false;
                 }
