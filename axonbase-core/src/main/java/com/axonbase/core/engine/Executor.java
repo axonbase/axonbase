@@ -284,6 +284,13 @@ public final class Executor {
             min = com.axonbase.core.security.Authz.Role.OPERATOR;
             needs = true;
         }
+        // CANCEL SAGA: papel explícito somente leitura (viewer) não pode cancelar. Tokens sem papel
+        // reconhecido (os dos SDKs, escopo database) continuam cancelando as próprias sagas.
+        if (s instanceof Statement.CancelSaga
+            && com.axonbase.core.security.Authz.role(auth) == com.axonbase.core.security.Authz.Role.VIEWER) {
+            throw new com.axonbase.common.AxonError(-32002,
+                Messages.get("auth_role_required", "operator"));
+        }
         if (needs && !com.axonbase.core.security.Authz.atLeast(auth, min)) {
             throw new com.axonbase.common.AxonError(-32002,
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));

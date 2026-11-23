@@ -179,6 +179,36 @@ public final class Datastore {
     /** Installs the server-owned JKS registrar without coupling the core to TLS classes. */
     public void jksRegistrar(JksRegistrar registrar) {
         this.jksRegistrar = registrar;
+        if (registrar != null) {
+            reloadPersistedJks(registrar);
+        }
+    }
+
+    /**
+     * Recarrega os truststores registrados no plano de controle. A senha nunca é persistida: o JKS é
+     * aberto sem ela (só certificados confiáveis, sem checagem de integridade), passando {@code null}.
+     */
+    private void reloadPersistedJks(JksRegistrar registrar) {
+        for (ControlCommand c : controlSnapshot().commands()) {
+            if (c.kind() != ControlCommand.Kind.JKS || "DROP".equals(c.definition())) {
+                continue;
+            }
+            try {
+                registrar.register(c.name(), c.definition(), null, "NONE", List.of());
+            } catch (RuntimeException e) {
+                System.err.println(Messages.get("jks_reload_failed", c.name(), String.valueOf(e.getMessage())));
+            }
+        }
+    }
+
+    /** Registra no plano de controle um truststore já carregado, para sobreviver a restart. */
+    public void persistJks(String name, String path) {
+        applyControl(ControlCommand.of(ControlCommand.Kind.JKS, "", "", name, path));
+    }
+
+    /** Marca o truststore como removido no plano de controle. */
+    public void dropJks(String name) {
+        applyControl(ControlCommand.of(ControlCommand.Kind.JKS, "", "", name, "DROP"));
     }
 
     public void aiProvider(AiProviderClient provider) {
@@ -509,6 +539,9 @@ public final class Datastore {
     }
 
     private void replay(ControlCommand command) {
+        if (command.kind() == ControlCommand.Kind.JKS) {
+            return; // recarregado quando o registrar do servidor é instalado
+        }
         if (command.kind() == ControlCommand.Kind.DATABASE) {
             ensureDatabase(command.namespace(), command.database());
             return;

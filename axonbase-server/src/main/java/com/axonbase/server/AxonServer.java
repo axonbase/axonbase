@@ -98,6 +98,14 @@ public final class AxonServer {
         this.requireAuth = requireAuth;
         this.config = config;
         this.trustStores = new TrustStoreRegistry();
+        // registra o carregador de JKS e recarrega os truststores persistidos no plano de controle
+        ds.jksRegistrar((name, path, password, collector, oids) -> {
+            if (password == null) {
+                this.trustStores.registerWithoutPassword(name, path);
+            } else {
+                this.trustStores.register(name, path, password, collector, oids);
+            }
+        });
         ds.eventListener((type, data) -> {
             events.publish(type, data);
             AxonLog.log("warn", type.replace('.', '_'), type, data);
@@ -161,8 +169,6 @@ public final class AxonServer {
         AxonServer srv = new AxonServer(ds, secret, cfg.port(),
             cfg.bind() == null || cfg.bind().isBlank() ? "127.0.0.1" : cfg.bind(),
             service, cfg.requireAuth(), cfg);
-        ds.jksRegistrar((name, path, password, collector, oids) ->
-            srv.trustStores.register(name, path, password, collector, oids));
         if (!cfg.tlsCa().isBlank() && !cfg.tlsKey().isBlank()) {
             try {
                 srv.trustStores.register("icp_brasil", cfg.tlsCa(), cfg.tlsKey().toCharArray(),

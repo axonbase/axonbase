@@ -139,4 +139,16 @@ class RbacEnforcementTest {
             ds.authCatalog().user("u", "app", "main").scope());
         org.junit.jupiter.api.Assertions.assertFalse(ds.dropUser(null, "u", AuthCatalog.Scope.ROOT, null, null));
     }
+
+    @Test
+    void cancelSagaNegaViewerMasPermiteTokenSemPapelDeSdk() {
+        Datastore ds = ds();
+        Session setup = as("ROOT", null, null, "admin");
+        ds.execute("BEGIN SAGA pedido WITH CORRELATION 'c1'", setup, null);
+        Session viewer = as("DATABASE", "app", "main", "viewer");
+        assertThrows(AxonError.class,
+            () -> ds.execute("CANCEL SAGA pedido WITH CORRELATION 'c1'", viewer, null));
+        Session sdk = as("DATABASE", "app", "main", null);
+        assertDoesNotThrow(() -> ds.execute("CANCEL SAGA pedido WITH CORRELATION 'c1'", sdk, null));
+    }
 }

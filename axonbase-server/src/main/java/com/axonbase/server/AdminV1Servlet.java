@@ -237,6 +237,7 @@ final class AdminV1Servlet extends HttpServlet {
                 if (!srv.trustStores().remove(seg.get(1))) {
                     throw notFound();
                 }
+                srv.ds().dropJks(seg.get(1));
                 return noContent();
             }
         }
@@ -925,6 +926,7 @@ final class AdminV1Servlet extends HttpServlet {
                 Files.deleteIfExists(target);
                 throw new ApiError(400, "BAD_REQUEST", e.getMessage());
             }
+            srv.ds().persistJks(name, target.toString());
             return AdminJson.obj("name", name);
         } catch (jakarta.servlet.ServletException e) {
             throw new ApiError(400, "BAD_REQUEST", Messages.get("admin_multipart_required"));

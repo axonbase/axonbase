@@ -47,6 +47,17 @@ public final class TrustStoreRegistry {
         }
     }
 
+    /** Recarrega um JKS persistido: sem senha só os certificados confiáveis são lidos (sem checar integridade). */
+    public void registerWithoutPassword(String name, String path) {
+        try (InputStream input = Files.newInputStream(Path.of(path))) {
+            KeyStore store = KeyStore.getInstance("JKS");
+            store.load(input, null);
+            stores.put(name, new RegisteredTrustStore(store, "NONE", List.of(), System.currentTimeMillis()));
+        } catch (Exception e) {
+            throw new IllegalArgumentException(Messages.get("cert_store_load_failed", name), e);
+        }
+    }
+
     /** Certificado de um truststore, com os campos que a API de gestão expõe. */
     public record CertInfo(String subject, long notAfter) {
     }
