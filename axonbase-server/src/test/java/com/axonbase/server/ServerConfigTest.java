@@ -13,6 +13,23 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class ServerConfigTest {
 
     @Test
+    void exemploDocumentaChavesReaisDeUsuarioESenhaDoRoot() throws Exception {
+        Path example = Path.of("..", "axonbase.conf.example");
+        String text = Files.readString(example);
+        assertFalse(text.lines().anyMatch(l -> l.matches("^(user|pass)\\s*=.*")), "chaves user/pass não existem");
+        Path file = Files.createTempFile("axonbase", ".conf");
+        Files.writeString(file, text.replace("root_user = root", "root_user = admin1")
+            .replace("root_password = root", "root_password = s3nha"));
+        try {
+            ServerConfig config = ServerConfig.load(file, Map.of());
+            assertEquals("admin1", config.user());
+            assertEquals("s3nha", config.password());
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void arquivoEVariaveisDeAmbienteCompoemConfiguracao() throws Exception {
         Path file = Files.createTempFile("axonbase", ".conf");
         Files.writeString(file, "# desenvolvimento\npath = data/axon\nport = 7777\n"

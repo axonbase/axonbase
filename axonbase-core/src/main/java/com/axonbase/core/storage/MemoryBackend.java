@@ -62,6 +62,23 @@ public final class MemoryBackend implements VersionedKvBackend {
     }
 
     @Override
+    public void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
+        List<String> deleted = new ArrayList<>();
+        synchronized (this) {
+            versions.forEach((k, v) -> {
+                if (v > since && !data.containsKey(k)) {
+                    deleted.add(k);
+                }
+            });
+        }
+        for (String k : deleted) {
+            if (!visitor.test(k)) {
+                return;
+            }
+        }
+    }
+
+    @Override
     public synchronized long currentVersion() {
         return clock;
     }

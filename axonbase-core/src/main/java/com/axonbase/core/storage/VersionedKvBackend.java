@@ -18,6 +18,14 @@ public interface VersionedKvBackend extends KvBackend {
         return 0L;
     }
 
+    /**
+     * Percorre as chaves apagadas depois da versão {@code since} (têm versão registrada maior e já
+     * não existem nos dados). Backends que descartam a versão ao apagar não reportam nada, e o backup
+     * incremental fica sem deleções.
+     */
+    default void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
+    }
+
     default Optional<VersionedValue> getVersioned(String key) {
         return get(key).map(value -> new VersionedValue(value, versionOf(key)));
     }

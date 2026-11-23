@@ -43,6 +43,10 @@ public final class Messages {
         Map.entry("auth_required", "usuário não autenticado"),
         Map.entry("auth_forbidden", "administração exige autenticação ROOT"),
         Map.entry("auth_role_required", "operação exige o papel %s"),
+        Map.entry("session_read_only", "sessão somente leitura: escrita recusada"),
+        Map.entry("admin_restore_line_too_long", "linha do backup maior que %s bytes"),
+        Map.entry("admin_restore_body_too_large", "corpo do backup excede o limite aceito"),
+        Map.entry("http_role_cap_invalid", "Axon-Role-Cap inválido: %s (use viewer ou operator)"),
         Map.entry("admin_invalid_backup_type", "tipo de backup inválido: use auto ou full"),
         Map.entry("admin_backup_unconfigured", "backup S3 não está configurado"),
         Map.entry("admin_backup_running", "já existe um backup em andamento"),
@@ -64,6 +68,11 @@ public final class Messages {
         Map.entry("admin_invalid_field", "campo inválido: %s"),
         Map.entry("admin_param_required", "parâmetro obrigatório: %s"),
         Map.entry("admin_invalid_limit", "limit deve ser um inteiro positivo"),
+        Map.entry("admin_invalid_since", "since deve ser um instante RFC 3339"),
+        Map.entry("backup_stream_truncated", "backup criptografado truncado ou vazio"),
+        Map.entry("admin_invalid_export_type", "tipo de exportação inválido: use full ou incremental"),
+        Map.entry("admin_invalid_since_version", "since deve ser a versão (inteiro positivo) devolvida em X-Axon-Backup-Version"),
+        Map.entry("admin_backup_stream_invalid", "o corpo não é um backup .axbak válido: %s"),
         Map.entry("admin_field_required", "campo obrigatório: %s"),
         Map.entry("admin_not_found", "recurso não encontrado"),
         Map.entry("audit_self_decision", "usuário bloqueado não pode decidir o próprio caso de auditoria"),
@@ -238,6 +247,7 @@ public final class Messages {
          ,Map.entry("cert_store_name_path_required", "nome e caminho do JKS são obrigatórios")
          ,Map.entry("cert_store_password_required", "senha do JKS é obrigatória")
          ,Map.entry("cert_store_load_failed", "não foi possível carregar o JKS %s")
+         ,Map.entry("jks_reload_failed", "truststore %s não pôde ser recarregado ao iniciar: %s")
          ,Map.entry("geo_precision_invalid", "precisão fora de 0..12")
          ,Map.entry("geo_hash_invalid", "geohash inválido: %s")
         ,Map.entry("value_string_null", "valor de string não pode ser nulo")
@@ -429,6 +439,10 @@ public final class Messages {
         Map.entry("auth_required", "user not authenticated"),
         Map.entry("auth_forbidden", "administration requires ROOT authentication"),
         Map.entry("auth_role_required", "operation requires the %s role"),
+        Map.entry("session_read_only", "read-only session: write refused"),
+        Map.entry("admin_restore_line_too_long", "backup line longer than %s bytes"),
+        Map.entry("admin_restore_body_too_large", "backup body exceeds the accepted limit"),
+        Map.entry("http_role_cap_invalid", "invalid Axon-Role-Cap: %s (use viewer or operator)"),
         Map.entry("admin_invalid_backup_type", "invalid backup type: use auto or full"),
         Map.entry("admin_backup_unconfigured", "S3 backup is not configured"),
         Map.entry("admin_backup_running", "a backup is already running"),
@@ -450,6 +464,11 @@ public final class Messages {
         Map.entry("admin_invalid_field", "invalid field: %s"),
         Map.entry("admin_param_required", "required parameter: %s"),
         Map.entry("admin_invalid_limit", "limit must be a positive integer"),
+        Map.entry("admin_invalid_since", "since must be an RFC 3339 instant"),
+        Map.entry("backup_stream_truncated", "encrypted backup is truncated or empty"),
+        Map.entry("admin_invalid_export_type", "invalid export type: use full or incremental"),
+        Map.entry("admin_invalid_since_version", "since must be the version (positive integer) returned in X-Axon-Backup-Version"),
+        Map.entry("admin_backup_stream_invalid", "the body is not a valid .axbak backup: %s"),
         Map.entry("admin_field_required", "required field: %s"),
         Map.entry("admin_not_found", "resource not found"),
         Map.entry("audit_self_decision", "a blocked user cannot decide their own audit case"),
@@ -624,6 +643,7 @@ public final class Messages {
          ,Map.entry("cert_store_name_path_required", "JKS name and path are required")
          ,Map.entry("cert_store_password_required", "JKS password is required")
          ,Map.entry("cert_store_load_failed", "could not load JKS %s")
+         ,Map.entry("jks_reload_failed", "truststore %s could not be reloaded at startup: %s")
          ,Map.entry("geo_precision_invalid", "precision must be between 0 and 12")
          ,Map.entry("geo_hash_invalid", "invalid geohash: %s")
         ,Map.entry("value_string_null", "string value cannot be null")

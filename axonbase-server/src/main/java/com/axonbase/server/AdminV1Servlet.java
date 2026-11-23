@@ -102,7 +102,15 @@ final class AdminV1Servlet extends HttpServlet {
             }
             if (method.equals("GET") && seg.size() == 1 && seg.get(0).equals("events")) {
                 needRoot(caller, Authz.Role.VIEWER);
-                sse(req, resp);
+                sse(req, resp, srv.events()::subscribe);
+                return;
+            }
+            if (method.equals("GET") && seg.size() == 2 && seg.get(0).equals("logs") && seg.get(1).equals("stream")) {
+                needRoot(caller, Authz.Role.VIEWER);
+                sse(req, resp, sink -> AxonLog.buffer().subscribe(e -> sink.accept(e.toJson())));
+                return;
+            }
+            if (BackupStreamApi.handle(srv, this, method, seg, req, resp, caller)) {
                 return;
             }
             AdminV1Response out = route(method, seg, req, caller);
@@ -145,6 +153,15 @@ final class AdminV1Servlet extends HttpServlet {
         }
         if (get && head.equals("databases") && n == 4 && seg.get(3).equals("tables")) {
             return ok(tables(c, seg.get(1), seg.get(2)));
+        }
+        if (get && head.equals("databases") && n == 6 && seg.get(3).equals("tables") && seg.get(5).equals("stats")) {
+            needScope(c, seg.get(1), seg.get(2), Authz.Role.VIEWER);
+            Database database = database(seg.get(1), seg.get(2));
+            Catalog.TableDef def = database.catalog().table(seg.get(4));
+            if (def == null) {
+                throw notFound();
+            }
+            return ok(TableStats.compute(database, def));
         }
         if (head.equals("users")) {
             if (get && n == 1) {
@@ -220,12 +237,17 @@ final class AdminV1Servlet extends HttpServlet {
                 if (!srv.trustStores().remove(seg.get(1))) {
                     throw notFound();
                 }
+                srv.ds().dropJks(seg.get(1));
                 return noContent();
             }
         }
         if (get && head.equals("certificates") && n == 2 && seg.get(1).equals("expiring")) {
             needRoot(c, Authz.Role.VIEWER);
             return ok(expiringCertificates(req));
+        }
+        if (get && head.equals("logs") && n == 1) {
+            needRoot(c, Authz.Role.VIEWER);
+            return ok(logs(req));
         }
         AdminV1Response extra = AdminV1Extensions.route(srv, this, method, seg, req, c);
         if (extra != null) {
@@ -293,7 +315,9 @@ final class AdminV1Servlet extends HttpServlet {
     }
 
     /** Fluxo Server-Sent Events: cada evento do barramento vira uma linha {@code data:}. */
-    private void sse(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+    private void sse(HttpServletRequest req, HttpServletResponse resp,
+                     java.util.function.Function<java.util.function.Consumer<String>, AutoCloseable> source)
+            throws IOException {
         jakarta.servlet.AsyncContext async = req.startAsync();
         async.setTimeout(0);
         resp.setStatus(200);
@@ -306,7 +330,7 @@ final class AdminV1Servlet extends HttpServlet {
         out.flush();
         resp.flushBuffer();
         java.util.concurrent.atomic.AtomicReference<AutoCloseable> sub = new java.util.concurrent.atomic.AtomicReference<>();
-        sub.set(srv.events().subscribe(line -> {
+        sub.set(source.apply(line -> {
             synchronized (out) {
                 out.write(line.startsWith(":") ? line + "\n\n" : "data: " + line + "\n\n");
                 out.flush();
@@ -371,6 +395,33 @@ final class AdminV1Servlet extends HttpServlet {
             "config", conf);
     }
 
+    /** Últimas linhas do buffer de log, com filtros {@code limit}, {@code level} (mínimo) e {@code since} (RFC 3339). */
+    private AxonValue logs(HttpServletRequest req) {
+        int limit = 500;
+        String l = req.getParameter("limit");
+        if (l != null && !l.isBlank()) {
+            try {
+                limit = Math.min(Math.max(1, Integer.parseInt(l.trim())), AxonLog.buffer().capacity());
+            } catch (NumberFormatException e) {
+                throw new ApiError(400, "BAD_REQUEST", Messages.get("admin_invalid_limit"));
+            }
+        }
+        long since = 0;
+        String sv = req.getParameter("since");
+        if (sv != null && !sv.isBlank()) {
+            try {
+                since = java.time.Instant.parse(sv.trim()).toEpochMilli();
+            } catch (java.time.format.DateTimeParseException e) {
+                throw new ApiError(400, "BAD_REQUEST", Messages.get("admin_invalid_since"));
+            }
+        }
+        List<Object> out = new ArrayList<>();
+        for (LogBuffer.Entry e : AxonLog.buffer().snapshot(limit, req.getParameter("level"), since)) {
+            out.add(e.toValue());
+        }
+        return AdminJson.of(out);
+    }
+
     private boolean clusterMode() {
         return !"local".equals(srv.clusterStatus().status().clusterId());
     }
@@ -404,7 +455,7 @@ final class AdminV1Servlet extends HttpServlet {
         return AdminJson.of(out);
     }
 
-    private static String indexKind(Catalog.IndexDef i) {
+    static String indexKind(Catalog.IndexDef i) {
         if (i.vector()) {
             return "vector";
         }
@@ -866,15 +917,23 @@ final class AdminV1Servlet extends HttpServlet {
             Path dir = srv.truststoreDir();
             Files.createDirectories(dir);
             Path target = dir.resolve(name + ".jks");
-            try (InputStream in = file.getInputStream()) {
-                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-            }
+            // grava num temporário, valida e só então troca de forma atômica: um reenvio inválido
+            // nunca destrói o truststore anterior
+            Path temp = Files.createTempFile(dir, name + "-", ".jks.tmp");
             try {
-                srv.registerTrustStore(name, target.toString(), password.toCharArray());
-            } catch (IllegalArgumentException e) {
-                Files.deleteIfExists(target);
-                throw new ApiError(400, "BAD_REQUEST", e.getMessage());
+                try (InputStream in = file.getInputStream()) {
+                    Files.copy(in, temp, StandardCopyOption.REPLACE_EXISTING);
+                }
+                try {
+                    srv.registerTrustStore(name, temp.toString(), password.toCharArray());
+                } catch (IllegalArgumentException e) {
+                    throw new ApiError(400, "BAD_REQUEST", e.getMessage());
+                }
+                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                Files.deleteIfExists(temp);
             }
+            srv.ds().persistJks(name, target.toString());
             return AdminJson.obj("name", name);
         } catch (jakarta.servlet.ServletException e) {
             throw new ApiError(400, "BAD_REQUEST", Messages.get("admin_multipart_required"));
@@ -1022,7 +1081,7 @@ final class AdminV1Servlet extends HttpServlet {
         return new AdminV1Response(204, null);
     }
 
-    private static void write(HttpServletResponse resp, int status, AxonValue body) throws IOException {
+    static void write(HttpServletResponse resp, int status, AxonValue body) throws IOException {
         resp.setStatus(status);
         resp.setContentType("application/json");
         resp.setCharacterEncoding("UTF-8");

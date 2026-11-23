@@ -65,6 +65,21 @@ class CoreSecurityTest {
         assertNull(ServerConfig.insecureDefaultsProblem(semAuth, Map.of()));
     }
 
+    @Test
+    void recusaSenhaRootEmBrancoForaDoLoopback() {
+        ServerConfig base = ServerConfig.defaults();
+        ServerConfig exposto = new ServerConfig(base.path(), "segredo-forte-de-verdade", "root", "",
+            base.port(), "0.0.0.0", true, "", "", "", "", 30000L, 300000L, 0, "", "", "", "",
+            10000L, 4, 100, "", "", "", "", "", 0L, "", 10, 0, "pt-BR", "", "", "", "",
+            false, "auth", false, 65536);
+        assertNotNull(ServerConfig.insecureDefaultsProblem(exposto, Map.of()));
+        ServerConfig espacos = new ServerConfig(base.path(), "segredo-forte-de-verdade", "root", "   ",
+            base.port(), "0.0.0.0", true, "", "", "", "", 30000L, 300000L, 0, "", "", "", "",
+            10000L, 4, 100, "", "", "", "", "", 0L, "", 10, 0, "pt-BR", "", "", "", "",
+            false, "auth", false, 65536);
+        assertNotNull(ServerConfig.insecureDefaultsProblem(espacos, Map.of()));
+    }
+
     private static ServerConfig withBind(ServerConfig b, String bind) {
         return new ServerConfig(b.path(), b.secret(), b.user(), b.password(), b.port(), bind,
             b.requireAuth(), "", "", "", "", 30000L, 300000L, 0, "", "", "", "",

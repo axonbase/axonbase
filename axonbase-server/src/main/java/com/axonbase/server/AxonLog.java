@@ -10,7 +10,36 @@ import java.util.Map;
  */
 public final class AxonLog {
 
+    private static final int DEFAULT_BUFFER = 10_000;
+    private static volatile LogBuffer buffer = new LogBuffer(envCapacity());
+
     private AxonLog() {
+    }
+
+    /** Capacidade do buffer em memória: {@code AXON_LOG_BUFFER}, padrão 10000. */
+    static int envCapacity() {
+        String v = System.getenv("AXON_LOG_BUFFER");
+        if (v != null && !v.isBlank()) {
+            try {
+                int n = Integer.parseInt(v.trim());
+                if (n > 0) {
+                    return n;
+                }
+            } catch (NumberFormatException ignored) {
+                // valor inválido: usa o padrão
+            }
+        }
+        return DEFAULT_BUFFER;
+    }
+
+    /** Buffer circular das últimas linhas registradas. */
+    public static LogBuffer buffer() {
+        return buffer;
+    }
+
+    /** Troca o buffer (testes e configuração). */
+    static void buffer(LogBuffer replacement) {
+        buffer = replacement;
     }
 
     /** Monta a linha JSON (sem imprimir). Campos nulos ou vazios ficam de fora. */
@@ -52,6 +81,13 @@ public final class AxonLog {
     /** Escreve uma linha de log em stdout. */
     public static void log(String level, String event, String msg, Map<String, ?> extra) {
         System.out.println(json(level, event, msg, extra));
+        Map<String, Object> fields = new LinkedHashMap<>();
+        extra.forEach((k, v) -> {
+            if (v != null && !String.valueOf(v).isEmpty()) {
+                fields.put(k, v);
+            }
+        });
+        buffer.add(new LogBuffer.Entry(System.currentTimeMillis(), level, event, msg, fields));
     }
 
     public static void log(String level, String event, String msg) {

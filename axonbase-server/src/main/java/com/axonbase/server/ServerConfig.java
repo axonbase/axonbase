@@ -97,7 +97,7 @@ public record ServerConfig(String path, String secret, String user, String passw
             return null;
         }
         java.util.List<String> problems = new java.util.ArrayList<>();
-        if ("root".equals(c.password())) {
+        if ("root".equals(c.password()) || c.password() == null || c.password().isBlank()) {
             problems.add(Messages.get("config_insecure_password"));
         }
         if (defaults().secret().equals(c.secret())) {

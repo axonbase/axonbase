@@ -144,12 +144,15 @@ public final class Datastore {
 
     /** Há algum registro de dados (chave de registro contém NUL)? Custo linear. */
     public boolean hasRecords() {
-        for (String key : backend.keysWithPrefix("")) {
+        boolean[] found = {false};
+        backend.scanPrefix("", key -> {
             if (key.indexOf('\u0000') >= 0) {
-                return true;
+                found[0] = true;
+                return false;
             }
-        }
-        return false;
+            return true;
+        });
+        return found[0];
     }
 
     /** Total de chaves no armazenamento (registros, catálogo e metadados). Custo linear. */
@@ -176,6 +179,36 @@ public final class Datastore {
     /** Installs the server-owned JKS registrar without coupling the core to TLS classes. */
     public void jksRegistrar(JksRegistrar registrar) {
         this.jksRegistrar = registrar;
+        if (registrar != null) {
+            reloadPersistedJks(registrar);
+        }
+    }
+
+    /**
+     * Recarrega os truststores registrados no plano de controle. A senha nunca é persistida: o JKS é
+     * aberto sem ela (só certificados confiáveis, sem checagem de integridade), passando {@code null}.
+     */
+    private void reloadPersistedJks(JksRegistrar registrar) {
+        for (ControlCommand c : controlSnapshot().commands()) {
+            if (c.kind() != ControlCommand.Kind.JKS || "DROP".equals(c.definition())) {
+                continue;
+            }
+            try {
+                registrar.register(c.name(), c.definition(), null, "NONE", List.of());
+            } catch (RuntimeException e) {
+                System.err.println(Messages.get("jks_reload_failed", c.name(), String.valueOf(e.getMessage())));
+            }
+        }
+    }
+
+    /** Registra no plano de controle um truststore já carregado, para sobreviver a restart. */
+    public void persistJks(String name, String path) {
+        applyControl(ControlCommand.of(ControlCommand.Kind.JKS, "", "", name, path));
+    }
+
+    /** Marca o truststore como removido no plano de controle. */
+    public void dropJks(String name) {
+        applyControl(ControlCommand.of(ControlCommand.Kind.JKS, "", "", name, "DROP"));
     }
 
     public void aiProvider(AiProviderClient provider) {
@@ -506,6 +539,9 @@ public final class Datastore {
     }
 
     private void replay(ControlCommand command) {
+        if (command.kind() == ControlCommand.Kind.JKS) {
+            return; // recarregado quando o registrar do servidor é instalado
+        }
         if (command.kind() == ControlCommand.Kind.DATABASE) {
             ensureDatabase(command.namespace(), command.database());
             return;
@@ -702,7 +738,8 @@ public final class Datastore {
             || query.statements().stream().anyMatch(statement -> !isReadOnly(statement));
     }
 
-    private static boolean isReadOnly(Statement statement) {
+    /** Instrução que só lê (classificação por AST), usada no roteamento e na imposição de somente leitura. */
+    public static boolean isReadOnly(Statement statement) {
         return statement instanceof Statement.Select
             || statement instanceof Statement.Explain
             || statement instanceof Statement.Info
@@ -853,17 +890,45 @@ public final class Datastore {
 
     /** Restaura um {@link #backupCluster()}: limpa tudo e reconstrói. */
     public void restoreCluster(String dump) {
-        java.util.List<String> lines = java.util.Arrays.asList(dump.split("\n", -1));
-        if (lines.isEmpty() || !"--axonbase-backup-v1--".equals(lines.get(0))) {
+        try {
+            restoreCluster(new java.io.BufferedReader(new java.io.StringReader(dump)));
+        } catch (java.io.IOException e) {
             throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
         }
-        for (String key : backend.keysWithPrefix("")) {
-            backend.delete(key);
+    }
+
+    /** Marca das linhas de deleção do backup incremental: {@code !del<TAB>base64(chave)}. */
+    static final String DELETE_MARK = "!del";
+
+    /**
+     * Restaura um backup lendo linha a linha, sem materializar o dump. O cabeçalho é validado antes
+     * de qualquer escrita; depois o armazenamento é limpo e as linhas são aplicadas em ordem
+     * (inclusive as deleções de backups incrementais mesclados).
+     *
+     * @return quantas chaves foram aplicadas (gravações mais deleções), sem contar o plano de controle
+     */
+    public long restoreCluster(java.io.BufferedReader reader) throws java.io.IOException {
+        String header = reader.readLine();
+        if (!"--axonbase-backup-v1--".equals(header)) {
+            throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
         }
+        // limpa em lotes para não listar todas as chaves de uma vez
+        List<String> batch = new ArrayList<>();
+        do {
+            batch.clear();
+            backend.scanPrefix("", key -> {
+                batch.add(key);
+                return batch.size() < 10_000;
+            });
+            for (String key : batch) {
+                backend.delete(key);
+            }
+        } while (!batch.isEmpty());
         java.util.Base64.Decoder b64 = java.util.Base64.getDecoder();
         boolean restoredControl = false;
-        for (int i = 1; i < lines.size(); i++) {
-            String line = lines.get(i);
+        long applied = 0;
+        String line;
+        while ((line = reader.readLine()) != null) {
             if (line.isBlank()) {
                 continue;
             }
@@ -877,8 +942,12 @@ public final class Datastore {
                 controlState.restore(com.axonbase.core.control.CatalogCodec.decode(
                     new String(value, java.nio.charset.StandardCharsets.UTF_8)));
                 restoredControl = true;
+            } else if (DELETE_MARK.equals(key)) {
+                backend.delete(new String(value, java.nio.charset.StandardCharsets.UTF_8));
+                applied++;
             } else {
                 backend.put(key, value);
+                applied++;
             }
         }
         if (restoredControl) {
@@ -886,6 +955,70 @@ public final class Datastore {
             controlStore.save(controlState, backend);
         }
         backend.flush();
+        return applied;
+    }
+
+    /**
+     * Escreve o backup em streaming no formato {@code .axbak} (texto, uma linha por chave, valores em
+     * Base64), varrendo o backend com {@link KvBackend#scanPrefix}: a memória não cresce com o tamanho.
+     *
+     * @param since versão a partir da qual incluir chaves alteradas ({@code <= 0} faz backup completo);
+     *              backends sem versão sempre fazem backup completo. Deleções posteriores a {@code since}
+     *              saem como linhas {@code !del} quando o backend as reporta.
+     * @return {@code true} se o backup escrito é incremental
+     */
+    public boolean backupTo(java.io.OutputStream out, long since) throws java.io.IOException {
+        VersionedKvBackend versioned = backend instanceof VersionedKvBackend v ? v : null;
+        boolean incremental = since > 0 && versioned != null;
+        java.io.Writer w = new java.io.BufferedWriter(
+            new java.io.OutputStreamWriter(out, java.nio.charset.StandardCharsets.UTF_8), 1 << 16);
+        java.util.Base64.Encoder b64 = java.util.Base64.getEncoder();
+        w.write("--axonbase-backup-v1--\n");
+        w.write("ctrl\t");
+        w.write(b64.encodeToString(com.axonbase.core.control.CatalogCodec.encode(controlState.snapshot())
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        w.write('\n');
+        java.io.IOException[] failure = new java.io.IOException[1];
+        backend.scanPrefix("", key -> {
+            try {
+                if (incremental && versioned.versionOf(key) <= since) {
+                    return true;
+                }
+                java.util.Optional<byte[]> raw = backend.get(key);
+                if (raw.isPresent()) {
+                    w.write(key);
+                    w.write('\t');
+                    w.write(b64.encodeToString(raw.get()));
+                    w.write('\n');
+                }
+                return true;
+            } catch (java.io.IOException e) {
+                failure[0] = e;
+                return false;
+            }
+        });
+        if (failure[0] != null) {
+            throw failure[0];
+        }
+        if (incremental) {
+            versioned.scanDeletedSince(since, key -> {
+                try {
+                    w.write(DELETE_MARK);
+                    w.write('\t');
+                    w.write(b64.encodeToString(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                    w.write('\n');
+                    return true;
+                } catch (java.io.IOException e) {
+                    failure[0] = e;
+                    return false;
+                }
+            });
+            if (failure[0] != null) {
+                throw failure[0];
+            }
+        }
+        w.flush();
+        return incremental;
     }
 
     /**
@@ -920,6 +1053,11 @@ public final class Datastore {
                     .append(b64.encodeToString(raw.get())).append('\n');
             }
         }
+        versionedBackend.scanDeletedSince(lastIndex, key -> {
+            sb.append(DELETE_MARK).append('\t').append(b64.encodeToString(
+                key.getBytes(java.nio.charset.StandardCharsets.UTF_8))).append('\n');
+            return true;
+        });
         return sb.toString();
     }
 
@@ -1128,6 +1266,12 @@ public final class Datastore {
         }
     }
 
+    private static void requireWritable(Session s) {
+        if (s.readOnly()) {
+            throw new AxonError(-32002, Messages.get("session_read_only"));
+        }
+    }
+
     /** Lee un valor KV. Devolve {@code NONE} cando non existe ou expirou. */
     public AxonValue kvGet(Session session, String ns, String db, String key) {
         Session s = session != null ? session : Session.create();
@@ -1147,6 +1291,7 @@ public final class Datastore {
     public AxonValue kvSet(Session session, String ns, String db, String key,
                            AxonValue value, Long ttlSeconds) {
         final Session s = session != null ? session : Session.create();
+        requireWritable(s);
         if (ns == null || ns.isBlank() || db == null || db.isBlank()
             || key == null || key.isBlank()) {
             throw AxonError.internal(Messages.get("kv_scope_key_required"));
@@ -1168,6 +1313,7 @@ public final class Datastore {
     /** Borra un valor KV e a súa metadata de expiración. Devolve se existía. */
     public boolean kvDel(Session session, String ns, String db, String key) {
         Session s = session != null ? session : Session.create();
+        requireWritable(s);
         return withKvWrite(s, () -> {
             KvBackend store = kvStore(s);
             boolean existed = store.delete(kvValueKey(ns, db, key));

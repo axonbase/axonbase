@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  * ({@code AXON_S3_ENCRYPT_KEY}), o dump é encriptado com AES-256-GCM antes do
  * upload e decriptado no download.</p>
  *
- * <p>A retenção mantém apenas os N backups mais recentes (config {@code s3_retention},
+ * <p>A retenção mantém ao menos os N backups mais recentes, em cadeias inteiras (completo + incrementais) (config {@code s3_retention},
  * padrão 10). O nome do arquivo segue o padrão
  * {@code {prefix}/cluster-{yyyyMMdd-HHmmss}.axbak}.</p>
  */
@@ -250,7 +250,7 @@ public final class S3SyncManager implements AutoCloseable {
                 lastBackedUpIndex = current;
                 lastWasFull = !incremental;
 
-                rotate(key);
+                rotate(key, incremental ? "incremental" : "full");
                 String type = incremental ? "incremental" : "full";
                 recordSuccess(key, payload.length, type, startedAt, (System.nanoTime() - t0) / 1_000_000L);
                 return true;
@@ -436,14 +436,19 @@ public final class S3SyncManager implements AutoCloseable {
     // Rotação
     // ------------------------------------------------------------------
 
-    private void rotate(String uploadedKey) {
+    /**
+     * Retenção por cadeias: uma cadeia é um backup completo mais os incrementais que dependem dele
+     * (os que vêm depois, até o próximo completo). Mantém as cadeias mais novas até somar pelo menos
+     * {@code retention} backups e apaga só cadeias inteiras mais antigas, nunca um completo ainda
+     * referenciado por incrementais mantidos. Backup sem tipo registrado conta como completo.
+     */
+    private void rotate(String uploadedKey, String uploadedType) {
         if (retention <= 0) return;
         try {
             List<String> backups = listBackups();
             if (backups.size() <= retention) return;
-            int toDelete = backups.size() - retention;
-            for (int i = 0; i < toDelete; i++) {
-                String old = backups.get(i);
+            List<String> doomed = expiredByChains(backups, uploadedKey, uploadedType);
+            for (String old : doomed) {
                 if (!old.equals(uploadedKey)) {
                     store.deleteObject(bucket, old);
                 }
@@ -451,6 +456,37 @@ public final class S3SyncManager implements AutoCloseable {
         } catch (Exception e) {
             System.err.println("Erro na rotação de backups S3: " + e.getMessage());
         }
+    }
+
+    /** Chaves a apagar: as cadeias inteiras que sobram depois de reter as mais novas. */
+    List<String> expiredByChains(List<String> backups, String uploadedKey, String uploadedType) {
+        List<List<String>> chains = new ArrayList<>();
+        for (String key : backups) {
+            String type = key.equals(uploadedKey) ? uploadedType : storedType(key);
+            if (chains.isEmpty() || !"incremental".equals(type)) {
+                chains.add(new ArrayList<>());
+            }
+            chains.get(chains.size() - 1).add(key);
+        }
+        List<String> doomed = new ArrayList<>();
+        int kept = 0;
+        for (int i = chains.size() - 1; i >= 0; i--) {
+            if (kept >= retention) {
+                doomed.addAll(chains.get(i));
+            } else {
+                kept += chains.get(i).size();
+            }
+        }
+        return doomed;
+    }
+
+    private String storedType(String key) {
+        var meta = datastore.metaGet(META_PREFIX + baseName(key));
+        if (meta.isEmpty()) {
+            return null;
+        }
+        String[] parts = new String(meta.get(), StandardCharsets.UTF_8).split("\\|");
+        return parts.length >= 2 ? parts[1] : null;
     }
 
     private List<String> listBackups() {

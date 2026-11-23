@@ -2,6 +2,7 @@ package com.axonbase.core;
 
 import com.axonbase.core.storage.Transaction;
 import com.axonbase.common.Messages;
+import com.axonbase.core.security.Authz;
 import com.axonbase.value.AxonValue;
 
 /**
@@ -14,6 +15,9 @@ public final class Session {
     private String database;
     private final Variables vars = new Variables();
     private AxonValue auth;
+    private Authz.Role roleCap;
+    private boolean capReadOnly;
+    private boolean authReadOnly;
     // Saga active state
     private String sagaName;
     private String sagaCorrelationId;
@@ -51,8 +55,30 @@ public final class Session {
         return auth;
     }
 
+    /**
+     * Define os claims da sessão. Aplica o teto de papel (se houver) e recalcula a
+     * marca de somente leitura: papel explícito viewer vira somente leitura.
+     */
     public void auth(AxonValue auth) {
-        this.auth = auth;
+        AxonValue effective = roleCap == null ? auth : Authz.cap(auth, roleCap);
+        this.auth = effective;
+        this.authReadOnly = Authz.role(effective) == Authz.Role.VIEWER;
+    }
+
+    /** Teto de papel pedido pelo cliente (cabeçalho Axon-Role-Cap): só rebaixa, nunca eleva. */
+    public void roleCap(Authz.Role cap) {
+        this.roleCap = cap;
+        if (cap == Authz.Role.VIEWER) {
+            this.capReadOnly = true;
+        }
+        if (auth != null) {
+            auth(auth);
+        }
+    }
+
+    /** True quando o motor deve recusar qualquer escrita nesta sessão. */
+    public boolean readOnly() {
+        return capReadOnly || authReadOnly;
     }
 
     // ------------------------------------------------------------------

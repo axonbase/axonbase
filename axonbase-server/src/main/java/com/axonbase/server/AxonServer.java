@@ -98,6 +98,14 @@ public final class AxonServer {
         this.requireAuth = requireAuth;
         this.config = config;
         this.trustStores = new TrustStoreRegistry();
+        // registra o carregador de JKS e recarrega os truststores persistidos no plano de controle
+        ds.jksRegistrar((name, path, password, collector, oids) -> {
+            if (password == null) {
+                this.trustStores.registerWithoutPassword(name, path);
+            } else {
+                this.trustStores.register(name, path, password, collector, oids);
+            }
+        });
         ds.eventListener((type, data) -> {
             events.publish(type, data);
             AxonLog.log("warn", type.replace('.', '_'), type, data);
@@ -161,8 +169,6 @@ public final class AxonServer {
         AxonServer srv = new AxonServer(ds, secret, cfg.port(),
             cfg.bind() == null || cfg.bind().isBlank() ? "127.0.0.1" : cfg.bind(),
             service, cfg.requireAuth(), cfg);
-        ds.jksRegistrar((name, path, password, collector, oids) ->
-            srv.trustStores.register(name, path, password, collector, oids));
         if (!cfg.tlsCa().isBlank() && !cfg.tlsKey().isBlank()) {
             try {
                 srv.trustStores.register("icp_brasil", cfg.tlsCa(), cfg.tlsKey().toCharArray(),
@@ -276,7 +282,7 @@ public final class AxonServer {
                         (jakarta.servlet.http.HttpServletResponse) response;
                     resp.setHeader("Access-Control-Allow-Origin", config.corsOrigins());
                     resp.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-                    resp.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Axon-Ns, Axon-Db, X-Request-Id, X-Correlation-Id");
+                    resp.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Axon-Ns, Axon-Db, Axon-Role-Cap, X-Request-Id, X-Correlation-Id");
                     resp.setHeader("Access-Control-Allow-Credentials", "true");
                     if ("OPTIONS".equalsIgnoreCase(((jakarta.servlet.http.HttpServletRequest) request).getMethod())) {
                         resp.setStatus(204);
@@ -310,6 +316,26 @@ public final class AxonServer {
             @Override public void init(jakarta.servlet.FilterConfig filterConfig) {}
             @Override public void destroy() {}
         };
+        // Recusa cedo (400) um Axon-Role-Cap desconhecido, em qualquer rota.
+        jakarta.servlet.Filter roleCapFilter = new jakarta.servlet.Filter() {
+            @Override
+            public void doFilter(jakarta.servlet.ServletRequest request,
+                                 jakarta.servlet.ServletResponse response,
+                                 jakarta.servlet.FilterChain chain)
+                    throws IOException, jakarta.servlet.ServletException {
+                try {
+                    parseRoleCap(((HttpServletRequest) request).getHeader(ROLE_CAP_HEADER));
+                } catch (IllegalArgumentException e) {
+                    json((HttpServletResponse) response, 400,
+                        "{\"status\":\"ERR\",\"detail\":\"" + esc(e.getMessage()) + "\"}");
+                    return;
+                }
+                chain.doFilter(request, response);
+            }
+            @Override public void init(jakarta.servlet.FilterConfig filterConfig) {}
+            @Override public void destroy() {}
+        };
+        ctx.addFilter(asyncFilter(roleCapFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(metricsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(new LoggingFilter(auth)), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
@@ -1130,6 +1156,10 @@ public final class AxonServer {
             if (requireAuthenticated(s, resp)) {
                 return;
             }
+            if (s.readOnly()) {
+                json(resp, 403, "{\"status\":\"ERR\",\"detail\":\"" + esc(Messages.get("session_read_only")) + "\"}");
+                return;
+            }
             if (redirectWrites(req, resp)) {
                 return;
             }
@@ -1163,6 +1193,11 @@ public final class AxonServer {
         if (correlationId != null && !correlationId.isBlank()) {
             s.vars().set("saga_corr", AxonValue.str(correlationId));
         }
+        // Teto de papel: só rebaixa. Valores inválidos já foram recusados (400) pelo filtro.
+        com.axonbase.core.security.Authz.Role cap = parseRoleCap(req.getHeader(ROLE_CAP_HEADER));
+        if (cap != null) {
+            s.roleCap(cap);
+        }
         String authorization = req.getHeader("Authorization");
         if (auth != null && authorization != null && authorization.startsWith("Bearer ")) {
             Map<String, Object> claims = auth.claims(authorization.substring("Bearer ".length()));
@@ -1171,6 +1206,20 @@ public final class AxonServer {
             }
         }
         return s;
+    }
+
+    static final String ROLE_CAP_HEADER = "Axon-Role-Cap";
+
+    /** Interpreta o cabeçalho Axon-Role-Cap: viewer ou operator; ausente dá null; outro valor dá IllegalArgumentException. */
+    static com.axonbase.core.security.Authz.Role parseRoleCap(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        return switch (raw.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "viewer" -> com.axonbase.core.security.Authz.Role.VIEWER;
+            case "operator" -> com.axonbase.core.security.Authz.Role.OPERATOR;
+            default -> throw new IllegalArgumentException(Messages.get("http_role_cap_invalid", raw));
+        };
     }
 
     static AxonValue claimsValue(Map<String, Object> claims) {

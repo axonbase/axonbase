@@ -26,6 +26,7 @@ import java.nio.file.Files;
 import java.security.KeyStore;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -373,6 +374,45 @@ class AdminV1Test {
 
         assertEquals(204, call("DELETE", "/truststores/meus", root, null).statusCode());
         assertEquals(404, call("DELETE", "/truststores/meus", root, null).statusCode());
+    }
+
+    private HttpResponse<String> uploadTruststore(String name, String password, byte[] jks) throws Exception {
+        String boundary = "----axtest";
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        part(body, boundary, "name", name);
+        part(body, boundary, "password", password);
+        body.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"t.jks\"\r\n"
+            + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        body.write(jks);
+        body.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+        return HTTP.send(HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + port + "/admin/v1/truststores"))
+            .header("Authorization", "Bearer " + root)
+            .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+            .POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray())).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void reenvioComSenhaErradaPreservaOTruststoreAnterior() throws Exception {
+        KeyStore ks = KeyStore.getInstance("JKS");
+        ks.load(null, null);
+        ByteArrayOutputStream jks = new ByteArrayOutputStream();
+        ks.store(jks, "senha123".toCharArray());
+        assertEquals(201, uploadTruststore("estavel", "senha123", jks.toByteArray()).statusCode());
+        java.nio.file.Path file = server.truststoreDir().resolve("estavel.jks");
+        byte[] antes = java.nio.file.Files.readAllBytes(file);
+
+        ByteArrayOutputStream outro = new ByteArrayOutputStream();
+        ks.store(outro, "outraSenha".toCharArray());
+        assertEquals(400, uploadTruststore("estavel", "senha-errada", outro.toByteArray()).statusCode());
+        assertEquals(400, uploadTruststore("estavel", "senha123", "lixo".getBytes(StandardCharsets.UTF_8)).statusCode());
+
+        assertArrayEquals(antes, java.nio.file.Files.readAllBytes(file));
+        assertEquals("estavel", json(get("/truststores", viewer)).asArray().get(0).asObject().get("name").asString());
+        try (var files = java.nio.file.Files.list(server.truststoreDir())) {
+            assertEquals(0, files.filter(f -> f.getFileName().toString().endsWith(".tmp")).count(),
+                "não deve sobrar arquivo temporário");
+        }
     }
 
     private static void part(ByteArrayOutputStream out, String boundary, String name, String value) throws Exception {

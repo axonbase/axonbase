@@ -214,6 +214,28 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         return clock.get();
     }
 
+    /** Varre a column family de versões: chave com versão maior que {@code since} e sem dado é uma deleção. */
+    @Override
+    public void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
+        try (RocksIterator it = db.newIterator(versionsHandle)) {
+            it.seekToFirst();
+            while (it.isValid()) {
+                if (bytesToLong(it.value()) > since) {
+                    byte[] k = it.key();
+                    try {
+                        if (db.get(dataHandle, k) == null
+                            && !visitor.test(new String(k, StandardCharsets.UTF_8))) {
+                            return;
+                        }
+                    } catch (RocksDBException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+                it.next();
+            }
+        }
+    }
+
     @Override
     public long versionOf(String key) {
         try {
