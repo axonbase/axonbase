@@ -198,6 +198,11 @@ public final class AuthCatalog {
         return false;
     }
 
+    /** Remove exatamente a identidade do escopo indicado, sem procurar escopos mais específicos. */
+    public boolean removeUserExact(String name, Scope scope, String namespace, String database) {
+        return users.remove(userKey(name, scope, namespace, database)) != null;
+    }
+
     /** Remove um access method em qualquer escopo compatível com ns/db. */
     public boolean removeAccess(String name, String namespace, String database) {
         for (Scope scope : List.of(Scope.DATABASE, Scope.NAMESPACE, Scope.ROOT)) {

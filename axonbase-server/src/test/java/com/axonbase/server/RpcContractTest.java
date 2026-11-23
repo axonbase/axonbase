@@ -59,7 +59,7 @@ class RpcContractTest {
         assertEquals(1, rpc.getProtocol());
         assertEquals(RpcDispatcher.PROTOCOL_VERSION, rpc.getProtocol());
         assertEquals(RpcDispatcher.PROTOCOL_VERSION, rpc.protocolVersion());
-        assertEquals("0.1.0-SNAPSHOT", rpc.serverVersion());
+        assertEquals(RpcDispatcher.SERVER_VERSION, rpc.serverVersion());
 
         List<String> methods = rpc.methods();
         assertEquals(rpc.getMethods(), methods);
@@ -71,7 +71,7 @@ class RpcContractTest {
 
         AxonValue hello = AxonJson.parseDocument(rpc.hello()).asObject().get("hello");
         assertEquals(1, hello.asObject().get("protocol").asLong());
-        assertEquals("0.1.0-SNAPSHOT", hello.asObject().get("server").asString());
+        assertEquals(RpcDispatcher.SERVER_VERSION, hello.asObject().get("server").asString());
         assertTrue(hello.asObject().get("methods").isArray());
         assertTrue(hello.asObject().get("methods").asArray().size() >= methods.size());
         assertFalse(rpc.hello().startsWith("{\"notification\""));

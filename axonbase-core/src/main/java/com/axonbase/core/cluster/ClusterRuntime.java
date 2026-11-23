@@ -488,6 +488,32 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         return out;
     }
 
+    /** Retrato de um peer para a API de gestão. {@code lastContactMs} é -1 quando nunca respondeu. */
+    public record PeerInfo(String node, String address, long lagEntries, long lastContactMs, boolean active) {
+    }
+
+    /** Peers conhecidos, com atraso de replicação e último contato. Só o líder tem dados reais. */
+    public List<PeerInfo> peerInfos() {
+        List<PeerInfo> out = new java.util.ArrayList<>();
+        long last = node.lastIndex();
+        long now = System.nanoTime();
+        long window = TimeUnit.MILLISECONDS.toNanos(LIVENESS_MILLIS);
+        for (InetSocketAddress peer : peers) {
+            String address = peer.getHostString() + ":" + peer.getPort();
+            String name = address;
+            for (Map.Entry<String, InetSocketAddress> e : addressByNode.entrySet()) {
+                if (e.getValue().equals(peer) && !e.getKey().isEmpty()) {
+                    name = e.getKey();
+                }
+            }
+            long reply = lastReply.getOrDefault(peer, 0L);
+            long contactMs = reply > 0 ? TimeUnit.NANOSECONDS.toMillis(now - reply) : -1;
+            out.add(new PeerInfo(name, address, Math.max(0, last - matchIndex.getOrDefault(peer, 0L)),
+                contactMs, reply > 0 && now - reply <= window));
+        }
+        return out;
+    }
+
     /** Replicación pendiente por peer: {@code lastIndex - matchIndex} do líder. */
     public Map<InetSocketAddress, Long> peerLag() {
         Map<InetSocketAddress, Long> lag = new java.util.LinkedHashMap<>();
