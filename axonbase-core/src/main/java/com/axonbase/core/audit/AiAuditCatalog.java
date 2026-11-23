@@ -24,6 +24,20 @@ public final class AiAuditCatalog {
     private final ConcurrentMap<String, AuditCase> history = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, BlockedUser> blockedUsers = new ConcurrentHashMap<>();
 
+    private volatile java.util.function.BiConsumer<String, java.util.Map<String, Object>> listener;
+
+    /** Receptor de eventos {@code audit.case.pending} e {@code audit.user.blocked}. */
+    public void listener(java.util.function.BiConsumer<String, java.util.Map<String, Object>> listener) {
+        this.listener = listener;
+    }
+
+    private void emit(String type, java.util.Map<String, Object> data) {
+        var l = listener;
+        if (l != null) {
+            l.accept(type, data);
+        }
+    }
+
     public AiAuditCatalog(KvBackend kv) {
         this.kv = kv;
         restore();
@@ -34,6 +48,11 @@ public final class AiAuditCatalog {
     public void addCase(String hash, AuditCase auditCase) {
         pendingCases.put(hash, auditCase);
         kv.put(PREFIX_CASE + hash, AxonJson.encode(toJson(auditCase)));
+        if ("PENDING".equals(auditCase.status())) {
+            emit("audit.case.pending", java.util.Map.of("hash", hash, "user", auditCase.userId(),
+                "sql", auditCase.sql(), "auditName", auditCase.auditName(),
+                "classification", auditCase.classification()));
+        }
     }
 
     public void addEvent(String hash, AuditCaseEvent event) {
@@ -74,6 +93,8 @@ public final class AiAuditCatalog {
         BlockedUser bu = new BlockedUser(userId, auditName, sql, reason, System.currentTimeMillis(), blockedBy);
         blockedUsers.put(userId, bu);
         kv.put(PREFIX_BLOCKED + userId, AxonJson.encode(toJson(bu)));
+        emit("audit.user.blocked", java.util.Map.of("user", userId, "auditName", auditName == null ? "" : auditName,
+            "reason", reason == null ? "" : reason));
     }
 
     public void unblockUser(String userId) {

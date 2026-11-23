@@ -16,6 +16,9 @@ public final class AuthService {
     private final UserStore users;
     private final Map<String, TemporaryCredential> temporaryCredentials = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
+    private final ServiceTokenStore serviceTokens = new ServiceTokenStore();
+    /** jti revogado, com o exp do JWT para poder esquecer a entrada depois. */
+    private final Map<String, Long> revokedJwts = new ConcurrentHashMap<>();
     private final Map<String, Long> lastCredentialIssuance = new ConcurrentHashMap<>();
 
     /** Cache JWT por credencial temporária para reuso na mesma sessão. */
@@ -108,10 +111,8 @@ public final class AuthService {
         cleanup();
         AuthCatalog.User identity = users.catalog().certificateUser(user, certificateStore, fingerprint);
         if (identity == null) {
-            System.err.println("{\"event\":\"cert_issue_failed\",\"user\":\""
-                + (user == null ? "" : user) + "\",\"store\":\"" + certificateStore
-                + "\",\"total_users\":" + users.catalog().users().size()
-                + ",\"user_names\":" + users.catalog().users().stream().map(u -> u.name()).toList() + "}");
+            com.axonbase.server.AxonLog.log("warn", "cert_issue_failed", "credencial temporária recusada",
+                Map.of("user", user == null ? "" : user, "store", certificateStore == null ? "" : certificateStore));
             throw new IllegalArgumentException(Messages.get("cert_user_missing"));
         }
         String userKey = user + "@" + certificateStore;
@@ -127,6 +128,8 @@ public final class AuthService {
         temporaryCredentials.put(credential, new TemporaryCredential(user,
             identity.certificate(), identity.fingerprint(), System.currentTimeMillis() + 60_000L));
         lastCredentialIssuance.put(userKey, now);
+        com.axonbase.server.AxonLog.log("info", "certificate_login", "credencial temporária emitida",
+            Map.of("user", user, "store", certificateStore));
         return credential;
     }
 
@@ -183,12 +186,58 @@ public final class AuthService {
 
     /** Claims verificados, ou {@code null} quando o token é inválido/expirado. */
     public Map<String, Object> claims(String token) {
-        Map<String, Object> claims = token == null ? null : Jwt.verify(secret, token);
+        if (token != null && token.startsWith(ServiceTokenStore.PREFIX)) {
+            return serviceClaims(token);
+        }
+        Map<String, Object> claims;
+        try {
+            claims = token == null ? null : Jwt.verify(secret, token);
+        } catch (RuntimeException e) {
+            return null;
+        }
         if (claims == null || !(claims.get("exp") instanceof Number exp)
             || exp.longValue() < System.currentTimeMillis() / 1000) {
             return null;
         }
+        if (claims.get("jti") != null && revokedJwts.containsKey(String.valueOf(claims.get("jti")))) {
+            return null;
+        }
         return claims;
+    }
+
+    private Map<String, Object> serviceClaims(String token) {
+        ServiceTokenStore.Info info = serviceTokens.verify(token);
+        if (info == null) {
+            return null;
+        }
+        Map<String, Object> claims = new java.util.LinkedHashMap<>();
+        claims.put("id", info.name());
+        claims.put("jti", info.id());
+        claims.put("typ", "service");
+        claims.put("scope", info.scope());
+        if (info.ns() != null) {
+            claims.put("ns", info.ns());
+        }
+        if (info.db() != null) {
+            claims.put("db", info.db());
+        }
+        if (!info.roles().isEmpty()) {
+            claims.put("roles", String.join(",", info.roles()));
+        }
+        claims.put("exp", info.expiresAt() / 1000);
+        return claims;
+    }
+
+    /** Tokens de serviço (criação, listagem e revogação). */
+    public ServiceTokenStore serviceTokens() {
+        return serviceTokens;
+    }
+
+    /** Revoga um JWT pelo {@code jti} até o instante {@code expSeconds} (epoch segundos) do próprio token. */
+    public void revokeJwt(String jti, long expSeconds) {
+        long now = System.currentTimeMillis() / 1000;
+        revokedJwts.entrySet().removeIf(e -> e.getValue() < now);
+        revokedJwts.put(jti, expSeconds);
     }
 
     /** Verifica se os claims podem usar o namespace/banco pedidos. */

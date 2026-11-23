@@ -261,7 +261,56 @@ public final class Executor {
         return def;
     }
 
+    /**
+     * Aplica papéis e escopo (E0). Só restringe sessões autenticadas: sessão sem auth é o
+     * modo embutido ou servidor sem autenticação.
+     */
+    private void authorize(Statement s) {
+        AxonValue auth = session.auth();
+        if (!com.axonbase.core.security.Authz.authenticated(auth)) {
+            return;
+        }
+        var min = com.axonbase.core.security.Authz.Role.ADMIN;
+        boolean needs = s instanceof Statement.DefineUser || s instanceof Statement.CreateUser
+            || s instanceof Statement.DropUser || s instanceof Statement.DefineAccess
+            || s instanceof Statement.GrantAccess || s instanceof Statement.RevokeAccess
+            || s instanceof Statement.CreateJks || s instanceof Statement.CreateDataRule
+            || s instanceof Statement.DropDataRule || s instanceof Statement.DefineAiAudit
+            || s instanceof Statement.DropAiAudit || s instanceof DefineDatabaseLink
+            || s instanceof DropDatabaseLink || s instanceof Statement.CreateDatabaseLink
+            || s instanceof Statement.AlterDatabaseLink || s instanceof CreateSaga
+            || s instanceof Statement.DropSaga;
+        if (s instanceof Statement.SetAuditCase) {
+            min = com.axonbase.core.security.Authz.Role.OPERATOR;
+            needs = true;
+        }
+        if (needs && !com.axonbase.core.security.Authz.atLeast(auth, min)) {
+            throw new com.axonbase.common.AxonError(-32002,
+                Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
+        }
+    }
+
+    /** Um usuário nunca cria identidade de escopo maior que o seu, nem fora do seu ns/db. */
+    private void authorizeUserScope(Statement.AuthScope target, String ns, String database) {
+        AxonValue auth = session.auth();
+        if (!com.axonbase.core.security.Authz.authenticated(auth)) {
+            return;
+        }
+        var caller = com.axonbase.core.security.Authz.scope(auth);
+        if (caller == com.axonbase.core.security.AuthCatalog.Scope.ROOT) {
+            return;
+        }
+        boolean broader = target.ordinal() < caller.ordinal();
+        boolean outside = !java.util.Objects.equals(ns, com.axonbase.core.security.Authz.ns(auth))
+            || (caller == com.axonbase.core.security.AuthCatalog.Scope.DATABASE
+                && !java.util.Objects.equals(database, com.axonbase.core.security.Authz.db(auth)));
+        if (broader || outside) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_scope_escalation"));
+        }
+    }
+
     private AxonValue runStatement(Statement s) {
+        authorize(s);
         return switch (s) {
             case Statement.Use u -> runUse(u);
             case Statement.Let l -> runLet(l);
@@ -2884,6 +2933,7 @@ return score;
         if (du.scope() == Statement.AuthScope.DATABASE && (database == null || database.isBlank())) {
             throw errorStmt(Messages.get("rpc_needs_db"));
         }
+        authorizeUserScope(du.scope(), ns, database);
         AuthCatalog.User stored;
         if (du.hashed()) {
             AuthCodec.Credential credential = AuthCodec.parse(du.passhash());
@@ -5025,6 +5075,10 @@ for (int level = 0; level <= top; level++) {
             throw errorStmt(Messages.get("audit_case_resolved", auditCase.status()));
         }
         String userId = sessionUserId();
+        // Quem está bloqueado por este caso não pode decidi-lo (nem outro caso sobre si).
+        if (userId.equals(auditCase.userId()) && cat.isBlocked(userId)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_self_decision"));
+        }
         auditCase.resolve(sac.status(), userId, sac.reason());
         cat.addEvent(sac.hash(), new com.axonbase.core.audit.AuditCaseEvent(
             sac.status().equals("AUTHORIZED") ? "AUTHORIZED" : "DENIED", userId, sac.reason(), System.currentTimeMillis()));

@@ -96,6 +96,79 @@ public final class Datastore {
         }
     }
 
+    private volatile java.util.function.BiConsumer<String, Map<String, Object>> eventListener;
+
+    /** Receptor de eventos do motor (auditoria). Chamado na thread que originou o evento. */
+    public void eventListener(java.util.function.BiConsumer<String, Map<String, Object>> listener) {
+        this.eventListener = listener;
+    }
+
+    private void emit(String type, Map<String, Object> data) {
+        var l = eventListener;
+        if (l != null) {
+            l.accept(type, data);
+        }
+    }
+
+    /** Grava um valor de metadados do servidor (tokens de serviço, histórico de backup). */
+    public void metaPut(String key, byte[] value) {
+        backend.put("!meta|" + key, value);
+    }
+
+    public java.util.Optional<byte[]> metaGet(String key) {
+        return backend.get("!meta|" + key);
+    }
+
+    public void metaDelete(String key) {
+        backend.delete("!meta|" + key);
+    }
+
+    /** Lista as chaves de metadados com o prefixo, sem o marcador interno. */
+    public List<String> metaKeys(String prefix) {
+        return backend.keysWithPrefix("!meta|" + prefix).stream()
+            .map(k -> k.substring("!meta|".length())).toList();
+    }
+
+    /**
+     * Remove um usuário do escopo exato e registra o DROP no plano de controle.
+     *
+     * @return {@code false} quando o usuário não existe nesse escopo
+     */
+    public boolean dropUser(Session session, String name, AuthCatalog.Scope scope, String ns, String db) {
+        if (!authCatalog.removeUserExact(name, scope, ns, db)) {
+            return false;
+        }
+        applyControl(session, ControlCommand.of(ControlCommand.Kind.USER, ns, db, name, "DROP USER " + name));
+        return true;
+    }
+
+    /** Há algum registro de dados (chave de registro contém NUL)? Custo linear. */
+    public boolean hasRecords() {
+        for (String key : backend.keysWithPrefix("")) {
+            if (key.indexOf('\u0000') >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Total de chaves no armazenamento (registros, catálogo e metadados). Custo linear. */
+    public long keyCount() {
+        return backend.keysWithPrefix("").size();
+    }
+
+    /** Chaves de registros de um banco. Custo linear no tamanho do banco. */
+    public long keyCount(String ns, String db) {
+        return backend.keysWithPrefix(ns + "\u0000" + db + "\u0000").size();
+    }
+
+    /** Todos os bancos conhecidos, para varreduras administrativas. */
+    public List<Database> allDatabases() {
+        List<Database> out = new ArrayList<>();
+        namespaces.values().forEach(m -> out.addAll(m.values()));
+        return out;
+    }
+
     public static Datastore memory() {
         return new Datastore(new MemoryBackend());
     }
@@ -255,7 +328,16 @@ public final class Datastore {
         ConcurrentMap<String, Database> dbs = namespaces.computeIfAbsent(ns,
             k -> new ConcurrentHashMap<>());
         boolean created = !dbs.containsKey(db);
-        Database database = dbs.computeIfAbsent(db, k -> new Database(ns, db, backend));
+        Database database = dbs.computeIfAbsent(db, k -> {
+            Database fresh = new Database(ns, db, backend);
+            fresh.auditCatalog().listener((type, data) -> {
+                Map<String, Object> enriched = new java.util.LinkedHashMap<>(data);
+                enriched.put("ns", ns);
+                enriched.put("db", db);
+                emit(type, enriched);
+            });
+            return fresh;
+        });
         if (created && !replaying.get()) {
             applyControl(session, ControlCommand.database(ns, db));
         }
@@ -338,6 +420,10 @@ public final class Datastore {
 
     public void defineSaga(String sagaName, SagaDef def) {
         sagas.put(sagaName, def);
+    }
+
+    public List<String> sagaNames() {
+        return List.copyOf(sagas.keySet());
     }
 
     public SagaDef saga(String sagaName) {

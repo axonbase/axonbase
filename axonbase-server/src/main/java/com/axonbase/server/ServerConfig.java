@@ -39,8 +39,8 @@ public record ServerConfig(String path, String secret, String user, String passw
         return new ServerConfig(
             envOr(env, "AXON_PATH", base.path()),
             envOr(env, "AXON_SECRET", base.secret()),
-            base.user(),
-            base.password(),
+            envOr(env, "AXON_ROOT_USER", base.user()),
+            envOr(env, "AXON_ROOT_PASSWORD", base.password()),
             portOr(env.get("AXON_PORT"), base.port()),
             envOr(env, "AXON_BIND", base.bind()),
             boolOr(env.get("AXON_REQUIRE_AUTH"), base.requireAuth()),
@@ -78,12 +78,41 @@ public record ServerConfig(String path, String secret, String user, String passw
             intOr(env.get("AXON_AUDIT_MAX_BODY"), base.auditMaxBody()));
     }
 
+    private static boolean loopback(String bind) {
+        if (bind == null || bind.isBlank()) {
+            return true;
+        }
+        String b = bind.trim().toLowerCase();
+        return b.equals("localhost") || b.equals("::1") || b.equals("[::1]") || b.startsWith("127.");
+    }
+
+    /**
+     * Devolve a descrição do problema quando a configuração sobe com credenciais padrão
+     * em interface exposta, ou {@code null} quando está tudo bem. A variável
+     * {@code AXON_ALLOW_INSECURE_DEFAULTS=true} libera conscientemente.
+     */
+    public static String insecureDefaultsProblem(ServerConfig c, Map<String, String> env) {
+        if (!c.requireAuth() || loopback(c.bind())
+            || "true".equalsIgnoreCase(env.getOrDefault("AXON_ALLOW_INSECURE_DEFAULTS", ""))) {
+            return null;
+        }
+        java.util.List<String> problems = new java.util.ArrayList<>();
+        if ("root".equals(c.password())) {
+            problems.add(Messages.get("config_insecure_password"));
+        }
+        if (defaults().secret().equals(c.secret())) {
+            problems.add(Messages.get("config_insecure_secret"));
+        }
+        return problems.isEmpty() ? null
+            : Messages.get("config_insecure_defaults", c.bind(), String.join("; ", problems));
+    }
+
     private static ServerConfig fromMap(Map<String, String> values, ServerConfig defaults) {
         return new ServerConfig(
             value(values, "path", defaults.path()),
             value(values, "secret", defaults.secret()),
-            defaults.user(),
-            defaults.password(),
+            value(values, "root_user", defaults.user()),
+            value(values, "root_password", defaults.password()),
             portOr(values.get("port"), defaults.port()),
             value(values, "bind", defaults.bind()),
             boolOr(values.get("require_auth"), defaults.requireAuth()),
