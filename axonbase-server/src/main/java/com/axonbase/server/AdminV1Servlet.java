@@ -100,6 +100,11 @@ final class AdminV1Servlet extends HttpServlet {
                     seg.add(part);
                 }
             }
+            if (method.equals("GET") && seg.size() == 1 && seg.get(0).equals("events")) {
+                needRoot(caller, Authz.Role.VIEWER);
+                sse(req, resp);
+                return;
+            }
             AdminV1Response out = route(method, seg, req, caller);
             if (out.status() == 204) {
                 resp.setStatus(204);
@@ -285,6 +290,48 @@ final class AdminV1Servlet extends HttpServlet {
         extra.put("leaderAddress", s.leaderAddress());
         extra.put("leader", s.leader());
         return new ApiError(503, "NOT_LEADER", Messages.get("server_no_leader"), extra);
+    }
+
+    /** Fluxo Server-Sent Events: cada evento do barramento vira uma linha {@code data:}. */
+    private void sse(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        jakarta.servlet.AsyncContext async = req.startAsync();
+        async.setTimeout(0);
+        resp.setStatus(200);
+        resp.setContentType("text/event-stream");
+        resp.setCharacterEncoding("UTF-8");
+        resp.setHeader("Cache-Control", "no-cache");
+        resp.setHeader("X-Accel-Buffering", "no");
+        java.io.PrintWriter out = resp.getWriter();
+        out.write(": connected\n\n");
+        out.flush();
+        resp.flushBuffer();
+        java.util.concurrent.atomic.AtomicReference<AutoCloseable> sub = new java.util.concurrent.atomic.AtomicReference<>();
+        sub.set(srv.events().subscribe(line -> {
+            synchronized (out) {
+                out.write(line.startsWith(":") ? line + "\n\n" : "data: " + line + "\n\n");
+                out.flush();
+                if (out.checkError()) {
+                    close(sub.get());
+                    async.complete();
+                }
+            }
+        }));
+        async.addListener(new jakarta.servlet.AsyncListener() {
+            @Override public void onComplete(jakarta.servlet.AsyncEvent e) { close(sub.get()); }
+            @Override public void onTimeout(jakarta.servlet.AsyncEvent e) { close(sub.get()); }
+            @Override public void onError(jakarta.servlet.AsyncEvent e) { close(sub.get()); }
+            @Override public void onStartAsync(jakarta.servlet.AsyncEvent e) { }
+        });
+    }
+
+    private static void close(AutoCloseable c) {
+        try {
+            if (c != null) {
+                c.close();
+            }
+        } catch (Exception ignored) {
+            // cancelar assinatura não falha
+        }
     }
 
     // ------------------------------------------------------------------

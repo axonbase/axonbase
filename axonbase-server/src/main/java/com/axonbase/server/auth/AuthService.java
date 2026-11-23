@@ -111,10 +111,8 @@ public final class AuthService {
         cleanup();
         AuthCatalog.User identity = users.catalog().certificateUser(user, certificateStore, fingerprint);
         if (identity == null) {
-            System.err.println("{\"event\":\"cert_issue_failed\",\"user\":\""
-                + (user == null ? "" : user) + "\",\"store\":\"" + certificateStore
-                + "\",\"total_users\":" + users.catalog().users().size()
-                + ",\"user_names\":" + users.catalog().users().stream().map(u -> u.name()).toList() + "}");
+            com.axonbase.server.AxonLog.log("warn", "cert_issue_failed", "credencial temporária recusada",
+                Map.of("user", user == null ? "" : user, "store", certificateStore == null ? "" : certificateStore));
             throw new IllegalArgumentException(Messages.get("cert_user_missing"));
         }
         String userKey = user + "@" + certificateStore;
@@ -130,6 +128,8 @@ public final class AuthService {
         temporaryCredentials.put(credential, new TemporaryCredential(user,
             identity.certificate(), identity.fingerprint(), System.currentTimeMillis() + 60_000L));
         lastCredentialIssuance.put(userKey, now);
+        com.axonbase.server.AxonLog.log("info", "certificate_login", "credencial temporária emitida",
+            Map.of("user", user, "store", certificateStore));
         return credential;
     }
 

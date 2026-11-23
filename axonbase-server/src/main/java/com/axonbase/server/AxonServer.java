@@ -63,6 +63,17 @@ public final class AxonServer {
     private volatile boolean metricsPerDatabase;
     private volatile boolean metricsRequireAuth;
     private volatile com.axonbase.core.backup.S3SyncManager backups;
+    private final EventBus events = new EventBus();
+    private final java.util.concurrent.ScheduledExecutorService ticker =
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "ax-ticker");
+            t.setDaemon(true);
+            return t;
+        });
+    private volatile long leaderWatchMs = 500;
+    private volatile java.util.concurrent.ScheduledFuture<?> leaderWatch;
+    private volatile String lastLeader = "";
+    private final java.util.Set<String> certNotified = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private volatile long storageKeysCached;
     private volatile long storageKeysAt;
     private final java.util.concurrent.atomic.AtomicLong wsOpen = new java.util.concurrent.atomic.AtomicLong();
@@ -87,6 +98,10 @@ public final class AxonServer {
         this.requireAuth = requireAuth;
         this.config = config;
         this.trustStores = new TrustStoreRegistry();
+        ds.eventListener((type, data) -> {
+            events.publish(type, data);
+            AxonLog.log("warn", type.replace('.', '_'), type, data);
+        });
         if (auth != null) {
             auth.serviceTokens().persistTo(ds);
         }
@@ -152,11 +167,11 @@ public final class AxonServer {
             try {
                 srv.trustStores.register("icp_brasil", cfg.tlsCa(), cfg.tlsKey().toCharArray(),
                     "ICPBRASIL", java.util.List.of());
-                System.err.println("{\"event\":\"truststore_loaded\",\"name\":\"icp_brasil\",\"path\":\""
-                    + cfg.tlsCa() + "\"}");
+                AxonLog.log("info", "truststore_loaded", "truststore carregado",
+                    Map.of("name", "icp_brasil", "path", cfg.tlsCa()));
             } catch (Exception e) {
-                System.err.println("{\"event\":\"truststore_load_failed\",\"name\":\"icp_brasil\",\"detail\":\""
-                    + e.getMessage() + "\"}");
+                AxonLog.log("error", "truststore_load_failed", "falha ao carregar truststore",
+                    Map.of("name", "icp_brasil", "error", String.valueOf(e.getMessage())));
             }
         }
         srv.listen();
@@ -197,6 +212,8 @@ public final class AxonServer {
 
         jetty.setHandler(handlers());
         jetty.start();
+        ticker.scheduleWithFixedDelay(events::heartbeat, 15, 15, TimeUnit.SECONDS);
+        ticker.scheduleWithFixedDelay(this::checkCertificates, 60, 3600, TimeUnit.SECONDS);
         this.startedAtNanos = System.nanoTime();
         this.jetty = jetty;
 
@@ -204,8 +221,7 @@ public final class AxonServer {
             try {
                 stop();
             } catch (Exception e) {
-                System.err.println("{\"time\":\"" + java.time.Instant.now()
-                    + "\",\"event\":\"shutdown_error\",\"message\":\"" + e.getMessage() + "\"}");
+                AxonLog.log("error", "shutdown_error", "erro ao desligar", Map.of("error", String.valueOf(e.getMessage())));
             }
         }, "ax-shutdown"));
     }
@@ -225,6 +241,7 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new CertificateLoginServlet()), "/certificate/login/*");
         ctx.addServlet(new ServletHolder(new ShardMoveServlet()), "/admin/shard/move");
         ServletHolder adminV1 = new ServletHolder(new AdminV1Servlet(this));
+        adminV1.setAsyncSupported(true);
         adminV1.getRegistration().setMultipartConfig(new jakarta.servlet.MultipartConfigElement(
             System.getProperty("java.io.tmpdir"), 8L << 20, 9L << 20, 1 << 20));
         ctx.addServlet(adminV1, "/admin/v1/*");
@@ -270,7 +287,7 @@ public final class AxonServer {
                 @Override public void init(jakarta.servlet.FilterConfig filterConfig) {}
                 @Override public void destroy() {}
             };
-            ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(corsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
+            ctx.addFilter(asyncFilter(corsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         }
 
         jakarta.servlet.Filter metricsFilter = new jakarta.servlet.Filter() {
@@ -293,9 +310,9 @@ public final class AxonServer {
             @Override public void init(jakarta.servlet.FilterConfig filterConfig) {}
             @Override public void destroy() {}
         };
-        ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(metricsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
-        ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(new LoggingFilter()), "/*", EnumSet.of(DispatcherType.REQUEST));
-        ctx.addFilter(new org.eclipse.jetty.servlet.FilterHolder(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
+        ctx.addFilter(asyncFilter(metricsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
+        ctx.addFilter(asyncFilter(new LoggingFilter(auth)), "/*", EnumSet.of(DispatcherType.REQUEST));
+        ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
 
         return ctx;
     }
@@ -304,9 +321,73 @@ public final class AxonServer {
         return ((ServerConnector) jetty.getConnectors()[0]).getLocalPort();
     }
 
+    private static org.eclipse.jetty.servlet.FilterHolder asyncFilter(jakarta.servlet.Filter f) {
+        var holder = new org.eclipse.jetty.servlet.FilterHolder(f);
+        holder.setAsyncSupported(true);
+        return holder;
+    }
+
+    /** Barramento de eventos de gestão (SSE e webhook). */
+    public EventBus events() {
+        return events;
+    }
+
+    /** Envia cada evento por POST assinado com HMAC-SHA256 (AXON_WEBHOOK_URL e AXON_WEBHOOK_SECRET). */
+    public void webhook(String url, String secret) {
+        WebhookSender sender = new WebhookSender(url, secret);
+        events.subscribe(sender::send);
+    }
+
+    /** Intervalo da checagem de troca de líder; vale a partir do próximo {@link #clusterStatus}. */
+    public void leaderWatchIntervalMs(long millis) {
+        this.leaderWatchMs = Math.max(10, millis);
+    }
+
+    private void watchLeader() {
+        var status = clusterStatus.status();
+        String now = status.leader();
+        String before = lastLeader;
+        if (!now.equals(before)) {
+            lastLeader = now;
+            Map<String, Object> data = new java.util.LinkedHashMap<>();
+            data.put("previous", before);
+            data.put("leader", now);
+            data.put("leaderAddress", status.leaderAddress());
+            data.put("term", status.term());
+            data.put("role", status.role().name());
+            events.publish("leader.changed", data);
+            AxonLog.log("info", "leader_changed", "líder mudou", data);
+        }
+    }
+
+    /** Emite {@code certificate.expiring} (uma vez por dia por certificado) para JKS que vencem em 30 dias. */
+    void checkCertificates() {
+        long now = System.currentTimeMillis();
+        long limit = now + 30L * 86_400_000L;
+        String day = java.time.LocalDate.now().toString();
+        for (var store : trustStores.list()) {
+            for (var cert : store.certificates()) {
+                if (cert.notAfter() <= limit && certNotified.add(store.name() + "|" + cert.subject() + "|" + day)) {
+                    Map<String, Object> data = new java.util.LinkedHashMap<>();
+                    data.put("truststore", store.name());
+                    data.put("subject", cert.subject());
+                    data.put("notAfter", AdminJson.iso(cert.notAfter()));
+                    events.publish("certificate.expiring", data);
+                    AxonLog.log("warn", "certificate_expiring", "certificado perto de vencer", data);
+                }
+            }
+        }
+    }
+
     /** Liga o gerenciador de backup à API de gestão e às métricas. */
     public void backups(com.axonbase.core.backup.S3SyncManager manager) {
         this.backups = manager;
+        if (manager != null) {
+            manager.listener((type, data) -> {
+                events.publish(type, data);
+                AxonLog.log("backup.failed".equals(type) ? "error" : "info", type.replace('.', '_'), type, data);
+            });
+        }
     }
 
     com.axonbase.core.backup.S3SyncManager backups() {
@@ -397,6 +478,13 @@ public final class AxonServer {
             ? com.axonbase.core.cluster.ClusterStatusProvider.Status::local : provider;
         this.clusterRuntime = provider instanceof com.axonbase.core.cluster.ClusterRuntime rt ? rt : null;
         dispatchers.forEach(dispatcher -> dispatcher.clusterStatus(() -> clusterStatus.status()));
+        lastLeader = clusterStatus.status().leader();
+        var previous = leaderWatch;
+        if (previous != null) {
+            previous.cancel(false);
+        }
+        leaderWatch = ticker.scheduleWithFixedDelay(this::watchLeader, leaderWatchMs, leaderWatchMs,
+            TimeUnit.MILLISECONDS);
     }
 
     /** Registers a JKS in memory without persisting its supplied password. */
@@ -469,6 +557,7 @@ public final class AxonServer {
         while (System.currentTimeMillis() < deadline && inflight.get() > 0) {
             Thread.sleep(100);
         }
+        ticker.shutdownNow();
         jetty.stop();
         jetty = null;
     }

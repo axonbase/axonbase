@@ -95,6 +95,20 @@ public final class Datastore {
         }
     }
 
+    private volatile java.util.function.BiConsumer<String, Map<String, Object>> eventListener;
+
+    /** Receptor de eventos do motor (auditoria). Chamado na thread que originou o evento. */
+    public void eventListener(java.util.function.BiConsumer<String, Map<String, Object>> listener) {
+        this.eventListener = listener;
+    }
+
+    private void emit(String type, Map<String, Object> data) {
+        var l = eventListener;
+        if (l != null) {
+            l.accept(type, data);
+        }
+    }
+
     /** Grava um valor de metadados do servidor (tokens de serviço, histórico de backup). */
     public void metaPut(String key, byte[] value) {
         backend.put("!meta|" + key, value);
@@ -313,7 +327,16 @@ public final class Datastore {
         ConcurrentMap<String, Database> dbs = namespaces.computeIfAbsent(ns,
             k -> new ConcurrentHashMap<>());
         boolean created = !dbs.containsKey(db);
-        Database database = dbs.computeIfAbsent(db, k -> new Database(ns, db, backend));
+        Database database = dbs.computeIfAbsent(db, k -> {
+            Database fresh = new Database(ns, db, backend);
+            fresh.auditCatalog().listener((type, data) -> {
+                Map<String, Object> enriched = new java.util.LinkedHashMap<>(data);
+                enriched.put("ns", ns);
+                enriched.put("db", db);
+                emit(type, enriched);
+            });
+            return fresh;
+        });
         if (created && !replaying.get()) {
             applyControl(session, ControlCommand.database(ns, db));
         }

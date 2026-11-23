@@ -142,7 +142,13 @@ public final class Main {
         if (cluster != null) {
             server.clusterStatus(cluster);
         }
-        System.out.println(Messages.get("server_started", "0.1.0", bind, port, path));
+        String webhookUrl = System.getenv("AXON_WEBHOOK_URL");
+        if (webhookUrl != null && !webhookUrl.isBlank()) {
+            server.webhook(webhookUrl.trim(), System.getenv("AXON_WEBHOOK_SECRET"));
+        }
+        server.metricsPerDatabase("true".equalsIgnoreCase(System.getenv("AXON_METRICS_PER_DATABASE")));
+        server.metricsRequireAuth("true".equalsIgnoreCase(System.getenv("AXON_METRICS_REQUIRE_AUTH")));
+        AxonLog.log("info", "server_started", Messages.get("server_started", BuildInfo.version(), bind, port, path));
         if (cluster != null) {
             System.out.println(Messages.get("server_cluster", config.clusterId(), config.nodeId(),
                 config.raftBind(), cluster.quorum(), cluster.members()));
