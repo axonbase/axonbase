@@ -43,6 +43,32 @@ class RpcScopeTest {
     }
 
     @Test
+    void viewerAutenticadoPorRpcFicaSomenteLeitura() {
+        Datastore ds = Datastore.memory();
+        ds.createDatabase("app", "main");
+        Session setup = Session.create();
+        setup.namespace("app");
+        setup.database("main");
+        ds.execute("CREATE itens:1 SET v = 1", setup, null);
+        ds.authCatalog().defineUser("visao", com.axonbase.core.security.AuthCatalog.Scope.DATABASE, "app", "main",
+            "senha", java.util.List.of("viewer"), java.util.List.of());
+        AuthService auth = new AuthService("secret", new UserStore(ds.authCatalog()));
+        RpcDispatcher rpc = new RpcDispatcher(ds, auth, true);
+        Session session = Session.create();
+        session.namespace("app");
+        session.database("main");
+        String signin = rpc.dispatch("{\"id\":1,\"method\":\"signin\",\"params\":[{\"user\":\"visao\",\"pass\":\"senha\"}]}", session);
+        String token = AxonJson.parseDocument(signin).asObject().get("result").asString();
+        rpc.dispatch("{\"id\":2,\"method\":\"authenticate\",\"params\":[\"" + token + "\"]}", session);
+
+        String denied = rpc.dispatch("{\"id\":3,\"method\":\"query\",\"params\":[\"DELETE itens:1\"]}", session);
+        assertTrue(denied.contains("error"), denied);
+        String kv = rpc.dispatch("{\"id\":4,\"method\":\"query\",\"params\":[\"RETURN kv::set('a', 1)\"]}", session);
+        assertTrue(kv.contains("error"), kv);
+        assertEquals(1, ds.execute("SELECT * FROM itens", setup, null).asArray().size());
+    }
+
+    @Test
     void rpcEspecializadoExigeAutenticacaoQuandoConfigurada() {
         Messages.setLanguage("pt-BR");
         Datastore ds = Datastore.memory();
