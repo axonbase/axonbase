@@ -738,7 +738,8 @@ public final class Datastore {
             || query.statements().stream().anyMatch(statement -> !isReadOnly(statement));
     }
 
-    private static boolean isReadOnly(Statement statement) {
+    /** Instrução que só lê (classificação por AST), usada no roteamento e na imposição de somente leitura. */
+    public static boolean isReadOnly(Statement statement) {
         return statement instanceof Statement.Select
             || statement instanceof Statement.Explain
             || statement instanceof Statement.Info
@@ -1265,6 +1266,12 @@ public final class Datastore {
         }
     }
 
+    private static void requireWritable(Session s) {
+        if (s.readOnly()) {
+            throw new AxonError(-32002, Messages.get("session_read_only"));
+        }
+    }
+
     /** Lee un valor KV. Devolve {@code NONE} cando non existe ou expirou. */
     public AxonValue kvGet(Session session, String ns, String db, String key) {
         Session s = session != null ? session : Session.create();
@@ -1284,6 +1291,7 @@ public final class Datastore {
     public AxonValue kvSet(Session session, String ns, String db, String key,
                            AxonValue value, Long ttlSeconds) {
         final Session s = session != null ? session : Session.create();
+        requireWritable(s);
         if (ns == null || ns.isBlank() || db == null || db.isBlank()
             || key == null || key.isBlank()) {
             throw AxonError.internal(Messages.get("kv_scope_key_required"));
@@ -1305,6 +1313,7 @@ public final class Datastore {
     /** Borra un valor KV e a súa metadata de expiración. Devolve se existía. */
     public boolean kvDel(Session session, String ns, String db, String key) {
         Session s = session != null ? session : Session.create();
+        requireWritable(s);
         return withKvWrite(s, () -> {
             KvBackend store = kvStore(s);
             boolean existed = store.delete(kvValueKey(ns, db, key));

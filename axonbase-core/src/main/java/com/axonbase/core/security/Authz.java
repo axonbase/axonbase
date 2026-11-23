@@ -65,6 +65,35 @@ public final class Authz {
         return best;
     }
 
+    /**
+     * Rebaixa o papel dos claims ao teto informado. Nunca eleva: papel NONE ou já
+     * igual/menor que o teto passa intacto. Devolve uma cópia com {@code roles} trocado.
+     */
+    public static AxonValue cap(AxonValue auth, Role cap) {
+        if (!authenticated(auth) || cap == null) {
+            return auth;
+        }
+        Role current = role(auth);
+        if (current == Role.NONE || current.compareTo(cap) <= 0) {
+            return auth;
+        }
+        java.util.Map<String, AxonValue> copy = new java.util.LinkedHashMap<>(auth.asObject());
+        copy.put("roles", AxonValue.str(cap.name().toLowerCase(Locale.ROOT)));
+        return AxonValue.object(copy);
+    }
+
+    /** O token pode operar no ns/db informado? ROOT tudo; NAMESPACE o mesmo ns; DATABASE o mesmo ns e db. */
+    public static boolean allows(AxonValue auth, String ns, String db) {
+        if (!authenticated(auth)) {
+            return true;
+        }
+        return switch (scope(auth)) {
+            case ROOT -> true;
+            case NAMESPACE -> ns != null && ns.equals(ns(auth));
+            case DATABASE -> ns != null && ns.equals(ns(auth)) && db != null && db.equals(db(auth));
+        };
+    }
+
     public static boolean atLeast(AxonValue auth, Role min) {
         return role(auth).compareTo(min) >= 0;
     }

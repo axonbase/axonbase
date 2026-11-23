@@ -318,6 +318,7 @@ public final class Executor {
 
     private AxonValue runStatement(Statement s) {
         authorize(s);
+        requireWritableIfNeeded(s);
         return switch (s) {
             case Statement.Use u -> runUse(u);
             case Statement.Let l -> runLet(l);
@@ -408,6 +409,17 @@ public final class Executor {
                 new Statement.DefineDatabaseLink(adl.name(), adl.url(), adl.ns(), adl.db(), adl.user(), adl.password()));
             case Statement.DropSaga ds -> runDropSaga(ds);
         };
+    }
+
+    /** Sessão somente leitura: só passam instruções de leitura (subconsultas e blocos também passam por aqui). */
+    private void requireWritableIfNeeded(Statement s) {
+        if (!session.readOnly() || Datastore.isReadOnly(s)
+            || s instanceof Statement.Let || s instanceof Statement.IfElse
+            || s instanceof Statement.ErrorStmt || s instanceof Statement.Savepoint
+            || s instanceof Statement.Release || s instanceof Statement.RollbackTo) {
+            return;
+        }
+        throw new com.axonbase.common.AxonError(-32002, Messages.get("session_read_only"));
     }
 
     private AxonValue runCreateJks(Statement.CreateJks jks) {
@@ -588,11 +600,17 @@ public final class Executor {
     // ------------------------------------------------------------------
 
     private AxonValue runUse(Statement.Use u) {
+        // O escopo do token vale também para o USE: calcula o destino antes de aplicar.
+        String ns = u.ns() != null ? literalIdent(u.ns()) : session.namespace();
+        String db = u.db() != null ? literalIdent(u.db()) : session.database();
+        if (!com.axonbase.core.security.Authz.allows(session.auth(), ns, db)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("rpc_scope_forbidden"));
+        }
         if (u.ns() != null) {
-            session.namespace(literalIdent(u.ns()));
+            session.namespace(ns);
         }
         if (u.db() != null) {
-            session.database(literalIdent(u.db()));
+            session.database(db);
         }
         return AxonValue.nul();
     }
