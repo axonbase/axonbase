@@ -154,6 +154,15 @@ final class AdminV1Servlet extends HttpServlet {
         if (get && head.equals("databases") && n == 4 && seg.get(3).equals("tables")) {
             return ok(tables(c, seg.get(1), seg.get(2)));
         }
+        if (get && head.equals("databases") && n == 6 && seg.get(3).equals("tables") && seg.get(5).equals("stats")) {
+            needScope(c, seg.get(1), seg.get(2), Authz.Role.VIEWER);
+            Database database = database(seg.get(1), seg.get(2));
+            Catalog.TableDef def = database.catalog().table(seg.get(4));
+            if (def == null) {
+                throw notFound();
+            }
+            return ok(TableStats.compute(database, def));
+        }
         if (head.equals("users")) {
             if (get && n == 1) {
                 needRoot(c, Authz.Role.VIEWER);
@@ -445,7 +454,7 @@ final class AdminV1Servlet extends HttpServlet {
         return AdminJson.of(out);
     }
 
-    private static String indexKind(Catalog.IndexDef i) {
+    static String indexKind(Catalog.IndexDef i) {
         if (i.vector()) {
             return "vector";
         }
