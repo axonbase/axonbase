@@ -163,4 +163,17 @@ class BackupStreamApiTest {
             assertTrue(a.ds.metaGet("x").isPresent());
         }
     }
+
+    @Test
+    void restoreEmClusterDa409MesmoComForce() throws Exception {
+        try (Node a = new Node("")) {
+            a.ds.metaPut("k1", "v".getBytes(StandardCharsets.UTF_8));
+            byte[] dump = a.export("?type=full", a.operator).body();
+            a.server.clusterStatus(() -> new com.axonbase.core.cluster.ClusterStatusProvider.Status("n1", "g", "n1",
+                "127.0.0.1:1", com.axonbase.core.cluster.ClusterRole.LEADER, 1, 1, 1, 1, 1));
+            HttpResponse<String> r = a.restore("?confirm=true&force=true", a.root, dump);
+            assertEquals(409, r.statusCode(), r.body());
+            assertTrue(a.ds.metaGet("k1").isPresent());
+        }
+    }
 }

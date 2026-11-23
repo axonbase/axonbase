@@ -205,4 +205,45 @@ public class S3SyncManagerTest {
             60_000L, 10, "", () -> 0L, () -> "x");
         assertFalse(noPwMgr.restoreFromS3(), "restore sem senha deve falhar");
     }
+
+    @Test
+    void retencaoPorCadeiaNaoApagaCompletoReferenciadoPorIncrementais() {
+        var store = new InMemoryBackupStore();
+        Datastore ds = Datastore.memory();
+        ds.createDatabase("test", "main");
+        // cadeia A: completo + 2 incrementais; cadeia B: completo + 1 incremental
+        String[] names = {"cluster-10000000-010100", "cluster-10000000-010101", "cluster-10000000-010102",
+            "cluster-10000000-010103", "cluster-10000000-010104"};
+        String[] types = {"full", "incremental", "incremental", "full", "incremental"};
+        for (int i = 0; i < names.length; i++) {
+            store.objects.put(names[i] + ".axbak", "x".getBytes());
+            ds.metaPut("backup|" + names[i] + ".axbak", ("1|" + types[i] + "|0").getBytes());
+        }
+        var stamp = new AtomicInteger(1);
+        // retenção 3: o novo incremental da cadeia B (3 itens) já cobre a retenção, então a cadeia A sai inteira
+        var mgr = new S3SyncManager(ds, store, "bucket", "", 60_000L, 3, "",
+            () -> 0L, () -> String.format("20000000-0202%02d", stamp.getAndIncrement()));
+        mgr.backupNow();
+        List<String> remaining = store.listObjects("bucket", "cluster-");
+        // o backup novo é completo (nada foi enviado antes por esta instância): cadeias B (2) + nova (1) = 3
+        assertEquals(3, remaining.size(), remaining.toString());
+        assertTrue(remaining.contains("cluster-10000000-010103.axbak"));
+        assertTrue(remaining.contains("cluster-10000000-010104.axbak"));
+        assertFalse(remaining.contains("cluster-10000000-010100.axbak"));
+    }
+
+    @Test
+    void retencaoPorCadeiaMantemCompletoQuandoIncrementaisMaisNovosDependemDele() {
+        var store = new InMemoryBackupStore();
+        Datastore ds = Datastore.memory();
+        ds.createDatabase("test", "main");
+        var mgr = new S3SyncManager(ds, store, "bucket", "", 60_000L, 2, "",
+            () -> 0L, () -> "x");
+        List<String> keys = List.of("a1", "a2", "a3", "a4");
+        for (String k : keys) {
+            ds.metaPut("backup|" + k, ("1|" + (k.equals("a1") ? "full" : "incremental") + "|0").getBytes());
+        }
+        // um completo seguido de 3 incrementais: retenção 2 não pode apagar o completo a1
+        assertEquals(List.of(), mgr.expiredByChains(keys, "a4", "incremental"));
+    }
 }
