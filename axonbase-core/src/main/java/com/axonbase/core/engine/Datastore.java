@@ -95,6 +95,25 @@ public final class Datastore {
         }
     }
 
+    /** Grava um valor de metadados do servidor (tokens de serviço, histórico de backup). */
+    public void metaPut(String key, byte[] value) {
+        backend.put("!meta|" + key, value);
+    }
+
+    public java.util.Optional<byte[]> metaGet(String key) {
+        return backend.get("!meta|" + key);
+    }
+
+    public void metaDelete(String key) {
+        backend.delete("!meta|" + key);
+    }
+
+    /** Lista as chaves de metadados com o prefixo, sem o marcador interno. */
+    public List<String> metaKeys(String prefix) {
+        return backend.keysWithPrefix("!meta|" + prefix).stream()
+            .map(k -> k.substring("!meta|".length())).toList();
+    }
+
     public static Datastore memory() {
         return new Datastore(new MemoryBackend());
     }

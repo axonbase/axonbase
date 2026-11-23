@@ -87,6 +87,9 @@ public final class AxonServer {
         this.requireAuth = requireAuth;
         this.config = config;
         this.trustStores = new TrustStoreRegistry();
+        if (auth != null) {
+            auth.serviceTokens().persistTo(ds);
+        }
         this.clusterStatus = com.axonbase.core.cluster.ClusterStatusProvider.Status::local;
     }
 
@@ -315,6 +318,24 @@ public final class AxonServer {
         return true;
     }
 
+    /** Exige o papel admin quando a autenticação está ligada (401 sem sessão, 403 sem papel). */
+    private boolean requireAdmin(Session session, HttpServletResponse resp) throws IOException {
+        if (!requireAuth) {
+            return false;
+        }
+        if (session.auth() == null) {
+            json(resp, 401, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_required")) + "\"}");
+            return true;
+        }
+        if (!com.axonbase.core.security.Authz.atLeast(session.auth(),
+            com.axonbase.core.security.Authz.Role.ADMIN)) {
+            json(resp, 403, "{\"code\":-32002,\"message\":\""
+                + esc(Messages.get("auth_role_required", "admin")) + "\"}");
+            return true;
+        }
+        return false;
+    }
+
     private boolean requireRoot(Session session, HttpServletResponse resp) throws IOException {
         if (!requireAuth || session.auth() == null || !session.auth().isObject()
             || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))) {
@@ -471,7 +492,7 @@ public final class AxonServer {
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             requests.incrementAndGet();
             Session s = withNames(req);
-            if (requireAuthenticated(s, resp)) {
+            if (requireAdmin(s, resp)) {
                 return;
             }
             var rt = clusterRuntime;
@@ -713,33 +734,11 @@ public final class AxonServer {
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             requests.incrementAndGet();
             Session s = withNames(req);
-            if (requireAuthenticated(s, resp)) {
+            if (requireAdmin(s, resp)) {
                 return;
             }
-            var status = clusterStatus.status();
-            if (!status.isLeader()) {
-                if (!status.leaderAddress().isEmpty()) {
-                    resp.setHeader("Location", "http://" + status.leaderAddress() + req.getRequestURI());
-                    resp.setStatus(307);
-                } else {
-                    json(resp, 503, "{\"status\":\"ERR\",\"kind\":\"NOT_LEADER\",\"detail\":\"" + esc(Messages.get("http_shard_leader_required")) + "\"}");
-                }
-                return;
-            }
-            AxonValue body = AxonJson.parseDocument(readBody(req));
-            if (!body.isObject()) {
-                json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(Messages.get("http_body_object_required")) + "\"}");
-                return;
-            }
-            var obj = body.asObject();
-            String ns = obj.containsKey("ns") ? obj.get("ns").asString() : "";
-            String db = obj.containsKey("db") ? obj.get("db").asString() : "";
-            String target = obj.containsKey("to") ? obj.get("to").asString() : "";
-            if (ns.isEmpty() || db.isEmpty() || target.isEmpty()) {
-                json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(Messages.get("http_shard_fields_required")) + "\"}");
-                return;
-            }
-            json(resp, 200, "{\"status\":\"OK\",\"detail\":\"shard move iniciado\",\"ns\":\"" + esc(ns) + "\",\"db\":\"" + esc(db) + "\",\"to\":\"" + esc(target) + "\"}");
+            json(resp, 501, "{\"error\":{\"code\":\"NOT_IMPLEMENTED\",\"message\":\""
+                + esc(Messages.get("http_shard_not_implemented")) + "\"}}");
         }
     }
 
