@@ -137,7 +137,9 @@ class EventsTest {
         HttpServer hook = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         hook.createContext("/hook", ex -> {
             String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            received.add(new String[] {body, ex.getRequestHeaders().getFirst("X-Axon-Signature")});
+            received.add(new String[] {body, ex.getRequestHeaders().getFirst("X-Axon-Signature"),
+                ex.getRequestHeaders().getFirst("X-Axon-Timestamp"),
+                ex.getRequestHeaders().getFirst("X-Axon-Signature-V2")});
             ex.sendResponseHeaders(204, -1);
             ex.close();
         });
@@ -153,6 +155,11 @@ class EventsTest {
             mac.init(new SecretKeySpec("segredo".getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
             String expected = HexFormat.of().formatHex(mac.doFinal(got[0].getBytes(StandardCharsets.UTF_8)));
             assertEquals("sha256=" + expected, got[1]);
+            // assinatura nova cobre "timestamp.corpo"
+            assertNotNull(got[2]);
+            String expectedV2 = HexFormat.of().formatHex(
+                mac.doFinal((got[2] + "." + got[0]).getBytes(StandardCharsets.UTF_8)));
+            assertEquals("sha256=" + expectedV2, got[3]);
             assertEquals("backup.failed", AxonJson.parseDocument(got[0]).asObject().get("type").asString());
         } finally {
             server.stop();
