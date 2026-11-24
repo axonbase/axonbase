@@ -192,7 +192,7 @@ public final class AuthService {
         }
         Map<String, Object> claims;
         try {
-            claims = token == null ? null : Jwt.verify(secret, token);
+            claims = token == null ? null : verifiedClaims(token);
         } catch (RuntimeException e) {
             return null;
         }
@@ -211,6 +211,30 @@ public final class AuthService {
         }
         return claims;
     }
+
+    /**
+     * Verifica a assinatura do JWT, guardando o resultado por token: a mesma sessão manda o mesmo token em milhares de
+     * requisições e o HMAC mais a leitura do JSON eram refeitos em cada uma (duas vezes, com o filtro de log). Só a
+     * assinatura é guardada; expiração, revogação e escopo seguem sendo conferidos a cada chamada em {@link #claims}.
+     */
+    private Map<String, Object> verifiedClaims(String token) {
+        Map<String, Object> hit = jwtCache.get(token);
+        if (hit != null) {
+            return hit;
+        }
+        Map<String, Object> verified = Jwt.verify(secret, token);
+        if (verified != null) {
+            if (jwtCache.size() >= JWT_CACHE_MAX) {
+                jwtCache.clear();
+            }
+            jwtCache.put(token, Map.copyOf(verified));
+        }
+        return verified;
+    }
+
+    private static final int JWT_CACHE_MAX = 4096;
+    private final java.util.concurrent.ConcurrentHashMap<String, Map<String, Object>> jwtCache =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     private Map<String, Object> serviceClaims(String token) {
         ServiceTokenStore.Info info = serviceTokens.verify(token);
