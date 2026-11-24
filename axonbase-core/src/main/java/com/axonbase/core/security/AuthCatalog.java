@@ -109,7 +109,23 @@ public final class AuthCatalog {
         String key = userKey(name, Scope.ROOT, null, null);
         if (!users.containsKey(key)) {
             defineUser(name, Scope.ROOT, null, null, password, List.of("OWNER"), List.of());
+            User created = users.get(key);
+            if (created != null) {
+                bootstrap.put(key, created);
+            }
         }
+    }
+
+    /**
+     * Usuários criados no arranque do servidor ({@link #ensureUser}). Eles não fazem parte do plano de controle,
+     * então quem reconstrói o catálogo a partir dele ({@link #clear()}) precisa devolvê-los com
+     * {@link #restoreBootstrap()}; sem isso ninguém consegue abrir uma nova sessão até o servidor reiniciar.
+     */
+    private final Map<String, User> bootstrap = new ConcurrentHashMap<>();
+
+    /** Devolve os usuários de arranque que o plano de controle não redefiniu (a definição persistida prevalece). */
+    public void restoreBootstrap() {
+        bootstrap.forEach(users::putIfAbsent);
     }
 
     /** Procura a identidade mais específica que se aplique ao ns/db indicado. */

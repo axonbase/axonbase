@@ -701,6 +701,7 @@ public final class Datastore {
             for (ControlCommand command : snapshot.commands()) {
                 replay(command);
             }
+            authCatalog.restoreBootstrap();
         } finally {
             replaying.set(false);
         }
