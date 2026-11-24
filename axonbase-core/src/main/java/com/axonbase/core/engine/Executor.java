@@ -5367,7 +5367,7 @@ return score;
             case GE -> AxonValue.bool(l.compareTo(r) >= 0);
             case ADD -> add(l, r);
             case SUB -> sub(l, r);
-            case MUL -> AxonValue.num(num(l, r, 1).multiply(num(r, l, 1)));
+            case MUL -> Arith.mul(l, r);
             case DIV -> divide(l, r);
             case MOD -> mod(l, r);
             case POW -> pow(l, r);
@@ -5513,34 +5513,28 @@ return score;
             return AxonValue.datetime(r.asInstant().plusMillis(l.asDuration().millis()));
         }
         if (l.isString() || r.isString()) {
-            return AxonValue.str(l.toString() + r.toString());
+            return Arith.concat(l, r);
         }
-        return AxonValue.num(num(l, r, 0).add(num(r, l, 0)));
+        return Arith.add(l, r);
     }
 
     private AxonValue sub(AxonValue l, AxonValue r) {
         if (l.isDatetime() && r.isDuration()) {
             return AxonValue.datetime(l.asInstant().minusMillis(r.asDuration().millis()));
         }
-        return AxonValue.num(num(l, r, 0).subtract(num(r, l, 0)));
+        return Arith.sub(l, r);
     }
 
-    /** Escala e arredondamento da divisão e do avg, os mesmos de math::mean. */
-    private static final int DIVISION_SCALE = 10;
-
     private AxonValue divide(AxonValue l, AxonValue r) {
-        if (num(r, l, 1).signum() == 0) {
-            throw AxonError.internal(Messages.get("stmt_division_by_zero"));
-        }
-        return AxonValue.num(num(l, r, 0).divide(num(r, l, 1), DIVISION_SCALE, java.math.RoundingMode.HALF_UP).stripTrailingZeros());
+        return Arith.div(l, r);
     }
 
     private AxonValue mod(AxonValue l, AxonValue r) {
-        return AxonValue.num(num(l, r, 0).remainder(num(r, l, 1)));
+        return Arith.mod(l, r);
     }
 
     private AxonValue pow(AxonValue l, AxonValue r) {
-        return AxonValue.num(Math.pow(l.asDouble(), r.asDouble()));
+        return Arith.pow(l, r);
     }
 
     private java.math.BigDecimal num(AxonValue v, AxonValue fallback, long def) {
@@ -5557,7 +5551,7 @@ return score;
         AxonValue operand = eval(u.operand());
         return switch (u.op()) {
             case NOT -> AxonValue.bool(!truthy(operand));
-            case NEG -> AxonValue.num(num(operand, null, 0).negate());
+            case NEG -> Arith.neg(operand);
             case POS -> operand;
         };
     }
@@ -5566,7 +5560,7 @@ return score;
         AxonValue operand = evalExprInDoc(u.operand(), doc);
         return switch (u.op()) {
             case NOT -> AxonValue.bool(!truthy(operand));
-            case NEG -> AxonValue.num(num(operand, null, 0).negate());
+            case NEG -> Arith.neg(operand);
             case POS -> operand;
         };
     }

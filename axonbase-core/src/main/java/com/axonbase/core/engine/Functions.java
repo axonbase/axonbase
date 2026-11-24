@@ -90,25 +90,26 @@ public final class Functions {
             // ----------------------------------------------------------
             // math
             // ----------------------------------------------------------
-            case "math::abs" -> AxonValue.num(dec(arg(args, 0)).abs());
+            case "math::abs" -> arg(args, 0) != null && arg(args, 0).isNumber()
+                ? Arith.abs(arg(args, 0)) : AxonValue.num(dec(arg(args, 0)).abs());
             case "math::ceil" -> AxonValue.num((long) Math.ceil(dbl(arg(args, 0))));
             case "math::floor" -> AxonValue.num((long) Math.floor(dbl(arg(args, 0))));
             case "math::round" -> AxonValue.num(Math.round(dbl(arg(args, 0))));
             case "math::fixed" -> AxonValue.num(dec(arg(args, 0))
                 .setScale((int) lng(arg(args, 1)), RoundingMode.HALF_UP));
-            case "math::sqrt" -> AxonValue.num(Math.sqrt(dbl(arg(args, 0))));
-            case "math::pow" -> AxonValue.num(Math.pow(dbl(arg(args, 0)), dbl(arg(args, 1))));
-            case "math::ln" -> AxonValue.num(Math.log(dbl(arg(args, 0))));
-            case "math::log" -> AxonValue.num(Math.log(dbl(arg(args, 0))) / Math.log(dbl(arg(args, 1))));
-            case "math::log10" -> AxonValue.num(Math.log10(dbl(arg(args, 0))));
-            case "math::log2" -> AxonValue.num(Math.log(dbl(arg(args, 0))) / Math.log(2));
-            case "math::exp" -> AxonValue.num(Math.exp(dbl(arg(args, 0))));
+            case "math::sqrt" -> Arith.finite("math::sqrt", Math.sqrt(dbl(arg(args, 0))));
+            case "math::pow" -> Arith.finite("math::pow", Math.pow(dbl(arg(args, 0)), dbl(arg(args, 1))));
+            case "math::ln" -> Arith.finite("math::ln", Math.log(dbl(arg(args, 0))));
+            case "math::log" -> Arith.finite("math::log", Math.log(dbl(arg(args, 0))) / Math.log(dbl(arg(args, 1))));
+            case "math::log10" -> Arith.finite("math::log10", Math.log10(dbl(arg(args, 0))));
+            case "math::log2" -> Arith.finite("math::log2", Math.log(dbl(arg(args, 0))) / Math.log(2));
+            case "math::exp" -> Arith.finite("math::exp", Math.exp(dbl(arg(args, 0))));
             case "math::sign" -> AxonValue.num(dec(arg(args, 0)).signum());
             case "math::clamp" -> AxonValue.num(Math.max(dbl(arg(args, 1)),
                 Math.min(dbl(arg(args, 2)), dbl(arg(args, 0)))));
             case "math::min" -> reduceNumbers(args, true);
             case "math::max" -> reduceNumbers(args, false);
-            case "math::sum" -> AxonValue.num(sumOf(numbers(args)));
+            case "math::sum" -> sumOf(numbers(args));
             case "math::mean" -> mean(numbers(args));
             case "math::median" -> median(numbers(args));
             case "math::product" -> product(numbers(args));
@@ -117,7 +118,7 @@ public final class Functions {
             // agregações genéricas sobre coleções
             // ----------------------------------------------------------
             case "count" -> AxonValue.num(args.isEmpty() ? 0 : items(arg(args, 0)).size());
-            case "sum" -> AxonValue.num(sumOf(numbers(args)));
+            case "sum" -> sumOf(numbers(args));
             case "avg" -> mean(numbers(args));
             case "min" -> reduceNumbers(args, true);
             case "max" -> reduceNumbers(args, false);
@@ -439,14 +440,12 @@ public final class Functions {
     // Auxiliares numéricos
     // ------------------------------------------------------------------
 
-    private static BigDecimal sumOf(List<AxonValue> values) {
-        BigDecimal total = BigDecimal.ZERO;
+    private static AxonValue sumOf(List<AxonValue> values) {
+        Arith.Sum total = new Arith.Sum();
         for (AxonValue v : values) {
-            if (v.isNumber()) {
-                total = total.add(v.asDecimal());
-            }
+            total.add(v);
         }
-        return total;
+        return total.result();
     }
 
     private static AxonValue mean(List<AxonValue> values) {
@@ -454,7 +453,7 @@ public final class Functions {
         if (nums.isEmpty()) {
             return AxonValue.nul();
         }
-        return AxonValue.num(sumOf(nums).divide(BigDecimal.valueOf(nums.size()), 10, RoundingMode.HALF_UP)
+        return Arith.compact(sumOf(nums).asDecimal().divide(BigDecimal.valueOf(nums.size()), 10, RoundingMode.HALF_UP)
             .stripTrailingZeros());
     }
 
@@ -468,20 +467,13 @@ public final class Functions {
         if (nums.size() % 2 == 1) {
             return nums.get(mid);
         }
-        return AxonValue.num(nums.get(mid - 1).asDecimal().add(nums.get(mid).asDecimal())
+        return Arith.compact(nums.get(mid - 1).asDecimal().add(nums.get(mid).asDecimal())
             .divide(BigDecimal.valueOf(2), 10, RoundingMode.HALF_UP).stripTrailingZeros());
     }
 
     private static AxonValue product(List<AxonValue> values) {
-        BigDecimal total = BigDecimal.ONE;
-        boolean any = false;
-        for (AxonValue v : values) {
-            if (v.isNumber()) {
-                total = total.multiply(v.asDecimal());
-                any = true;
-            }
-        }
-        return any ? AxonValue.num(total) : AxonValue.nul();
+        List<AxonValue> nums = values.stream().filter(AxonValue::isNumber).toList();
+        return nums.isEmpty() ? AxonValue.nul() : Arith.product(nums);
     }
 
     private static AxonValue reduceNumbers(List<AxonValue> args, boolean minimum) {

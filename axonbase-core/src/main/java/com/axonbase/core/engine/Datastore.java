@@ -694,6 +694,7 @@ public final class Datastore {
      */
     private void replayControl() {
         ControlSnapshot snapshot = controlState.snapshot();
+        catalogRebuilds.incrementAndGet();
         replaying.set(true);
         try {
             namespaces.clear();
@@ -701,6 +702,7 @@ public final class Datastore {
             for (ControlCommand command : snapshot.commands()) {
                 replay(command);
             }
+            authCatalog.restoreBootstrap();
         } finally {
             replaying.set(false);
         }
@@ -1278,6 +1280,7 @@ public final class Datastore {
         // de um buffer para que o snapshot de controle entre no batch replicado.
         KvBackend base = session.namespace() == null || session.database() == null
             ? backend : requireDatabase(session).records();
+        session.txControlVersion(controlState.version());
         session.tx(new Transaction(base));
     }
 
@@ -1319,17 +1322,30 @@ public final class Datastore {
 
     public void cancelSession(Session session) {
         Transaction tx = session.tx();
+        long started = session.txControlVersion();
         if (tx != null) {
             tx.cancel();
             session.tx(null);
         }
+        session.txControlVersion(-1);
         session.discardLive();
         // DDL e auth foram aplicados em memória para a própria sessão; se o batch não
-        // confirmou, o plano de controle volta ao que está durável no storage.
+        // confirmou, o plano de controle volta ao que está durável no storage. Reconstruir reexecuta todo o
+        // plano de controle de todos os bancos, então só se faz quando houve DDL desde o começo da transação.
         synchronized (controlLock) {
+            if (tx != null && started >= 0 && started == controlState.version()) {
+                return;
+            }
             controlState.restore(controlStore.load());
             replayControl();
         }
+    }
+
+    private final java.util.concurrent.atomic.AtomicLong catalogRebuilds = new java.util.concurrent.atomic.AtomicLong();
+
+    /** Quantas vezes o catálogo foi reconstruído a partir do plano de controle (testes e diagnóstico). */
+    public long catalogRebuilds() {
+        return catalogRebuilds.get();
     }
 
     // ------------------------------------------------------------------
