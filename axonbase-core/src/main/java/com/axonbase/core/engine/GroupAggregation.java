@@ -343,23 +343,21 @@ final class GroupAggregation {
     }
 
     private static final class Sum implements State {
-        private BigDecimal sum = BigDecimal.ZERO;
+        private final Arith.Sum sum = new Arith.Sum();
 
         @Override
         public void add(AxonValue value) {
-            if (value != null && value.isNumber()) {
-                sum = sum.add(value.asDecimal());
-            }
+            sum.add(value);
         }
 
         @Override
         public void merge(State other) {
-            sum = sum.add(((Sum) other).sum);
+            sum.merge(((Sum) other).sum);
         }
 
         @Override
         public AxonValue result() {
-            return AxonValue.num(sum);
+            return sum.result();
         }
     }
 
@@ -384,7 +382,7 @@ final class GroupAggregation {
         @Override
         public AxonValue result() {
             return count == 0 ? AxonValue.nul()
-                : AxonValue.num(sum.divide(BigDecimal.valueOf(count), AVG_SCALE, RoundingMode.HALF_UP).stripTrailingZeros());
+                : Arith.compact(sum.divide(BigDecimal.valueOf(count), AVG_SCALE, RoundingMode.HALF_UP));
         }
     }
 
