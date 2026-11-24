@@ -273,6 +273,23 @@ public final class Render {
                 }
             }
             case Statement.DropEmbedding de -> sb.append("DROP EMBEDDING ").append(de.name());
+            case Statement.CreateFunction f -> program(sb, "FUNCTION", f.orReplace(), f.name(), f.params(), f.returns(),
+                f.definer(), f.body(), true);
+            case Statement.CreateProcedure f -> program(sb, "PROCEDURE", f.orReplace(), f.name(), f.params(),
+                f.returns(), f.definer(), f.body(), true);
+            case Statement.CreatePackage f -> program(sb, "PACKAGE", f.orReplace(), f.name(), List.of(), null,
+                f.definer(), f.body(), false);
+            case Statement.DropProgram d -> sb.append("DROP ").append(d.kind()).append(' ').append(d.name());
+            case Statement.CallProgram c -> {
+                sb.append("CALL ").append(c.name()).append('(');
+                for (int i = 0; i < c.args().size(); i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(expr(c.args().get(i)));
+                }
+                sb.append(')');
+            }
             case Statement.Reembed r -> {
                 sb.append("REEMBED TABLE ").append(r.table());
                 if (r.field() != null) {
@@ -673,6 +690,36 @@ public final class Render {
             default -> {
             }
         }
+    }
+
+    private static void program(StringBuilder sb, String kind, boolean orReplace, String name,
+                                List<Statement.ProgramParam> params, String returns, boolean definer, String body,
+                                boolean withParams) {
+        sb.append("CREATE ").append(orReplace ? "OR REPLACE " : "").append(kind).append(' ').append(name);
+        if (withParams) {
+            sb.append('(');
+            for (int i = 0; i < params.size(); i++) {
+                Statement.ProgramParam p = params.get(i);
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(p.name());
+                if (p.type() != null) {
+                    sb.append(' ').append(p.type());
+                }
+                if (p.defaultExpr() != null) {
+                    sb.append(" = ").append(expr(p.defaultExpr()));
+                }
+            }
+            sb.append(')');
+        }
+        if (returns != null) {
+            sb.append(" RETURNS ").append(returns);
+        }
+        if (definer) {
+            sb.append(" SECURITY DEFINER");
+        }
+        sb.append(" AS ").append(ProgramText.quote(body));
     }
 
     public static String expr(Expr e) {

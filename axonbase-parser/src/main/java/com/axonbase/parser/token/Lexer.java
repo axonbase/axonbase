@@ -241,7 +241,38 @@ public final class Lexer {
         tokens.add(new Token(TokenType.IDENT, content, rawStart, pos, content));
     }
 
+    /**
+     * Texto entre delimitadores de dólar ({@code $$ ... $$} ou {@code $tag$ ... $tag$}, como no PostgreSQL). O
+     * conteúdo é cru: aspas, quebras de linha, barras e {@code --} valem como texto. Devolve {@code false} se o
+     * cifrão não abre um delimitador (então é um parâmetro, {@code $nome}).
+     */
+    private boolean dollarQuoted() {
+        int open = pos + 1;
+        while (open < src.length() && (Character.isLetterOrDigit(src.charAt(open)) || src.charAt(open) == '_')) {
+            open++;
+        }
+        if (open >= src.length() || src.charAt(open) != '$') {
+            return false;
+        }
+        if (open > pos + 1 && Character.isDigit(src.charAt(pos + 1))) {
+            return false;
+        }
+        String delimiter = src.substring(pos, open + 1);
+        int end = src.indexOf(delimiter, open + 1);
+        if (end < 0) {
+            throw error(Messages.get("lexer_unterminated_string"));
+        }
+        int rawStart = pos;
+        String content = src.substring(open + 1, end);
+        pos = end + delimiter.length();
+        tokens.add(new Token(TokenType.STRING, src.substring(rawStart, pos), rawStart, pos, content));
+        return true;
+    }
+
     private void param() {
+        if (dollarQuoted()) {
+            return;
+        }
         pos++;
         int start = pos;
         while (pos < src.length() && (Character.isAlphabetic(src.charAt(pos))
