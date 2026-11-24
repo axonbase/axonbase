@@ -2922,6 +2922,11 @@ return score;
         if (from.isRecordId() && to.isRecordId()) {
             AxonValue.RecordId fromR = from.asRecordId();
             AxonValue.RecordId toR = to.asRecordId();
+            // o tipo da aresta passa a existir no catálogo (como DEFINE TABLE tipo SCHEMALESS), que é por onde
+            // INFO FOR DATABASE e a página Relations graph do Enterprise descobrem as arestas de um banco
+            if (Datastore.PLAIN_NAME.matcher(kind).matches()) {
+                ensureTable(db, kind);
+            }
             persistEdge(db, fromR, kind, toR);
         }
         Map<String, AxonValue> edge = new LinkedHashMap<>();
