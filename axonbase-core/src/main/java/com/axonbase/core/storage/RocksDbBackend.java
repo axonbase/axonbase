@@ -2,16 +2,21 @@ package com.axonbase.core.storage;
 
 import com.axonbase.common.Messages;
 
+import org.rocksdb.BlockBasedTableConfig;
+import org.rocksdb.BloomFilter;
 import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.CompressionType;
 import org.rocksdb.DBOptions;
-import org.rocksdb.FlushOptions;
+import org.rocksdb.LRUCache;
 import org.rocksdb.Options;
+import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.Slice;
+import org.rocksdb.Snapshot;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 
@@ -19,38 +24,114 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Backend persistente baseado em RocksDB (LSM-tree) que implementa
- * {@link VersionedKvBackend} con column families separadas para datos
- * e versións, e commits OCC (Optimistic Concurrency Control) cun
- * {@link WriteBatch} atómico.
+ * Backend persistente baseado em RocksDB (LSM-tree) que implementa {@link VersionedKvBackend} com column
+ * families separadas para dados e versões.
  *
- * <p>Deseñado para soportar centos de millóns de rexistros grazas ó
- * LSM-tree maduro de RocksDB, compactación leveled, bloom filters e
- * compresión ZSTD. A interface {@code prefix_extractor} pode activarse
- * nunha futura optimización para acelerar {@link #keysWithPrefix(String)}.</p>
+ * <p>Concorrência: não há monitor global. Leituras e varreduras não travam (o iterador do RocksDB enxerga uma
+ * visão estável desde que é criado). Cada escrita grava valor e versão num único {@link WriteBatch} atômico.
+ * A verificação de versão do commit otimista e a atribuição de versão por chave usam travas por faixa de chave
+ * (striped locks), sempre adquiridas em ordem crescente para evitar deadlock. Um commit que varreu prefixos
+ * (detecção de leitura fantasma) pega a trava exclusiva do conjunto; os demais entram em modo compartilhado.</p>
+ *
+ * <p>Durabilidade: o WAL (write-ahead log) fica sempre ligado. {@link SyncMode} escolhe quando ele é
+ * sincronizado em disco; veja a variável opcional {@code AXON_STORAGE_SYNC}.</p>
  */
 public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
+    /**
+     * Quando o WAL é sincronizado (fsync). O WAL é gravado em todos os modos, então um processo que cai não
+     * perde escritas já confirmadas; o modo só decide a janela de perda numa queda do sistema operacional ou
+     * da energia.
+     */
+    public enum SyncMode {
+        /** fsync em cada escrita (agrupado entre escritores concorrentes pelo RocksDB). Janela de perda zero. */
+        ALWAYS,
+        /** fsync em segundo plano a cada 1 s. Padrão: numa queda do sistema operacional perde, no máximo, esse intervalo. */
+        BATCH,
+        /** Sem fsync periódico: o sistema operacional decide quando descarrega. */
+        OFF;
+
+        /** Lê {@code AXON_STORAGE_SYNC} (ou a propriedade {@code axon.storage.sync}); padrão {@link #BATCH}. */
+        public static SyncMode fromEnvironment() {
+            String raw = System.getenv("AXON_STORAGE_SYNC");
+            if (raw == null || raw.isBlank()) {
+                raw = System.getProperty("axon.storage.sync");
+            }
+            if (raw == null || raw.isBlank()) {
+                return BATCH;
+            }
+            try {
+                return valueOf(raw.trim().toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException unknown) {
+                return BATCH;
+            }
+        }
+    }
+
     private static final String DATA_CF = "data";
     private static final String VERSIONS_CF = "versions";
+    private static final int STRIPES = 1024;
+    private static final long BATCH_SYNC_INTERVAL_MS = 1000L;
 
     private final RocksDB db;
     private final ColumnFamilyHandle dataHandle;
     private final ColumnFamilyHandle versionsHandle;
+    private final SyncMode syncMode;
+    private final WriteOptions writeOptions;
+    private final DBOptions dbOptions;
+    private final ColumnFamilyOptions cfOptions;
+    private final LRUCache blockCache;
+    private final BloomFilter bloom;
+
+    /** Último número de versão atribuído. Só muda dentro de {@link #versionGate}. */
     private final AtomicLong clock = new AtomicLong();
+    private final Object versionGate = new Object();
+    /** Primeira versão de cada lote ainda não gravado: a marca d'água de backup não passa dela. */
+    private final TreeSet<Long> inFlight = new TreeSet<>();
+
+    private final ReentrantLock[] stripes = new ReentrantLock[STRIPES];
+    private final ReentrantReadWriteLock rangeLock = new ReentrantReadWriteLock();
+
+    private final AtomicBoolean dirty = new AtomicBoolean();
+    private volatile boolean closed;
+    private Thread syncThread;
 
     public RocksDbBackend(String directory) {
-        this(directory, defaultDbOptions());
+        this(directory, SyncMode.fromEnvironment());
+    }
+
+    public RocksDbBackend(String directory, SyncMode syncMode) {
+        this(directory, null, syncMode);
     }
 
     RocksDbBackend(String directory, DBOptions dbOpts) {
+        this(directory, dbOpts, SyncMode.fromEnvironment());
+    }
+
+    private RocksDbBackend(String directory, DBOptions dbOpts, SyncMode syncMode) {
+        for (int i = 0; i < STRIPES; i++) {
+            stripes[i] = new ReentrantLock();
+        }
+        this.syncMode = syncMode;
+        this.dbOptions = dbOpts != null ? dbOpts : defaultDbOptions();
+        long budget = memoryBudget();
+        this.blockCache = new LRUCache(budget / 2);
+        this.bloom = new BloomFilter(10, false);
+        this.cfOptions = defaultCfOptions(budget, blockCache, bloom);
+        this.writeOptions = new WriteOptions().setSync(syncMode == SyncMode.ALWAYS);
         try {
             Path dir = Path.of(directory);
             boolean exists = Files.exists(dir.resolve("IDENTITY"));
@@ -59,7 +140,6 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             }
 
             String pathStr = dir.toAbsolutePath().toString();
-            ColumnFamilyOptions cfOpts = defaultCfOptions();
 
             if (exists) {
                 List<byte[]> cfNames;
@@ -68,22 +148,22 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 }
                 List<ColumnFamilyDescriptor> cfDescs = new ArrayList<>(cfNames.size());
                 for (byte[] name : cfNames) {
-                    cfDescs.add(new ColumnFamilyDescriptor(name, cfOpts));
+                    cfDescs.add(new ColumnFamilyDescriptor(name, cfOptions));
                 }
                 List<ColumnFamilyHandle> handles = new ArrayList<>(cfNames.size());
-                this.db = RocksDB.open(dbOpts, pathStr, cfDescs, handles);
+                this.db = RocksDB.open(this.dbOptions, pathStr, cfDescs, handles);
                 this.dataHandle = findHandle(handles, cfNames, DATA_CF);
                 this.versionsHandle = findHandle(handles, cfNames, VERSIONS_CF);
             } else {
                 List<ColumnFamilyDescriptor> bootstrap = List.of(
-                    new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOpts));
+                    new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions));
                 List<ColumnFamilyHandle> tmp = new ArrayList<>(1);
-                this.db = RocksDB.open(dbOpts, pathStr, bootstrap, tmp);
+                this.db = RocksDB.open(this.dbOptions, pathStr, bootstrap, tmp);
                 ColumnFamilyHandle def = tmp.get(0);
                 this.dataHandle = db.createColumnFamily(
-                    new ColumnFamilyDescriptor(DATA_CF.getBytes(StandardCharsets.UTF_8), cfOpts));
+                    new ColumnFamilyDescriptor(DATA_CF.getBytes(StandardCharsets.UTF_8), cfOptions));
                 this.versionsHandle = db.createColumnFamily(
-                    new ColumnFamilyDescriptor(VERSIONS_CF.getBytes(StandardCharsets.UTF_8), cfOpts));
+                    new ColumnFamilyDescriptor(VERSIONS_CF.getBytes(StandardCharsets.UTF_8), cfOptions));
                 def.close();
             }
             // O contador de versão não é gravado. O número de sequência do RocksDB é monotônico entre
@@ -93,21 +173,54 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         } catch (Exception e) {
             throw new RuntimeException(Messages.get("rocksdb_open_failed", directory), e);
         }
+        if (syncMode == SyncMode.BATCH) {
+            startSyncThread();
+        }
     }
 
-    // ---- options factory ----
+    // ---- options factory (auto-ajuste pelo hardware/container) ----
 
     private static DBOptions defaultDbOptions() {
+        int cores = Math.max(2, Runtime.getRuntime().availableProcessors());
         return new DBOptions()
             .setCreateIfMissing(true)
-            .setIncreaseParallelism(Runtime.getRuntime().availableProcessors())
-            .setMaxBackgroundJobs(Runtime.getRuntime().availableProcessors());
+            .setIncreaseParallelism(cores)
+            .setMaxBackgroundJobs(cores)
+            .setEnablePipelinedWrite(true)
+            .setBytesPerSync(1L << 20)
+            .setWalBytesPerSync(1L << 20);
     }
 
-    private static ColumnFamilyOptions defaultCfOptions() {
+    /** Memória que o RocksDB pode usar (cache de blocos e write buffers): 10% da memória visível, entre 128 MB e 2 GB. */
+    static long memoryBudget() {
+        long total = 4L << 30;
+        try {
+            if (java.lang.management.ManagementFactory.getOperatingSystemMXBean()
+                instanceof com.sun.management.OperatingSystemMXBean os) {
+                total = os.getTotalMemorySize();
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            // sem a extensão do JDK, fica o padrão
+        }
+        return Math.max(128L << 20, Math.min(2L << 30, total / 10));
+    }
+
+    private static ColumnFamilyOptions defaultCfOptions(long budget, LRUCache cache, BloomFilter bloom) {
+        long writeBuffer = Math.max(16L << 20, Math.min(128L << 20, budget / 12));
+        BlockBasedTableConfig table = new BlockBasedTableConfig()
+            .setBlockCache(cache)
+            .setFilterPolicy(bloom)
+            .setWholeKeyFiltering(true)
+            .setCacheIndexAndFilterBlocks(true)
+            .setPinL0FilterAndIndexBlocksInCache(true)
+            .setBlockSize(16 * 1024);
         return new ColumnFamilyOptions()
             .setLevelCompactionDynamicLevelBytes(true)
-            .setCompressionType(CompressionType.ZSTD_COMPRESSION);
+            .setCompressionType(CompressionType.LZ4_COMPRESSION)
+            .setBottommostCompressionType(CompressionType.ZSTD_COMPRESSION)
+            .setWriteBufferSize(writeBuffer)
+            .setMaxWriteBufferNumber(3)
+            .setTableFormatConfig(table);
     }
 
     private static ColumnFamilyHandle findHandle(List<ColumnFamilyHandle> handles,
@@ -121,119 +234,341 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         throw new IllegalStateException(Messages.get("rocksdb_column_family_missing", target));
     }
 
+    private void startSyncThread() {
+        syncThread = new Thread(() -> {
+            while (!closed) {
+                try {
+                    Thread.sleep(BATCH_SYNC_INTERVAL_MS);
+                } catch (InterruptedException interrupted) {
+                    return;
+                }
+                if (dirty.compareAndSet(true, false)) {
+                    try {
+                        db.syncWal();
+                    } catch (RocksDBException | RuntimeException e) {
+                        dirty.set(true);
+                    }
+                }
+            }
+        }, "axon-wal-sync");
+        syncThread.setDaemon(true);
+        syncThread.start();
+    }
+
+    // ---- leituras (sem trava) ----
+
     @Override
     public Optional<byte[]> get(String key) {
         try {
-            byte[] v = db.get(dataHandle, key.getBytes(StandardCharsets.UTF_8));
+            byte[] v = db.get(dataHandle, utf8(key));
             return v == null ? Optional.empty() : Optional.of(v);
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
         }
     }
 
+    /** Valor e versão da mesma foto do banco: um commit concorrente não aparece pela metade. */
     @Override
-    public synchronized void put(String key, byte[] value) {
-        try {
-            byte[] raw = key.getBytes(StandardCharsets.UTF_8);
-            db.put(dataHandle, raw, value);
-            db.put(versionsHandle, raw, longToBytes(clock.incrementAndGet()));
-        } catch (RocksDBException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @Override
-    public synchronized boolean putIfAbsent(String key, byte[] value) {
-        try {
-            byte[] raw = key.getBytes(StandardCharsets.UTF_8);
-            if (db.get(dataHandle, raw) != null) {
-                return false;
+    public Optional<VersionedValue> getVersioned(String key) {
+        byte[] raw = utf8(key);
+        Snapshot snapshot = db.getSnapshot();
+        try (ReadOptions ro = new ReadOptions().setSnapshot(snapshot)) {
+            byte[] value = db.get(dataHandle, ro, raw);
+            if (value == null) {
+                return Optional.empty();
             }
-            db.put(dataHandle, raw, value);
-            db.put(versionsHandle, raw, longToBytes(clock.incrementAndGet()));
-            return true;
+            byte[] version = db.get(versionsHandle, ro, raw);
+            return Optional.of(new VersionedValue(value, version == null ? 0L : bytesToLong(version)));
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
+        } finally {
+            db.releaseSnapshot(snapshot);
+            snapshot.close();
         }
     }
 
     @Override
-    public synchronized boolean delete(String key) {
+    public long versionOf(String key) {
         try {
-            byte[] raw = key.getBytes(StandardCharsets.UTF_8);
-            if (db.get(dataHandle, raw) == null) {
-                return false;
-            }
-            db.delete(dataHandle, raw);
-            db.put(versionsHandle, raw, longToBytes(clock.incrementAndGet()));
-            return true;
+            byte[] v = db.get(versionsHandle, utf8(key));
+            return v == null ? 0L : bytesToLong(v);
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    public synchronized List<String> keysWithPrefix(String prefix) {
+    public List<String> keysWithPrefix(String prefix) {
         List<String> keys = new ArrayList<>();
-        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
-        try (RocksIterator it = db.newIterator(dataHandle)) {
-            it.seek(prefixBytes);
-            while (it.isValid()) {
-                byte[] keyBytes = it.key();
-                if (!startsWith(keyBytes, prefixBytes)) {
-                    break;
-                }
-                keys.add(new String(keyBytes, StandardCharsets.UTF_8));
-                it.next();
-            }
-        }
+        scanPrefix(prefix, key -> {
+            keys.add(key);
+            return true;
+        });
         return keys;
     }
 
-    /** Iterador do RocksDB sem o monitor do backend: um scan longo não bloqueia as escritas. */
     @Override
     public void scanPrefix(String prefix, java.util.function.Predicate<String> visitor) {
-        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
-        try (RocksIterator it = db.newIterator(dataHandle)) {
-            it.seek(prefixBytes);
-            while (it.isValid()) {
-                byte[] keyBytes = it.key();
-                if (!startsWith(keyBytes, prefixBytes)
-                    || !visitor.test(new String(keyBytes, StandardCharsets.UTF_8))) {
+        try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
+            while (scan.it.isValid()) {
+                if (!visitor.test(new String(scan.it.key(), StandardCharsets.UTF_8))) {
                     break;
                 }
-                it.next();
+                scan.it.next();
             }
         }
     }
 
     @Override
     public void scanEntries(String prefix, java.util.function.BiPredicate<String, byte[]> visitor) {
-        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
-        try (RocksIterator it = db.newIterator(dataHandle)) {
-            it.seek(prefixBytes);
-            while (it.isValid()) {
-                byte[] keyBytes = it.key();
-                if (!startsWith(keyBytes, prefixBytes)
-                    || !visitor.test(new String(keyBytes, StandardCharsets.UTF_8), it.value())) {
+        try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
+            while (scan.it.isValid()) {
+                if (!visitor.test(new String(scan.it.key(), StandardCharsets.UTF_8), scan.it.value())) {
                     break;
                 }
-                it.next();
+                scan.it.next();
             }
         }
     }
 
-    // ---- VersionedKvBackend ----
+    /**
+     * Iterador limitado ao prefixo (limite superior exclusivo calculado), sem trava e sem poluir o cache de
+     * blocos com varreduras longas.
+     */
+    private final class Scan implements AutoCloseable {
+        private final ReadOptions options;
+        private final Slice upper;
+        final RocksIterator it;
+
+        Scan(ColumnFamilyHandle handle, byte[] prefix) {
+            this.options = new ReadOptions().setFillCache(false);
+            byte[] bound = upperBound(prefix);
+            this.upper = bound == null ? null : new Slice(bound);
+            if (upper != null) {
+                options.setIterateUpperBound(upper);
+            }
+            this.it = db.newIterator(handle, options);
+            it.seek(prefix);
+        }
+
+        @Override
+        public void close() {
+            it.close();
+            options.close();
+            if (upper != null) {
+                upper.close();
+            }
+        }
+    }
+
+    // ---- escritas ----
 
     @Override
+    public void put(String key, byte[] value) {
+        byte[] raw = utf8(key);
+        rangeLock.readLock().lock();
+        ReentrantLock stripe = stripeOf(raw);
+        stripe.lock();
+        try {
+            writeOne(raw, value);
+        } finally {
+            stripe.unlock();
+            rangeLock.readLock().unlock();
+        }
+    }
+
+    @Override
+    public boolean putIfAbsent(String key, byte[] value) {
+        byte[] raw = utf8(key);
+        rangeLock.readLock().lock();
+        ReentrantLock stripe = stripeOf(raw);
+        stripe.lock();
+        try {
+            if (db.get(dataHandle, raw) != null) {
+                return false;
+            }
+            writeOne(raw, value);
+            return true;
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        } finally {
+            stripe.unlock();
+            rangeLock.readLock().unlock();
+        }
+    }
+
+    @Override
+    public boolean delete(String key) {
+        byte[] raw = utf8(key);
+        rangeLock.readLock().lock();
+        ReentrantLock stripe = stripeOf(raw);
+        stripe.lock();
+        try {
+            if (db.get(dataHandle, raw) == null) {
+                return false;
+            }
+            long first = allocate(1);
+            try (WriteBatch batch = new WriteBatch()) {
+                batch.delete(dataHandle, raw);
+                batch.put(versionsHandle, raw, longToBytes(first));
+                write(batch);
+            } finally {
+                release(first);
+            }
+            return true;
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        } finally {
+            stripe.unlock();
+            rangeLock.readLock().unlock();
+        }
+    }
+
+    /** Valor e versão no mesmo lote. O chamador já tem a trava da faixa da chave. */
+    private void writeOne(byte[] raw, byte[] value) {
+        long first = allocate(1);
+        try (WriteBatch batch = new WriteBatch()) {
+            batch.put(dataHandle, raw, value);
+            batch.put(versionsHandle, raw, longToBytes(first));
+            write(batch);
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        } finally {
+            release(first);
+        }
+    }
+
+    @Override
+    public void commit(Map<String, Long> expectedVersions,
+                       Map<String, byte[]> puts,
+                       Set<String> deletes,
+                       Set<String> readPrefixes) {
+        boolean exclusive = !readPrefixes.isEmpty();
+        var lock = exclusive ? rangeLock.writeLock() : rangeLock.readLock();
+        lock.lock();
+        List<ReentrantLock> held = exclusive ? List.of() : lockStripes(expectedVersions.keySet(), puts.keySet(), deletes);
+        try {
+            for (var expected : expectedVersions.entrySet()) {
+                long current = versionOf(expected.getKey());
+                if (current != expected.getValue()) {
+                    throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()), expected.getKey());
+                }
+            }
+            for (String prefix : readPrefixes) {
+                checkPhantoms(prefix, expectedVersions, puts, deletes);
+            }
+            int n = puts.size() + deletes.size();
+            if (n == 0) {
+                return;
+            }
+            long first = allocate(n);
+            try (WriteBatch batch = new WriteBatch()) {
+                long version = first;
+                for (String key : deletes) {
+                    byte[] raw = utf8(key);
+                    batch.delete(dataHandle, raw);
+                    batch.put(versionsHandle, raw, longToBytes(version++));
+                }
+                for (var entry : puts.entrySet()) {
+                    byte[] raw = utf8(entry.getKey());
+                    batch.put(dataHandle, raw, entry.getValue());
+                    batch.put(versionsHandle, raw, longToBytes(version++));
+                }
+                write(batch);
+            } catch (RocksDBException e) {
+                throw new RuntimeException(e);
+            } finally {
+                release(first);
+            }
+        } finally {
+            for (int i = held.size() - 1; i >= 0; i--) {
+                held.get(i).unlock();
+            }
+            lock.unlock();
+        }
+    }
+
+    private void checkPhantoms(String prefix, Map<String, Long> expectedVersions,
+                               Map<String, byte[]> puts, Set<String> deletes) {
+        try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
+            while (scan.it.isValid()) {
+                String key = new String(scan.it.key(), StandardCharsets.UTF_8);
+                if (!expectedVersions.containsKey(key) && !puts.containsKey(key) && !deletes.contains(key)) {
+                    throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
+                }
+                scan.it.next();
+            }
+        }
+    }
+
+    private void write(WriteBatch batch) throws RocksDBException {
+        db.write(writeOptions, batch);
+        if (syncMode == SyncMode.BATCH) {
+            dirty.set(true);
+        }
+    }
+
+    /** Reserva {@code n} versões consecutivas e registra o lote como em andamento. Devolve a primeira. */
+    private long allocate(int n) {
+        synchronized (versionGate) {
+            long first = clock.get() + 1;
+            clock.set(first + n - 1);
+            inFlight.add(first);
+            return first;
+        }
+    }
+
+    private void release(long first) {
+        synchronized (versionGate) {
+            inFlight.remove(first);
+        }
+    }
+
+    // ---- travas por faixa ----
+
+    private ReentrantLock stripeOf(byte[] raw) {
+        return stripes[stripeIndex(raw)];
+    }
+
+    private static int stripeIndex(byte[] raw) {
+        int h = java.util.Arrays.hashCode(raw);
+        h ^= (h >>> 16);
+        return (h & 0x7fffffff) % STRIPES;
+    }
+
+    /** Pega, em ordem crescente de índice, a trava de cada faixa tocada pelas chaves. */
+    @SafeVarargs
+    private List<ReentrantLock> lockStripes(Collection<String>... keySets) {
+        TreeSet<Integer> indexes = new TreeSet<>();
+        for (Collection<String> keys : keySets) {
+            for (String key : keys) {
+                indexes.add(stripeIndex(utf8(key)));
+            }
+        }
+        List<ReentrantLock> held = new ArrayList<>(indexes.size());
+        for (int index : indexes) {
+            ReentrantLock lock = stripes[index];
+            lock.lock();
+            held.add(lock);
+        }
+        return held;
+    }
+
+    // ---- VersionedKvBackend ----
+
+    /** Marca d'água de backup: não passa de um lote ainda em gravação, para o incremental não perdê-lo. */
+    @Override
     public long currentVersion() {
-        return clock.get();
+        synchronized (versionGate) {
+            return inFlight.isEmpty() ? clock.get() : inFlight.first() - 1;
+        }
     }
 
     /** Varre a column family de versões: chave com versão maior que {@code since} e sem dado é uma deleção. */
     @Override
     public void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
-        try (RocksIterator it = db.newIterator(versionsHandle)) {
+        try (ReadOptions ro = new ReadOptions().setFillCache(false);
+             RocksIterator it = db.newIterator(versionsHandle, ro)) {
             it.seekToFirst();
             while (it.isValid()) {
                 if (bytesToLong(it.value()) > since) {
@@ -252,67 +587,28 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         }
     }
 
-    @Override
-    public long versionOf(String key) {
-        try {
-            byte[] v = db.get(versionsHandle, key.getBytes(StandardCharsets.UTF_8));
-            return v == null ? 0L : bytesToLong(v);
-        } catch (RocksDBException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @Override
-    public synchronized void commit(Map<String, Long> expectedVersions,
-                                     Map<String, byte[]> puts,
-                                     Set<String> deletes,
-                                     Set<String> readPrefixes) {
-        for (var expected : expectedVersions.entrySet()) {
-            long current = versionOf(expected.getKey());
-            if (current != expected.getValue()) {
-                throw new VersionConflictException(Messages.get("storage_version_conflict", expected.getKey()), expected.getKey());
-            }
-        }
-
-        for (String prefix : readPrefixes) {
-            byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
-            try (RocksIterator it = db.newIterator(dataHandle)) {
-                it.seek(prefixBytes);
-                while (it.isValid()) {
-                    byte[] keyBytes = it.key();
-                    if (!startsWith(keyBytes, prefixBytes)) break;
-                    String key = new String(keyBytes, StandardCharsets.UTF_8);
-                    if (!expectedVersions.containsKey(key)
-                        && !puts.containsKey(key)
-                        && !deletes.contains(key)) {
-                        throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
-                    }
-                    it.next();
-                }
-            }
-        }
-
-        try (WriteBatch batch = new WriteBatch()) {
-            for (String key : deletes) {
-                batch.delete(dataHandle, key.getBytes(StandardCharsets.UTF_8));
-                batch.put(versionsHandle, key.getBytes(StandardCharsets.UTF_8),
-                    longToBytes(clock.incrementAndGet()));
-            }
-            for (var entry : puts.entrySet()) {
-                byte[] raw = entry.getKey().getBytes(StandardCharsets.UTF_8);
-                batch.put(dataHandle, raw, entry.getValue());
-                batch.put(versionsHandle, raw, longToBytes(clock.incrementAndGet()));
-            }
-            db.write(new WriteOptions(), batch);
-        } catch (RocksDBException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
+    /**
+     * Antes forçava a descarga do memtable para um arquivo SST a cada statement, o que custava uma escrita de
+     * arquivo por operação. As escritas já estão no WAL (que é reaplicado ao reabrir). Aqui apenas empurra o
+     * buffer do WAL para o sistema operacional; o fsync segue {@link SyncMode}.
+     */
     @Override
     public void flush() {
+        if (syncMode == SyncMode.ALWAYS) {
+            return; // cada escrita já foi sincronizada
+        }
         try {
-            db.flush(new FlushOptions().setWaitForFlush(true));
+            db.flushWal(false);
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** Força o fsync do WAL agora, em qualquer modo. */
+    public void syncWal() {
+        try {
+            db.syncWal();
+            dirty.set(false);
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
         }
@@ -320,10 +616,28 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
         try {
+            if (syncThread != null) {
+                syncThread.interrupt();
+                syncThread.join(1000);
+            }
+            try {
+                db.syncWal();
+            } catch (RocksDBException ignored) {
+                // o fechamento segue; o WAL já está no sistema operacional
+            }
             if (dataHandle != null) dataHandle.close();
             if (versionsHandle != null) versionsHandle.close();
             if (db != null) db.close();
+            writeOptions.close();
+            cfOptions.close();
+            dbOptions.close();
+            blockCache.close();
+            bloom.close();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -331,12 +645,22 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     // ---- utilities ----
 
-    private static boolean startsWith(byte[] key, byte[] prefix) {
-        if (key.length < prefix.length) return false;
-        for (int i = 0; i < prefix.length; i++) {
-            if (key[i] != prefix[i]) return false;
+    private static byte[] utf8(String s) {
+        return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** Menor chave maior que todas as do prefixo, ou {@code null} se o prefixo é vazio ou só de 0xFF. */
+    static byte[] upperBound(byte[] prefix) {
+        int end = prefix.length;
+        while (end > 0 && prefix[end - 1] == (byte) 0xFF) {
+            end--;
         }
-        return true;
+        if (end == 0) {
+            return null;
+        }
+        byte[] bound = java.util.Arrays.copyOf(prefix, end);
+        bound[end - 1]++;
+        return bound;
     }
 
     private static byte[] longToBytes(long v) {
