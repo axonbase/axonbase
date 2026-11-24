@@ -20,6 +20,9 @@ public final class Repr {
         if (o instanceof BigDecimal d) {
             return d.toString();
         }
+        if (o instanceof AxonValue.RecordId r) {
+            return r.table() + ":" + keyStr(r.key());
+        }
         return repr(o, 0);
     }
 
