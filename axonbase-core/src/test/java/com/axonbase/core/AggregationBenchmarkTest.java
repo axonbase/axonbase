@@ -26,7 +26,8 @@ class AggregationBenchmarkTest {
     @Test
     void congestionamento() throws Exception {
         int rows = Integer.getInteger("axon.bench.rows", 200_000);
-        for (boolean geoIndex : new boolean[] {false, true}) {
+        boolean[] modes = Boolean.getBoolean("axon.bench.onlyScan") ? new boolean[] {false} : new boolean[] {false, true};
+        for (boolean geoIndex : modes) {
             try (RocksDbBackend backend = new RocksDbBackend(Files.createTempDirectory("bench").toString())) {
                 Datastore ds = new Datastore(backend);
                 ds.createDatabase("test", "dev");
@@ -40,6 +41,16 @@ class AggregationBenchmarkTest {
                 load(ds, s, rows);
                 System.out.printf(Locale.ROOT, "BENCH geoIndex=%s rows=%d carga=%.1fs%n", geoIndex, rows, (System.nanoTime() - t0) / 1e9);
 
+                if (Boolean.getBoolean("axon.bench.breakdown")) {
+                    time("só ler a tabela (count GROUP ALL)", geoIndex, ds, s, "SELECT count() AS n FROM transito GROUP ALL");
+                    time("+ filtro de horário", geoIndex, ds, s, "SELECT count() AS n FROM transito WHERE " + WINDOW + " GROUP ALL");
+                    time("+ filtro simples (placa != x)", geoIndex, ds, s, "SELECT count() AS n FROM transito WHERE placa != 'x' GROUP ALL");
+                    time("GROUP BY placa", geoIndex, ds, s, "SELECT placa, count() AS n FROM transito GROUP BY placa ORDER BY n DESC LIMIT 3");
+                    time("GROUP BY geo::cell sem filtro", geoIndex, ds, s,
+                        "SELECT geo::cell(pos, 500) AS trecho, count() AS n FROM transito GROUP BY trecho ORDER BY n DESC LIMIT 3");
+                    time("GROUP BY floor(lon) numérico", geoIndex, ds, s,
+                        "SELECT math::floor(pos.coordinates[0] * 100) AS x, count() AS n FROM transito GROUP BY x ORDER BY n DESC LIMIT 3");
+                }
                 time("grade 500 m (GROUP BY geo::cell)", geoIndex, ds, s,
                     "SELECT geo::cell(pos, 500) AS trecho, count() AS pings, count(DISTINCT placa) AS carros FROM transito WHERE "
                         + WINDOW + " GROUP BY trecho ORDER BY pings DESC LIMIT 10");
