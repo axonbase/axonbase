@@ -9,7 +9,7 @@ Multi-model database written in Java 21+, combining document, graph, relational,
 - **Native sagas**: `BEGIN SAGA`, `COMMIT SAGA`, `CANCEL SAGA` with correlation IDs, automatic compensation, remote rollback via Database Link, and ledger tracking
 - **AI Audit**: LLM-generated security rules classify every query as `SAFE`, `WARNING`, or `DANGER` before execution — no production data reaches the AI provider
 - **Data Rules**: row-level security with predicate ANDing and automatic field masking, enforced across all queries without application changes
-- **Search engines**: BM25 full-text with configurable analyzers, HNSW vector search (cosine/Euclidean/Manhattan), geo spatial with R-Tree, graph traversal, and columnar indexes for direct aggregation (count/sum/avg/min/max)
+- **Search engines**: BM25 full-text with configurable analyzers, HNSW vector search (cosine/Euclidean/Manhattan), geo spatial with a geohash grid, graph traversal, and columnar indexes for direct aggregation (count/sum/avg/min/max)
 - **Multi-model indexes**: unique, count, full-text (SEARCH ANALYZER), HNSW vector, GEO spatial, and COLUMNAR analytical
 - **MVCC transactions**: snapshot isolation, savepoints, optimistic retry, phantom protection via read ranges, and `VersionConflictException`
 - **Raft consensus**: TCP Raft with leader election, quorum, dynamic membership (join/leave via joint consensus), catch-up, snapshots, and consistent hash sharding

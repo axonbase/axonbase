@@ -692,6 +692,26 @@ public final class Executor {
             "databases", AxonValue.array(strings(ds.databases(ns).stream().sorted().toList()))));
     }
 
+    /** Tipo principal do índice para o INFO: UNIQUE, SEARCH, HNSW, GEO, COLUMNAR, COUNT ou INDEX. */
+    private static String indexKind(Catalog.IndexDef i) {
+        if (i.unique()) {
+            return "UNIQUE";
+        }
+        if (i.search()) {
+            return "SEARCH";
+        }
+        if (i.vector()) {
+            return "HNSW";
+        }
+        if (i.geo()) {
+            return "GEO";
+        }
+        if (i.columnar()) {
+            return "COLUMNAR";
+        }
+        return i.count() ? "COUNT" : "INDEX";
+    }
+
     private AxonValue infoDatabase() {
         Database db = db();
         List<String> tables = db.catalog().tables().stream().map(Catalog.TableDef::name).sorted().toList();
@@ -699,11 +719,18 @@ public final class Executor {
         for (String table : tables) {
             detail.put(table, tableInfo(db.catalog().table(table)));
         }
+        Map<String, AxonValue> analyzers = new LinkedHashMap<>();
+        db.catalog().analyzers().stream().sorted(Comparator.comparing(Catalog.AnalyzerDef::name)).forEach(a ->
+            analyzers.put(a.name(), AxonValue.object(Map.of(
+                "lowercase", AxonValue.bool(a.lowercase()),
+                "stemming", AxonValue.bool(a.stemming()),
+                "stopwords", AxonValue.array(strings(a.stopwords()))))));
         return AxonValue.object(Map.of(
             "namespace", AxonValue.str(db.ns()),
             "database", AxonValue.str(db.db()),
             "tables", AxonValue.array(strings(tables)),
-            "details", AxonValue.object(detail)));
+            "details", AxonValue.object(detail),
+            "analyzers", AxonValue.object(analyzers)));
     }
 
     private AxonValue infoTable(String table) {
@@ -741,6 +768,14 @@ public final class Executor {
             info.put("geo", AxonValue.bool(i.geo()));
             info.put("vector_dimension", i.vectorDimension() == null ? AxonValue.nul() : AxonValue.num(i.vectorDimension()));
             info.put("vector_distance", i.vectorDistance() == null ? AxonValue.nul() : AxonValue.str(i.vectorDistance()));
+            info.put("columnar", AxonValue.bool(i.columnar()));
+            info.put("kind", AxonValue.str(indexKind(i)));
+            if (i.vector()) {
+                info.put("hnsw", AxonValue.object(Map.of(
+                    "m", AxonValue.num(i.hnswM()),
+                    "efc", AxonValue.num(i.hnswEfc()),
+                    "efs", AxonValue.num(i.hnswEfs()))));
+            }
             indexes.put(i.name(), AxonValue.object(info));
         });
         Map<String, AxonValue> events = new LinkedHashMap<>();
@@ -1286,7 +1321,12 @@ public final class Executor {
                             () -> streamable || streamableAggregate ? null : searchSourceDocs(db, sel)))));
             }
             if (docs == null) {
-                if (streamableAggregate) {
+                GroupAggregation covered = streamableAggregate ? columnarCoveredAggregate(db, sel) : null;
+                if (covered != null) {
+                    // todas as colunas da consulta estão em índices COLUMNAR: agrega só com as entradas do índice
+                    streamedAggregation = covered;
+                    docs = new ArrayList<>();
+                } else if (streamableAggregate) {
                     // sem índice: agrega lendo a tabela em fluxo, sem montar a lista de documentos
                     streamedAggregation = streamAggregate(db, sel);
                     docs = new ArrayList<>();
@@ -2196,28 +2236,21 @@ return score;
             return null;
         }
         Expr.Binary searchSide = null;
-        Expr.Binary vectorSide = null;
-        if (isSearchMatch(and.left())) {
-            searchSide = (Expr.Binary) and.left();
-        } else if (isSearchMatch(and.right())) {
-            searchSide = (Expr.Binary) and.right();
+        VectorSide vectorSide = null;
+        for (Expr side : List.of(and.left(), and.right())) {
+            VectorSide vs = vectorSide(side);
+            if (vs != null && vectorSide == null) {
+                vectorSide = vs;
+            } else if (searchSide == null && isTextMatch(side)) {
+                searchSide = (Expr.Binary) side;
+            }
         }
-        if (isVectorCond(and.left())) {
-            vectorSide = (Expr.Binary) and.left();
-        } else if (isVectorCond(and.right())) {
-            vectorSide = (Expr.Binary) and.right();
-        }
-        if (searchSide == null || vectorSide == null || searchSide == vectorSide) {
+        if (searchSide == null || vectorSide == null) {
             return null;
         }
+        final String vectorField = vectorSide.field();
         String searchField = ((Expr.Ident) searchSide.left()).name();
         AxonValue query = eval(searchSide.right());
-        if (!query.isString()) {
-            return null;
-        }
-        Expr.Call vc = (Expr.Call) vectorSide.left();
-        String vectorField = ((Expr.Ident) vc.args().get(0)).name();
-        AxonValue queryVector = eval(vc.args().get(1));
         Catalog.TableDef def = db().catalog().table(tableName(sel.from()));
         if (def == null) {
             return null;
@@ -2229,7 +2262,29 @@ return score;
         if (searchIndex == null || vectorIndex == null) {
             return null;
         }
-        return new HybridSearch(searchIndex, vectorIndex, query.asString(), queryVector);
+        return new HybridSearch(searchIndex, vectorIndex, query.asString(), vectorSide.query());
+    }
+
+    /** Lado vetorial de uma consulta híbrida: o campo e o vetor da consulta. */
+    private record VectorSide(String field, AxonValue query) {
+    }
+
+    /**
+     * Lado vetorial de um AND: {@code vector::similarity::cosine(campo, vec) > limiar} ou
+     * {@code campo @@ vetor} (sem limiar). {@code null} quando a expressão é outra coisa.
+     */
+    private VectorSide vectorSide(Expr e) {
+        if (isVectorCond(e)) {
+            Expr.Call vc = (Expr.Call) ((Expr.Binary) e).left();
+            return new VectorSide(((Expr.Ident) vc.args().get(0)).name(), eval(vc.args().get(1)));
+        }
+        if (e instanceof Expr.Binary b && b.op() == Expr.BinaryOp.MATCH && b.left() instanceof Expr.Ident field) {
+            AxonValue q = eval(b.right());
+            if (arrayVector(q)) {
+                return new VectorSide(field.name(), q);
+            }
+        }
+        return null;
     }
 
     private boolean isSearchMatch(Expr e) {
@@ -2243,6 +2298,12 @@ return score;
             && b.left() instanceof Expr.Call c && !c.args().isEmpty()
             && c.name().startsWith("vector::similarity::")
             && c.args().get(0) instanceof Expr.Ident;
+    }
+
+    /** {@code campo @@ "termos"}: busca textual (a consulta é texto). */
+    private boolean isTextMatch(Expr e) {
+        return e instanceof Expr.Binary b && b.op() == Expr.BinaryOp.MATCH && b.left() instanceof Expr.Ident
+            && eval(b.right()).isString();
     }
 
     /**
@@ -2532,6 +2593,8 @@ return score;
     private static final String PS_VECTOR = "VECTOR";
     private static final String PS_HYBRID = "HYBRID";
     private static final String PS_COLUMNAR = "COLUMNAR";
+    /** Agregação respondida só pelas entradas do índice columnar, sem ler documentos. */
+    private static final String PS_COLUMNAR_AGG = "COLUMNAR_AGG";
 
     /** {@code via}: a parte do WHERE (ligada por AND) que o índice atende, ou {@code null} se for o WHERE inteiro. */
     private record ExplainPlan(String strategy, Catalog.IndexDef index, String table, Expr via) {
@@ -2595,6 +2658,10 @@ return score;
         ix = columnarIndexFor(db, table, sel);
         if (ix != null) {
             return new ExplainPlan(PS_COLUMNAR, ix, table);
+        }
+        List<Catalog.IndexDef> covering = columnarCoveringIndexes(db, sel);
+        if (covering != null) {
+            return new ExplainPlan(PS_COLUMNAR_AGG, covering.get(0), table);
         }
         ix = vectorIndexFor(db, table, sel);
         if (ix != null) {
@@ -2726,11 +2793,24 @@ return score;
         if (PS_UNIQUE.equals(plan.strategy())) {
             return 1;
         }
+        if (PS_COLUMNAR_AGG.equals(plan.strategy())) {
+            return columnarEntryCount(db, plan);
+        }
         return fullScanDocs(db, sel).size();
+    }
+
+    /** Entradas de uma coluna do índice columnar (uma por linha da tabela). */
+    private long columnarEntryCount(Database db, ExplainPlan plan) {
+        String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
+            db.ns(), db.db(), plan.table(), plan.index().name(), plan.index().columns().get(0));
+        return records(db).keysWithPrefix(prefix).size();
     }
 
     private long explainedRows(Database db, Statement.Select whole, ExplainPlan plan) {
         Statement.Select sel = plan.via() == null ? whole : withCond(whole, plan.via());
+        if (PS_COLUMNAR_AGG.equals(plan.strategy())) {
+            return columnarEntryCount(db, plan);
+        }
         List<Document> docs = switch (plan.strategy()) {
             case PS_UNIQUE -> loadUniqueDocs(db, sel, plan.index());
             case PS_FULLTEXT -> searchSourceDocs(db, sel);
@@ -3245,6 +3325,10 @@ return score;
                     indexColumnar(db, rid, null, doc.current());
                 }
             }
+            if (di.columnar()) {
+                records(db).put(com.axonbase.core.storage.ColumnarIndex.readyKey(db.ns(), db.db(), di.table(), di.name()),
+                    new byte[]{1});
+            }
         }
         control(db, ControlCommand.Kind.INDEX, di.table() + ":" + di.name(),
             com.axonbase.parser.Render.stmt(di));
@@ -3684,7 +3768,17 @@ return score;
     private AxonValue runDropIndex(Statement.DropIndex di) {
         Database db = db();
         for (Catalog.TableDef def : db.catalog().tables()) {
-            if (def.indexes().remove(di.name()) != null) {
+            Catalog.IndexDef removed = def.indexes().remove(di.name());
+            if (removed != null) {
+                if (removed.columnar()) {
+                    records(db).delete(com.axonbase.core.storage.ColumnarIndex.readyKey(
+                        db.ns(), db.db(), def.name(), removed.name()));
+                    String prefix = com.axonbase.core.storage.ColumnarIndex.indexPrefix(
+                        db.ns(), db.db(), def.name(), removed.name());
+                    for (String key : records(db).keysWithPrefix(prefix)) {
+                        records(db).delete(key);
+                    }
+                }
                 control(db, ControlCommand.Kind.INDEX, di.name(),
                     "DROP INDEX " + di.name());
                 return AxonValue.nul();
@@ -4430,6 +4524,11 @@ return score;
 
     /** Sem índice, {@code @@} ainda funciona por comparação de termos simples. */
     private boolean textMatches(AxonValue text, AxonValue query) {
+        if (arrayVector(text) && arrayVector(query)) {
+            // campo_vetorial @@ $consulta é um predicado de vizinhança: a ordem e o corte (ORDER BY ... LIMIT) vêm do
+            // índice HNSW ou da distância, então a condição em si deixa passar todo vetor
+            return true;
+        }
         if (!text.isString() || !query.isString()) {
             return false;
         }
@@ -4809,10 +4908,22 @@ return score;
         String start = args.size() > 1 && args.get(1).isString() ? args.get(1).asString() : "<em>";
         String end = args.size() > 2 && args.get(2).isString() ? args.get(2).asString() : "</em>";
         String text = args.get(0).asString();
-        for (String term : terms) {
-            text = text.replaceAll("(?i)" + java.util.regex.Pattern.quote(term), start + "$0" + end);
+        List<String> usable = terms.stream().filter(t -> !t.isBlank())
+            .sorted(Comparator.comparingInt(String::length).reversed()).toList();
+        if (usable.isEmpty()) {
+            return AxonValue.str(text);
         }
-        return AxonValue.str(text);
+        // os termos da consulta são radicais (stemming): marca a palavra inteira que contém o radical
+        String alternatives = usable.stream().map(java.util.regex.Pattern::quote)
+            .collect(java.util.stream.Collectors.joining("|"));
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("(?iu)[\\p{L}\\p{N}_]*(?:" + alternatives + ")[\\p{L}\\p{N}_]*").matcher(text);
+        StringBuilder out = new StringBuilder();
+        while (m.find()) {
+            m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(start + m.group() + end));
+        }
+        m.appendTail(out);
+        return AxonValue.str(out.toString());
     }
 
     /** Tira os parênteses de nomes já normalizados pelo lexer e o prefixo {@code fn::}. */
@@ -5289,7 +5400,8 @@ return score;
                     String newKey = com.axonbase.core.storage.ColumnarIndex.columnKey(
                         db.ns(), db.db(), rid.table(), index.name(), column,
                         newVal != null ? newVal : com.axonbase.value.AxonValue.nul(), rid);
-                    records(db).put(newKey, new byte[0]);
+                    records(db).put(newKey, com.axonbase.core.storage.ColumnarIndex.entryValue(
+                        rid.key().keyString(), newVal));
                 }
             }
         }
@@ -5307,6 +5419,128 @@ return score;
             }
         }
         return null;
+    }
+
+    // ---- agregação só pelo índice columnar ----
+
+    /** Colunas citadas por uma expressão, ou {@code false} se há algo que não dá para analisar com segurança. */
+    private static boolean columnRefs(Expr e, java.util.Set<String> out) {
+        return switch (e) {
+            case null -> true;
+            case Expr.Literal l -> true;
+            case Expr.Param p -> true;
+            case Expr.Ident i -> out.add(i.name()) || true;
+            case Expr.Alias a -> columnRefs(a.expr(), out);
+            case Expr.Unary u -> columnRefs(u.operand(), out);
+            case Expr.Cast c -> columnRefs(c.operand(), out);
+            case Expr.Binary b -> columnRefs(b.left(), out) && columnRefs(b.right(), out);
+            case Expr.Call c -> c.args().stream().allMatch(a -> columnRefs(a, out));
+            case Expr.ArrayLit a -> a.items().stream().allMatch(x -> columnRefs(x, out));
+            case Expr.ObjectLit o -> o.entries().stream().allMatch(en -> columnRefs(en.value(), out));
+            default -> false;
+        };
+    }
+
+    /**
+     * Índices COLUMNAR que cobrem todas as colunas de um SELECT de agregação, na ordem das colunas, ou
+     * {@code null} se a consulta não pode ser respondida só pelo índice: precisa ser agregação sobre uma tabela
+     * simples, sem JOIN, FETCH, viagem no tempo, permissões nem Data Rules, citar apenas colunas com índice
+     * columnar já no formato com valor e não usar {@code id} ou {@code *}.
+     */
+    private List<Catalog.IndexDef> columnarCoveringIndexes(Database db, Statement.Select sel) {
+        if (!(sel.from() instanceof Expr.Ident t) || !sel.joins().isEmpty() || !sel.fetch().isEmpty()
+            || sel.timeTravel() != null || !isStreamableAggregate(sel)) {
+            return null;
+        }
+        Catalog.TableDef def = db.catalog().table(t.name());
+        if (def == null || (def.permissions() != null && def.permissions().select() != null)
+            || !dataRulePredicates().isEmpty()) {
+            return null;
+        }
+        java.util.Set<String> refs = new java.util.LinkedHashSet<>();
+        boolean ok = sel.fields().stream().allMatch(f -> columnRefs(f, refs))
+            && columnRefs(sel.cond(), refs) && columnRefs(sel.having(), refs)
+            && sel.group().stream().allMatch(g -> columnRefs(g, refs))
+            && sel.orders().stream().allMatch(o -> columnRefs(o.field(), refs));
+        if (!ok || refs.contains("id") || refs.contains("*")) {
+            return null;
+        }
+        List<Catalog.IndexDef> columnar = def.indexes().values().stream().filter(Catalog.IndexDef::columnar)
+            .filter(i -> records(db).get(com.axonbase.core.storage.ColumnarIndex.readyKey(
+                db.ns(), db.db(), t.name(), i.name())).isPresent()).toList();
+        if (columnar.isEmpty()) {
+            return null;
+        }
+        if (refs.isEmpty()) {
+            // count() puro: qualquer coluna indexada tem uma entrada por linha
+            return List.of(columnar.get(0));
+        }
+        List<Catalog.IndexDef> out = new ArrayList<>();
+        for (String column : refs) {
+            Catalog.IndexDef ix = columnar.stream().filter(i -> i.columns().contains(column)).findFirst().orElse(null);
+            if (ix == null) {
+                return null;
+            }
+            out.add(ix);
+        }
+        return out;
+    }
+
+    /**
+     * Agrega só com as entradas do índice columnar (sem carregar documentos). Cada linha vira um documento
+     * sintético com as colunas indexadas citadas; WHERE, GROUP BY, HAVING e agregados seguem as regras de sempre.
+     * {@code null} quando a consulta não é coberta pelo índice.
+     */
+    private GroupAggregation columnarCoveredAggregate(Database db, Statement.Select sel) {
+        List<Catalog.IndexDef> indexes = columnarCoveringIndexes(db, sel);
+        if (indexes == null) {
+            return null;
+        }
+        String table = ((Expr.Ident) sel.from()).name();
+        java.util.Set<String> refs = new java.util.LinkedHashSet<>();
+        sel.fields().forEach(f -> columnRefs(f, refs));
+        columnRefs(sel.cond(), refs);
+        columnRefs(sel.having(), refs);
+        sel.group().forEach(g -> columnRefs(g, refs));
+        sel.orders().forEach(o -> columnRefs(o.field(), refs));
+        List<String> columns = refs.isEmpty() ? List.of(indexes.get(0).columns().get(0)) : new ArrayList<>(refs);
+        Map<String, Map<String, AxonValue>> rows = new LinkedHashMap<>();
+        boolean[] complete = {true};
+        for (int c = 0; c < columns.size() && complete[0]; c++) {
+            String column = columns.get(c);
+            Catalog.IndexDef index = refs.isEmpty() ? indexes.get(0)
+                : indexes.get(c);
+            String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
+                db.ns(), db.db(), table, index.name(), column);
+            int[] seen = {0};
+            records(db).scanEntries(prefix, (key, bytes) -> {
+                AxonValue entry = com.axonbase.core.storage.ColumnarIndex.decodeEntry(bytes);
+                if (entry == null) {
+                    complete[0] = false;
+                    return false;
+                }
+                String rowKey = entry.asObject().get("k").asString();
+                rows.computeIfAbsent(rowKey, k -> new LinkedHashMap<>()).put(column, entry.asObject().get("v"));
+                seen[0]++;
+                return true;
+            });
+            if (complete[0] && c > 0 && seen[0] != rows.size()) {
+                complete[0] = false;
+            }
+        }
+        if (!complete[0]) {
+            return null;
+        }
+        GroupAggregation aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
+        for (Map.Entry<String, Map<String, AxonValue>> row : rows.entrySet()) {
+            Document doc = new Document(new RecordId(table, parseKey(row.getKey())),
+                AxonValue.object(row.getValue()));
+            if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
+                continue;
+            }
+            aggregation.accept(doc);
+        }
+        return aggregation;
     }
 
     private List<Document> columnarSourceDocs(Database db, Statement.Select sel) {

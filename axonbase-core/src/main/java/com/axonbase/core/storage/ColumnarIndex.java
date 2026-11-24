@@ -31,6 +31,46 @@ public final class ColumnarIndex {
     public static final byte TYPE_ARRAY = 0x05;
     public static final byte TYPE_OBJECT = 0x06;
 
+    // ---- entradas com valor (varredura só pelo índice) ----
+
+    /** Prefixo de todas as colunas de um índice: {@code CI|{ns}|{db}|{table}|{index}|}. */
+    public static String indexPrefix(String ns, String db, String table, String index) {
+        return "CI|" + ns + "|" + db + "|" + table + "|" + index + "|";
+    }
+
+    /**
+     * Chave do marcador que diz que as entradas do índice guardam o valor e a chave da linha (formato novo).
+     * Sem o marcador (índices criados antes) as agregações leem os documentos, como sempre.
+     */
+    public static String readyKey(String ns, String db, String table, String index) {
+        return "CIV|" + ns + "|" + db + "|" + table + "|" + index;
+    }
+
+    /**
+     * Valor guardado na entrada do índice: o valor da coluna com o tipo original e a chave da linha. A chave do
+     * índice é uma String feita de bytes ordenáveis e não dá para decodificá-la com segurança, então os agregados
+     * leem o valor daqui.
+     */
+    public static byte[] entryValue(String rowKey, AxonValue value) {
+        java.util.Map<String, AxonValue> m = new java.util.LinkedHashMap<>();
+        m.put("k", AxonValue.str(rowKey));
+        m.put("v", value == null ? AxonValue.nul() : value);
+        return com.axonbase.value.AxonJson.encode(AxonValue.object(m));
+    }
+
+    /** Lê uma entrada nova; {@code null} para entradas vazias (formato antigo) ou ilegíveis. */
+    public static AxonValue decodeEntry(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        try {
+            AxonValue v = com.axonbase.value.AxonJson.decode(bytes);
+            return v.isObject() && v.asObject().containsKey("k") && v.asObject().containsKey("v") ? v : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     // ---- key construction ----
 
     /** Prefixo para varrer toda a columna: {@code CI|{ns}|{db}|{table}|{index}|{column}|}. */

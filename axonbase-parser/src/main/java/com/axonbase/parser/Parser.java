@@ -1653,6 +1653,11 @@ public final class Parser {
         }
         if (matchKeyword("index")) {
             String name = expectIdent();
+            // forma com a tabela (DROP INDEX nome ON [TABLE] tabela), a mesma do CREATE INDEX; o nome já basta
+            if (matchKeyword("on")) {
+                matchKeyword("table");
+                expectIdentOrString();
+            }
             return new Statement.DropIndex(name);
         }
         if (matchKeyword("event")) {
