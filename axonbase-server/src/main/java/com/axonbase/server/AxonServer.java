@@ -116,6 +116,11 @@ public final class AxonServer {
         });
         // AxonPL: o prazo de cada chamada segue AXON_QUERY_TIMEOUT e o log dos programas vai para o AxonLog
         ds.programs().timeoutMs(config.queryTimeout());
+        // depuração do AxonPL: ociosidade opcional (segundos) de uma sessão pausada
+        String debugIdle = System.getenv("AXON_PL_DEBUG_IDLE");
+        if (debugIdle != null && debugIdle.trim().matches("\\d{1,9}")) {
+            ds.programs().debug().idleSeconds(Long.parseLong(debugIdle.trim()));
+        }
         ds.programs().logSink((level, msg) -> AxonLog.log(level.toLowerCase(java.util.Locale.ROOT), "axonpl", msg,
             Map.of()));
         if (auth != null) {
@@ -723,6 +728,10 @@ public final class AxonServer {
               .append("axe_pl_steps_total ").append(ds.programs().stats().steps()).append("\n")
               .append("# TYPE axe_pl_limit_errors_total counter\n")
               .append("axe_pl_limit_errors_total ").append(ds.programs().stats().limitErrors()).append("\n")
+              .append("# TYPE axe_pl_debug_sessions gauge\n")
+              .append("axe_pl_debug_sessions ").append(ds.programs().debug().active()).append("\n")
+              .append("# TYPE axe_pl_debug_timeouts_total counter\n")
+              .append("axe_pl_debug_timeouts_total ").append(ds.programs().debug().timeouts()).append("\n")
               .append("# TYPE axe_txn_open gauge\n")
               .append("axe_txn_open ").append(activity.openTransactions()).append("\n")
               .append("# TYPE axe_txn_conflicts_total counter\n")

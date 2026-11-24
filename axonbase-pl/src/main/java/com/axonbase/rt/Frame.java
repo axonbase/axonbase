@@ -70,6 +70,22 @@ public final class Frame implements PlFrame {
     }
 
     @Override
+    public Map<String, AxonValue> globais() {
+        Map<String, AxonValue> r = new LinkedHashMap<>();
+        String[] names = mod.program.nomesGlobais();
+        for (int i = 0; i < names.length && i < globals.length; i++) {
+            Object v = globals[i];
+            if (v instanceof Cell c) {
+                v = c.v;
+            }
+            if (v != null && !(v instanceof PyCallable) && !(v instanceof PyModule) && !names[i].startsWith(".")) {
+                r.put(names[i], Convert.paraAxonSolto(v));
+            }
+        }
+        return r;
+    }
+
+    @Override
     public PlFrame chamador() {
         return caller;
     }

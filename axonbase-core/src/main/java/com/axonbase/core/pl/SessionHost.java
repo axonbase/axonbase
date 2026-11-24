@@ -30,6 +30,10 @@ final class SessionHost implements PlHost {
         final ProgramDef def;
         boolean ddlRan;
         final List<String> log = new ArrayList<>();
+        /** Depuração: registra as consultas db.* disparadas (null fora da depuração). */
+        QueryProfile profile;
+        /** Depuração sem commit: DDL não é permitido (não há como desfazê-lo com garantia). */
+        boolean noDdl;
 
         CallState(boolean writable, ProgramDef def) {
             this.writable = writable;
@@ -210,10 +214,14 @@ final class SessionHost implements PlHost {
         guard(fn, parsed);
         service.checkCancelled();
         Map<String, AxonValue> saved = bind(params);
+        long started = System.nanoTime();
         try {
             AxonValue r = new Executor(ds).execute(parsed.query(), session, null);
             if (parsed.ddl()) {
                 state.ddlRan = true;
+            }
+            if (state.profile != null) {
+                state.profile.registrar(sql, System.nanoTime() - started, QueryProfile.rows(r));
             }
             return r;
         } catch (AxonError e) {
@@ -229,6 +237,9 @@ final class SessionHost implements PlHost {
     private void guard(String fn, SqlText.Parsed parsed) {
         if (parsed.forbidden()) {
             throw Errors.runtime(fn + "(): programas AxonPL nao podem usar " + parsed.forbiddenWhat());
+        }
+        if (state.noDdl && parsed.ddl()) {
+            throw Errors.runtime(fn + "(): sentencas de esquema nao sao permitidas numa depuracao sem commit");
         }
         if (!state.writable && !parsed.readOnly()) {
             throw Errors.runtime(fn + "(): a funcao '" + state.def.name() + "' e somente leitura e nao pode "

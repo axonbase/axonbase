@@ -47,6 +47,7 @@ public final class ProgramService {
     private final Datastore ds;
     private final PlRuntime runtime = new PlRuntime();
     private final PlStats stats = new PlStats();
+    private final DebugManager debug;
     private final ThreadLocal<int[]> depth = ThreadLocal.withInitial(() -> new int[1]);
     private final ThreadLocal<List<String>> lastLog = new ThreadLocal<>();
     private final AtomicLong savepoints = new AtomicLong();
@@ -56,10 +57,16 @@ public final class ProgramService {
 
     public ProgramService(Datastore ds) {
         this.ds = ds;
+        this.debug = new DebugManager(ds, this);
     }
 
     public PlStats stats() {
         return stats;
+    }
+
+    /** Gerenciador das sessões de depuração deste banco de dados. */
+    public DebugManager debug() {
+        return debug;
     }
 
     /** Prazo de cada chamada, em milissegundos (0 desliga). O servidor usa AXON_QUERY_TIMEOUT. */
@@ -439,6 +446,17 @@ public final class ProgramService {
 
     private AxonValue invoke(Session session, ProgramCatalog catalog, ProgramDef def, String fn,
                              List<AxonValue> rawArgs, boolean writable) {
+        return invoke(session, catalog, def, fn, rawArgs, writable, null);
+    }
+
+    /** Execução sob depuração (módulo recarregado do zero, gancho, rastro e limites do depurador). */
+    AxonValue invokeDebug(Session session, ProgramCatalog catalog, ProgramDef def, String fn,
+                          List<AxonValue> rawArgs, boolean writable, DebugRun dbg) {
+        return invoke(session, catalog, def, fn, rawArgs, writable, dbg);
+    }
+
+    private AxonValue invoke(Session session, ProgramCatalog catalog, ProgramDef def, String fn,
+                             List<AxonValue> rawArgs, boolean writable, DebugRun dbg) {
         if (def.broken()) {
             throw new AxonError(PL_ERROR, kindName(def.kind()) + " '" + def.name() + "' esta quebrado: "
                 + def.error());
@@ -450,7 +468,7 @@ public final class ProgramService {
         }
         boolean isPackage = def.kind() == ProgramDef.Kind.PACKAGE;
         List<AxonValue> args = isPackage ? rawArgs : bindArgs(def, rawArgs);
-        PlLimits limits = PlLimits.padrao();
+        PlLimits limits = dbg != null ? dbg.limits() : PlLimits.padrao();
         long ms = timeoutMs;
         if (ms > 0) {
             limits.prazoNanos(ms * 1_000_000L);
@@ -461,6 +479,10 @@ public final class ProgramService {
             handle.onCancel(cancel);
         }
         SessionHost.CallState state = new SessionHost.CallState(writable, def);
+        if (dbg != null) {
+            state.profile = dbg.profile();
+            state.noDdl = dbg.noDdl();
+        }
         SessionHost host = new SessionHost(this, ds, session, catalog, state);
         AxonValue savedAuth = session.auth();
         String savedNs = session.namespace();
@@ -472,11 +494,12 @@ public final class ProgramService {
                 session.auth(def.owner());
             }
             checkCancelled();
-            PlNamespace ns = namespaceOf(def, host, limits);
+            PlNamespace ns = dbg != null ? runtime.exec(def.program(), host, limits, dbg.hook())
+                : namespaceOf(def, host, limits);
             if (isPackage && !publicFunction(ns, fn)) {
                 throw new AxonError(PL_ERROR, "o package '" + def.name() + "' nao tem a funcao publica '" + fn + "'");
             }
-            AxonValue r = ns.call(fn, args, null, host, limits, null);
+            AxonValue r = ns.call(fn, args, null, host, limits, dbg == null ? null : dbg.hook());
             return r == null ? AxonValue.nul() : r;
         } catch (PlError e) {
             stats.error(e instanceof PlLimitError);

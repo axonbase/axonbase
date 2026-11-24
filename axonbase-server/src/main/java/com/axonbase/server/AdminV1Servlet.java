@@ -255,6 +255,10 @@ final class AdminV1Servlet extends HttpServlet {
             needRoot(c, Authz.Role.VIEWER);
             return ok(logs(req));
         }
+        AdminV1Response debug = AdminV1Debug.route(srv, this, method, seg, req, c);
+        if (debug != null) {
+            return debug;
+        }
         AdminV1Response extra = AdminV1Extensions.route(srv, this, method, seg, req, c);
         if (extra != null) {
             return extra;
@@ -298,7 +302,7 @@ final class AdminV1Servlet extends HttpServlet {
     }
 
     /** Rotas por ns/db: ROOT, ou um claim cujo escopo cobre o banco. */
-    private void needScope(Caller c, String ns, String db, Authz.Role min) {
+    void needScope(Caller c, String ns, String db, Authz.Role min) {
         if (c.claims() != null && !srv.auth().allows(c.claims(), ns, db)) {
             throw new ApiError(403, "FORBIDDEN", Messages.get("rpc_scope_forbidden"));
         }

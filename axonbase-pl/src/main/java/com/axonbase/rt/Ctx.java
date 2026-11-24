@@ -64,7 +64,7 @@ public final class Ctx {
         if (lim.cancelado()) {
             throw Errors.limite(PlLimitError.Tipo.CANCELADO, "execucao cancelada");
         }
-        if (deadline != 0 && System.nanoTime() - deadline > 0) {
+        if (deadline != 0 && System.nanoTime() - deadline - lim.creditoNanos() > 0) {
             throw Errors.limite(PlLimitError.Tipo.TEMPO, "prazo de execucao excedido");
         }
     }

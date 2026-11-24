@@ -23,4 +23,9 @@ public interface PlFrame {
 
     /** Profundidade (0 no topo). */
     int profundidade();
+
+    /** Variaveis globais do modulo do quadro (funcoes e modulos ficam de fora). */
+    default Map<String, AxonValue> globais() {
+        return Map.of();
+    }
 }

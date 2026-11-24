@@ -14,6 +14,7 @@ public final class PlLimits {
     private long maxTamanhoString = 16_000_000;
     private volatile boolean cancelado;
     private volatile long passosExecutados;
+    private volatile long creditoNanos;
 
     /** Limites padrao. */
     public static PlLimits padrao() {
@@ -76,6 +77,18 @@ public final class PlLimits {
 
     void passosExecutados(long v) {
         this.passosExecutados = v;
+    }
+
+    /** Soma tempo ao prazo (por exemplo o tempo parado num breakpoint, que nao conta contra a execucao). */
+    public void creditarNanos(long nanos) {
+        if (nanos > 0) {
+            this.creditoNanos += nanos;
+        }
+    }
+
+    /** Total creditado ao prazo, em nanossegundos. */
+    public long creditoNanos() {
+        return creditoNanos;
     }
 
     public boolean cancelado() {
