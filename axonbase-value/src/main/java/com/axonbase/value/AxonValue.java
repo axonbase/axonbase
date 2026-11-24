@@ -307,6 +307,29 @@ public final class AxonValue implements Comparable<AxonValue> {
         public String toString() {
             return table + ":" + renderKey(key);
         }
+
+        /**
+         * Igualdade pela identidade lógica: o literal {@code pessoa:ana} guarda a chave como {@link AxonValue},
+         * enquanto o que sai de uma travessia de grafo ou do armazenamento traz a chave crua. Os dois são o
+         * mesmo registro, então a comparação desembrulha a chave e separa número de texto.
+         */
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof RecordId r && table.equals(r.table) && identityKey(key).equals(identityKey(r.key));
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * table.hashCode() + identityKey(key).hashCode();
+        }
+    }
+
+    private static String identityKey(Object key) {
+        Object raw = key instanceof AxonValue kv && kv.type() == AxonType.NUMBER ? renderKey(kv) : key;
+        if (raw instanceof Number || (key instanceof AxonValue kv2 && kv2.type() == AxonType.NUMBER)) {
+            return "n" + new java.math.BigDecimal(raw.toString()).stripTrailingZeros().toPlainString();
+        }
+        return "s" + renderKey(key);
     }
 
     /** Converte a clave do record a forma simples sen comillas. */

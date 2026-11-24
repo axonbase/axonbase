@@ -244,4 +244,17 @@ class GraphEdgesAndTraversalTest {
         names.sort(String::compareTo);
         assertEquals(List.of("Mouse", "Notebook"), names);
     }
+
+    @Test
+    @DisplayName("id literal e id vindo da travessia são o mesmo registro (=, IN, graph::path)")
+    void literalAndTraversedIdsAreEqual() {
+        assertTrue(run("RETURN pessoa:caio IN pessoa:ana->segue->pessoa").asBool());
+        assertTrue(run("RETURN pessoa:bia->segue->pessoa = pessoa:caio").asBool());
+        assertTrue(run("RETURN pessoa:dani IN pessoa:ana->segue->pessoa->segue->pessoa").asBool());
+        assertFalse(run("RETURN pessoa:dani IN pessoa:ana->segue->pessoa").asBool());
+        assertEquals(3, run("RETURN graph::path(pessoa:ana, pessoa:dani)").asArray().size());
+        assertTrue(run("RETURN graph::connected(pessoa:ana, pessoa:dani)").asBool());
+        assertFalse(run("RETURN graph::connected(pessoa:dani, pessoa:ana)").asBool());
+        assertEquals(0, run("RETURN graph::path(pessoa:dani, pessoa:ana)").asArray().size());
+    }
 }

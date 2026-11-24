@@ -4616,7 +4616,7 @@ return score;
     /** BFS reachability check. Returns true if there is a path within maxDepth. */
     private AxonValue graphBfs(Database db, AxonValue.RecordId from, AxonValue.RecordId to,
                                 String edge, int maxDepth) {
-        if (from.table().equals(to.table()) && keyEquals(from.key(), to.key())) {
+        if (from.equals(to)) {
             return AxonValue.bool(true);
         }
         java.util.Set<String> visited = new java.util.HashSet<>();
@@ -4631,7 +4631,7 @@ return score;
                 for (AxonValue target : edgeTargets(db, current, "out", edge)) {
                     if (target.isRecordId()) {
                         AxonValue.RecordId next = target.asRecordId();
-                        if (next.table().equals(to.table()) && keyEquals(next.key(), to.key())) {
+                        if (next.equals(to)) {
                             return AxonValue.bool(true);
                         }
                         if (visited.add(next.toString())) {
@@ -4647,7 +4647,7 @@ return score;
     /** BFS path finding. Returns the path as an array of record IDs, or empty array. */
     private AxonValue graphBfsPath(Database db, AxonValue.RecordId from, AxonValue.RecordId to,
                                     String edge, int maxDepth) {
-        if (from.table().equals(to.table()) && keyEquals(from.key(), to.key())) {
+        if (from.equals(to)) {
             return AxonValue.array(java.util.List.of(AxonValue.record(from.table(), from.key())));
         }
         java.util.Set<String> visited = new java.util.HashSet<>();
@@ -4668,7 +4668,7 @@ return score;
                 AxonValue.RecordId next = target.asRecordId();
                 String key = next.toString();
 
-                if (next.table().equals(to.table()) && keyEquals(next.key(), to.key())) {
+                if (next.equals(to)) {
                     java.util.List<AxonValue> result = new java.util.ArrayList<>();
                     for (AxonValue.RecordId p : path) {
                         result.add(AxonValue.record(p.table(), p.key()));
@@ -4687,9 +4687,6 @@ return score;
         return AxonValue.array(java.util.List.of());
     }
 
-    private static boolean keyEquals(Object a, Object b) {
-        return a == b || (a != null && a.toString().equals(b != null ? b.toString() : null));
-    }
 
     /** Envolve cada termo da busca em tags HTML (HyperText Markup Language) configuráveis. */
     private AxonValue highlight(List<AxonValue> args, List<String> terms) {
