@@ -2132,8 +2132,10 @@ return score;
      * documento sintético, e os valores nus entram no campo {@code value}.
      */
     private List<Document> sourceDocs(Database db, Expr from) {
-        if (from instanceof Expr.SubQuery || from instanceof Expr.ArrayLit) {
-            return virtualDocs(eval(from));
+        if (from instanceof Expr.SubQuery || from instanceof Expr.ArrayLit || from instanceof Expr.Param) {
+            // FROM $variavel: o valor guardado por LET (array de objetos) vira a fonte, como numa subquery
+            AxonValue source = eval(from);
+            return virtualDocs(source.isArray() || source.isObject() ? source : AxonValue.array(List.of(source)));
         }
         // DATABASE LINK or local qualified database (table reference)
         if (from instanceof Expr.Qualified q) {
@@ -3871,7 +3873,8 @@ return score;
         if (f instanceof Expr.Ident id) {
             return fieldValue(doc.current(), id.name());
         }
-        if (f instanceof Expr.SubQuery || f instanceof Expr.Call || f instanceof Expr.Binary) {
+        if (f instanceof Expr.SubQuery || f instanceof Expr.Call || f instanceof Expr.Binary
+            || f instanceof Expr.ObjectLit || f instanceof Expr.ArrayLit) {
             return evalExprInDoc(f, doc);
         }
         if (f instanceof Expr.Idiom i) {
@@ -3909,8 +3912,21 @@ return score;
             // subquery correlacionada: o registro externo fica em $parent
             return evalSubQuery(sq, doc);
         }
-        if (e instanceof Expr.ObjectLit || e instanceof Expr.ArrayLit) {
-            return eval(e);
+        // Literais montados dentro de uma linha enxergam os campos dela: {type: 'Point', coordinates: [lon, lat]}
+        // usa as colunas lon e lat do registro. Sem isso os nomes eram lidos como tabelas.
+        if (e instanceof Expr.ObjectLit o) {
+            Map<String, AxonValue> m = new LinkedHashMap<>();
+            for (Expr.ObjectLit.Entry entry : o.entries()) {
+                m.put(entry.key(), evalExprInDoc(entry.value(), doc));
+            }
+            return AxonValue.object(m);
+        }
+        if (e instanceof Expr.ArrayLit a) {
+            List<AxonValue> list = new ArrayList<>();
+            for (Expr item : a.items()) {
+                list.add(evalExprInDoc(item, doc));
+            }
+            return AxonValue.array(list);
         }
         return eval(e);
     }

@@ -11,6 +11,8 @@ import java.util.Map;
 final class GeoVector {
 
     private static final double EARTH_RADIUS_METERS = 6_371_008.8;
+    /** Comprimento de um grau de latitude (e de longitude no equador), em metros. */
+    private static final double METERS_PER_DEGREE = 111_320d;
 
     private GeoVector() {
     }
@@ -73,6 +75,42 @@ final class GeoVector {
             }
         }
         return AxonValue.bool(inside);
+    }
+
+    /**
+     * Célula da grade que contém o ponto, como Polygon GeoJSON de lado aproximado {@code meters}. A grade é
+     * fixa (não depende dos dados), então todos os pontos da mesma célula recebem o mesmo polígono e a função
+     * serve de chave em {@code GROUP BY}; como o resultado é GeoJSON, o mapa já desenha as células.
+     * A altura da célula é constante em graus; a largura é recalculada por faixa de latitude para que a
+     * célula continue quadrada (em metros) longe do equador.
+     */
+    static AxonValue cell(AxonValue point, AxonValue meters) {
+        double[] p = pointOf(point);
+        if (p == null || meters == null || !meters.isNumber() || meters.asDouble() <= 0) {
+            return AxonValue.nul();
+        }
+        double side = meters.asDouble();
+        double latStep = side / METERS_PER_DEGREE;
+        long row = (long) Math.floor(p[1] / latStep);
+        double bandCenterLat = (row + 0.5) * latStep;
+        double lonStep = side / (METERS_PER_DEGREE * Math.max(1e-6, Math.cos(Math.toRadians(bandCenterLat))));
+        long col = (long) Math.floor(p[0] / lonStep);
+        double west = col * lonStep;
+        double east = (col + 1) * lonStep;
+        double south = row * latStep;
+        double north = (row + 1) * latStep;
+        List<AxonValue> ring = List.of(corner(west, south), corner(east, south), corner(east, north),
+            corner(west, north), corner(west, south));
+        return polygon(AxonValue.array(List.of(AxonValue.array(ring))));
+    }
+
+    /** Vértice com 6 casas decimais (≈ 11 cm): evita lixo de ponto flutuante nos polígonos de célula. */
+    private static AxonValue corner(double lon, double lat) {
+        return AxonValue.array(List.of(rounded(lon), rounded(lat)));
+    }
+
+    private static AxonValue rounded(double value) {
+        return AxonValue.num(java.math.BigDecimal.valueOf(value).setScale(6, java.math.RoundingMode.HALF_UP));
     }
 
     static AxonValue euclidean(AxonValue a, AxonValue b) {

@@ -1972,6 +1972,18 @@ public final class Parser {
         Expr lhs = parsePrefix();
         while (true) {
             lhs = applyPostfix(lhs);
+            if (minBp <= COMPARISON_BP) {
+                if (atWord("between")) {
+                    pos++;
+                    lhs = between(lhs, false);
+                    continue;
+                }
+                if (atKeyword("not") && peekIsWord(1, "between")) {
+                    pos += 2;
+                    lhs = between(lhs, true);
+                    continue;
+                }
+            }
             OpInfo op = binaryOpInfo();
             if (op == null) {
                 return lhs;
@@ -1990,6 +2002,34 @@ public final class Parser {
             Expr rhs = parseExpr(rp);
             lhs = new Expr.Binary(op.op, lhs, rhs);
         }
+    }
+
+    /** Precedência dos operadores de comparação ({@code <}, {@code =}...). */
+    private static final int COMPARISON_BP = 5;
+
+    /**
+     * {@code x BETWEEN a AND b} vira {@code x >= a AND x <= b} (inclusivo nos dois lados), então o executor,
+     * a seleção de índice e o EXPLAIN enxergam só comparações que já conhecem. Os limites são lidos acima da
+     * precedência de comparação para que o {@code AND} do meio não seja consumido como operador lógico.
+     */
+    private Expr between(Expr value, boolean negate) {
+        Expr low = parseExpr(COMPARISON_BP + 1);
+        expectKeyword("and");
+        Expr high = parseExpr(COMPARISON_BP + 1);
+        Expr inside = new Expr.Binary(BinaryOp.AND,
+            new Expr.Binary(BinaryOp.GE, value, low),
+            new Expr.Binary(BinaryOp.LE, value, high));
+        return negate ? new Expr.Unary(UnaryOp.NOT, inside) : inside;
+    }
+
+    /** Palavra contextual: não é reservada, então continua valendo como nome de campo em outros lugares. */
+    private boolean atWord(String word) {
+        return peekIsWord(0, word);
+    }
+
+    private boolean peekIsWord(int ahead, String word) {
+        Token t = peek(ahead);
+        return (t.is(TokenType.IDENT) || t.is(TokenType.KEYWORD)) && t.text().equalsIgnoreCase(word);
     }
 
     /**
