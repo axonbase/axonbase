@@ -62,6 +62,8 @@ public final class Datastore {
     private final LiveBus liveBus = new LiveBus();
     private final AuthCatalog authCatalog = new AuthCatalog();
     private final ControlStateMachine controlState = new ControlStateMachine();
+    private volatile com.axonbase.core.embedding.EmbeddingClient embeddingClient =
+        new com.axonbase.core.embedding.EmbeddingClient();
     private final ControlStore controlStore;
     private final Object controlLock = new Object();
     private volatile CommitCoordinator commitCoordinator;
@@ -562,6 +564,38 @@ public final class Datastore {
         synchronized (controlLock) {
             int removed = controlState.removeWhere(c -> c.namespace().equals(ns) && c.database().equals(db)
                 && table.equals(tableOfControl(c)));
+            if (removed == 0) {
+                return;
+            }
+            KvBackend target = session != null && session.inTransaction() ? session.tx() : backend;
+            controlStore.save(controlState, target);
+            if (target == backend) {
+                backend.flush();
+            }
+        }
+    }
+
+    /** Cliente dos provedores de embedding (um por servidor: cache, limite de concorrência e métricas). */
+    public com.axonbase.core.embedding.EmbeddingClient embeddings() {
+        return embeddingClient;
+    }
+
+    /** Troca o cliente de embeddings (testes e configuração do servidor). */
+    public void useEmbeddingClient(com.axonbase.core.embedding.EmbeddingClient client) {
+        this.embeddingClient = client;
+    }
+
+    /**
+     * Tira do plano de controle uma definição (o DROP de embedding, por exemplo). O plano só sabe substituir, então
+     * sem isso o replay do reinício a recriaria.
+     */
+    public void removeControl(Session session, String ns, String db, ControlCommand.Kind kind, String name) {
+        if (replaying.get()) {
+            return;
+        }
+        synchronized (controlLock) {
+            int removed = controlState.removeWhere(c -> c.kind() == kind && c.namespace().equals(ns)
+                && c.database().equals(db) && c.name().equals(name));
             if (removed == 0) {
                 return;
             }

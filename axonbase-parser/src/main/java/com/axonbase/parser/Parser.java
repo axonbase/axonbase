@@ -190,6 +190,9 @@ public final class Parser {
                 if (atWord("unrelate") && (peek(1).is(IDENT) || peek(1).is(KEYWORD) || peek(1).is(TokenType.STRING))) {
                     yield parseUnrelate();
                 }
+                if (atWord("reembed") && peekIsWord(1, "table")) {
+                    yield parseReembed();
+                }
                 throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
             }
             default -> throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
@@ -1116,6 +1119,9 @@ public final class Parser {
             }
             return new Statement.DefineAnalyzer(name, lowercase, stopwords, stemming);
         }
+        if (matchWord("embedding")) {
+            return parseDefineEmbedding();
+        }
         if (matchKeyword("user")) {
             String name = expectIdentOrString();
             AuthTarget target = parseAuthTarget();
@@ -1209,7 +1215,15 @@ public final class Parser {
             if (matchKeyword("references")) {
                 references = expectIdent();
             }
-            return new Statement.DefineField(name, table, type, assertE, readonly, valueE, defaultE, references);
+            String embeddingName = null;
+            String embeddingFrom = null;
+            if (matchWord("embedding")) {
+                embeddingName = expectIdent();
+                expectWord("from");
+                embeddingFrom = parseFieldPath();
+            }
+            return new Statement.DefineField(name, table, type, assertE, readonly, valueE, defaultE, references,
+                embeddingName, embeddingFrom);
         }
         if (matchKeyword("index")) {
             String name = expectIdent();
@@ -1376,6 +1390,87 @@ public final class Parser {
             default -> throw error("distância desconhecida no índice HNSW: " + name
                 + " (use cosine, euclidean ou manhattan)");
         };
+    }
+
+    /**
+     * {@code DEFINE EMBEDDING nome PROVIDER http URL '...' MODEL '...' DIMENSION n [KEY ENV 'VAR'] [TIMEOUT s]
+     * [BATCH n] [DOCUMENT PREFIX '...'] [QUERY PREFIX '...'] [SEND DIMENSION] [AUTH HEADER '...']}. As cláusulas
+     * opcionais valem em qualquer ordem.
+     */
+    private Statement parseDefineEmbedding() {
+        String name = expectIdent();
+        String provider = null;
+        String url = null;
+        String model = null;
+        Integer dimension = null;
+        String keyEnv = null;
+        Integer timeout = null;
+        Integer batch = null;
+        String documentPrefix = null;
+        String queryPrefix = null;
+        boolean sendDimension = false;
+        String authHeader = null;
+        while (true) {
+            if (matchWord("provider")) {
+                provider = expectIdent().toLowerCase(java.util.Locale.ROOT);
+            } else if (matchWord("url")) {
+                url = (String) expect(TokenType.STRING).literal();
+            } else if (matchWord("model")) {
+                model = (String) expect(TokenType.STRING).literal();
+            } else if (matchWord("dimension")) {
+                dimension = ((Number) expect(TokenType.INT).literal()).intValue();
+            } else if (matchWord("key")) {
+                expectWord("env");
+                keyEnv = (String) expect(TokenType.STRING).literal();
+            } else if (matchWord("timeout")) {
+                timeout = ((Number) expect(TokenType.INT).literal()).intValue();
+            } else if (matchWord("batch")) {
+                batch = ((Number) expect(TokenType.INT).literal()).intValue();
+            } else if (matchWord("document")) {
+                expectWord("prefix");
+                documentPrefix = (String) expect(TokenType.STRING).literal();
+            } else if (matchWord("query")) {
+                expectWord("prefix");
+                queryPrefix = (String) expect(TokenType.STRING).literal();
+            } else if (matchWord("send")) {
+                expectWord("dimension");
+                sendDimension = true;
+            } else if (matchWord("auth")) {
+                expectWord("header");
+                authHeader = (String) expect(TokenType.STRING).literal();
+            } else {
+                break;
+            }
+        }
+        if (provider == null || !provider.equals("http")) {
+            throw error("DEFINE EMBEDDING exige PROVIDER http (o único provedor suportado)");
+        }
+        if (url == null || model == null || dimension == null || dimension < 1) {
+            throw error("DEFINE EMBEDDING exige URL, MODEL e DIMENSION (inteiro maior que zero)");
+        }
+        return new Statement.DefineEmbedding(name, provider, url, model, dimension, keyEnv, timeout, batch,
+            documentPrefix, queryPrefix, sendDimension, authHeader);
+    }
+
+    /** {@code REEMBED TABLE t [FIELD f] [DRY RUN]} */
+    private Statement parseReembed() {
+        pos++; // REEMBED
+        expectWord("table");
+        String table = expectIdent();
+        String field = null;
+        boolean dryRun = false;
+        while (true) {
+            if (matchWord("field")) {
+                field = parseFieldPath();
+            } else if (atWord("dry")) {
+                pos++;
+                expectWord("run");
+                dryRun = true;
+            } else {
+                break;
+            }
+        }
+        return new Statement.Reembed(table, field, dryRun);
     }
 
     private Statement parseCreateAnalyzer() {
@@ -1665,6 +1760,9 @@ public final class Parser {
             String name = expectIdentOrString();
             return new Statement.DropTable(name);
         }
+        if (matchWord("embedding")) {
+            return new Statement.DropEmbedding(expectIdent());
+        }
         if (matchKeyword("index")) {
             String name = expectIdent();
             // forma com a tabela (DROP INDEX nome ON [TABLE] tabela), a mesma do CREATE INDEX; o nome já basta
@@ -1932,14 +2030,22 @@ public final class Parser {
         StringBuilder sb = new StringBuilder(expectTypeWord());
         if (match(TokenType.LT)) {
             sb.append('<');
-            sb.append(expectTypeWord());
+            sb.append(expectTypeArg());
             while (match(COMMA)) {
-                sb.append(',').append(expectTypeWord());
+                sb.append(',').append(expectTypeArg());
             }
             expect(TokenType.GT);
             sb.append('>');
         }
         return sb.toString();
+    }
+
+    /** Argumento de tipo entre {@code < >}: um nome ({@code geometry<point>}) ou um número ({@code vector<1024>}). */
+    private String expectTypeArg() {
+        if (at(INT)) {
+            return String.valueOf(((Number) take().literal()).longValue());
+        }
+        return expectTypeWord();
     }
 
     private String expectTypeWord() {
@@ -2083,6 +2189,21 @@ public final class Parser {
     }
 
     /** Palavra contextual: não é reservada, então continua valendo como nome de campo em outros lugares. */
+    /** Consome a palavra contextual (IDENT ou KEYWORD), sem exigir que seja reservada. */
+    private boolean matchWord(String word) {
+        if (atWord(word)) {
+            pos++;
+            return true;
+        }
+        return false;
+    }
+
+    private void expectWord(String word) {
+        if (!matchWord(word)) {
+            throw error(Messages.get("parser_expected_keyword", word, peek().start()));
+        }
+    }
+
     private boolean atWord(String word) {
         return peekIsWord(0, word);
     }
@@ -2541,7 +2662,7 @@ public final class Parser {
             || t.isKeyword("begin") || t.isKeyword("commit") || t.isKeyword("cancel")
             || t.isKeyword("alter") || t.isKeyword("drop") || t.isKeyword("grant")
             || t.isKeyword("revoke")
-            || (t.is(IDENT) && t.text().equalsIgnoreCase("unrelate"));
+            || (t.is(IDENT) && (t.text().equalsIgnoreCase("unrelate") || t.text().equalsIgnoreCase("reembed")));
     }
 
     private boolean isObjectLiteralAhead() {

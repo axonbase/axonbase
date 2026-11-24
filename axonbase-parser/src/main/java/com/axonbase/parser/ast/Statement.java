@@ -110,7 +110,32 @@ public sealed interface Statement {
     }
 
     record DefineField(String name, String table, String type, Expr assertExpr, boolean readonly,
-                       Expr valueExpr, Expr defaultExpr, String references) implements Statement {
+                       Expr valueExpr, Expr defaultExpr, String references,
+                       String embeddingName, String embeddingFrom) implements Statement {
+
+        /** DEFINE FIELD sem a cláusula EMBEDDING (o formato de antes dela existir). */
+        public DefineField(String name, String table, String type, Expr assertExpr, boolean readonly,
+                           Expr valueExpr, Expr defaultExpr, String references) {
+            this(name, table, type, assertExpr, readonly, valueExpr, defaultExpr, references, null, null);
+        }
+    }
+
+    /**
+     * DEFINE EMBEDDING: provedor que transforma texto em vetor. Só existe o provedor {@code http}, que fala o formato
+     * {@code /v1/embeddings} (OpenAI, Ollama, llama.cpp, vLLM...). A chave nunca aparece aqui, só o NOME da variável
+     * de ambiente ({@code keyEnv}).
+     */
+    record DefineEmbedding(String name, String provider, String url, String model, int dimension, String keyEnv,
+                           Integer timeoutSeconds, Integer batch, String documentPrefix, String queryPrefix,
+                           boolean sendDimension, String authHeader) implements Statement {
+    }
+
+    /** DROP EMBEDDING {@code <name>} */
+    record DropEmbedding(String name) implements Statement {
+    }
+
+    /** REEMBED TABLE t [FIELD f] [DRY RUN]: regera os vetores dos campos que seguem um embedding. */
+    record Reembed(String table, String field, boolean dryRun) implements Statement {
     }
 
     record DefineIndex(String name, String table, List<String> columns, boolean unique, boolean count,

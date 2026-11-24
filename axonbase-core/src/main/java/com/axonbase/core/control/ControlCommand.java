@@ -21,7 +21,7 @@ public record ControlCommand(Kind kind, String namespace, String database, Strin
      * tabela, e a tabela precisa do banco de dados.
      */
     public enum Kind {
-        DATABASE, DATABASE_LINK, ANALYZER, TABLE, FIELD, INDEX, EVENT, ACCESS, USER, AUDIT,
+        DATABASE, DATABASE_LINK, ANALYZER, EMBEDDING, TABLE, FIELD, INDEX, EVENT, ACCESS, USER, AUDIT,
         /** Truststore enviado pela API: guarda só nome e caminho do arquivo, nunca a senha. */
         JKS
     }

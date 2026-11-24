@@ -15,6 +15,7 @@ public final class Catalog {
 
     private final ConcurrentMap<String, TableDef> tables = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, AnalyzerDef> analyzers = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, EmbeddingDef> embeddings = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, DataRuleDef> dataRules = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, com.axonbase.core.audit.AiAuditDef> audits = new ConcurrentHashMap<>();
 
@@ -63,6 +64,22 @@ public final class Catalog {
 
     public List<AnalyzerDef> analyzers() {
         return List.copyOf(analyzers.values());
+    }
+
+    public void defineEmbedding(EmbeddingDef def) {
+        embeddings.put(def.name(), def);
+    }
+
+    public EmbeddingDef embedding(String name) {
+        return embeddings.get(name);
+    }
+
+    public List<EmbeddingDef> embeddings() {
+        return List.copyOf(embeddings.values());
+    }
+
+    public boolean removeEmbedding(String name) {
+        return embeddings.remove(name) != null;
     }
 
     public boolean removeAnalyzer(String name) {
@@ -124,6 +141,8 @@ public final class Catalog {
         private final com.axonbase.parser.ast.Expr assertExpr;
         private final com.axonbase.parser.ast.Expr defaultExpr;
         private final String references;
+        private final String embeddingName;
+        private final String embeddingFrom;
 
         public FieldDef(String name, String type, boolean readonly) {
             this(name, type, readonly, null, null, null);
@@ -139,12 +158,21 @@ public final class Catalog {
                         com.axonbase.parser.ast.Expr assertExpr,
                         com.axonbase.parser.ast.Expr defaultExpr,
                         String references) {
+            this(name, type, readonly, assertExpr, defaultExpr, references, null, null);
+        }
+
+        public FieldDef(String name, String type, boolean readonly,
+                        com.axonbase.parser.ast.Expr assertExpr,
+                        com.axonbase.parser.ast.Expr defaultExpr,
+                        String references, String embeddingName, String embeddingFrom) {
             this.name = name;
             this.type = type;
             this.readonly = readonly;
             this.assertExpr = assertExpr;
             this.defaultExpr = defaultExpr;
             this.references = references;
+            this.embeddingName = embeddingName;
+            this.embeddingFrom = embeddingFrom;
         }
 
         public String name() {
@@ -169,6 +197,16 @@ public final class Catalog {
 
         public String references() {
             return references;
+        }
+
+        /** Nome do embedding que preenche este campo, ou {@code null}. */
+        public String embeddingName() {
+            return embeddingName;
+        }
+
+        /** Campo de texto de onde o vetor é calculado, ou {@code null}. */
+        public String embeddingFrom() {
+            return embeddingFrom;
         }
     }
 
@@ -266,6 +304,17 @@ public final class Catalog {
     }
 
     /** Configuração de normalização para um índice full-text. */
+    /**
+     * Embedding: provedor HTTP que transforma texto em vetor (formato {@code /v1/embeddings}). {@code keyEnv} é o NOME
+     * da variável de ambiente com a chave, nunca a chave.
+     */
+    public record EmbeddingDef(String name, String url, String model, int dimension, String keyEnv, int timeoutSeconds,
+                               int batch, String documentPrefix, String queryPrefix, boolean sendDimension,
+                               String authHeader) {
+        public static final int DEFAULT_TIMEOUT_SECONDS = 30;
+        public static final int DEFAULT_BATCH = 64;
+    }
+
     public record AnalyzerDef(String name, boolean lowercase, List<String> stopwords,
                               boolean stemming) {
         public AnalyzerDef {

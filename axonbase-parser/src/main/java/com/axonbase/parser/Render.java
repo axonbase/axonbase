@@ -242,6 +242,45 @@ public final class Render {
                 if (df.references() != null) {
                     sb.append(" REFERENCES ").append(df.references());
                 }
+                if (df.embeddingName() != null) {
+                    sb.append(" EMBEDDING ").append(df.embeddingName()).append(" FROM ").append(df.embeddingFrom());
+                }
+            }
+            case Statement.DefineEmbedding de -> {
+                sb.append("DEFINE EMBEDDING ").append(de.name()).append(" PROVIDER ").append(de.provider())
+                    .append(" URL \"").append(escape(de.url())).append("\" MODEL \"").append(escape(de.model()))
+                    .append("\" DIMENSION ").append(de.dimension());
+                if (de.keyEnv() != null) {
+                    sb.append(" KEY ENV \"").append(escape(de.keyEnv())).append('"');
+                }
+                if (de.timeoutSeconds() != null) {
+                    sb.append(" TIMEOUT ").append(de.timeoutSeconds());
+                }
+                if (de.batch() != null) {
+                    sb.append(" BATCH ").append(de.batch());
+                }
+                if (de.documentPrefix() != null) {
+                    sb.append(" DOCUMENT PREFIX \"").append(escape(de.documentPrefix())).append('"');
+                }
+                if (de.queryPrefix() != null) {
+                    sb.append(" QUERY PREFIX \"").append(escape(de.queryPrefix())).append('"');
+                }
+                if (de.sendDimension()) {
+                    sb.append(" SEND DIMENSION");
+                }
+                if (de.authHeader() != null) {
+                    sb.append(" AUTH HEADER \"").append(escape(de.authHeader())).append('"');
+                }
+            }
+            case Statement.DropEmbedding de -> sb.append("DROP EMBEDDING ").append(de.name());
+            case Statement.Reembed r -> {
+                sb.append("REEMBED TABLE ").append(r.table());
+                if (r.field() != null) {
+                    sb.append(" FIELD ").append(r.field());
+                }
+                if (r.dryRun()) {
+                    sb.append(" DRY RUN");
+                }
             }
             case Statement.DefineIndex di -> {
                 sb.append("DEFINE INDEX ").append(di.name()).append(" ON TABLE ").append(di.table())
