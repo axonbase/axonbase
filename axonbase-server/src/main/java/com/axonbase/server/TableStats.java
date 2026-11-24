@@ -29,8 +29,7 @@ final class TableStats {
             .forEach(f -> fields.add(AdminJson.obj("name", f.name(), "type", f.type() == null ? "any" : f.type())));
         List<Object> indexes = new ArrayList<>();
         table.indexes().values().stream().sorted(Comparator.comparing(Catalog.IndexDef::name))
-            .forEach(i -> indexes.add(AdminJson.obj("name", i.name(), "columns", i.columns(),
-                "kind", AdminV1Servlet.indexKind(i))));
+            .forEach(i -> indexes.add(AdminV1Servlet.indexInfo(i)));
         return AdminJson.obj("count", count(db, table), "fields", fields, "indexes", indexes,
             "geoFields", geoFields(db, table), "vectorFields", vectorFields(table));
     }

@@ -449,13 +449,32 @@ final class AdminV1Servlet extends HttpServlet {
                 .forEach(f -> fields.add(AdminJson.obj("name", f.name(), "type", f.type() == null ? "any" : f.type())));
             List<Object> indexes = new ArrayList<>();
             t.indexes().values().stream().sorted(Comparator.comparing(Catalog.IndexDef::name))
-                .forEach(i -> indexes.add(AdminJson.obj("name", i.name(), "columns", i.columns(),
-                    "kind", indexKind(i))));
+                .forEach(i -> indexes.add(indexInfo(i)));
             out.add(AdminJson.obj("name", t.name(),
                 "schemaMode", t.schemafull() ? "SCHEMAFULL" : "SCHEMALESS",
                 "fields", fields, "indexes", indexes));
         }
         return AdminJson.of(out);
+    }
+
+    /**
+     * Índice como o painel do Enterprise o lê: nome, colunas, tipo e os detalhes do tipo (analisador da busca,
+     * dimensão e distância do vetor, parâmetros do HNSW), só quando existem.
+     */
+    static AxonValue indexInfo(Catalog.IndexDef i) {
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("name", i.name());
+        m.put("columns", i.columns());
+        m.put("kind", indexKind(i));
+        if (i.search()) {
+            m.put("analyzer", i.searchAnalyzer());
+        }
+        if (i.vector()) {
+            m.put("dimension", i.vectorDimension());
+            m.put("distance", i.vectorDistance());
+            m.put("hnsw", Map.of("m", i.hnswM(), "efc", i.hnswEfc(), "efs", i.hnswEfs()));
+        }
+        return AdminJson.of(m);
     }
 
     static String indexKind(Catalog.IndexDef i) {
