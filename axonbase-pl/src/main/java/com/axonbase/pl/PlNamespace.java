@@ -53,6 +53,23 @@ public final class PlNamespace {
         return r;
     }
 
+    /**
+     * Verdadeiro se o espaco de nomes pode ter o estado alterado por uma chamada: alguma funcao declara
+     * {@code global} ou algum valor global e um contêiner mutavel (list, dict, set).
+     */
+    public boolean temEstadoMutavel() {
+        if (mi.program.declaraGlobal()) {
+            return true;
+        }
+        for (Object v : mi.globals) {
+            if (v instanceof com.axonbase.pl.rt.PyList || v instanceof com.axonbase.pl.rt.PyDict
+                || v instanceof com.axonbase.pl.rt.PySet) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Chama uma funcao do espaco de nomes (compartilhando as variaveis globais). */
     public AxonValue call(String function, List<AxonValue> args, Map<String, AxonValue> kwargs, PlHost host,
                           PlLimits limits, PlDebugHook hook) {

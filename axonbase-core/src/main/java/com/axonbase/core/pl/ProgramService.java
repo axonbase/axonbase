@@ -184,6 +184,9 @@ public final class ProgramService {
             System.err.println("{\"event\":\"axonpl_replay_broken\",\"name\":\"" + name + "\",\"error\":\""
                 + error.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ") + "\"}");
         }
+        if (program != null && !replaying) {
+            checkImports(db, name, program);
+        }
         String text = Render.stmt(renderable(kind, name, ps, params, returns, definer, body));
         String definition = effective.header() + text;
         ProgramDef def = new ProgramDef(kind, name, ps, returns, definer, owner, body, definition, version, created,
@@ -191,6 +194,54 @@ public final class ProgramService {
         ds.applyControl(session, ControlCommand.of(controlKind(kind), db.ns(), db.db(), name, definition));
         db.programs().put(def);
         return AxonValue.nul();
+    }
+
+    /** Recusa import de package inexistente, de objeto que não é package e ciclos de import. */
+    private void checkImports(Database db, String name, PlProgram program) {
+        for (com.axonbase.pl.PlImportInfo imp : program.imports()) {
+            String mod = imp.modulo();
+            if (com.axonbase.pl.rt.Modules.embutido(mod) || SessionHost.isNative(mod)) {
+                continue;
+            }
+            ProgramDef target = db.programs().get(mod);
+            if (mod.equals(name)) {
+                throw new AxonError(-32000, "import circular: '" + name + "' importa a si mesmo");
+            }
+            if (target == null) {
+                throw new AxonError(-32000, "o package '" + mod + "' importado por '" + name + "' (linha "
+                    + imp.linha() + ") nao existe; crie-o antes com CREATE PACKAGE");
+            }
+            if (target.kind() != ProgramDef.Kind.PACKAGE) {
+                throw new AxonError(-32000, "'" + mod + "' importado por '" + name + "' (linha " + imp.linha()
+                    + ") e " + what(target.kind()) + ", nao um package");
+            }
+            List<String> path = new ArrayList<>();
+            path.add(name);
+            if (reaches(db.programs(), mod, name, new HashSet<>(), path)) {
+                throw new AxonError(-32000, "import circular detectado: " + String.join(" -> ", path));
+            }
+        }
+    }
+
+    /** Busca em profundidade: {@code from} alcança {@code goal} pelos imports já cadastrados? */
+    private static boolean reaches(ProgramCatalog catalog, String from, String goal, Set<String> seen,
+                                   List<String> path) {
+        path.add(from);
+        if (from.equals(goal)) {
+            return true;
+        }
+        if (seen.add(from)) {
+            ProgramDef d = catalog.get(from);
+            if (d != null && d.program() != null) {
+                for (com.axonbase.pl.PlImportInfo i : d.program().imports()) {
+                    if (reaches(catalog, i.modulo(), goal, seen, path)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        path.remove(path.size() - 1);
+        return false;
     }
 
     private static Statement renderable(ProgramDef.Kind kind, String name, List<ProgramDef.Param> ps,
@@ -295,12 +346,16 @@ public final class ProgramService {
             throw new AxonError(-32000, kindName(kind) + " '" + d.name() + "' nao existe");
         }
         if (kind == ProgramDef.Kind.PACKAGE) {
+            List<String> users = new ArrayList<>();
             for (ProgramDef other : db.programs().all()) {
-                if (other.program() != null && other.kind() == ProgramDef.Kind.PACKAGE && !other.name().equals(d.name())
+                if (other.program() != null && !other.name().equals(d.name())
                     && other.program().imports().stream().anyMatch(i -> i.modulo().equals(d.name()))) {
-                    throw new AxonError(-32000, "o package '" + d.name() + "' e importado pelo package '"
-                        + other.name() + "' e nao pode ser removido");
+                    users.add(what(other.kind()) + " " + other.name());
                 }
+            }
+            if (!users.isEmpty()) {
+                throw new AxonError(-32000, "o package '" + d.name() + "' e importado por " + String.join(", ", users)
+                    + " e nao pode ser removido; remova ou altere esses objetos antes");
             }
         }
         db.programs().remove(d.name());
@@ -476,7 +531,7 @@ public final class ProgramService {
             if (isPackage && !publicFunction(ns, fn)) {
                 throw new AxonError(PL_ERROR, "o package '" + def.name() + "' nao tem a funcao publica '" + fn + "'");
             }
-            AxonValue r = ns.call(fn, args, null, host, limits, null);
+            AxonValue r = callLocked(def, ns, fn, args, host, limits);
             return r == null ? AxonValue.nul() : r;
         } catch (PlError e) {
             stats.error(e instanceof PlLimitError);
@@ -494,6 +549,38 @@ public final class ProgramService {
             }
             stats.call(System.nanoTime() - started, limits.passosExecutados());
             lastLog.set(state.log);
+        }
+    }
+
+    /**
+     * Semântica das globais de package: o estado global (variáveis do módulo) é compartilhado entre as chamadas.
+     * Se o package tem estado mutável (alguma função usa {@code global} ou há list/dict/set no módulo), cada
+     * chamada a ele toma a trava do package (reentrante) e as chamadas são serializadas: nenhuma atualização se
+     * perde. Package só com constantes imutáveis e funções puras não toma trava e roda em paralelo.
+     * A espera pela trava respeita o prazo da chamada.
+     */
+    private AxonValue callLocked(ProgramDef def, PlNamespace ns, String fn, List<AxonValue> args, SessionHost host,
+                                 PlLimits limits) {
+        if (def.kind() != ProgramDef.Kind.PACKAGE || !ns.temEstadoMutavel()) {
+            return ns.call(fn, args, null, host, limits, null);
+        }
+        java.util.concurrent.locks.ReentrantLock lock = def.stateLock();
+        long ms = timeoutMs > 0 ? timeoutMs : 30_000;
+        boolean got;
+        try {
+            got = lock.tryLock(ms, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AxonError(PL_LIMIT, "interrompido esperando a trava do package '" + def.name() + "'");
+        }
+        if (!got) {
+            throw new AxonError(PL_LIMIT, "tempo esgotado esperando a trava do estado global do package '"
+                + def.name() + "' (outra chamada o mantem ocupado; possivel espera circular entre packages)");
+        }
+        try {
+            return ns.call(fn, args, null, host, limits, null);
+        } finally {
+            lock.unlock();
         }
     }
 

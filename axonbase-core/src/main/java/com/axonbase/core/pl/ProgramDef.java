@@ -32,6 +32,7 @@ public final class ProgramDef {
     private final String error;
     private final PlProgram program;
     private volatile PlNamespace loaded;
+    private final java.util.concurrent.locks.ReentrantLock stateLock = new java.util.concurrent.locks.ReentrantLock();
 
     ProgramDef(Kind kind, String name, List<Param> params, String returns, boolean definer, AxonValue owner,
                String body, String definition, long version, long created, long updated, String error,
@@ -111,6 +112,11 @@ public final class ProgramDef {
     /** Programa compilado (nulo quando quebrado). */
     PlProgram program() {
         return program;
+    }
+
+    /** Trava do estado global do package: tomada só em chamadas a packages com estado mutável. */
+    java.util.concurrent.locks.ReentrantLock stateLock() {
+        return stateLock;
     }
 
     PlNamespace loaded() {

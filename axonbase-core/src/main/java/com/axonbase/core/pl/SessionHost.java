@@ -39,6 +39,10 @@ final class SessionHost implements PlHost {
 
     private static final Set<String> NATIVE = Set.of("db", "log");
 
+    static boolean isNative(String name) {
+        return NATIVE.contains(name);
+    }
+
     private final ProgramService service;
     private final Datastore ds;
     private final Session session;
