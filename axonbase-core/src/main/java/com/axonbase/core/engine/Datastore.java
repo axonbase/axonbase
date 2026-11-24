@@ -686,7 +686,25 @@ public final class Datastore {
         Session session = new Session(emptyToNull(command.namespace()),
             emptyToNull(command.database()));
         Query query = AxonQl.parse(command.definition());
-        new Executor(this).execute(query, session, null);
+        com.axonbase.core.pl.ProgramMeta.beginReplay(command.definition());
+        try {
+            new Executor(this).execute(query, session, null);
+        } finally {
+            com.axonbase.core.pl.ProgramMeta.endReplay();
+        }
+    }
+
+    private final com.axonbase.core.pl.ProgramService programs = new com.axonbase.core.pl.ProgramService(this);
+
+    /** Funções, procedures e packages AxonPL (criação, chamada, métricas). */
+    public com.axonbase.core.pl.ProgramService programs() {
+        return programs;
+    }
+
+    /** Banco existente ou {@code null} (não cria). */
+    public Database findDatabase(String ns, String db) {
+        ConcurrentMap<String, Database> dbs = namespaces.get(ns);
+        return dbs == null ? null : dbs.get(db);
     }
 
     /**

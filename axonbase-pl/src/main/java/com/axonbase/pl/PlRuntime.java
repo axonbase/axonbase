@@ -58,7 +58,8 @@ public final class PlRuntime {
     }
 
     static AxonValue executar(PlHost host, PlLimits limits, PlDebugHook hook, Function<Ctx, AxonValue> body) {
-        Ctx ctx = new Ctx(host, limits == null ? PlLimits.padrao() : limits, hook);
+        PlLimits lim = limits == null ? PlLimits.padrao() : limits;
+        Ctx ctx = new Ctx(host, lim, hook);
         try {
             ctx.checkTempo();
             return body.apply(ctx);
@@ -68,6 +69,8 @@ public final class PlRuntime {
             throw Errors.limite(PlLimitError.Tipo.PROFUNDIDADE, "pilha de execucao esgotada (recursao funda demais)");
         } catch (RuntimeException e) {
             throw Errors.runtime("erro interno do interpretador AxonPL: " + e);
+        } finally {
+            lim.passosExecutados(ctx.steps);
         }
     }
 

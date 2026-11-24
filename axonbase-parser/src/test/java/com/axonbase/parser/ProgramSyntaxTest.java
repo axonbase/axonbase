@@ -108,6 +108,15 @@ class ProgramSyntaxTest {
     }
 
     @Test
+    void renderDeCorpoIndentadoEIdempotente() {
+        String sql = "CREATE PROCEDURE p() AS $$ while True:\n    db.count('x')\n    if a:\n        pass $$";
+        var first = assertInstanceOf(Statement.CreateProcedure.class, one(sql));
+        var second = assertInstanceOf(Statement.CreateProcedure.class, one(AxonQl.render(AxonQl.parse(sql))));
+        assertEquals(first.body(), second.body());
+        assertEquals("while True:\n    db.count('x')\n    if a:\n        pass", second.body());
+    }
+
+    @Test
     void normalizaIndentacao() {
         assertEquals("a = 1\nif a:\n    return 2", ProgramText.normalizeBody("\n\n    a = 1\n    if a:\n        return 2\n   \n"));
     }

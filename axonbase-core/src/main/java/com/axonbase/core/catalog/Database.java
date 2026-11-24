@@ -15,6 +15,7 @@ public final class Database {
     private final Catalog catalog;
     private final KvBackend records;
     private final AiAuditCatalog auditCatalog;
+    private final com.axonbase.core.pl.ProgramCatalog programs = new com.axonbase.core.pl.ProgramCatalog();
 
     public Database(String ns, String db, KvBackend backend) {
         this.ns = ns;
@@ -42,5 +43,10 @@ public final class Database {
 
     public AiAuditCatalog auditCatalog() {
         return auditCatalog;
+    }
+
+    /** Funções, procedures e packages AxonPL deste banco. */
+    public com.axonbase.core.pl.ProgramCatalog programs() {
+        return programs;
     }
 }

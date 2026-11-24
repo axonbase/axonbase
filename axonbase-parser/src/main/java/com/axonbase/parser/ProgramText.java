@@ -34,8 +34,9 @@ public final class ProgramText {
         if (sameLine) {
             lines[0] = lines[0].stripLeading();
         }
-        int common = Integer.MAX_VALUE;
-        for (int i = sameLine ? first + 1 : first; i <= last; i++) {
+        // a primeira linha vale recuo zero: o resto fica como está (é o que o Python entenderia)
+        int common = sameLine ? 0 : Integer.MAX_VALUE;
+        for (int i = first; i <= last && !sameLine; i++) {
             if (lines[i].isBlank()) {
                 continue;
             }
@@ -59,12 +60,12 @@ public final class ProgramText {
 
     /** Escolhe um delimitador {@code $$} ou {@code $tag$} que não aparece no corpo. */
     public static String delimiterFor(String body) {
-        if (!body.contains("$$") && !body.endsWith("$")) {
+        if (!body.contains("$$")) {
             return "$$";
         }
         String tag = "axon";
         int n = 0;
-        while (body.contains("$" + tag + "$") || body.endsWith("$" + tag)) {
+        while (body.contains("$" + tag + "$")) {
             tag = "axon" + (++n);
         }
         return "$" + tag + "$";
@@ -73,6 +74,6 @@ public final class ProgramText {
     /** O corpo entre delimitadores, pronto para o Render. */
     public static String quote(String body) {
         String d = delimiterFor(body);
-        return d + body + d;
+        return d + "\n" + body + "\n" + d;
     }
 }

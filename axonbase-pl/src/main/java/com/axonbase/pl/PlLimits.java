@@ -13,6 +13,7 @@ public final class PlLimits {
     private long maxMemoria = 64L * 1024 * 1024;
     private long maxTamanhoString = 16_000_000;
     private volatile boolean cancelado;
+    private volatile long passosExecutados;
 
     /** Limites padrao. */
     public static PlLimits padrao() {
@@ -66,6 +67,15 @@ public final class PlLimits {
     /** Limpa o cancelamento. */
     public void limparCancelamento() {
         this.cancelado = false;
+    }
+
+    /** Passos executados pela última execução que usou estes limites (para métricas). */
+    public long passosExecutados() {
+        return passosExecutados;
+    }
+
+    void passosExecutados(long v) {
+        this.passosExecutados = v;
     }
 
     public boolean cancelado() {
