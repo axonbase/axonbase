@@ -333,6 +333,7 @@ public final class Executor {
             case Statement.Delete d -> runDelete(d);
             case Statement.Select sel -> runSelect(sel);
             case Statement.Relate r -> runRelate(r);
+            case Statement.Unrelate u -> runUnrelate(u);
             case DefineTable dt -> runDefineTable(dt);
             case DefineField df -> runDefineField(df);
             case DefineIndex di -> runDefineIndex(di);
@@ -1124,6 +1125,7 @@ public final class Executor {
         }
         List<RecordId> targets = resolveMutationTargets(db, d.target(), d.cond());
         List<AxonValue> deleted = new ArrayList<>();
+        boolean edges = !targets.isEmpty() && hasAnyEdge(db);
         for (RecordId rid : targets) {
             Document doc = loadDoc(db, rid);
             if (doc == null) {
@@ -1146,6 +1148,9 @@ public final class Executor {
                 sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "DELETE");
             }
             records(db).delete(rid.storageKey(db.ns(), db.db()));
+            if (edges) {
+                removeEdgesOf(db, rid);
+            }
             indexSearch(db, rid, doc.current(), null);
             indexAdvanced(db, rid, doc.current(), null);
             indexColumnar(db, rid, doc.current(), null);
@@ -1343,7 +1348,9 @@ public final class Executor {
                 if (!sel.fetch().isEmpty() && !joined) {
                     fetchDocs(d, sel.fetch());
                 }
-                out.add(joined ? projectJoin(sel, d) : project(sel, d));
+                AxonValue row = joined ? projectJoin(sel, d) : project(sel, d);
+                // FETCH também vale para colunas calculadas (->comprou->produto AS p ... FETCH p)
+                out.add(!sel.fetch().isEmpty() && !joined ? fetchProjected(row, sel.fetch()) : row);
             }
         }
         if (scalarAggregate) {
@@ -2802,6 +2809,41 @@ return score;
         };
     }
 
+    /** FETCH sobre as colunas da linha já projetada: troca record ids (ou listas deles) pelos registros. */
+    private AxonValue fetchProjected(AxonValue row, List<String> fields) {
+        if (!row.isObject()) {
+            return row;
+        }
+        Map<String, AxonValue> map = new LinkedHashMap<>(row.asObject());
+        boolean changed = false;
+        for (String name : fields) {
+            AxonValue cur = map.get(name);
+            if (cur == null) {
+                continue;
+            }
+            if (cur.isRecordId()) {
+                AxonValue filled = fetchOne(cur.asRecordId());
+                if (filled != null) {
+                    map.put(name, filled);
+                    changed = true;
+                }
+            } else if (cur.isArray()) {
+                List<AxonValue> filled = new ArrayList<>();
+                boolean any = false;
+                for (AxonValue item : cur.asArray()) {
+                    AxonValue f = item.isRecordId() ? fetchOne(item.asRecordId()) : null;
+                    filled.add(f != null ? f : item);
+                    any |= f != null;
+                }
+                if (any) {
+                    map.put(name, AxonValue.array(filled));
+                    changed = true;
+                }
+            }
+        }
+        return changed ? AxonValue.object(map) : row;
+    }
+
     private void fetchDocs(Document d, java.util.List<String> fields) {
         for (String fname : fields) {
             AxonValue cur = fieldValue(d.current(), fname);
@@ -2938,6 +2980,109 @@ return score;
             }
         }
         return AxonValue.object(edge);
+    }
+
+    /**
+     * UNRELATE a->tipo->b remove a aresta (nas duas direções); UNRELATE a->tipo remove todas as arestas de saída de
+     * {@code a} com esse tipo. Devolve as arestas removidas (lista vazia se não havia nenhuma).
+     */
+    private AxonValue runUnrelate(Statement.Unrelate u) {
+        if (u.from() instanceof Expr.Qualified || u.to() instanceof Expr.Qualified
+            || (u.from() instanceof Expr.RecordId fr && fr.table() instanceof Expr.Qualified)
+            || (u.to() instanceof Expr.RecordId tr && tr.table() instanceof Expr.Qualified)) {
+            throw errorStmt(Messages.get("stmt_unrelate_link_unsupported"));
+        }
+        Database db = db();
+        AxonValue from = mapping(u.from());
+        AxonValue to = u.to() == null ? null : mapping(u.to());
+        String kind = tableOf(u.kind());
+        List<AxonValue> removed = new ArrayList<>();
+        if (!from.isRecordId() || (to != null && !to.isRecordId())) {
+            return AxonValue.array(removed);
+        }
+        AxonValue.RecordId f = from.asRecordId();
+        if (to != null) {
+            if (removeEdge(db, f, kind, to.asRecordId())) {
+                removed.add(edgeValue(from, to));
+            }
+            return AxonValue.array(removed);
+        }
+        String prefix = edgePrefix(db, "out", f) + kind + "|";
+        for (String key : records(db).keysWithPrefix(prefix)) {
+            String[] parts = key.substring(prefix.length()).split("\\|", 2);
+            if (parts.length < 2) {
+                continue;
+            }
+            AxonValue target = AxonValue.record(parts[0], parseKeyVal(parts[1]));
+            if (removeEdge(db, f, kind, target.asRecordId())) {
+                removed.add(edgeValue(from, target));
+            }
+        }
+        return AxonValue.array(removed);
+    }
+
+    private static AxonValue edgeValue(AxonValue from, AxonValue to) {
+        Map<String, AxonValue> edge = new LinkedHashMap<>();
+        edge.put("in", from);
+        edge.put("out", to);
+        return AxonValue.object(edge);
+    }
+
+    /** Apaga a chave de saída e o espelho de entrada; {@code true} se a aresta existia. */
+    private boolean removeEdge(Database db, AxonValue.RecordId from, String kind, AxonValue.RecordId to) {
+        boolean existed = records(db).delete(edgeKey(db, "out", from, kind, to));
+        existed |= records(db).delete(edgeKey(db, "in", to, kind, from));
+        return existed;
+    }
+
+    /** Há alguma aresta neste banco? Uma consulta de uma chave só, para o DELETE em massa não pagar a cascata à toa. */
+    private boolean hasAnyEdge(Database db) {
+        boolean[] found = {false};
+        records(db).scanPrefix("E|" + db.ns() + "|" + db.db() + "|", key -> {
+            found[0] = true;
+            return false;
+        });
+        return found[0];
+    }
+
+    /** Apaga as arestas que saem e chegam num registro (e os espelhos delas): registro apagado não deixa aresta solta. */
+    private void removeEdgesOf(Database db, RecordId rid) {
+        String self = rid.table() + "|" + keyToken(rid.key());
+        String ns = db.ns();
+        String dbName = db.db();
+        for (String dir : new String[] {"out", "in"}) {
+            String other = dir.equals("out") ? "in" : "out";
+            String prefix = "E|" + ns + "|" + dbName + "|" + dir + "|" + self + "|";
+            for (String key : records(db).keysWithPrefix(prefix)) {
+                // kind|tabelaDoOutroLado|chaveDoOutroLado
+                String[] parts = key.substring(prefix.length()).split("\\|", 3);
+                records(db).delete(key);
+                if (parts.length == 3) {
+                    records(db).delete("E|" + ns + "|" + dbName + "|" + other + "|" + parts[1] + "|" + parts[2] + "|"
+                        + parts[0] + "|" + self);
+                }
+            }
+        }
+    }
+
+    /** Apaga todas as arestas de um tipo (DROP TABLE do tipo). */
+    private void removeEdgesOfKind(Database db, String kind) {
+        String ns = db.ns();
+        String dbName = db.db();
+        String prefix = "E|" + ns + "|" + dbName + "|out|";
+        List<String> keys = new ArrayList<>();
+        List<String> mirrors = new ArrayList<>();
+        records(db).scanPrefix(prefix, key -> {
+            // tabelaOrigem|chaveOrigem|tipo|tabelaDestino|chaveDestino
+            String[] p = key.substring(prefix.length()).split("\\|", 5);
+            if (p.length == 5 && p[2].equals(kind)) {
+                keys.add(key);
+                mirrors.add("E|" + ns + "|" + dbName + "|in|" + p[3] + "|" + p[4] + "|" + kind + "|" + p[0] + "|" + p[1]);
+            }
+            return true;
+        });
+        keys.forEach(records(db)::delete);
+        mirrors.forEach(records(db)::delete);
     }
 
     private AxonValue mapping(Expr e) {
@@ -3431,6 +3576,9 @@ return score;
         for (String key : records(db).keysWithPrefix(prefix)) {
             records(db).delete(key);
         }
+        // se a tabela era um tipo de aresta (RELATE), as arestas dele saem junto
+        removeEdgesOfKind(db, table);
+        ds.removeTableControl(session, db.ns(), db.db(), table);
         return AxonValue.nul();
     }
 
@@ -3929,7 +4077,7 @@ return score;
 
     private AxonValue applyPart(AxonValue v, Expr.Part p) {
         return switch (p) {
-            case Expr.Part.Field f -> v.isObject() ? v.asObject().getOrDefault(f.name(), AxonValue.nul()) : AxonValue.nul();
+            case Expr.Part.Field f -> fieldAccess(v, f.name());
             case Expr.Part.Index ix -> {
                 int idx = (int) eval(ix.index()).asLong();
                 yield v.isArray() && idx >= 0 && idx < v.asArray().size() ? v.asArray().get(idx) : AxonValue.nul();
@@ -3937,6 +4085,31 @@ return score;
             case Expr.Part.Graph g -> graphTraverse(v, g);
             default -> v;
         };
+    }
+
+    /**
+     * {@code valor.campo}: campo de um objeto; de um registro referenciado (record id, lendo o registro); ou, numa
+     * lista, o campo de cada item (o que dá {@code ->comprou->produto.nome}). Itens sem o campo ficam de fora.
+     */
+    private AxonValue fieldAccess(AxonValue v, String name) {
+        if (v.isObject()) {
+            return v.asObject().getOrDefault(name, AxonValue.nul());
+        }
+        if (v.isRecordId()) {
+            AxonValue record = fetchOne(v.asRecordId());
+            return record == null ? AxonValue.nul() : fieldAccess(record, name);
+        }
+        if (v.isArray()) {
+            List<AxonValue> out = new ArrayList<>();
+            for (AxonValue item : v.asArray()) {
+                AxonValue value = fieldAccess(item, name);
+                if (!value.isNull() && !value.isNone()) {
+                    out.add(value);
+                }
+            }
+            return AxonValue.array(out);
+        }
+        return AxonValue.nul();
     }
 
     /**

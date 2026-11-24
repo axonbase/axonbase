@@ -550,6 +550,64 @@ public final class Datastore {
         applyControl(null, command);
     }
 
+    /**
+     * Tira do plano de controle a tabela e tudo que pertence a ela (campos, índices e eventos). Sem isso o
+     * {@code DEFINE TABLE} continuava no replay e a tabela voltava a cada reinício; e como campo, índice e evento
+     * recriam a tabela quando ela falta, eles também precisam sair.
+     */
+    public void removeTableControl(Session session, String ns, String db, String table) {
+        if (replaying.get()) {
+            return;
+        }
+        synchronized (controlLock) {
+            int removed = controlState.removeWhere(c -> c.namespace().equals(ns) && c.database().equals(db)
+                && table.equals(tableOfControl(c)));
+            if (removed == 0) {
+                return;
+            }
+            KvBackend target = session != null && session.inTransaction() ? session.tx() : backend;
+            controlStore.save(controlState, target);
+            if (target == backend) {
+                backend.flush();
+            }
+        }
+    }
+
+    /** Tabela a que um comando de controle pertence, ou {@code null} (usuário, banco, analyzer...). */
+    private static String tableOfControl(ControlCommand c) {
+        switch (c.kind()) {
+            case TABLE:
+                return c.name();
+            case FIELD: {
+                int colon = c.name().indexOf(':');
+                return colon < 0 ? null : c.name().substring(0, colon);
+            }
+            case INDEX:
+            case EVENT:
+                try {
+                    for (com.axonbase.parser.ast.Statement st : AxonQl.parse(c.definition()).statements()) {
+                        if (st instanceof com.axonbase.parser.ast.Statement.DefineIndex di) {
+                            return di.table();
+                        }
+                        if (st instanceof com.axonbase.parser.ast.Statement.CreateIndex ci) {
+                            return ci.table();
+                        }
+                        if (st instanceof com.axonbase.parser.ast.Statement.DefineEvent de) {
+                            return de.table();
+                        }
+                        if (st instanceof com.axonbase.parser.ast.Statement.CreateEvent ce) {
+                            return ce.table();
+                        }
+                    }
+                } catch (RuntimeException e) {
+                    return null;
+                }
+                return null;
+            default:
+                return null;
+        }
+    }
+
     public ControlSnapshot controlSnapshot() {
         synchronized (controlLock) {
             return controlState.snapshot();
