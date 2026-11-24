@@ -47,4 +47,43 @@ UNRELATE pessoa:dani->segue;
 DELETE pessoa:edu;
 SELECT id, <-segue<-pessoa AS seguidores FROM pessoa:ana;
 
+-- 12. Como duas pessoas se conhecem. Troque as duas primeiras linhas pelas pessoas que quer comparar.
+-- O que cada uma tem em comum, em uma só linha de resultado: quem as liga, empresa, cidade e compras.
+LET $x = pessoa:ana;
+LET $y = pessoa:dani;
+RETURN {
+  segue_direto: $y IN array::flatten([$x->segue->pessoa]),
+  amigo_direto: $y IN array::flatten([$x->amigo_de->pessoa]),
+  seguem_os_dois: array::intersect(array::flatten([$x->segue->pessoa]), array::flatten([$y->segue->pessoa])),
+  quem_liga_x_a_y: array::intersect(array::flatten([$x->segue->pessoa]), array::flatten([$y<-segue<-pessoa])),
+  empresa_x: $x->trabalha_em->empresa,
+  empresa_y: $y->trabalha_em->empresa,
+  cidade_x: $x->mora_em->cidade,
+  cidade_y: $y->mora_em->cidade,
+  compras_em_comum: array::intersect(array::flatten([$x->comprou->produto]), array::flatten([$y->comprou->produto]))
+};
+
+-- 13. Caminho entre duas pessoas: graph::path(origem, destino, tipo_da_aresta, saltos_maximos) devolve a
+-- sequência de registros pelo menor caminho (lista vazia se não houver). O tipo e o limite são opcionais.
+-- O caminho segue o sentido das arestas; para o outro sentido, troque a ordem das pessoas.
+RETURN graph::path(pessoa:ana, pessoa:dani, 'segue', 5);
+RETURN graph::path(pessoa:dani, pessoa:ana);
+RETURN graph::connected(pessoa:ana, pessoa:dani);
+
+-- 14. Quem está a 1, 2 ou 3 saltos (travessia encadeada) e se uma pessoa aparece no alcance da outra.
+SELECT id,
+       ->segue->pessoa AS um_salto,
+       ->segue->pessoa->segue->pessoa AS dois_saltos,
+       pessoa:dani IN ->segue->pessoa->segue->pessoa AS alcanca_a_dani_em_2
+FROM pessoa:ana;
+
+-- 15. Rede de uma pessoa: todas as ligações de entrada e saída de uma vez, para ver o desenho na aba Graph.
+SELECT id, nome,
+       ->segue->pessoa AS segue,
+       <-segue<-pessoa AS seguidores,
+       ->amigo_de->pessoa AS amigo,
+       ->trabalha_em->empresa AS empresa,
+       ->mora_em->cidade AS cidade
+FROM pessoa;
+
 -- Observação: com um único resultado a coluna volta como texto ("pessoa:caio"), não como lista.
