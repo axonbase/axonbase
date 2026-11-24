@@ -875,33 +875,47 @@ public final class Parser {
             }
             joins.add(new Join(source, bin.left(), bin.right()));
         }
+        // WHERE, GROUP BY|ALL, HAVING e ORDER BY podem vir em qualquer ordem (cada uma no máximo uma vez):
+        // a ordem de execução é fixa (filtrar, agrupar, filtrar grupos, ordenar) e não depende da escrita.
         Expr cond = null;
-        if (matchKeyword("where")) {
-            cond = parseExpr();
-        }
+        Expr having = null;
+        boolean groupAll = false;
         List<OrderTerm> orders = new ArrayList<>();
-        if (matchKeyword("order")) {
-            expectKeyword("by");
-            while (true) {
-                Expr f = parseExpr();
-                boolean desc = false;
-                if (matchKeyword("desc")) {
-                    desc = true;
-                } else {
-                    matchKeyword("asc");
-                }
-                orders.add(new OrderTerm(f, desc));
-                if (!match(COMMA)) {
-                    break;
-                }
-            }
-        }
         List<Expr> group = new ArrayList<>();
-        if (matchKeyword("group")) {
-            expectKeyword("by");
-            group.add(parseExpr());
-            while (match(COMMA)) {
-                group.add(parseExpr());
+        while (true) {
+            if (cond == null && matchKeyword("where")) {
+                cond = parseExpr();
+            } else if (orders.isEmpty() && matchKeyword("order")) {
+                expectKeyword("by");
+                while (true) {
+                    Expr f = parseExpr();
+                    boolean desc = false;
+                    if (matchKeyword("desc")) {
+                        desc = true;
+                    } else {
+                        matchKeyword("asc");
+                    }
+                    orders.add(new OrderTerm(f, desc));
+                    if (!match(COMMA)) {
+                        break;
+                    }
+                }
+            } else if (group.isEmpty() && !groupAll && matchKeyword("group")) {
+                if (atWord("all")) {
+                    pos++;
+                    groupAll = true;
+                } else {
+                    expectKeyword("by");
+                    group.add(parseExpr());
+                    while (match(COMMA)) {
+                        group.add(parseExpr());
+                    }
+                }
+            } else if (having == null && atWord("having")) {
+                pos++;
+                having = parseExpr();
+            } else {
+                break;
             }
         }
         // START e LIMIT aceptados en calquera orde entre order/fetch
@@ -931,8 +945,11 @@ public final class Parser {
         if (matchKeyword("only")) {
             only = true;
         }
+        if (having != null && group.isEmpty() && !groupAll) {
+            throw error(Messages.get("parser_having_requires_group"));
+        }
         return new Statement.Select(fields, valueOnly, only, from, cond, orders, group,
-            limit, start, fetch, joins, timeTravel);
+            limit, start, fetch, joins, timeTravel, having, groupAll);
     }
 
     private Statement.TimeTravel parseTimeTravel() {
@@ -1972,6 +1989,18 @@ public final class Parser {
         Expr lhs = parsePrefix();
         while (true) {
             lhs = applyPostfix(lhs);
+            if (minBp <= COMPARISON_BP) {
+                if (atWord("between")) {
+                    pos++;
+                    lhs = between(lhs, false);
+                    continue;
+                }
+                if (atKeyword("not") && peekIsWord(1, "between")) {
+                    pos += 2;
+                    lhs = between(lhs, true);
+                    continue;
+                }
+            }
             OpInfo op = binaryOpInfo();
             if (op == null) {
                 return lhs;
@@ -1990,6 +2019,34 @@ public final class Parser {
             Expr rhs = parseExpr(rp);
             lhs = new Expr.Binary(op.op, lhs, rhs);
         }
+    }
+
+    /** Precedência dos operadores de comparação ({@code <}, {@code =}...). */
+    private static final int COMPARISON_BP = 5;
+
+    /**
+     * {@code x BETWEEN a AND b} vira {@code x >= a AND x <= b} (inclusivo nos dois lados), então o executor,
+     * a seleção de índice e o EXPLAIN enxergam só comparações que já conhecem. Os limites são lidos acima da
+     * precedência de comparação para que o {@code AND} do meio não seja consumido como operador lógico.
+     */
+    private Expr between(Expr value, boolean negate) {
+        Expr low = parseExpr(COMPARISON_BP + 1);
+        expectKeyword("and");
+        Expr high = parseExpr(COMPARISON_BP + 1);
+        Expr inside = new Expr.Binary(BinaryOp.AND,
+            new Expr.Binary(BinaryOp.GE, value, low),
+            new Expr.Binary(BinaryOp.LE, value, high));
+        return negate ? new Expr.Unary(UnaryOp.NOT, inside) : inside;
+    }
+
+    /** Palavra contextual: não é reservada, então continua valendo como nome de campo em outros lugares. */
+    private boolean atWord(String word) {
+        return peekIsWord(0, word);
+    }
+
+    private boolean peekIsWord(int ahead, String word) {
+        Token t = peek(ahead);
+        return (t.is(TokenType.IDENT) || t.is(TokenType.KEYWORD)) && t.text().equalsIgnoreCase(word);
     }
 
     /**
@@ -2248,9 +2305,24 @@ public final class Parser {
         }
         // keywords de agregação e funções tratadas como nomes de função
         if (at(LPAREN)) {
-            return new Expr.Call(name.text(), parseArgs());
+            return call(name.text());
         }
         return new Expr.Ident(name.text());
+    }
+
+    /**
+     * Chamada de função. {@code count(DISTINCT x)} vira a função interna {@code count::distinct}: DISTINCT é
+     * palavra contextual (não reservada), então só vale logo depois de {@code count(} e antes de uma expressão.
+     */
+    private Expr call(String name) {
+        if (name.equalsIgnoreCase("count") && peekIsWord(1, "distinct")
+            && !peek(2).is(RPAREN) && !peek(2).is(COMMA)) {
+            pos += 2;
+            Expr arg = parseExpr();
+            expect(RPAREN);
+            return new Expr.Call(Expr.COUNT_DISTINCT, List.of(arg));
+        }
+        return new Expr.Call(name, parseArgs());
     }
 
     /** Caminho com namespace: {@code a::b::c}, com ou sem argumentos. */
@@ -2273,7 +2345,7 @@ public final class Parser {
             return functionPath(name.text());
         }
         if (at(LPAREN)) {
-            return new Expr.Call(name.text(), parseArgs());
+            return call(name.text());
         }
         if (at(COLON)) {
             pos++;

@@ -203,6 +203,7 @@ public final class Functions {
             case "geo::distance" -> GeoVector.distance(arg(args, 0), arg(args, 1));
             case "geo::area" -> GeoVector.area(arg(args, 0));
             case "geo::contains" -> GeoVector.contains(arg(args, 0), arg(args, 1));
+            case "geo::cell" -> GeoVector.cell(arg(args, 0), arg(args, 1));
             case "vector::distance::euclidean" -> GeoVector.euclidean(arg(args, 0), arg(args, 1));
             case "vector::distance::manhattan" -> GeoVector.manhattan(arg(args, 0), arg(args, 1));
             case "vector::distance::cosine" -> GeoVector.cosineDistance(arg(args, 0), arg(args, 1));
@@ -215,14 +216,17 @@ public final class Functions {
             case "now" -> AxonValue.datetime(Instant.now());
             case "time::unix" -> AxonValue.num(instant(arg(args, 0)).getEpochSecond());
             case "time::millis" -> AxonValue.num(instant(arg(args, 0)).toEpochMilli());
-            case "time::year" -> AxonValue.num(zoned(arg(args, 0)).getYear());
-            case "time::month" -> AxonValue.num(zoned(arg(args, 0)).getMonthValue());
-            case "time::day" -> AxonValue.num(zoned(arg(args, 0)).getDayOfMonth());
-            case "time::hour" -> AxonValue.num(zoned(arg(args, 0)).getHour());
-            case "time::minute" -> AxonValue.num(zoned(arg(args, 0)).getMinute());
-            case "time::second" -> AxonValue.num(zoned(arg(args, 0)).getSecond());
-            case "time::wday" -> AxonValue.num(zoned(arg(args, 0)).getDayOfWeek().getValue());
-            case "time::yday" -> AxonValue.num(zoned(arg(args, 0)).getDayOfYear());
+            // O último argumento opcional é o fuso horário (America/Sao_Paulo); sem ele vale UTC.
+            case "time::year" -> AxonValue.num(zoned(args).getYear());
+            case "time::month" -> AxonValue.num(zoned(args).getMonthValue());
+            case "time::day" -> AxonValue.num(zoned(args).getDayOfMonth());
+            case "time::hour" -> AxonValue.num(zoned(args).getHour());
+            case "time::minute" -> AxonValue.num(zoned(args).getMinute());
+            case "time::second" -> AxonValue.num(zoned(args).getSecond());
+            case "time::wday" -> AxonValue.num(zoned(args).getDayOfWeek().getValue());
+            case "time::yday" -> AxonValue.num(zoned(args).getDayOfYear());
+            case "time::clock" -> AxonValue.str(zoned(args).format(CLOCK));
+            case "time::floor" -> timeFloor(args);
             case "time::from::unix" -> AxonValue.datetime(Instant.ofEpochSecond(lng(arg(args, 0))));
             case "time::from::millis" -> AxonValue.datetime(Instant.ofEpochMilli(lng(arg(args, 0))));
 
@@ -665,6 +669,64 @@ public final class Functions {
         return instant(v).atZone(ZoneOffset.UTC);
     }
 
+    private static final java.time.format.DateTimeFormatter CLOCK =
+        java.time.format.DateTimeFormatter.ofPattern("HH:mm");
+
+    /** Instante do primeiro argumento no fuso do segundo (opcional, UTC por padrão). */
+    private static ZonedDateTime zoned(List<AxonValue> args) {
+        return instant(arg(args, 0)).atZone(zone(args, 1));
+    }
+
+    private static java.time.ZoneId zone(List<AxonValue> args, int index) {
+        if (args.size() <= index || args.get(index).isNull() || args.get(index).isNone()) {
+            return ZoneOffset.UTC;
+        }
+        String name = str(args.get(index));
+        java.time.ZoneId cached = ZONES.get(name);
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            java.time.ZoneId zone = java.time.ZoneId.of(name);
+            ZONES.put(name, zone);
+            return zone;
+        } catch (java.time.DateTimeException e) {
+            throw AxonError.internal(Messages.get("fn_timezone_invalid", name));
+        }
+    }
+
+    /** Fusos já resolvidos: {@code ZoneId.of} custa caro quando roda em cada linha de uma varredura. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.time.ZoneId> ZONES =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * {@code time::floor(t, '10m' [, fuso])}: início da janela de tamanho fixo que contém {@code t}. As janelas
+     * são alinhadas à meia-noite do fuso, então 15m e 1h caem em :00, :15, :30 e :45 do horário local.
+     */
+    private static AxonValue timeFloor(List<AxonValue> args) {
+        String spec = str(arg(args, 1));
+        java.util.regex.Matcher m = DURATION.matcher(spec.trim());
+        if (!m.matches()) {
+            throw AxonError.internal(Messages.get("fn_duration_invalid", spec));
+        }
+        long unit = switch (m.group(2)) {
+            case "s" -> 1L;
+            case "m" -> 60L;
+            case "h" -> 3_600L;
+            default -> 86_400L;
+        };
+        long size = Long.parseLong(m.group(1)) * unit;
+        if (size <= 0) {
+            throw AxonError.internal(Messages.get("fn_duration_invalid", spec));
+        }
+        Instant at = instant(arg(args, 0));
+        long offset = zone(args, 2).getRules().getOffset(at).getTotalSeconds();
+        long local = Math.floorDiv(at.getEpochSecond() + offset, size) * size - offset;
+        return AxonValue.datetime(Instant.ofEpochSecond(local));
+    }
+
+    private static final java.util.regex.Pattern DURATION = java.util.regex.Pattern.compile("(\\d+)(s|m|h|d)");
+
     private static String digest(String algorithm, String input) {
         try {
             MessageDigest md = MessageDigest.getInstance(algorithm);
@@ -705,13 +767,13 @@ public final class Functions {
         "type::is::number", "type::is::object", "type::is::record", "type::is::string",
         "record::id", "record::table", "record::tb", "record::exists", "meta::id", "meta::tb",
         "geometry::point", "geometry::line", "geometry::polygon", "geo::distance", "geo::area",
-        "geo::contains", "vector::distance::euclidean", "vector::distance::manhattan",
+        "geo::contains", "geo::cell", "vector::distance::euclidean", "vector::distance::manhattan",
         "vector::distance::cosine",
         "vector::similarity::cosine",
         "search::score", "search::highlight",
         "graph::connected", "graph::path",
         "time::now", "now", "time::unix", "time::millis", "time::year", "time::month", "time::day",
-        "time::hour", "time::minute", "time::second", "time::wday", "time::yday",
+        "time::hour", "time::minute", "time::second", "time::wday", "time::yday", "time::clock", "time::floor",
         "time::from::unix", "time::from::millis",
         "rand", "rand::bool", "rand::float", "rand::int", "rand::string", "rand::uuid", "rand::enum",
         "crypto::md5", "crypto::sha1", "crypto::sha256", "crypto::sha512",

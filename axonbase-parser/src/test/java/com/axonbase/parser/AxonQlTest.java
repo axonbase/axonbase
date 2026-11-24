@@ -226,6 +226,28 @@ class AxonQlTest {
     }
 
     @Test
+    void roundTripGroupAllHavingECountDistinct() {
+        assertRoundTrip("SELECT count() FROM venda GROUP ALL");
+        assertRoundTrip("SELECT cidade, count() AS n FROM venda GROUP BY cidade HAVING n > 1 ORDER BY n DESC LIMIT 5");
+        assertRoundTrip("SELECT cidade, count(DISTINCT cliente) AS clientes FROM venda GROUP BY cidade");
+    }
+
+    @Test
+    void clausulasEmQualquerOrdemRenderizamNaOrdemDeExecucao() {
+        String canonical = "SELECT cidade, count() AS n FROM venda WHERE valor > 0 GROUP BY cidade HAVING n > 1 ORDER BY n DESC";
+        assertEquals(canonical, AxonQl.render(AxonQl.parse(
+            "SELECT cidade, count() AS n FROM venda ORDER BY n DESC HAVING n > 1 GROUP BY cidade WHERE valor > 0")));
+        assertEquals(canonical, AxonQl.render(AxonQl.parse(canonical)));
+    }
+
+    @Test
+    void betweenViraDuasComparacoes() {
+        assertEquals("SELECT * FROM t WHERE n >= 1 AND n <= 5", AxonQl.render(AxonQl.parse("SELECT * FROM t WHERE n BETWEEN 1 AND 5")));
+        assertEquals(AxonQl.render(AxonQl.parse("SELECT * FROM t WHERE n BETWEEN 1 AND 5 AND x = 2")),
+            AxonQl.render(AxonQl.parse("SELECT * FROM t WHERE (n >= 1 AND n <= 5) AND x = 2")));
+    }
+
+    @Test
     void roundTripLiveSelect() {
         assertRoundTrip("LIVE SELECT * FROM person");
         assertRoundTrip("LIVE SELECT * FROM person WHERE age > 18");

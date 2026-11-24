@@ -28,6 +28,9 @@ public sealed interface Expr {
     record Call(String name, List<Expr> args) implements Expr {
     }
 
+    /** Nome interno de {@code count(DISTINCT x)}; o Render devolve o texto original. */
+    String COUNT_DISTINCT = "count::distinct";
+
     record RecordId(Expr table, Expr key) implements Expr {
     }
 

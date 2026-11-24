@@ -145,6 +145,20 @@ public final class Render {
                 if (s2.cond() != null) {
                     sb.append(" WHERE ").append(expr(s2.cond()));
                 }
+                if (s2.groupAll()) {
+                    sb.append(" GROUP ALL");
+                } else if (!s2.group().isEmpty()) {
+                    sb.append(" GROUP BY ");
+                    for (int i = 0; i < s2.group().size(); i++) {
+                        if (i > 0) {
+                            sb.append(", ");
+                        }
+                        sb.append(expr(s2.group().get(i)));
+                    }
+                }
+                if (s2.having() != null) {
+                    sb.append(" HAVING ").append(expr(s2.having()));
+                }
                 if (!s2.orders().isEmpty()) {
                     sb.append(" ORDER BY ");
                     for (int i = 0; i < s2.orders().size(); i++) {
@@ -156,15 +170,6 @@ public final class Render {
                         if (o.descending()) {
                             sb.append(" DESC");
                         }
-                    }
-                }
-                if (!s2.group().isEmpty()) {
-                    sb.append(" GROUP BY ");
-                    for (int i = 0; i < s2.group().size(); i++) {
-                        if (i > 0) {
-                            sb.append(", ");
-                        }
-                        sb.append(expr(s2.group().get(i)));
                     }
                 }
                 if (s2.limit() != null) {
@@ -645,7 +650,11 @@ public final class Render {
             case Expr.Param p -> sb.append('$').append(p.name());
             case Expr.Path p -> sb.append(p.name());
             case Expr.Call c2 -> {
-                sb.append(c2.name()).append('(');
+                boolean distinct = c2.name().equals(Expr.COUNT_DISTINCT);
+                sb.append(distinct ? "count" : c2.name()).append('(');
+                if (distinct) {
+                    sb.append("DISTINCT ");
+                }
                 for (int i = 0; i < c2.args().size(); i++) {
                     if (i > 0) {
                         sb.append(", ");

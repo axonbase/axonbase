@@ -35,7 +35,21 @@ public sealed interface Statement {
      */
     record Select(List<Expr> fields, boolean valueOnly, boolean only, Expr from, Expr cond,
                    List<OrderTerm> orders, List<Expr> group, Expr limit, Expr start,
-                   List<String> fetch, List<Join> joins, TimeTravel timeTravel) implements Statement {
+                   List<String> fetch, List<Join> joins, TimeTravel timeTravel,
+                   Expr having, boolean groupAll) implements Statement {
+
+        /** SELECT sem HAVING nem GROUP ALL (o formato de antes dessas cláusulas existirem). */
+        public Select(List<Expr> fields, boolean valueOnly, boolean only, Expr from, Expr cond,
+                      List<OrderTerm> orders, List<Expr> group, Expr limit, Expr start,
+                      List<String> fetch, List<Join> joins, TimeTravel timeTravel) {
+            this(fields, valueOnly, only, from, cond, orders, group, limit, start, fetch, joins, timeTravel,
+                null, false);
+        }
+
+        /** Há agregação por grupos (GROUP BY ou GROUP ALL). */
+        public boolean grouped() {
+            return groupAll || (group != null && !group.isEmpty());
+        }
     }
 
     /** Ponto histórico de leitura de um SELECT. */
