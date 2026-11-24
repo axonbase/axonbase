@@ -446,7 +446,7 @@ final class AdminV1Servlet extends HttpServlet {
                 .sorted(Comparator.comparing(Catalog.TableDef::name)).toList()) {
             List<Object> fields = new ArrayList<>();
             t.fields().values().stream().sorted(Comparator.comparing(Catalog.FieldDef::name))
-                .forEach(f -> fields.add(AdminJson.obj("name", f.name(), "type", f.type() == null ? "any" : f.type())));
+                .forEach(f -> fields.add(fieldInfo(f)));
             List<Object> indexes = new ArrayList<>();
             t.indexes().values().stream().sorted(Comparator.comparing(Catalog.IndexDef::name))
                 .forEach(i -> indexes.add(indexInfo(i)));
@@ -461,6 +461,17 @@ final class AdminV1Servlet extends HttpServlet {
      * Índice como o painel do Enterprise o lê: nome, colunas, tipo e os detalhes do tipo (analisador da busca,
      * dimensão e distância do vetor, parâmetros do HNSW), só quando existem.
      */
+    /** Campo para o painel do Enterprise: nome, tipo e, se segue um embedding, qual e de que campo vem o texto. */
+    static AxonValue fieldInfo(Catalog.FieldDef f) {
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("name", f.name());
+        m.put("type", f.type() == null ? "any" : f.type());
+        if (f.embeddingName() != null) {
+            m.put("embedding", Map.of("name", f.embeddingName(), "from", f.embeddingFrom()));
+        }
+        return AdminJson.of(m);
+    }
+
     static AxonValue indexInfo(Catalog.IndexDef i) {
         Map<String, Object> m = new java.util.LinkedHashMap<>();
         m.put("name", i.name());

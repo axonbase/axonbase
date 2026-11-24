@@ -26,7 +26,7 @@ final class TableStats {
     static AxonValue compute(Database db, Catalog.TableDef table) {
         List<Object> fields = new ArrayList<>();
         table.fields().values().stream().sorted(Comparator.comparing(Catalog.FieldDef::name))
-            .forEach(f -> fields.add(AdminJson.obj("name", f.name(), "type", f.type() == null ? "any" : f.type())));
+            .forEach(f -> fields.add(AdminV1Servlet.fieldInfo(f)));
         List<Object> indexes = new ArrayList<>();
         table.indexes().values().stream().sorted(Comparator.comparing(Catalog.IndexDef::name))
             .forEach(i -> indexes.add(AdminV1Servlet.indexInfo(i)));

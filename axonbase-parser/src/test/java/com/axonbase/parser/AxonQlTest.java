@@ -611,4 +611,27 @@ class AxonQlTest {
     void roundTripAlterDatabaseLink() {
         assertRoundTrip("ALTER DATABASE LINK \"bank1\" CONNECT BY \"ws://127.0.0.1:8011/rpc/ws\" WITH ns = \"test\" db = \"bank1\" user = \"\" password = \"\"");
     }
+
+    @Test
+    void roundTripEmbeddingStatements() {
+        assertRoundTrip("DEFINE EMBEDDING default PROVIDER http URL \"http://localhost:11434/v1/embeddings\" MODEL \"bge-m3\" DIMENSION 1024");
+        assertRoundTrip("DEFINE EMBEDDING meuprovider PROVIDER http URL \"https://api.openai.com/v1/embeddings\" MODEL \"text-embedding-3-small\" "
+            + "DIMENSION 512 KEY ENV \"OPENAI_API_KEY\" TIMEOUT 20 BATCH 32 DOCUMENT PREFIX \"doc: \" QUERY PREFIX \"q: \" SEND DIMENSION AUTH HEADER \"api-key\"");
+        assertRoundTrip("DROP EMBEDDING default");
+        assertRoundTrip("REEMBED TABLE artigo");
+        assertRoundTrip("REEMBED TABLE artigo FIELD emb DRY RUN");
+        assertRoundTrip("DEFINE FIELD emb ON TABLE artigo TYPE vector<1024> EMBEDDING default FROM corpo");
+    }
+
+    @Test
+    void embeddingClausesInAnyOrderAndValidation() {
+        assertEquals("DEFINE EMBEDDING e PROVIDER http URL \"http://h/v1/embeddings\" MODEL \"m\" DIMENSION 8 TIMEOUT 5 SEND DIMENSION",
+            AxonQl.render(AxonQl.parse("DEFINE EMBEDDING e PROVIDER http SEND DIMENSION TIMEOUT 5 DIMENSION 8 MODEL \"m\" URL \"http://h/v1/embeddings\"")));
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+            () -> AxonQl.parse("DEFINE EMBEDDING e PROVIDER builtin URL \"u\" MODEL \"m\" DIMENSION 8"));
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+            () -> AxonQl.parse("DEFINE EMBEDDING e PROVIDER http MODEL \"m\" DIMENSION 8"));
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+            () -> AxonQl.parse("DEFINE EMBEDDING e PROVIDER http URL \"u\" MODEL \"m\" DIMENSION 0"));
+    }
 }

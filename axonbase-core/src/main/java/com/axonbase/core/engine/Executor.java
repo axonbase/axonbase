@@ -338,6 +338,9 @@ public final class Executor {
             case DefineField df -> runDefineField(df);
             case DefineIndex di -> runDefineIndex(di);
             case Statement.DefineAnalyzer da -> runDefineAnalyzer(da);
+            case Statement.DefineEmbedding de -> runDefineEmbedding(de);
+            case Statement.DropEmbedding de -> runDropEmbedding(de);
+            case Statement.Reembed re -> runReembed(re);
             case DefineEvent de -> runDefineEvent(de);
             case Statement.DefineUser du -> runDefineUser(du);
             case Statement.DefineAccess da -> runDefineAccess(da);
@@ -725,12 +728,30 @@ public final class Executor {
                 "lowercase", AxonValue.bool(a.lowercase()),
                 "stemming", AxonValue.bool(a.stemming()),
                 "stopwords", AxonValue.array(strings(a.stopwords()))))));
+        Map<String, AxonValue> embeddings = new LinkedHashMap<>();
+        db.catalog().embeddings().stream().sorted(Comparator.comparing(Catalog.EmbeddingDef::name)).forEach(e -> {
+            Map<String, AxonValue> m = new LinkedHashMap<>();
+            m.put("provider", AxonValue.str("http"));
+            m.put("url", AxonValue.str(e.url()));
+            m.put("model", AxonValue.str(e.model()));
+            m.put("dimension", AxonValue.num(e.dimension()));
+            // só o NOME da variável de ambiente; a chave nunca sai do servidor
+            m.put("key_env", e.keyEnv() == null ? AxonValue.nul() : AxonValue.str(e.keyEnv()));
+            m.put("timeout", AxonValue.num(e.timeoutSeconds()));
+            m.put("batch", AxonValue.num(e.batch()));
+            m.put("send_dimension", AxonValue.bool(e.sendDimension()));
+            m.put("document_prefix", e.documentPrefix() == null ? AxonValue.nul() : AxonValue.str(e.documentPrefix()));
+            m.put("query_prefix", e.queryPrefix() == null ? AxonValue.nul() : AxonValue.str(e.queryPrefix()));
+            m.put("auth_header", e.authHeader() == null ? AxonValue.nul() : AxonValue.str(e.authHeader()));
+            embeddings.put(e.name(), AxonValue.object(m));
+        });
         return AxonValue.object(Map.of(
             "namespace", AxonValue.str(db.ns()),
             "database", AxonValue.str(db.db()),
             "tables", AxonValue.array(strings(tables)),
             "details", AxonValue.object(detail),
-            "analyzers", AxonValue.object(analyzers)));
+            "analyzers", AxonValue.object(analyzers),
+            "embeddings", AxonValue.object(embeddings)));
     }
 
     private AxonValue infoTable(String table) {
@@ -750,6 +771,11 @@ public final class Executor {
             Map<String, AxonValue> info = new LinkedHashMap<>();
             info.put("type", f.type() == null ? AxonValue.nul() : AxonValue.str(f.type()));
             info.put("readonly", AxonValue.bool(f.readonly()));
+            if (f.embeddingName() != null) {
+                info.put("embedding", AxonValue.object(Map.of(
+                    "name", AxonValue.str(f.embeddingName()),
+                    "from", AxonValue.str(f.embeddingFrom()))));
+            }
             if (f.assertExpr() != null) {
                 info.put("assert", AxonValue.str(com.axonbase.parser.Render.expr(f.assertExpr())));
             }
@@ -915,10 +941,16 @@ public final class Executor {
      * são aplicados; em {@code update}, só coerção/assert.
      */
     private void applyFieldSchema(Database db, String table, Map<String, AxonValue> obj, boolean update) {
+        applyFieldSchema(db, table, obj, update, null);
+    }
+
+    private void applyFieldSchema(Database db, String table, Map<String, AxonValue> obj, boolean update,
+                                  AxonValue before) {
         Catalog.TableDef def = db.catalog().table(table);
         if (def == null) {
             return;
         }
+        autoEmbed(db, def, obj, before);
         for (Catalog.FieldDef fd : def.fields().values()) {
             String fieldName = fd.name();
             boolean present = obj.containsKey(fieldName);
@@ -998,7 +1030,10 @@ public final class Executor {
             case "object" -> v.isObject() ? v : null;
             case "geometry" -> isGeometry(v) ? v : null;
             case "vector" -> v.isArray() && v.asArray().stream().allMatch(AxonValue::isNumber) ? v : null;
-            default -> v;
+            default -> vectorTypeSize(t) > 0
+                ? (v.isArray() && v.asArray().size() == vectorTypeSize(t)
+                    && v.asArray().stream().allMatch(AxonValue::isNumber) ? v : null)
+                : v;
         };
     }
 
@@ -1097,7 +1132,7 @@ public final class Executor {
             if (u.data() != null) {
                 applyMutate(current, u.data(), doc);
             }
-            applyFieldSchema(db, tableName(u.target()), current, true);
+            applyFieldSchema(db, tableName(u.target()), current, true, doc.initial());
             injectDataRuleFields(current);
             AxonValue next = AxonValue.object(current);
             doc.setCurrent(next);
@@ -1258,6 +1293,88 @@ public final class Executor {
     // ------------------------------------------------------------------
 
     private AxonValue runSelect(Statement.Select sel) {
+        return runSelectResolved(rewriteEmbeddingMatches(sel));
+    }
+
+    /**
+     * {@code WHERE campo @@ 'texto'} num campo que segue um embedding: o texto vira o vetor da consulta (com o
+     * prefixo QUERY do embedding do próprio campo, então o modelo é sempre o mesmo da gravação). Sem ORDER BY, a
+     * consulta passa a ordenar pela distância ao vetor e, sem LIMIT, devolve os 10 mais próximos. Com ORDER BY
+     * explícito o vetor entra só no filtro; o resto da consulta segue as regras de sempre.
+     */
+    private Statement.Select rewriteEmbeddingMatches(Statement.Select sel) {
+        if (sel.cond() == null || !(sel.from() instanceof Expr.Ident from) || !containsMatch(sel.cond())) {
+            return sel;
+        }
+        Database db = db();
+        Catalog.TableDef def = db.catalog().table(from.name());
+        if (def == null || def.fields().values().stream().noneMatch(f -> f.embeddingName() != null)) {
+            return sel;
+        }
+        String[] firstField = new String[1];
+        AxonValue[] firstVector = new AxonValue[1];
+        Expr cond = rewriteMatches(db, def, sel.cond(), firstField, firstVector);
+        if (cond == sel.cond()) {
+            return sel;
+        }
+        List<OrderTerm> orders = sel.orders();
+        Expr limit = sel.limit();
+        if (orders.isEmpty() && firstField[0] != null && !sel.grouped()
+            && sel.fields().stream().noneMatch(this::isAggregateCall)) {
+            String metric = def.indexes().values().stream()
+                .filter(i -> i.vector() && i.columns().contains(firstField[0])).map(Catalog.IndexDef::vectorDistance)
+                .findFirst().orElse("cosine");
+            String function = "vector::distance::" + ("manhattan".equals(metric) ? "manhattan"
+                : "euclidean".equals(metric) ? "euclidean" : "cosine");
+            orders = List.of(new OrderTerm(new Expr.Call(function,
+                List.of(new Expr.Ident(firstField[0]), new Expr.Literal(firstVector[0]))), false));
+            if (limit == null) {
+                limit = new Expr.Literal(AxonValue.num(10));
+            }
+        }
+        return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), cond, orders, sel.group(),
+            limit, sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(), sel.groupAll());
+    }
+
+    private static boolean containsMatch(Expr e) {
+        if (e instanceof Expr.Binary b) {
+            return b.op() == Expr.BinaryOp.MATCH || ((b.op() == Expr.BinaryOp.AND || b.op() == Expr.BinaryOp.OR)
+                && (containsMatch(b.left()) || containsMatch(b.right())));
+        }
+        return false;
+    }
+
+    private Expr rewriteMatches(Database db, Catalog.TableDef def, Expr e, String[] firstField, AxonValue[] firstVector) {
+        if (!(e instanceof Expr.Binary b)) {
+            return e;
+        }
+        if (b.op() == Expr.BinaryOp.AND || b.op() == Expr.BinaryOp.OR) {
+            Expr left = rewriteMatches(db, def, b.left(), firstField, firstVector);
+            Expr right = rewriteMatches(db, def, b.right(), firstField, firstVector);
+            return left == b.left() && right == b.right() ? e : new Expr.Binary(b.op(), left, right);
+        }
+        if (b.op() != Expr.BinaryOp.MATCH || !(b.left() instanceof Expr.Ident field)) {
+            return e;
+        }
+        Catalog.FieldDef fd = def.fields().get(field.name());
+        if (fd == null || fd.embeddingName() == null) {
+            return e;
+        }
+        AxonValue rhs = eval(b.right());
+        if (!rhs.isString()) {
+            return e;
+        }
+        Catalog.EmbeddingDef embedding = requireEmbedding(fd.embeddingName());
+        AxonValue vector = com.axonbase.core.embedding.EmbeddingClient.toValue(ds.embeddings().embedOne(embedding,
+            rhs.asString(), com.axonbase.core.embedding.EmbeddingClient.Role.QUERY));
+        if (firstField[0] == null) {
+            firstField[0] = field.name();
+            firstVector[0] = vector;
+        }
+        return new Expr.Binary(Expr.BinaryOp.MATCH, b.left(), new Expr.Literal(vector));
+    }
+
+    private AxonValue runSelectResolved(Statement.Select sel) {
         // Check if FROM is AUDIT_CASES virtual table
         if (sel.from() instanceof Expr.Ident id) {
             String tableName = id.name();
@@ -2611,7 +2728,7 @@ return score;
      */
     private AxonValue runExplain(Statement.Explain ex) {
         Database db = db();
-        Statement.Select sel = ex.select();
+        Statement.Select sel = rewriteEmbeddingMatches(ex.select());
         ExplainPlan plan = planExplain(db, sel);
         Map<String, AxonValue> info = new LinkedHashMap<>();
         info.put("strategy", AxonValue.str(plan.strategy()));
@@ -3289,9 +3406,12 @@ return score;
     private AxonValue runDefineField(DefineField df) {
         Database db = db();
         Catalog.TableDef def = ensureTable(db, df.table());
+        if (df.embeddingName() != null) {
+            checkEmbeddingField(db, def, df);
+        }
         def.fields().put(df.name(),
             new Catalog.FieldDef(df.name(), df.type(), df.readonly(), df.assertExpr(), df.defaultExpr(),
-                df.references()));
+                df.references(), df.embeddingName(), df.embeddingFrom()));
         control(db, ControlCommand.Kind.FIELD, df.table() + ":" + df.name(),
             com.axonbase.parser.Render.stmt(df));
         return AxonValue.nul();
@@ -3302,6 +3422,15 @@ return score;
         Catalog.TableDef def = ensureTable(db, di.table());
         if (di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", di.searchAnalyzer()));
+        }
+        if (di.vectorDimension() != null) {
+            for (String column : di.columns()) {
+                Catalog.EmbeddingDef bound = embeddingOfField(db, di.table(), column);
+                if (bound != null && bound.dimension() != di.vectorDimension()) {
+                    throw errorStmt(Messages.get("embedding_index_dimension", di.name(), di.vectorDimension(), column,
+                        bound.name(), bound.dimension()));
+                }
+            }
         }
         Catalog.IndexDef newIndex = new Catalog.IndexDef(di.name(), di.columns(), di.unique(), di.count(),
             di.searchAnalyzer(), di.geo(), di.columnar(), di.vectorDimension(), di.vectorDistance(),
@@ -3360,6 +3489,224 @@ return score;
         for (String entry : entries) {
             records(db).put(entry, new byte[0]);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // EMBEDDING: provedor HTTP que transforma texto em vetor
+    // ------------------------------------------------------------------
+
+    private AxonValue runDefineEmbedding(Statement.DefineEmbedding de) {
+        Database db = db();
+        if (!"http".equals(de.provider())) {
+            throw errorStmt(Messages.get("embedding_provider_unsupported", de.provider()));
+        }
+        ds.embeddings().checkUrl(de.url());
+        db.catalog().defineEmbedding(new Catalog.EmbeddingDef(de.name(), de.url(), de.model(), de.dimension(),
+            de.keyEnv(), de.timeoutSeconds() == null ? Catalog.EmbeddingDef.DEFAULT_TIMEOUT_SECONDS : de.timeoutSeconds(),
+            de.batch() == null ? Catalog.EmbeddingDef.DEFAULT_BATCH : de.batch(), de.documentPrefix(),
+            de.queryPrefix(), de.sendDimension(), de.authHeader()));
+        control(db, ControlCommand.Kind.EMBEDDING, de.name(), com.axonbase.parser.Render.stmt(de));
+        return AxonValue.nul();
+    }
+
+    private AxonValue runDropEmbedding(Statement.DropEmbedding de) {
+        Database db = db();
+        if (db.catalog().embedding(de.name()) == null) {
+            throw errorStmt(Messages.get("embedding_missing", de.name()));
+        }
+        for (Catalog.TableDef table : db.catalog().tables()) {
+            for (Catalog.FieldDef f : table.fields().values()) {
+                if (de.name().equals(f.embeddingName())) {
+                    throw errorStmt(Messages.get("embedding_in_use", de.name(), table.name(), f.name()));
+                }
+            }
+        }
+        db.catalog().removeEmbedding(de.name());
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.EMBEDDING, de.name());
+        return AxonValue.nul();
+    }
+
+    /** Valida {@code DEFINE FIELD ... TYPE vector<N> EMBEDDING e FROM f}: o embedding existe e as dimensões batem. */
+    private void checkEmbeddingField(Database db, Catalog.TableDef table, Statement.DefineField df) {
+        Catalog.EmbeddingDef embedding = db.catalog().embedding(df.embeddingName());
+        if (embedding == null) {
+            throw errorStmt(Messages.get("embedding_missing", df.embeddingName()));
+        }
+        if (vectorTypeSize(df.type()) != embedding.dimension()) {
+            throw errorStmt(Messages.get("embedding_field_type", df.name(), embedding.dimension(),
+                embedding.dimension()));
+        }
+        for (Catalog.IndexDef ix : table.indexes().values()) {
+            if (ix.vector() && ix.columns().contains(df.name()) && !ix.vectorDimension().equals(embedding.dimension())) {
+                throw errorStmt(Messages.get("embedding_index_dimension", ix.name(), ix.vectorDimension(), df.name(),
+                    embedding.name(), embedding.dimension()));
+            }
+        }
+    }
+
+    /** N de {@code vector<N>}, ou -1 se o tipo é outro. */
+    private static int vectorTypeSize(String type) {
+        if (type == null) {
+            return -1;
+        }
+        String t = type.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!t.startsWith("vector<") || !t.endsWith(">")) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(t.substring(7, t.length() - 1).trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /** Embedding que um campo segue, ou {@code null}. */
+    private Catalog.EmbeddingDef embeddingOfField(Database db, String table, String field) {
+        Catalog.TableDef def = db.catalog().table(table);
+        Catalog.FieldDef fd = def == null ? null : def.fields().get(field);
+        return fd == null || fd.embeddingName() == null ? null : db.catalog().embedding(fd.embeddingName());
+    }
+
+    /** Embedding de um nome (ou o padrão {@code default}); erro claro se não existe. */
+    private Catalog.EmbeddingDef requireEmbedding(String name) {
+        Catalog.EmbeddingDef def = db().catalog().embedding(name);
+        if (def == null) {
+            throw errorStmt(Messages.get("embedding_missing", name));
+        }
+        return def;
+    }
+
+    /** {@code vector::embed(texto [, nome])} e o apelido {@code vector::fromstr}. */
+    private AxonValue invokeEmbed(List<AxonValue> args) {
+        if (args.isEmpty() || args.get(0) == null || args.get(0).isNull() || args.get(0).isNone()) {
+            return AxonValue.nul();
+        }
+        if (!args.get(0).isString()) {
+            throw errorStmt(Messages.get("embedding_input_required"));
+        }
+        String name = args.size() > 1 && args.get(1).isString() ? args.get(1).asString() : "default";
+        Catalog.EmbeddingDef def = requireEmbedding(name);
+        return com.axonbase.core.embedding.EmbeddingClient.toValue(ds.embeddings().embedOne(def,
+            args.get(0).asString(), com.axonbase.core.embedding.EmbeddingClient.Role.QUERY));
+    }
+
+    /**
+     * Preenche os campos que seguem um embedding a partir do texto de origem. Na criação (ou quando o texto de
+     * origem mudou) o vetor é calculado e gravado; se o registro já traz o vetor na mão, ele é mantido (só a
+     * dimensão é conferida). Origem ausente ou vazia não gera vetor. Um provedor fora do ar derruba a escrita:
+     * nunca se grava registro sem o vetor que o chamador esperava.
+     */
+    private void autoEmbed(Database db, Catalog.TableDef def, Map<String, AxonValue> obj, AxonValue before) {
+        List<Catalog.FieldDef> fields = def.fields().values().stream().filter(f -> f.embeddingName() != null).toList();
+        if (fields.isEmpty()) {
+            return;
+        }
+        Map<Catalog.EmbeddingDef, List<Catalog.FieldDef>> byEmbedding = new LinkedHashMap<>();
+        Map<Catalog.FieldDef, String> texts = new LinkedHashMap<>();
+        for (Catalog.FieldDef fd : fields) {
+            Catalog.EmbeddingDef embedding = db.catalog().embedding(fd.embeddingName());
+            if (embedding == null) {
+                throw errorStmt(Messages.get("embedding_missing", fd.embeddingName()));
+            }
+            AxonValue source = obj.get(fd.embeddingFrom());
+            if (source == null || source.isNull() || source.isNone()) {
+                continue;
+            }
+            if (!source.isString()) {
+                throw errorStmt(Messages.get("embedding_source_not_text", fd.embeddingFrom()));
+            }
+            if (source.asString().isBlank()) {
+                continue;
+            }
+            AxonValue given = obj.get(fd.name());
+            boolean sourceChanged = before == null || !before.isObject()
+                || !source.equals(before.asObject().get(fd.embeddingFrom()));
+            boolean hasVector = given != null && given.isArray();
+            boolean givenChanged = hasVector && (before == null || !before.isObject()
+                || !given.equals(before.asObject().get(fd.name())));
+            if (givenChanged) {
+                if (given.asArray().size() != embedding.dimension()) {
+                    throw errorStmt(Messages.get("embedding_dimension_mismatch", embedding.name(),
+                        given.asArray().size(), embedding.dimension()));
+                }
+                continue;
+            }
+            if (hasVector && !sourceChanged) {
+                continue;
+            }
+            byEmbedding.computeIfAbsent(embedding, k -> new ArrayList<>()).add(fd);
+            texts.put(fd, source.asString());
+        }
+        for (Map.Entry<Catalog.EmbeddingDef, List<Catalog.FieldDef>> entry : byEmbedding.entrySet()) {
+            List<Catalog.FieldDef> group = entry.getValue();
+            List<String> input = group.stream().map(texts::get).toList();
+            List<double[]> vectors = ds.embeddings().embed(entry.getKey(), input,
+                com.axonbase.core.embedding.EmbeddingClient.Role.DOCUMENT);
+            for (int i = 0; i < group.size(); i++) {
+                obj.put(group.get(i).name(), com.axonbase.core.embedding.EmbeddingClient.toValue(vectors.get(i)));
+            }
+        }
+    }
+
+    /**
+     * {@code REEMBED TABLE t [FIELD f] [DRY RUN]}: regera os vetores. {@code DRY RUN} não chama o provedor: conta
+     * linhas, caracteres e estima os tokens (cerca de um a cada 4 caracteres), para saber o custo antes.
+     */
+    private AxonValue runReembed(Statement.Reembed re) {
+        Database db = db();
+        Catalog.TableDef def = db.catalog().table(re.table());
+        if (def == null) {
+            throw errorStmt(Messages.get("stmt_table_undefined", re.table()));
+        }
+        List<Catalog.FieldDef> fields = def.fields().values().stream().filter(f -> f.embeddingName() != null)
+            .filter(f -> re.field() == null || f.name().equals(re.field())).toList();
+        if (fields.isEmpty()) {
+            throw errorStmt(Messages.get("embedding_field_unknown", re.field() == null ? "*" : re.field(), re.table()));
+        }
+        long rows = 0;
+        long characters = 0;
+        long updated = 0;
+        for (RecordId rid : resolveTargets(new Expr.Ident(re.table()))) {
+            Document doc = loadDoc(db, rid);
+            if (doc == null || !doc.current().isObject()) {
+                continue;
+            }
+            Map<String, AxonValue> current = new LinkedHashMap<>(doc.current().asObject());
+            boolean any = false;
+            for (Catalog.FieldDef fd : fields) {
+                AxonValue source = current.get(fd.embeddingFrom());
+                if (source != null && source.isString() && !source.asString().isBlank()) {
+                    characters += source.asString().length();
+                    any = true;
+                }
+            }
+            if (!any) {
+                continue;
+            }
+            rows++;
+            if (re.dryRun()) {
+                continue;
+            }
+            for (Catalog.FieldDef fd : fields) {
+                current.remove(fd.name());
+            }
+            autoEmbed(db, def, current, null);
+            AxonValue next = AxonValue.object(current);
+            records(db).put(rid.storageKey(db.ns(), db.db()), encode(next));
+            indexSearch(db, rid, doc.current(), next);
+            indexAdvanced(db, rid, doc.current(), next);
+            indexColumnar(db, rid, doc.current(), next);
+            updated++;
+        }
+        Map<String, AxonValue> out = new LinkedHashMap<>();
+        out.put("rows", AxonValue.num(rows));
+        if (re.dryRun()) {
+            out.put("characters", AxonValue.num(characters));
+            out.put("estimatedTokens", AxonValue.num((characters + 3) / 4));
+        } else {
+            out.put("updated", AxonValue.num(updated));
+        }
+        return AxonValue.object(out);
     }
 
     private AxonValue runDefineAnalyzer(Statement.DefineAnalyzer da) {
@@ -4691,6 +5038,9 @@ return score;
         }
         if (name.startsWith("graph::")) {
             return invokeGraph(name, args);
+        }
+        if (name.equals("vector::embed") || name.equals("vector::fromstr")) {
+            return invokeEmbed(args);
         }
         AxonValue result = Functions.call(name, args);
         if (result != null) {
