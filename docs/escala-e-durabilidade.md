@@ -40,6 +40,31 @@ Carga de 200 mil linhas, máquina de desenvolvimento macOS com a carga do sistem
 | Raio de 2 km, 4 threads | 8 ops/s (p50 409 ms) | 1.475 ops/s (p50 2,5 ms) |
 | 20 mais próximos, 4 threads | não existia | 334 ops/s (p50 10 ms) |
 
+### Modos de sincronização no macOS (200 mil linhas, em processo)
+
+| Teste (ops/s) | `always` | `batch` | `off` |
+|---|---|---|---|
+| Ingestão, 1 thread | 50 | 14.505 | 13.948 |
+| Ingestão, 8 threads | 192 | 42.982 | 48.132 |
+| Ingestão com UNIQUE e coluna | 180 | 25.491 | 32.113 |
+| Atualização, 4 threads | 95 | 10.963 | 16.105 |
+| Posição com GEO, 8 threads | 184 | 10.849 | 28.899 |
+
+### Carga HTTP em contêiner Linux
+
+Gerador de carga em Go (`scripts/loadtest`), 64 conexões, 15 segundos por cenário, imagem Docker no Docker Desktop do macOS (12 CPUs, 8 GB). O gerador roda no host, então o limite aqui é o caminho HTTP e o mapeamento de porta, não o armazenamento. A carga do sistema ficou perto de 20 durante a rodada.
+
+| Cenário (ops/s) | 0.8.0 | 0.9.0 `batch` | 0.9.0 `always` | 0.9.0 `off` |
+|---|---|---|---|---|
+| Leitura por id | 4.280 | 4.292 | 4.327 | 4.592 |
+| Atualização de status | 1.251 | 3.845 | 1.874 | 3.572 |
+| Inserção de pedidos | 2.029 | 4.449 | 1.990 | 4.400 |
+| Posição de motorista (GEO) | 1.785 | 4.010 | 2.055 | 4.195 |
+| Motoristas próximos | 17 | 3.327 | 3.203 | 3.273 |
+| Misto | 249 | 4.835 | 3.537 | 4.654 |
+
+Em Linux o custo do `always` é bem menor do que no macOS: cerca de metade da vazão de escrita do `batch`, contra 0,3% a 1% no macOS. Ainda assim, `batch` é o padrão porque limita a perda a cerca de 1 segundo e quase não custa vazão.
+
 Para reproduzir:
 
 ```bash
