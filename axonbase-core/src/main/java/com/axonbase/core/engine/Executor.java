@@ -464,7 +464,17 @@ public final class Executor {
             case Statement.AlterDatabaseLink adl -> runDefineDatabaseLink(
                 new Statement.DefineDatabaseLink(adl.name(), adl.url(), adl.ns(), adl.db(), adl.user(), adl.password()));
             case Statement.DropSaga ds -> runDropSaga(ds);
+            case Statement.CreateFunction p -> runProgram(p);
+            case Statement.CreateProcedure p -> runProgram(p);
+            case Statement.CreatePackage p -> runProgram(p);
+            case Statement.DropProgram p -> runProgram(p);
+            case Statement.CallProgram p -> runProgram(p);
         };
+    }
+
+    /** AxonPL: CREATE/DROP FUNCTION|PROCEDURE|PACKAGE e CALL (a lógica fica em {@code core.pl}). */
+    private AxonValue runProgram(Statement s) {
+        return ds.programs().run(s, session, this::eval);
     }
 
     /** Sessão somente leitura: só passam instruções de leitura (subconsultas e blocos também passam por aqui). */
@@ -705,6 +715,7 @@ public final class Executor {
             case "namespace" -> infoNamespace();
             case "database" -> infoDatabase();
             case "table" -> infoTable(inf.table());
+            case "function", "procedure", "package" -> ds.programs().info(session, inf.kind(), inf.table());
             default -> throw errorStmt(Messages.get("stmt_info_scope_unknown", inf.kind()));
         };
     }
@@ -795,13 +806,15 @@ public final class Executor {
             m.put("auth_header", e.authHeader() == null ? AxonValue.nul() : AxonValue.str(e.authHeader()));
             embeddings.put(e.name(), AxonValue.object(m));
         });
-        return AxonValue.object(Map.of(
-            "namespace", AxonValue.str(db.ns()),
-            "database", AxonValue.str(db.db()),
-            "tables", AxonValue.array(strings(tables)),
-            "details", AxonValue.object(detail),
-            "analyzers", AxonValue.object(analyzers),
-            "embeddings", AxonValue.object(embeddings)));
+        Map<String, AxonValue> info = new LinkedHashMap<>();
+        info.put("namespace", AxonValue.str(db.ns()));
+        info.put("database", AxonValue.str(db.db()));
+        info.put("tables", AxonValue.array(strings(tables)));
+        info.put("details", AxonValue.object(detail));
+        info.put("analyzers", AxonValue.object(analyzers));
+        info.put("embeddings", AxonValue.object(embeddings));
+        info.putAll(ds.programs().summary(db));
+        return AxonValue.object(info);
     }
 
     private AxonValue infoTable(String table) {
@@ -5606,6 +5619,10 @@ return score;
         AxonValue result = Functions.call(name, args);
         if (result != null) {
             return result;
+        }
+        AxonValue user = ds.programs().tryCall(session, c.name(), args);
+        if (user != null) {
+            return user;
         }
         throw AxonError.internal(Messages.get("stmt_function_unknown", name));
     }

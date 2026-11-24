@@ -1,0 +1,2511 @@
+{
+ "python": "3.14.5",
+ "casos": [
+  {
+   "resultado": "3",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_soma_basica",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "1",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_precedencia",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3.5, 4.0, -3.5, 0.3333333333333333, 2.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_divisao_verdadeira",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3, -4, -4, 3, 1, 2, -2, -1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_piso_negativos",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3.0, -4.0, 1.5, 0.5, -0.5, 16.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_piso_float",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[1024, 1, 0.5, -8, 1.4142135623730951, 1000000000000000, 1, 1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_potencias",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[(3, 2), (-4, 3), (-4, -3), (3.0, 1.5)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_divmod",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[5, 3.5, 0.0, 2, 4, -2, 2.67, 1200, 0, 2]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_abs_round",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3.142, 2.0, 10000000000.0, -1.0, 123.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_round_float_casas",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[1, 7, 6, -6, 1024, 128, -4, 6]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_bitwise",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[True, False, True, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_comparacoes_encadeadas",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[0.30000000000000004, 1e+16, 1e-05, 123456789.12345679, 1.5e+300, 1.1805916207174113e+21, 0.3333333333333333, 100.0, 1000000000000000.0, 1.2345678901234568e+16]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_float_repr",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[inf, -inf, True, True, True, inf, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_float_especiais",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3.0, 4.5, 9.5, 2, 5, 3.5, 8.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_int_float_mistura",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3, -3, 42, 17, -5, 255, 5, 31, 1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_int_conversoes",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3.5, 2.0, 1000.0, -0.5, 3.0, inf, 1000.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_float_conversoes",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "['0xff', '-0xff', '0b1010', '-0b1010', '0o10', '0x0', 'A', 97, '€', 8364]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_hex_bin_oct",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[31, 1, 9, 41, 1, 2.5, 1.0, 0.6, 6.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_sum_min_max",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "['uva', 'banana', 'banana', 'uva', -1, 3]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_min_max_key",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[1024, 24, 4, 0.25, 8]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_pow_modular",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[4611686018427387904, 9223372036854775807, 9223372036854775807, -9223372036854775808, 9223372030926249001]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_inteiros_grandes_64",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "2432902008176640000",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_fatorial_iter",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_fibonacci_iter",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_primos",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[6, 1, 9, 25]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_mdc",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[2, 3, -3, -2, 4.0, 8.0, -2, 6, 3.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_matematica_modulo",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[3.141592653589793, 2.718281828459045, True, True, 1.0, 1.0, 3.0, 1.0, 3.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_matematica_constantes",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[2, 0, 2, 1, 5, 'x', 0, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_bool_aritmetica",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[14, 3.75, 1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_atribuicao_aumentada",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[4, 5, 3, 3, 1, 2]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_swap_encadeada",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "['zero', 'zero', 'zero', 'zero', 'zero']",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_zero_divisao_tipos",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[True, False, True, True, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_float_hash_igualdade",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[255, 5, 15, 1000000, 1000.0, 0.0015, 0.5, 5.0, 255, 10.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_numeros_literais",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "2.9289682539682538",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_loop_acumulador_float",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[5.0, 4.0, 2.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_media_variancia",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "111",
+   "stdout": "",
+   "erro": null,
+   "nome": "ar_collatz",
+   "arquivo": "aritmetica.pyt"
+  },
+  {
+   "resultado": "[[0, 3, 1, 2, 5, 7, 99, 8, 100], 9, 6, 1, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_basica",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[2], 1, 1, [1, 6, 8]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_remocao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[-1, 1, 20, 30, 40, 4, 5, 6, 7, 8, 99], ['a', 1, 'b', 3, 'c', 5], [0]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_fatias_atribuicao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[2, 3, 4], [0, 1, 2], [7, 8, 9], [0, 3, 6, 9], [9, 8, 7, 6, 5, 4, 3, 2, 1, 0], [7, 8, 9], [1, 3, 5, 7], [8, 6, 4], [], [], []]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_fatias_leitura",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[1, 2, 3, 5, 8, 9], [1, 2, 3, 5, 8, 9], [9, 8, 5, 3, 2, 1], ['a', 'bb', 'dd', 'ccc'], ['ccc', 'bb', 'dd', 'a'], [1, 2.25, 3.5], [(1, 'z'), (2, 'a'), (2, 'b')]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_ordenacao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[('b', 1), ('d', 1), ('a', 2), ('c', 2), ('e', 2)], [('a', 2), ('c', 2), ('e', 2), ('b', 1), ('d', 1)]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_sort_estavel",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[3, 2, 1], [1, 2, 3], [3, 2, 1, 4], [3, 2, 1], False, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_reverse_copy",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[0, 0, 0], [[1, 0], [1, 0]], [1, 2, 3, 4, 5], [1, 2, 1, 2]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_multiplicacao_concat",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[True, True, True, True, True, True, True, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_comparacao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[[1, 4, 7], [2, 5, 8], [3, 6, 9]], [1, 5, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9], 45, 9]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_lista_aninhada",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[(1, 2, 3), (4,), (), 6, (1, 2, 3, 4), (1, 2, 3, 1, 2, 3), 3, 2, (3, 2, 1), 1, 1, True, True, (1, 2), ('a', 'b')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_tupla_basica",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[1, [2, 3, 4], [1, 2, 3], 4, 1, [2, 3, 4], 5, 1, 2, 3, 'x', 'y', 'a', [], 4, 5, 6]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_desempacotamento",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[6, [1, 2, 3, 'a', 'b'], (1, 2, 1, 2), True, {'a': 9, 'b': 2}, 8]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_desempacotamento_chamada_literal",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[{'a': 11, 'c': 3}, 2, True, False, 11, None, 0, ['a', 'c'], ['a', 'c'], [11, 3], [('a', 11), ('c', 3)]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_basico",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[{'x': 5, 'z': 3, 'w': 4}, 2, -1, [1], 5, ('k', [1]), {'x': 5, 'z': 3, 'w': 4, 'novo': 1}, ['novo', 'w', 'x', 'z']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_metodos",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[['um', 'dois', 'tres'], [2, 4, 6], ['um=1', 'dois=2', 'tres=3'], {'dois': 2, 'tres': 3}, {1: 'um', 2: 'dois', 3: 'tres'}, 6, 'tres']",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_iteracao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[['e', 'b', 'r', 'a', 'z'], [101, 98, 114, 0, 1]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_ordem_insercao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "['int', 'str', 'tupla', 'float', 'none', 6, 'fs']",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_chaves_variadas",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[{'db': {'host': 'h', 'portas': [1, 2, 3], 'user': 'u'}, 'n': 3, 'log': {'nivel': 'x'}}, 3, 3, ['db', 'log', 'n']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_aninhado",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[True, False, True, True, False, True, {'p': 1, 'q': 2}, {'a': 1, 'b': 2}, {'k': 1, 'z': 2}]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_comparacao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[{'c': ['casa', 'carro', 'cama'], 'b': ['bola', 'barco'], 'l': ['lua']}, {'c': 3, 'b': 2, 'l': 1}, [('b', ['bola', 'barco']), ('c', ['casa', 'carro', 'cama']), ('l', ['lua'])]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_dict_agrupamento",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[1, 5], 2, True, False, [1, 2], True, ['e', 'h', 'l', 'o']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_set_basico",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[1, 2, 3, 4, 5], [3, 4], [1, 2], [1, 2, 5], [1, 2, 3, 4, 5, 9], [3, 4], [1, 2], [1, 2, 5], True, False, True, False, True, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_set_operacoes",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[2, 3, 5], [2, 3], [2, 3]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_set_update",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[3, 1, 2], [1, 2, 3], 3]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_set_deduplicar_ordem",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[True, 'x', [1, 2, 3, 9], 3, True, True, [1, 2, 3]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_frozenset",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[0, 1, 4, 9, 16, 25], [0, 6, 12, 18], [(1, 0), (2, 0), (2, 1)], ['A', 'B', 'C'], [[0, 0, 0], [0, 1, 2], [0, 2, 4]], [0, 1, -2, 3, -4], [1, 2, 2, 3, 3, 3]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_compreensoes_lista",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[{0: 0, 1: 1, 2: 4, 3: 9}, True, {'a': 97, 'b': 98}, {'b': 1, 'c': 2}, [1, 2]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_compreensoes_dict_set",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[45, 3, 4, True, True, [0, 0, 0, 1, 1, 1, 2, 2, 3, 3], [2, 3], ('a', 'b'), '0,1,2', True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_geradores_ansiosos",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "['externo', [0, 1, 2], [0, 1, 2], [2, 2, 2]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_escopo_compreensao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[0, 1, 2, 3, 4], [2, 4, 6], [5, 3, 1], [], [], 3, 1, 7, True, False, [1, 4, 7], 5050, [-3, -2, -1, 0, 1, 2], [3, 2, 1, 0], True, 4]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_range",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[(0, 'a'), (1, 'b'), (2, 'c')], [(5, 'a'), (6, 'b'), (7, 'c')], [('a', 10), ('b', 20), ('c', 30)], [('a', 10, True), ('b', 20, False), ('c', 30, None)], [], {'a': 10, 'b': 20, 'c': 30}, [(0, 'x'), (1, 'y')], [(1, 3, 5), (2, 4, 6)], [4, 10, 18]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_enumerate_zip",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[2, 4, 6], ['1', '2'], [11, 22], [2, 3], [1, 'a', [0]], [1, 2], 15]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_map_filter",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[1, 2, 3, 'fim', [3, 2, 1], ['c', 'b', 'a'], [2, 1], [1, 2, 3], ['a', 'b']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_reversed_sorted_iter",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[False, True, True, False, True, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_any_all",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[2, 3, 2, 1, 1, 7, 'a', 3, 4, [1, 2], [1, 3], (1, 'z')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_len_sum_min_max_colecoes",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[0, 1, 2, 3], 4, [1, 2, 3, 4], 0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_pilha_fila",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[3, 0, 6, -1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_busca_binaria",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[1, 2, 5, 5, 6, 9], [], [1], [1, 2, 3]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_bubble_sort",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[1, 2, 2, 3, 3, 5, 6, 8, 9]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_quicksort_recursivo",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[[19, 22], [43, 50]], [[1, 2], [3, 4]]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_matriz_multiplicacao",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[('a', 5), ('b', 2), ('r', 2), ('c', 1), ('d', 1)], 5, ['c', 'd']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_contagem_frequencia",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[[[1, 2, 99], [3]], [[1, 2, 99], [3]], [[1, 2], [3]], True, False, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_copia_rasa_profunda",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[True, False, True, True, True, True, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_identidade_e_none",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[{'ana': 17, 'bia': 13, 'caio': 3}, [('ana', 17), ('bia', 13), ('caio', 3)], ['ana', 'bia', 'caio'], 33]",
+   "stdout": "",
+   "erro": null,
+   "nome": "co_tabela_agregada",
+   "arquivo": "colecoes.pyt"
+  },
+  {
+   "resultado": "[Decimal('12.50'), Decimal('8.50'), Decimal('21.00'), Decimal('5.25'), Decimal('5'), Decimal('0.50'), Decimal('110.2500'), Decimal('-10.50'), Decimal('3.2'), True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_basico",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[Decimal('0.6'), True, False, Decimal('3.30'), Decimal('59.97'), Decimal('33.33333333333333333333333333')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_precisao_financeira",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['3.14', \"Decimal('3.14')\", '1E+3', '1E-7', '100', '-0.50', '3.14', '3.1', '1,234.50']",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_str_repr",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[Decimal('5'), Decimal('5.0'), Decimal('0.5'), 7, 1.25, Decimal('1'), '3', Decimal('10.5')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_conversoes",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[Decimal('2.68'), 2, 4, -2, Decimal('2.68'), Decimal('1.00'), Decimal('12.3')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_arredondamento",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[True, True, False, True, True, [1, 2, Decimal('2.5'), Decimal('3')], 2, Decimal('3.3'), False, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_comparacao_mista",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['soma float', 'literal', 'zero']",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_erros_tipo",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[Decimal('43.30'), Decimal('3.03'), Decimal('46.33'), Decimal('14.43333333333333333333333333')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "dc_soma_lista_precos",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['1', '\"a\\\\\"b\"', '[1, 2.5, null, true]', '{\"a\": 1, \"b\": [1, 2]}', '{}', '[]', '\"\\\\u00e9\"', '[1, 2]', '1.0', '10000000000', '1e+20']",
+   "stdout": "",
+   "erro": null,
+   "nome": "js_dumps_basico",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['{\"a\": {\"x\": [1, 2], \"y\": null}, \"b\": 2}', '{\\n  \"b\": 2,\\n  \"a\": {\\n    \"x\": [\\n      1,\\n      2\\n    ],\\n    \"y\": null\\n  }\\n}', '[\\n 1,\\n [\\n  2,\\n  3\\n ]\\n]', '{\"k\": \"é\"}', '{\"a\":1}']",
+   "stdout": "",
+   "erro": null,
+   "nome": "js_dumps_opcoes",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['{\"1\": \"a\", \"2.5\": \"b\", \"null\": \"d\"}', '{\"z\": 1, \"a\": 2}']",
+   "stdout": "",
+   "erro": null,
+   "nome": "js_dumps_chaves_nao_texto",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[1, 1.5, 'x', [1, 2, [3]], {'a': {'b': [True, False, None]}}, [], 100.0, 'é\\n', -0.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "js_loads_basico",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "js_ida_e_volta",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['erro', 'erro', 'erro', 'erro', 'erro', 'erro']",
+   "stdout": "",
+   "erro": null,
+   "nome": "js_loads_erro",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['erro', 'erro', 'erro']",
+   "stdout": "",
+   "erro": null,
+   "nome": "js_dumps_tipo_invalido",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[-1, 0, 5, 5, 1.4142135623730951, 0.0, 2.718281828459045, 0.0, 2.0, -3.0, 0.0, 1.0, 0.0, 0.7853981633974483, 5.0, 180.0, 3.141592653589793, 3628800, -3.0, 1.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "mt_math_funcoes",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['erro', 'erro', 'erro', 'erro']",
+   "stdout": "",
+   "erro": null,
+   "nome": "mt_math_erros",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[True, False, True, False, True, False, True, True, 6.283185307179586]",
+   "stdout": "",
+   "erro": null,
+   "nome": "mt_math_isnan_inf",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "[0.1, 0.5, 1e-07, 123456789.0, 1e+22, 1.7976931348623157e+308, 5e-324, 2.5e-05, 1.2345678901234568e+18, 0.000123, 3e-10, 1e+20, 1.0000000000000002e+16]",
+   "stdout": "",
+   "erro": null,
+   "nome": "mt_round_repr_float_casos",
+   "arquivo": "decimal_json.pyt"
+  },
+  {
+   "resultado": "['neg', 'zero', 'pequeno', 'grande', 'grande']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_if_elif_else",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[3, 3, ['fim normal']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_while_else_break",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['achou', 'nao achou', 'nao achou']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_for_else",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1), (3, 0), (3, 1), (3, 2)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_continue_aninhado",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['impar', True, True, False, 'y', 0, 'padrao', 'ultimo', 3]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_ternario_booleanos",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[False, True, True, False, ['a', 'a', 'b', 'b', 'b', 'a']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_curto_circuito",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[1, 2, 3], [1, 5, 3], [1, 2, 9], [0, 2, 1], [1, 2, 3], [8, 7, 3]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_funcao_padroes",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[(), []], [(1, 2), []], [(), [('x', 1), ('y', 2)]], [(1,), [('x', 2)]], [1, (), 10, []], [1, (2, 3), 10, []], [1, (), 5, []], [1, (2,), 10, [('z', 3)]], [1, (2,), 4, [('w', 5)]]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_funcao_args_kwargs",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[6, 13, 1, 5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_somente_nomeados",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[1, 2], [1, 2], [3], True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_padrao_mutavel",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[3, 6, 'a,b', 5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_anotacoes_ignoradas",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[None, 1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_docstring_e_pass",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[1, 120, 3628800, 2432902008176640000]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_recursao_fatorial",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_recursao_fibonacci",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[True, False, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_recursao_mutua",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[15, [('A', 'B'), ('A', 'C'), ('B', 'C')], ('B', 'C')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_recursao_hanoi",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[[1, 2, 3], [1, 3, 2], [2, 1, 3], [2, 3, 1], [3, 1, 2], [3, 2, 1]], 120]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_recursao_permutacoes",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[9, 61]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_recursao_ackermann",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[1, 2, 3, 1, 4]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_closure_contador",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[2, 2, 2], [0, 1, 2]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_closure_captura_tardia",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[6, 60]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_closure_aninhada",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[101, 103, 106]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_closure_acumulador",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[2, 100, 3]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_global_nonlocal",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[17.0, 12.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_global_leitura_modulo",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[25, 2, 3, ((1, 2), [('z', 3)]), 16, 42, [3, 7]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_lambda_variados",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[2, 4], [-1, -2], [6, -3], True, False, ['dobra', 'neg']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_funcoes_como_valores",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[('res', 3), ('res', 6)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_decorador_manual",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['zero', 'indice', 'chave', 'valor', 'tipo', 'nome']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_excecao_basica",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['lookup', 'lookup', 'arit', 'arit', 'vt', 'vt', 'outro', 'outro', 'outro']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_excecao_hierarquia",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[('falhou', 42), \"('falhou', 42)\", \"'chave'\", ('chave',), 'so msg', \"RuntimeError('so msg')\"]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_excecao_mensagem_args",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[5.0, ['try', 'else', 'finally']], [None, ['try', 'except', 'finally']]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_excecao_else_finally",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['try', 1, 2]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_finally_com_return",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[('corpo', 0), ('fim', 0), ('fim', 1), ('corpo', 2), ('fim', 2)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_finally_em_loop",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['original', 'novo']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_excecao_relancar",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['encadeado', True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_raise_from",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['pego', ('fundo',)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_excecao_propaga_funcao",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['msg customizada', '']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_assert",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['generica', \"''\", \"('a', 'b')\"]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_excecao_custom_nome",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": null,
+   "stdout": "",
+   "erro": "IndexError",
+   "nome": "fl_excecao_nao_tratada_tipo",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": null,
+   "stdout": "",
+   "erro": "ValueError",
+   "nome": "fl_excecao_nao_tratada_custom",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[True, True, True, True, True, True, True, True, True, False, True, True, True, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_isinstance_type",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[['a', 'b', 'c'], [1, 2], ['a'], (1,), True, {1: 2}, '12', 13, 3.0, False, True, False, True, False, 0, '', [], {}, 0.0, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_conversoes_construtores",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "2418",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_while_true_break",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[None, None]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_pass_e_blocos_vazios",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[1, 2, 3, 1, 2]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_ponto_virgula_linhas",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[6, 6, [1, 2, 3], {'a': 1, 'b': 2}, 3, 2]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_continuacao_linha",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[1, 2, 3]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_comentarios_indentacao",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['apagado', 2]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_del_variavel",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "'unbound'",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_variavel_nao_inicializada",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[True, True, True, True, True, True, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_operador_in_not_in_is",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['ola', 'mundo!']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_encadeamento_metodos",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[2, 'indefinida']",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_escopo_loop_variavel",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[3, 2, (4, 1), 1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_retorno_multiplo",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[1, 3, 7, 15, 31, 63, 127]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_geracao_sequencia_while",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[6, 28, 496]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_numeros_perfeitos",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[[1], [1, 1], [1, 2, 1], [1, 3, 3, 1], [1, 4, 6, 4, 1], [1, 5, 10, 10, 5, 1], [1, 6, 15, 20, 15, 6, 1]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_triangulo_pascal",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]",
+   "stdout": "",
+   "erro": null,
+   "nome": "fl_crivo",
+   "arquivo": "fluxo.pyt"
+  },
+  {
+   "resultado": "['OLA MUNDO, TUDO BEM?', 'ola mundo, tudo bem?', 'Ola Mundo, Tudo Bem?', 'Ola mundo, tudo bem?', 'oLA mUNDO, TUDO bem?', 'áéí', 'STRASSE']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_metodos_caixa",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['xyz', 'xyz  \\n', '  \\t xyz', 'abc', 'b', 'a.b..', '..a.b']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_strip_variantes",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[['a', 'b', 'c'], ['a', 'b', 'c'], ['a', 'b'], ['a', 'b,c'], ['a,b', 'c'], [''], [], ['a', 'c'], ['a', 'b', 'c'], ['a', 'b  c ']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_split_varios",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['a-b-c', 'xy', '', 'bbb', 'bba', '-a-b-c-', 'heo', '0, 1, 2, 3']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_join_replace",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[1, -1, 3, 2, 3, 2, 3, -1, True, True, True, 7]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_busca",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[True, True, True, True, True, True, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_in_e_comparacao",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['a', 'j', 'cde', 'abc', 'hij', 'acegi', 'jihgfedcba', 'hij', 'bcdefghi', '', '', 'ab', 'adgj', 'fedc', 'abcdefghi']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_indexacao_fatias",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['ababab', 'ababab', 'abc', '', '', '==========']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_repeticao_concat",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['00042', '-00042', '+007', '***abc***', '**abc***', 'abc...', '...abc', 'abcdef', ' x  ']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_zfill_justify",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[True, False, True, False, True, True, False, True, True, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_is_predicados",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[('a', '=', 'b=c'), ('abc', '', ''), ('a=b', '=', 'c'), ['l1', 'l2', 'l3'], ['l1', 'l2'], ['l1\\n', 'l2'], []]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_partition_splitlines",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['1 e dois', 'a b a', 'Ana tem 30', '     a|b     |  c   ', '3.14', '00042', \"'x'\", '{}', '1,234,567']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_format_metodo",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['6', '9', '   r', '    3.14']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_format_indice_chave",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['5 items', 'a e b', '  3.1|', '42   |', '00042', 'ff', '%%', '100%', \"'x'\", '[1, 2]']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_percent_formato",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['Ola Ana', '3 + 3 = 6', \"'Ana'\", 'ANA', '{literal}', '003', 'ab', '7.5']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_fstring_basica",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['3.14', '   3.142|', '3.1       |', '   3.14   |', '1,234,567', '1_234_567', '   1,234,567', '3.141593e+00', '3.142e+00', '3.14159', '50%', 'ff', '0xff', '11111111', '+5', '-5', ' 5']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_fstring_formatos",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['   ab', 'ab   |', ' ab  |', '**ab***', '----ab', 'a', '42****', '  42   |', 'x    |', '    7|']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_fstring_alinhamento",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['    2.72', ' 2.71828', 't       |', '1', '1', '1']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_fstring_aninhada",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['x=5', 'x + 1=6', \"nome='a'\", 'x=005']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_fstring_debug",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "'linha 1\\nlinha 2\\nfim'",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_fstring_multilinha",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['a\\tb', 'a\\\\b', 'Aé', \"it's\", 'say \"hi\"', 'A', 1, ['tab', 'here'], '€']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_escapes",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['a\\\\nb', '\\\\d+\\\\.\\\\d', 2, 'x\\\\ty', \"\\\\'\"]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_raw_strings",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['um\\ndois', 'x\\ny', 7, ['um', 'dois']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_triplas_aspas",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['abcdef', 'abc']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_concat_implicita",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[\"'a'\", '\"it\\'s\"', '\\'say \"x\"\\'', \"'a\\\\nb'\", \"'tab\\\\t'\", '\\'both \\\\\\' and \"\\'', \"''\", \"'\\\\\\\\'\", \"'é'\", \"'\\\\x01'\"]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_repr_strings",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['1', '1.5', 'True', 'None', \"[1, 'a']\", '(1,)', \"{'a': 1}\", '1e+20', '-0.0', '1000000000000000', '1.4142135623730951']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_str_de_tipos",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['Ifmmp', [72, 101, 108, 108, 111], 500]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_ord_chr_ciclo",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[True, False, 5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_palindromo_vogais",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[('o', 2), ('rato', 2), ('a', 1), ('de', 1)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_contagem_palavras",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['Khoor, Zruog!', 'abc xyz']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_cifra_cesar",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[['Apple', 'apple', 'banana', 'cherry'], ['a', 'A', 'b', 'B'], ['e', 'h', 'l', 'l', 'o'], ['10', '100', '9'], 'o', 'e']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_comparacao_ordem_sorted",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[12, 'OLÁ, MUNDO Ñ', 'ñ odnum ,álo', 2, 'àé', False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_unicode_basico",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[True, True, True, False, 'arquivo.tar', 'tar.gz', 'gz', 'arquivo']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_startswith_variantes",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[[(0, 'a'), (1, 'b'), (2, 'c')], [('a', 'x'), ('b', 'y'), ('c', 'z')], ['ax', 'by', 'cz'], [(1, 'a'), (2, 'b'), (3, 'c')], {'a': 0, 'b': 1, 'c': 2}]",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_enumerate_zip_string",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "[3, 97, [97, 98, 99], b'abcd', True, True, 'abc', b'hi', b'ab\\x00']",
+   "stdout": "",
+   "erro": null,
+   "nome": "st_bytes_basico",
+   "arquivo": "strings.pyt"
+  },
+  {
+   "resultado": "['0', '7', '-7', '42', '-1234567', '255', '100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_0",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '7', '-7', '42', '-1234567', '255', '100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['    0', '    7', '   -7', '   42', '-1234567', '  255', '100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0    ', '7    ', '-7   ', '42   ', '-1234567', '255  ', '100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['   0   ', '   7   ', '  -7   ', '  42   ', '-1234567', '  255  ', '100000 ']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_4",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['00000', '00007', '-0007', '00042', '-1234567', '00255', '100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_5",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['+0', '+7', '-7', '+42', '-1234567', '+255', '+100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_6",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[' 0', ' 7', '-7', ' 42', '-1234567', ' 255', ' 100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_7",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '7', '-7', '42', '-1,234,567', '255', '100,000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_8",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '7', '-7', '42', '-1_234_567', '255', '100_000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_9",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '7', '-7', '2a', '-12d687', 'ff', '186a0']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_10",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '7', '-7', '2A', '-12D687', 'FF', '186A0']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_11",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0x0', '0x7', '-0x7', '0x2a', '-0x12d687', '0xff', '0x186a0']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_12",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '7', '-7', '52', '-4553207', '377', '303240']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_13",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '111', '-111', '101010', '-100101101011010000111', '11111111', '11000011010100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_14",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['00000000', '00000111', '-0000111', '00101010', '-100101101011010000111', '11111111', '11000011010100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_15",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['         0', '         7', '        -7', '        42', '  -1234567', '       255', '    100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_16",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['         0', '         7', '        -7', '        42', '-1,234,567', '       255', '   100,000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_17",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['****0****', '****7****', '***-7****', '***42****', '-1234567*', '***255***', '*100000**']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_18",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['+0000000', '+0000007', '-0000007', '+0000042', '-1234567', '+0000255', '+0100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_19",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0o0', '0o7', '-0o7', '0o52', '-0o4553207', '0o377', '0o303240']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_20",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0b0', '0b111', '-0b111', '0b101010', '-0b100101101011010000111', '0b11111111', '0b11000011010100000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_21",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.0', '1.5', '-2.25', '3.14159', '1234567.891', '1e-05', '25000000000.0', '0.1', '2.5', '0.125', '-0.0001234']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_0",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.00', '1.50', '-2.25', '3.14', '1234567.89', '0.00', '25000000000.00', '0.10', '2.50', '0.12', '-0.00']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['     0.000', '     1.500', '    -2.250', '     3.142', '1234567.891', '     0.000', '25000000000.000', '     0.100', '     2.500', '     0.125', '    -0.000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.0       ', '1.5       ', '-2.2      ', '3.1       ', '1234567.9 ', '0.0       ', '25000000000.0', '0.1       ', '2.5       ', '0.1       ', '-0.0      ']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['   0.00   ', '   1.50   ', '  -2.25   ', '   3.14   ', '1234567.89', '   0.00   ', '25000000000.00', '   0.10   ', '   2.50   ', '   0.12   ', '  -0.00   ']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_4",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0000000.00', '0000001.50', '-000002.25', '0000003.14', '1234567.89', '0000000.00', '25000000000.00', '0000000.10', '0000002.50', '0000000.12', '-000000.00']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_5",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['+0.0', '+1.5', '-2.2', '+3.1', '+1234567.9', '+0.0', '+25000000000.0', '+0.1', '+2.5', '+0.1', '-0.0']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_6",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.000000e+00', '1.500000e+00', '-2.250000e+00', '3.141590e+00', '1.234568e+06', '1.000000e-05', '2.500000e+10', '1.000000e-01', '2.500000e+00', '1.250000e-01', '-1.234000e-04']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_7",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.000e+00', '1.500e+00', '-2.250e+00', '3.142e+00', '1.235e+06', '1.000e-05', '2.500e+10', '1.000e-01', '2.500e+00', '1.250e-01', '-1.234e-04']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_8",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.000000E+00', '1.500000E+00', '-2.250000E+00', '3.141590E+00', '1.234568E+06', '1.000000E-05', '2.500000E+10', '1.000000E-01', '2.500000E+00', '1.250000E-01', '-1.234000E-04']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_9",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '1.5', '-2.25', '3.14159', '1.23457e+06', '1e-05', '2.5e+10', '0.1', '2.5', '0.125', '-0.0001234']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_10",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '1.5', '-2.25', '3.14', '1.23e+06', '1e-05', '2.5e+10', '0.1', '2.5', '0.125', '-0.000123']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_11",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '2', '-2', '3', '1234568', '0', '25000000000', '0', '2', '0', '-0']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_12",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.000000%', '150.000000%', '-225.000000%', '314.159000%', '123456789.100000%', '0.001000%', '2500000000000.000000%', '10.000000%', '250.000000%', '12.500000%', '-0.012340%']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_13",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.0%', '150.0%', '-225.0%', '314.2%', '123456789.1%', '0.0%', '2500000000000.0%', '10.0%', '250.0%', '12.5%', '-0.0%']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_14",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.00', '1.50', '-2.25', '3.14', '1,234,567.89', '0.00', '25,000,000,000.00', '0.10', '2.50', '0.12', '-0.00']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_15",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.0', '1.5', '-2.2', '3.1', '1_234_567.9', '0.0', '25_000_000_000.0', '0.1', '2.5', '0.1', '-0.0']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_16",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['         0.0', '         1.5', '       -2.25', '     3.14159', ' 1234567.891', '       1e-05', '25000000000.0', '         0.1', '         2.5', '       0.125', '  -0.0001234']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_17",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['         0.0', '         1.5', '       -2.25', '     3.14159', ' 1234567.891', '       1e-05', '25000000000.0', '         0.1', '         2.5', '       0.125', '  -0.0001234']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_18",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.0', '1.5', '-2.25', '3.142', '1.235e+06', '1e-05', '2.5e+10', '0.1', '2.5', '0.125', '-0.0001234']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_19",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0', '1.5', '-2.25', '3.14159', '1.23457E+06', '1E-05', '2.5E+10', '0.1', '2.5', '0.125', '-0.0001234']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_20",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['+0.000000e+00', '+1.500000e+00', '-2.250000e+00', '+3.141590e+00', '+1.234568e+06', '+1.000000e-05', '+2.500000e+10', '+1.000000e-01', '+2.500000e+00', '+1.250000e-01', '-1.234000e-04']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_21",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0e+00', '2e+00', '-2e+00', '3e+00', '1e+06', '1e-05', '2e+10', '1e-01', '2e+00', '1e-01', '-1e-04']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_22",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.', '2.', '-2.', '3.', '1234568.', '0.', '25000000000.', '0.', '2.', '0.', '-0.']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_float_23",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', 'a', 'abc', 'olá', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_0",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', 'a', 'abc', 'olá', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['        ', '       a', '     abc', '     olá', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['        ', 'a       ', 'abc     ', 'olá     ', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['        ', '   a    ', '  abc   ', '  olá   ', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_4",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['********', '*******a', '*****abc', '*****olá', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_5",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['--------', '-------a', '-----abc', '-----olá', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_6",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', 'a', 'a', 'o', 'x']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_7",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', 'a', 'ab', 'ol', 'xx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_8",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['          ', 'a         ', 'ab        ', 'ol        ', 'xx        ']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_9",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['_________', '____a____', '___abc___', '___olá___', 'xxxxxxxxxxxx']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_str_10",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.00', '7.00', '-7.00', '1000000.00', '1.000000e+00', '1.000000e+01', '1.234500e+04']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_int_como_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['True', '0', '     1', 'True', 'None']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_bool",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['erro', 'erro', 'erro', 'erro', 'a0000']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fmt_erros",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[9, -5, 5, -9, 5, 5, 1237, 2, 13, 12, 1, 0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_soma_int",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[9.5, -5.0, 0.30000000000000004, 10000000003.0, 5.0, 2.0, 100000.00001, 10.0, 1.0, 4.0, 107.0, 3.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_soma_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[9.0, 5.5, -3.5, 14.0, 4.0, 2.5, 10.0, -7.0, 3.0, 2.5, 1007.0, 3.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_soma_misto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[5, -9, 9, -5, -5, 5, 1231, 0, 7, -8, 5, -6]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_sub_int",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[5.5, -10.0, -0.1, 9999999997.0, 5.0, 3.0, -99999.99999, 9.98, -1.0, -2.0, 93.0, -2.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_sub_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[5.0, -0.5, -4.5, 6.0, -2.0, -2.5, 2.0, -11.0, 3.0, 1.5, 993.0, 7.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_sub_misto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[14, -14, -14, 14, 0, 0, 3702, 1, 30, 20, -6, -9]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_mul_int",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[15.0, -18.75, 0.020000000000000004, 30000000000.0, 0.0, -1.25, 1.0, 0.0999, -0.0, 3.0, 700.0, 1.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_mul_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[14.0, 7.5, -2.0, 40.0, 3.0, 0.0, 24.0, -18.0, 0.0, 1.0, 7000.0, -10.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_mul_misto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[3.5, -3.5, -3.5, 3.5, 0.0, 'zero', 411.3333333333333, 1.0, 3.3333333333333335, 0.2, -1.5, -1.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_div_int",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[3.75, -3.0, 0.5, 3333333333.3333335, 'zero', -5.0, 1e-10, 999.0, -0.0, 0.3333333333333333, 14.285714285714286, 0.16666666666666666]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_div_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[3.5, 0.8333333333333334, -8.0, 2.5, 0.3333333333333333, 0.0, 1.5, -4.5, 'zero', 4.0, 142.85714285714286, -2.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_div_misto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[3, -4, -4, 3, 0, 'zero', 411, 1, 3, 0, -2, -1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_piso_int",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[3.0, -3.0, 0.0, 3333333333.0, 'zero', -5.0, 0.0, 999.0, -0.0, 0.0, 14.0, 0.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_piso_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[3.0, 0.0, -8.0, 2.0, 0.0, 0.0, 1.0, -5.0, 'zero', 4.0, 142.0, -3.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_piso_misto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1, 1, -1, -1, 0, 'zero', 1, 0, 1, 2, -1, 0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_mod_int",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1.5, 0.0, 0.1, 1.0, 'zero', -0.0, 1e-05, 5.204170427930421e-18, 0.0, 1.0, 2.0, 0.5]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_mod_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1.0, 2.5, 0.0, 2.0, 1.0, 0.0, 2.0, 1.0, 'zero', 0.0, 6.0, -1.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_mod_misto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[49, 49, 0.02040816326530612, 0.02040816326530612, 0, 1, 1879080904, 1, 1000, 1024, 0.1111111111111111, -27]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_pot_int",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[56.25, 0.6309573444801932, 1e+30, 1.0, 0.6324555320336759, 0.0, 1.0232827542821685, -0.0, 1.0, 100000000000000.0, 0.125]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_pot_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[49.0, 15.625, 10000.0, 1.0, 0.0, 1296.0, 81.0, 1.0, 1.4142135623730951, 1e+21, 0.04]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_ar_pot_misto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[True, False, False, True, False, False, False, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_cmp_0",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[True, True, False, True, True, True, False, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_cmp_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, True, False, False, False, True, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_cmp_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, True, True, False, True, True, True, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_cmp_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, True, False, False, True, True, False, True, True, True]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_cmp_4",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[True, False, True, True, False, False, True, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_cmp_5",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [2, 3, 4, 5, 6, 7, 8, 9], [0, 1, 2, 3, 4], [1, 2, 3, 4, 5, 6], [7, 8, 9], [0, 1, 2, 3, 4, 5, 6, 7], [3, 4, 5, 6, 7], [], [], [], [], [9]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_lista_None",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['abcdefghij', 'cdefghij', 'abcde', 'bcdefg', 'hij', 'abcdefgh', 'defgh', '', '', '', '', 'j']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_str_None",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), (2, 3, 4, 5, 6, 7, 8, 9), (0, 1, 2, 3, 4), (1, 2, 3, 4, 5, 6), (7, 8, 9), (0, 1, 2, 3, 4, 5, 6, 7), (3, 4, 5, 6, 7), (), (), (), (), (9,)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_tupla_None",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [2, 3, 4, 5, 6, 7, 8, 9], [0, 1, 2, 3, 4], [1, 2, 3, 4, 5, 6], [7, 8, 9], [0, 1, 2, 3, 4, 5, 6, 7], [3, 4, 5, 6, 7], [], [], [], [], [9]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_lista_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['abcdefghij', 'cdefghij', 'abcde', 'bcdefg', 'hij', 'abcdefgh', 'defgh', '', '', '', '', 'j']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_str_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), (2, 3, 4, 5, 6, 7, 8, 9), (0, 1, 2, 3, 4), (1, 2, 3, 4, 5, 6), (7, 8, 9), (0, 1, 2, 3, 4, 5, 6, 7), (3, 4, 5, 6, 7), (), (), (), (), (9,)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_tupla_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[0, 2, 4, 6, 8], [2, 4, 6, 8], [0, 2, 4], [1, 3, 5], [7, 9], [0, 2, 4, 6], [3, 5, 7], [], [], [], [], [9]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_lista_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['acegi', 'cegi', 'ace', 'bdf', 'hj', 'aceg', 'dfh', '', '', '', '', 'j']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_str_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(0, 2, 4, 6, 8), (2, 4, 6, 8), (0, 2, 4), (1, 3, 5), (7, 9), (0, 2, 4, 6), (3, 5, 7), (), (), (), (), (9,)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_tupla_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[0, 3, 6, 9], [2, 5, 8], [0, 3], [1, 4], [7], [0, 3, 6], [3, 6], [], [], [], [], [9]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_lista_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['adgj', 'cfi', 'ad', 'be', 'h', 'adg', 'dg', '', '', '', '', 'j']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_str_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(0, 3, 6, 9), (2, 5, 8), (0, 3), (1, 4), (7,), (0, 3, 6), (3, 6), (), (), (), (), (9,)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_tupla_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[9, 8, 7, 6, 5, 4, 3, 2, 1, 0], [2, 1, 0], [9, 8, 7, 6], [], [7, 6, 5, 4, 3, 2, 1, 0], [9], [], [8, 7, 6, 5, 4, 3], [9, 8, 7, 6, 5, 4, 3, 2, 1, 0], [9, 8, 7, 6, 5, 4, 3, 2, 1, 0], [], [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_lista_m1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['jihgfedcba', 'cba', 'jihg', '', 'hgfedcba', 'j', '', 'ihgfed', 'jihgfedcba', 'jihgfedcba', '', 'jihgfedcba']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_str_m1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(9, 8, 7, 6, 5, 4, 3, 2, 1, 0), (2, 1, 0), (9, 8, 7, 6), (), (7, 6, 5, 4, 3, 2, 1, 0), (9,), (), (8, 7, 6, 5, 4, 3), (9, 8, 7, 6, 5, 4, 3, 2, 1, 0), (9, 8, 7, 6, 5, 4, 3, 2, 1, 0), (), (9, 8, 7, 6, 5, 4, 3, 2, 1, 0)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_tupla_m1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[9, 7, 5, 3, 1], [2, 0], [9, 7], [], [7, 5, 3, 1], [9], [], [8, 6, 4], [9, 7, 5, 3, 1], [9, 7, 5, 3, 1], [], [9, 7, 5, 3, 1]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_lista_m2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['jhfdb', 'ca', 'jh', '', 'hfdb', 'j', '', 'ige', 'jhfdb', 'jhfdb', '', 'jhfdb']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_str_m2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(9, 7, 5, 3, 1), (2, 0), (9, 7), (), (7, 5, 3, 1), (9,), (), (8, 6, 4), (9, 7, 5, 3, 1), (9, 7, 5, 3, 1), (), (9, 7, 5, 3, 1)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_tupla_m2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[9, 6, 3, 0], [2], [9, 6], [], [7, 4, 1], [9], [], [8, 5], [9, 6, 3, 0], [9, 6, 3, 0], [], [9, 6, 3, 0]]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_lista_m3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['jgda', 'c', 'jg', '', 'heb', 'j', '', 'if', 'jgda', 'jgda', '', 'jgda']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_str_m3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(9, 6, 3, 0), (2,), (9, 6), (), (7, 4, 1), (9,), (), (8, 5), (9, 6, 3, 0), (9, 6, 3, 0), (), (9, 6, 3, 0)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_fatia_tupla_m3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  A B  ', 'HELLO WORLD', 'OLA, MUNDO', 'ÁÉÍ ÓÚ', '123', 'A1B2', 'UPPER LOWER', 'X', '   ', 'TAB\\tHERE', 'ABABABAB', 'JOÃO DA SILVA']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_0",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  a b  ', 'hello world', 'ola, mundo', 'áéí óú', '123', 'a1b2', 'upper lower', 'x', '   ', 'tab\\there', 'abababab', 'joão da silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  A B  ', 'Hello World', 'Ola, Mundo', 'Áéí Óú', '123', 'A1B2', 'Upper Lower', 'X', '   ', 'Tab\\tHere', 'Abababab', 'João Da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  a b  ', 'Hello world', 'Ola, mundo', 'Áéí óú', '123', 'A1b2', 'Upper lower', 'X', '   ', 'Tab\\there', 'Abababab', 'João da silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  A B  ', 'hELLO wORLD', 'OLA, MUNDO', 'áéí ÓÚ', '123', 'A1B2', 'upper LOWER', 'X', '   ', 'TAB\\tHERE', 'ABABABAB', 'jOÃO DA sILVA']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_4",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', 'a b', 'Hello World', 'ola, mundo', 'ÁÉÍ óú', '123', 'a1b2', 'UPPER lower', 'x', '', 'tab\\there', 'abababab', 'João da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_5",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', 'a b  ', 'Hello World', 'ola, mundo', 'ÁÉÍ óú', '123', 'a1b2', 'UPPER lower', 'x', '', 'tab\\there', 'abababab', 'João da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_6",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  a b', 'Hello World', 'ola, mundo', 'ÁÉÍ óú', '123', 'a1b2', 'UPPER lower', 'x', '', 'tab\\there', 'abababab', 'João da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_7",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[], ['a', 'b'], ['Hello', 'World'], ['ola,', 'mundo'], ['ÁÉÍ', 'óú'], ['123'], ['a1b2'], ['UPPER', 'lower'], ['x'], [], ['tab', 'here'], ['abababab'], ['João', 'da', 'Silva']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_8",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[''], ['  a b  '], ['Hell', ' W', 'rld'], ['', 'la, mund', ''], ['ÁÉÍ óú'], ['123'], ['a1b2'], ['UPPER l', 'wer'], ['x'], ['   '], ['tab\\there'], ['abababab'], ['J', 'ã', ' da Silva']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_9",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[''], ['', ' a b  '], ['Hello', 'World'], ['ola,', 'mundo'], ['ÁÉÍ', 'óú'], ['123'], ['a1b2'], ['UPPER', 'lower'], ['x'], ['', '  '], ['tab\\there'], ['abababab'], ['João', 'da Silva']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_10",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[''], ['  a b ', ''], ['Hello', 'World'], ['ola,', 'mundo'], ['ÁÉÍ', 'óú'], ['123'], ['a1b2'], ['UPPER', 'lower'], ['x'], ['  ', ''], ['tab\\there'], ['abababab'], ['João da', 'Silva']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_11",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, False, False, False, True, False, False, False, False, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_12",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, False, False, False, False, False, False, True, False, False, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_13",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, False, False, False, True, True, False, True, False, False, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_14",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, False, False, False, False, False, False, False, True, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_15",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, False, False, False, False, False, False, False, False, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_16",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, True, False, True, False, False, True, False, True, False, True, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_17",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['00000000', '0  a b  ', 'Hello World', 'ola, mundo', '00ÁÉÍ óú', '00000123', '0000a1b2', 'UPPER lower', '0000000x', '00000   ', 'tab\\there', 'abababab', 'João da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_18",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['***************', '****  a b  ****', '**Hello World**', '***ola, mundo**', '*****ÁÉÍ óú****', '******123******', '******a1b2*****', '**UPPER lower**', '*******x*******', '******   ******', '****tab\\there***', '****abababab***', '*João da Silva*']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_19",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['..............', '  a b  .......', 'Hello World...', 'ola, mundo....', 'ÁÉÍ óú........', '123...........', 'a1b2..........', 'UPPER lower...', 'x.............', '   ...........', 'tab\\there......', 'abababab......', 'João da Silva.']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_20",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['              ', '         a b  ', '   Hello World', '    ola, mundo', '        ÁÉÍ óú', '           123', '          a1b2', '   UPPER lower', '             x', '              ', '      tab\\there', '      abababab', ' João da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_21",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[-1, -1, 4, 0, -1, -1, -1, 7, -1, -1, -1, -1, 1]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_22",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[-1, -1, 7, 9, -1, -1, -1, 7, -1, -1, -1, -1, 3]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_23",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 4, 2]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_24",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1, 8, 12, 11, 7, 4, 5, 12, 2, 4, 9, 9, 14]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_25",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, True, False, False, False, False, False, False, False, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_26",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, False, True, False, False, False, False, False, False, False, False, False, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_27",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  a b  ', 'Hell0 W0rld', '0la, mund0', 'ÁÉÍ óú', '123', 'a1b2', 'UPPER l0wer', 'x', '   ', 'tab\\there', 'abababab', 'J0ã0 da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_28",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['-', '- - -a- -b- - -', '-H-e-l-l-o- -W-o-r-l-d-', '-o-l-a-,- -m-u-n-d-o-', '-Á-É-Í- -ó-ú-', '-1-2-3-', '-a-1-b-2-', '-U-P-P-E-R- -l-o-w-e-r-', '-x-', '- - - -', '-t-a-b-\\t-h-e-r-e-', '-a-b-a-b-a-b-a-b-', '-J-o-ã-o- -d-a- -S-i-l-v-a-']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_29",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[('', '', ''), ('', ' ', ' a b  '), ('Hello', ' ', 'World'), ('ola,', ' ', 'mundo'), ('ÁÉÍ', ' ', 'óú'), ('123', '', ''), ('a1b2', '', ''), ('UPPER', ' ', 'lower'), ('x', '', ''), ('', ' ', '  '), ('tab\\there', '', ''), ('abababab', '', ''), ('João', ' ', 'da Silva')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_30",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[('', '', ''), ('  a b ', ' ', ''), ('Hello', ' ', 'World'), ('ola,', ' ', 'mundo'), ('ÁÉÍ', ' ', 'óú'), ('', '', '123'), ('', '', 'a1b2'), ('UPPER', ' ', 'lower'), ('', '', 'x'), ('  ', ' ', ''), ('', '', 'tab\\there'), ('', '', 'abababab'), ('João da', ' ', 'Silva')]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_31",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[], ['  a b  '], ['Hello World'], ['ola, mundo'], ['ÁÉÍ óú'], ['123'], ['a1b2'], ['UPPER lower'], ['x'], ['   '], ['tab\\there'], ['abababab'], ['João da Silva']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_32",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  a b  ', 'hELLO wORLD', 'oLA, mUNDO', 'áÉÍ óÚ', '123', 'a1b2', 'uPPER lOWER', 'x', '   ', 'tAB\\thERE', 'aBABABAB', 'jOÃO dA sILVA']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_33",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  A B  ', 'HELLO WORLD', 'OLA, MUNDO', 'ÁÉÍ ÓÚ', '123', '1B2', 'UPPER LOWER', 'X', '   ', 'TAB\\tHERE', 'BABABAB', 'JOÃO DA SILV']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_34",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  a b  ', 'Hello World', 'ola, mundo', 'ÁÉÍ óú', '123', '1b2', 'UPPER lower', 'x', '   ', 'tab\\there', 'bababab', 'João da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_35",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['', '  a b  ', 'Hello Worl', 'ola, mundo', 'ÁÉÍ óú', '123', 'a1b2', 'UPPER lower', 'x', '   ', 'tab\\there', 'abababab', 'João da Silva']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_36",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[-1, 2, -1, 2, -1, -1, 0, -1, -1, -1, 1, 0, 6]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_str_37",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0.1, 0.2, 0.3, 0.3333333333333333, 0.6666666666666666, 3.3333333333333335, 1000000000000000.0, 1e+16, 1e+17, 123456789012345.6, 1234567890123456.8, 0.0001, 1e-05, 0.00012, 1.5e-07]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_float_repr_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1e+100, 1.2345678901234567e-200, 5e-324, 1.7976931348623157e+308, 4.35, 4.349999999999999, 100.0, 100.0, 12.0, 0.5, 1.4142135623730951, 3.14159265358979, 9007199254740992.0, 12345600.0, 0.7999999999999999]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_float_repr_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['0.1', '0.2', '0.3', '0.3333333333333333', '0.6666666666666666', '3.3333333333333335', '1000000000000000.0', '1e+16', '1e+17', '123456789012345.6', '1234567890123456.8', '0.0001', '1e-05', '0.00012', '1.5e-07']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_float_str_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "['1e+100|1e+100', '1.2345678901234567e-200|1.2345678901234567e-200', '5e-324|5e-324', '1.7976931348623157e+308|1.7976931348623157e+308', '4.35|4.35', '4.349999999999999|4.349999999999999', '100.0|100.0', '100.0|100.0', '12.0|12.0', '0.5|0.5', '1.4142135623730951|1.4142135623730951', '3.14159265358979|3.14159265358979', '9007199254740992.0|9007199254740992.0', '12345600.0|12345600.0', '0.7999999999999999|0.7999999999999999']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_float_str_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0, 2, 2, 4, 0, -2, -2, 0, 3, 1, 1235, 0, 0, 1000000000000000, 100, 7]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_round_n",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0.0, 2.0, 2.0, 4.0, -0.0, -2.0, -2.0, 0.0, 3.0, 1.0, 1235.0, 0.0, 0.0, 1000000000000000.0, 100.0, 7.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_round_0",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 0.5, 2.7, 1.0, 1234.6, 0.1, 0.4, 1000000000000000.5, 100.0, 7.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_round_1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 0.5, 2.67, 1.0, 1234.57, 0.12, 0.38, 1000000000000000.5, 100.0, 7.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_round_2",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 0.5, 2.675, 1.005, 1234.568, 0.125, 0.375, 1000000000000000.5, 99.995, 7.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_round_3",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0.0, 0.0, 0.0, 0.0, -0.0, -0.0, -0.0, 0.0, 0.0, 0.0, 1230.0, 0.0, 0.0, 1000000000000000.0, 100.0, 10.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_round_m1",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0, 0, 0, 10000000000, -10000000000, 123, 2500000000000000]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_int_de_float",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1, 2, 3, -4, 10, 0, 7, 'erro', 'erro', 'erro', 'erro']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_int_de_texto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1.0, 2.5, 3.5, -1000.0, 0.5, 5.0, inf, -inf, 'erro', 'erro', 'erro', 10.5, 'erro']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_float_de_texto",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[[0, True, 1.5, 2, 3], ['1', 'A', 'B', '_', 'a', 'b'], [(0, 'z'), (1, 'a'), (1, 'b')], [[1, 2], [1, 5], [2, 1]], [0, -1, 5, -10], ['ccc', 'aa', 'b']]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_sort_tipos",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1.5, 3, 'e', 'b', [1, 9], (1, 3), 1, 1, 1.0]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_minmax_variados",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[0, 6, 0.30000000000000004, 3.5, 2, 499500, 1.0, 1.0, [1, 2, 3], 110]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_sum_variados",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[(3, 1), (-4, 1), (-4, -1), (3, -1), (0, 0), (2, 0), (3.0, 1.5), (-4.0, 0.5), (3333333333.0, 1.0)]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_divmod_pares",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[256, 1, 1, -8, 0.125, 6.25, 3.0, 1000000000000000000, 4, 698635]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_pow_variados",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[False, True, True, False, True, False, True, False, True, False, True, False, True, False, True, False, True, False]",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_bool_truthiness",
+   "arquivo": "sweeps.pyt"
+  },
+  {
+   "resultado": "[1, None, 0, '', 'padrao', 1, 'vazio', 'vazio', 'vazio']",
+   "stdout": "",
+   "erro": null,
+   "nome": "sw_dict_get_default",
+   "arquivo": "sweeps.pyt"
+  }
+ ]
+}

@@ -51,6 +51,7 @@
         <module>axonbase-common</module>
         <module>axonbase-value</module>
         <module>axonbase-parser</module>
+        <module>axonbase-pl</module>
         <module>axonbase-core</module>
         <module>axonbase-server</module>
         <module>axonbase-sdk-java</module>
