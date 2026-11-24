@@ -1,0 +1,56 @@
+# Escala de um nó e durabilidade (0.9.0)
+
+A versão 0.9.0 reescreve o caminho de armazenamento e de consulta de um único nó. Nenhuma configuração é obrigatória: o motor ajusta threads, caches e buffers sozinho a partir dos núcleos e da memória visíveis.
+
+## Durabilidade: `AXON_STORAGE_SYNC`
+
+O log de escrita antecipada (WAL, Write-Ahead Log) do RocksDB fica sempre ligado. A variável opcional `AXON_STORAGE_SYNC` (ou a propriedade `-Daxon.storage.sync`) escolhe quando o sistema operacional é forçado a gravar esse log em disco com fsync.
+
+| Valor | Comportamento | Perda possível |
+|---|---|---|
+| `batch` (padrão) | fsync em segundo plano a cada 1 segundo | até cerca de 1 segundo de escritas, apenas em queda do sistema operacional ou da energia |
+| `always` | fsync a cada escrita | nenhuma |
+| `off` | sem fsync periódico (padrão do próprio RocksDB) | o que ainda estiver no cache do sistema operacional |
+
+Uma queda apenas do processo do banco não perde nada em nenhum dos três modos, porque o WAL é gravado antes da confirmação.
+
+No macOS o fsync completo (`F_FULLFSYNC`) custa cerca de 19 ms. Por isso `always` mede 50 operações por segundo com uma thread e 192 com oito. Em Linux o custo costuma ser bem menor, mas a medida ainda não foi feita. Escolha `always` quando a janela zero de perda for obrigatória e a vazão de escrita for baixa.
+
+## O que mudou no caminho de escrita e de leitura
+
+- O monitor global do armazenamento foi substituído por 1024 travas por faixa de chave e leituras por iterador sem trava.
+- Valor e versão são gravados num único lote atômico. Cada comando de escrita (`CREATE`, `INSERT`, `UPDATE`, `DELETE`, `RELATE`, `UNRELATE`) grava registro, índices e arestas num único lote. Um comando que falha no meio não deixa linhas nem entradas de índice.
+- `SELECT ... LIMIT` para de varrer ao completar o limite. `ORDER BY ... LIMIT` usa um heap de tamanho fixo (top-K).
+- O índice GEO guarda as coordenadas na própria entrada e responde "os N mais próximos" por expansão de anéis (`GEO_KNN` no `EXPLAIN`).
+- Índices de vetor, contadores de versão e a trilha de auditoria têm custo constante por escrita. Antes, cada escrita listava o log inteiro.
+- O caminho quente do `/sql` (impressão digital da consulta, geração de ids, buffer de log e cache do JWT) deixou de alocar e de travar por requisição.
+
+## Medidas
+
+Carga de 200 mil linhas, máquina de desenvolvimento macOS com a carga do sistema entre 10 e 18 durante a rodada.
+
+| Teste | 0.8.0 | 0.9.0 (`batch`) |
+|---|---|---|
+| Ingestão, 1 thread | 6.183 ops/s | 14.505 ops/s |
+| Ingestão, 8 threads | 10.340 ops/s | 42.982 ops/s |
+| Ingestão com índice UNIQUE e coluna | 3.742 ops/s | 25.491 ops/s |
+| Atualização de posição com índice GEO | 3.429 ops/s | 10.849 ops/s |
+| Atualização, 4 threads | 1.828 ops/s | 10.963 ops/s |
+| `SELECT * LIMIT 10` | 2.934 ms | 6,3 ms |
+| Raio de 2 km, 4 threads | 8 ops/s (p50 409 ms) | 1.475 ops/s (p50 2,5 ms) |
+| 20 mais próximos, 4 threads | não existia | 334 ops/s (p50 10 ms) |
+
+Para reproduzir:
+
+```bash
+mvn -pl axonbase-core -am -Daxon.bench=true -Daxon.bench.rows=200000 -Dtest=ScaleBaselineBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+As linhas de resultado começam com `BASE`.
+
+## Limites conhecidos
+
+- Os comandos que leem varreduras com leitura fantasma em transações explícitas ou no cluster ainda serializam, como o monitor antigo.
+- Um comando muito grande guarda suas escritas em memória até o fim, proporcionalmente ao tamanho.
+- `DELETE` ainda não libera a entrada do índice UNIQUE: criar de novo o mesmo valor depois de apagar o registro falha.
+- O ganho multi-nó (grupo de commit no Raft, leituras em seguidores, múltiplos grupos Raft) não faz parte desta versão.
