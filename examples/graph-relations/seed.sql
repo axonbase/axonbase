@@ -1,6 +1,6 @@
 -- Rede de exemplo para a página "Relations graph" e para consultas de grafo no Workspace.
 -- Rode com "Run all" no Workspace (ou com POST /sql). Pode ser repetido: CREATE e RELATE regravam o mesmo registro e a
--- mesma aresta. Atencao: o AxonQL ainda nao tem como remover uma aresta (DELETE no tipo da aresta nao apaga nada).
+-- mesma aresta. Atenção: o AxonQL ainda não tem como remover uma aresta (DELETE no tipo da aresta não apaga nada).
 
 -- A partir da versão 0.5.1 o RELATE registra o tipo de aresta sozinho. As linhas DEFINE TABLE abaixo só são
 -- necessárias em versões anteriores, e continuam valendo (declarar um tipo que já existe não muda nada).
@@ -10,7 +10,7 @@ DEFINE TABLE comprou SCHEMALESS;
 DEFINE TABLE mora_em SCHEMALESS;
 DEFINE TABLE fornece SCHEMALESS;
 
--- Limpeza dos registros de uma carga anterior (as arestas nao sao removidas por DELETE).
+-- Limpeza dos registros de uma carga anterior (as arestas não são removidas por DELETE).
 DELETE pessoa; DELETE empresa; DELETE produto; DELETE cidade;
 
 -- Nós
@@ -34,7 +34,7 @@ RELATE pessoa:bia->segue->pessoa:caio;
 RELATE pessoa:caio->segue->pessoa:dani;
 RELATE pessoa:dani->segue->pessoa:ana;
 RELATE pessoa:edu->segue->pessoa:ana;
--- este tipo nao foi declarado com DEFINE TABLE: a partir da 0.5.1 o proprio RELATE o registra
+-- este tipo não foi declarado com DEFINE TABLE: a partir da 0.5.1 o próprio RELATE o registra
 RELATE pessoa:ana->amigo_de->pessoa:edu;
 -- onde trabalham, o que compraram, onde moram e quem fornece o quê
 RELATE pessoa:ana->trabalha_em->empresa:acme;
