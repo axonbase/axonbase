@@ -140,4 +140,26 @@ class TableStatsApiTest {
             + "{\"type\":\"Point\",\"coordinates\":[9,9]})");
         assertTrue(!outside.body().contains("LineString"), outside.body());
     }
+
+    @Test
+    void indicesDeBuscaEVetorTrazemOsDetalhes() throws Exception {
+        ds.execute("CREATE ANALYZER pt LOWERCASE STEMMING STOPWORDS \"de\"; DEFINE TABLE artigo SCHEMALESS; "
+            + "CREATE INDEX a_texto ON TABLE artigo COLUMNS corpo SEARCH ANALYZER pt; "
+            + "CREATE INDEX a_vetor ON TABLE artigo COLUMNS emb HNSW DIMENSION 3 DIST cos; "
+            + "CREATE INDEX a_col ON TABLE artigo COLUMNS views COLUMNAR", session(), null);
+        HttpResponse<String> r = stats("artigo");
+        assertEquals(200, r.statusCode());
+        AxonValue indexes = AxonJson.parseDocument(r.body()).asObject().get("indexes");
+        var byName = new java.util.HashMap<String, AxonValue>();
+        indexes.asArray().forEach(ix -> byName.put(ix.asObject().get("name").asString(), ix));
+        assertEquals("search", byName.get("a_texto").asObject().get("kind").asString());
+        assertEquals("pt", byName.get("a_texto").asObject().get("analyzer").asString());
+        var vec = byName.get("a_vetor").asObject();
+        assertEquals("vector", vec.get("kind").asString());
+        assertEquals(3, vec.get("dimension").asLong());
+        assertEquals("cosine", vec.get("distance").asString());
+        assertTrue(vec.get("hnsw").asObject().get("m").asLong() > 0);
+        assertEquals("columnar", byName.get("a_col").asObject().get("kind").asString());
+        assertTrue(!byName.get("a_col").asObject().containsKey("analyzer"));
+    }
 }

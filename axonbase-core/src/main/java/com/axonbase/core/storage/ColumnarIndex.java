@@ -31,6 +31,93 @@ public final class ColumnarIndex {
     public static final byte TYPE_ARRAY = 0x05;
     public static final byte TYPE_OBJECT = 0x06;
 
+    // ---- entradas com valor (varredura só pelo índice) ----
+
+    /** Prefixo de todas as colunas de um índice: {@code CI|{ns}|{db}|{table}|{index}|}. */
+    public static String indexPrefix(String ns, String db, String table, String index) {
+        return "CI|" + ns + "|" + db + "|" + table + "|" + index + "|";
+    }
+
+    /**
+     * Chave do marcador que diz que as entradas do índice guardam o valor e a chave da linha (formato novo).
+     * Sem o marcador (índices criados antes) as agregações leem os documentos, como sempre.
+     */
+    public static String readyKey(String ns, String db, String table, String index) {
+        return "CIV|" + ns + "|" + db + "|" + table + "|" + index;
+    }
+
+    /** Entrada lida do índice: a chave da linha e o valor da coluna com o tipo original. */
+    public record Entry(String rowKey, AxonValue value) {
+    }
+
+    private static final byte ENTRY_V1 = 1;
+    private static final byte TAG_NULL = 'Z';
+    private static final byte TAG_TRUE = 'T';
+    private static final byte TAG_FALSE = 'F';
+    private static final byte TAG_LONG = 'L';
+    private static final byte TAG_STRING = 'S';
+    private static final byte TAG_JSON = 'J';
+
+    /**
+     * Valor guardado na entrada do índice: a chave da linha e o valor da coluna com o tipo original. A chave do
+     * índice é uma String feita de bytes ordenáveis e não dá para decodificá-la com segurança, então os agregados
+     * leem o valor daqui. Formato: versão, tamanho da chave da linha (2 bytes), chave da linha, tag do tipo e dado.
+     * Inteiros, textos, booleanos e nulos têm tag própria (leitura sem JSON); o resto vai como JSON.
+     */
+    public static byte[] entryValue(String rowKey, AxonValue value) {
+        byte[] row = rowKey.getBytes(StandardCharsets.UTF_8);
+        byte tag;
+        byte[] payload;
+        if (value == null || value.isNull() || value.isNone()) {
+            tag = TAG_NULL;
+            payload = new byte[0];
+        } else if (value.isBool()) {
+            tag = value.asBool() ? TAG_TRUE : TAG_FALSE;
+            payload = new byte[0];
+        } else if (value.isString()) {
+            tag = TAG_STRING;
+            payload = value.asString().getBytes(StandardCharsets.UTF_8);
+        } else if (value.isNumber() && value.isInteger()) {
+            tag = TAG_LONG;
+            payload = ByteBuffer.allocate(8).putLong(value.asLong()).array();
+        } else {
+            tag = TAG_JSON;
+            payload = com.axonbase.value.AxonJson.encode(value);
+        }
+        ByteBuffer buf = ByteBuffer.allocate(1 + 2 + row.length + 1 + payload.length);
+        buf.put(ENTRY_V1).putShort((short) row.length).put(row).put(tag).put(payload);
+        return buf.array();
+    }
+
+    /** Lê uma entrada nova; {@code null} para entradas vazias (formato antigo) ou ilegíveis. */
+    public static Entry decodeEntry(byte[] bytes) {
+        if (bytes == null || bytes.length < 4 || bytes[0] != ENTRY_V1) {
+            return null;
+        }
+        try {
+            ByteBuffer buf = ByteBuffer.wrap(bytes);
+            buf.get();
+            int rowLen = buf.getShort() & 0xFFFF;
+            byte[] row = new byte[rowLen];
+            buf.get(row);
+            byte tag = buf.get();
+            byte[] payload = new byte[buf.remaining()];
+            buf.get(payload);
+            AxonValue value = switch (tag) {
+                case TAG_NULL -> AxonValue.nul();
+                case TAG_TRUE -> AxonValue.bool(true);
+                case TAG_FALSE -> AxonValue.bool(false);
+                case TAG_LONG -> AxonValue.num(ByteBuffer.wrap(payload).getLong());
+                case TAG_STRING -> AxonValue.str(new String(payload, StandardCharsets.UTF_8));
+                case TAG_JSON -> com.axonbase.value.AxonJson.decode(payload);
+                default -> null;
+            };
+            return value == null ? null : new Entry(new String(row, StandardCharsets.UTF_8), value);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     // ---- key construction ----
 
     /** Prefixo para varrer toda a columna: {@code CI|{ns}|{db}|{table}|{index}|{column}|}. */

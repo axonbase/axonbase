@@ -207,6 +207,22 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         }
     }
 
+    @Override
+    public void scanEntries(String prefix, java.util.function.BiPredicate<String, byte[]> visitor) {
+        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
+        try (RocksIterator it = db.newIterator(dataHandle)) {
+            it.seek(prefixBytes);
+            while (it.isValid()) {
+                byte[] keyBytes = it.key();
+                if (!startsWith(keyBytes, prefixBytes)
+                    || !visitor.test(new String(keyBytes, StandardCharsets.UTF_8), it.value())) {
+                    break;
+                }
+                it.next();
+            }
+        }
+    }
+
     // ---- VersionedKvBackend ----
 
     @Override

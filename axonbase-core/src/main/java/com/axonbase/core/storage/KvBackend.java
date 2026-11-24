@@ -42,6 +42,20 @@ public interface KvBackend {
         }
     }
 
+    /**
+     * Percorre as entradas (chave e valor) com o prefixo, em ordem lexicográfica, até {@code visitor} devolver
+     * {@code false}. A implementação padrão lê cada valor com {@link #get}; backends com iterador sobrescrevem para
+     * ler chave e valor numa passada só.
+     */
+    default void scanEntries(String prefix, java.util.function.BiPredicate<String, byte[]> visitor) {
+        for (String key : keysWithPrefix(prefix)) {
+            byte[] value = get(key).orElse(new byte[0]);
+            if (!visitor.test(key, value)) {
+                return;
+            }
+        }
+    }
+
     /** Cando a implementación é persistente, forza a escritura ao disco. */
     default void flush() {
     }
