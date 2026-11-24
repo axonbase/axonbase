@@ -1307,7 +1307,7 @@ public final class Executor {
         if (joined) {
             docs = joinDocs(db, sel, docs);
         }
-        List<OrderTerm> orders = sel.orders();
+        List<OrderTerm> orders = ordersByAlias(sel);
         // Com agregação, ORDER BY e LIMIT valem para as linhas agrupadas (depois de GROUP BY e HAVING), não
         // para os documentos de origem: ordenar ou cortar antes mudaria o resultado dos agregados.
         boolean aggregating = !joined && (sel.grouped() || sel.fields().stream().anyMatch(GroupAggregation::containsAggregate)
@@ -2907,6 +2907,32 @@ return score;
 
     private boolean isSingleTarget(Expr from) {
         return from instanceof Expr.RecordId;
+    }
+
+    /**
+     * {@code ORDER BY apelido}: quando o nome é o apelido de uma coluna calculada do SELECT
+     * ({@code geo::distance(...) AS metros}), ordena pela expressão; sem isso o apelido não existe no documento
+     * de origem e a ordenação seria ignorada. Colunas simples e nomes que não são apelido ficam como estão.
+     */
+    private static List<OrderTerm> ordersByAlias(Statement.Select sel) {
+        if (sel.orders().isEmpty()) {
+            return sel.orders();
+        }
+        Map<String, Expr> aliases = new java.util.HashMap<>();
+        for (Expr f : sel.fields()) {
+            if (f instanceof Expr.Alias a && !(a.expr() instanceof Expr.Ident)) {
+                aliases.put(a.name(), a.expr());
+            }
+        }
+        if (aliases.isEmpty()) {
+            return sel.orders();
+        }
+        List<OrderTerm> out = new ArrayList<>();
+        for (OrderTerm ot : sel.orders()) {
+            Expr target = ot.field() instanceof Expr.Ident id ? aliases.get(id.name()) : null;
+            out.add(target != null ? new OrderTerm(target, ot.descending()) : ot);
+        }
+        return out;
     }
 
     private Comparator<Document> orderComparator(List<OrderTerm> orders) {
