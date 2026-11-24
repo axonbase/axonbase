@@ -15,6 +15,13 @@ public final class ServerMetrics {
     /** Limite em segundos a partir do qual uma consulta conta como lenta. */
     public static final double SLOW_SECONDS = 1.0;
 
+    /** Limite em uso (configurável por AXON_SLOW_QUERY_MS). */
+    private volatile double slowSeconds = SLOW_SECONDS;
+
+    public void slowSeconds(double seconds) {
+        this.slowSeconds = seconds;
+    }
+
     /** Buckets do histograma de consultas, de 1 ms a 30 s. */
     private static final double[] BUCKETS = {0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30};
     private static final String[] BUCKET_LABELS = {"0.001", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25",
@@ -43,7 +50,7 @@ public final class ServerMetrics {
             queryErrors.incrementAndGet();
         }
         double seconds = nanos / 1_000_000_000.0;
-        if (seconds >= SLOW_SECONDS) {
+        if (seconds >= slowSeconds) {
             slowQueries.incrementAndGet();
         }
         durationNanos.add(nanos);
