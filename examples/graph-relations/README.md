@@ -5,7 +5,7 @@ experimentar consultas de grafo no Workspace.
 
 ## A rede
 
-`seed.sql` cria 12 registros e 25 arestas em `app/main`:
+`seed.sql` cria 12 registros e 25 arestas em `app/main` (rode o `seed.sql` de novo para recriar o que `queries.sql` remover):
 
 | tabela | registros | ligações (tipo de aresta) |
 |---|---|---|
@@ -36,11 +36,17 @@ que chegam; o apelido (`AS segue`) vira o nome da coluna.
 SELECT id, ->segue->pessoa AS segue, ->trabalha_em->empresa AS empresa FROM pessoa:ana;
 ```
 
+## Remover e navegar (a partir da versão 0.6.0)
+
+- `UNRELATE pessoa:ana->amigo_de->pessoa:edu` remove uma aresta; `UNRELATE pessoa:dani->segue` remove todas as arestas de
+  saída desse tipo. `DELETE` de um registro apaga também as arestas dele, de entrada e de saída.
+- A travessia pode ser encadeada: `->segue->pessoa->segue->pessoa` segue duas vezes.
+- `->comprou->produto.nome` devolve o campo de cada registro alcançado, e `FETCH` expande a coluna calculada pela
+  travessia (`->comprou->produto AS produtos ... FETCH produtos`).
+
 ## Limites conhecidos
 
-- O AxonQL ainda não remove arestas: `DELETE` no tipo da aresta não apaga nada.
 - Com um único resultado a coluna volta como texto (`"pessoa:caio"`), não como lista.
-- Travessias encadeadas (`->segue->pessoa->segue->pessoa`) ainda não são aceitas. Para mais de um salto use a
-  página Relations graph, que tem o controle de profundidade.
-- `->comprou->produto.nome` e `FETCH` sobre o resultado de uma travessia ainda não trazem os campos do registro
-  ligado.
+- Um campo comum com um id (`autor: pessoa:ana` em `CONTENT`) é guardado como texto, então `autor.nome` e
+  `FETCH autor` não expandem; use arestas (`RELATE`) para ligações que você quer navegar.
+- `UNRELATE` ainda não funciona em DATABASE LINK.

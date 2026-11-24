@@ -19,6 +19,13 @@ public final class ControlStateMachine {
         state.put(command.identity(), command);
     }
 
+    /** Remove os comandos que casam com o filtro (DROP TABLE tira a tabela e o que pertence a ela do replay). */
+    public synchronized int removeWhere(java.util.function.Predicate<ControlCommand> filter) {
+        int before = state.size();
+        state.values().removeIf(filter);
+        return before - state.size();
+    }
+
     public synchronized ControlSnapshot snapshot() {
         return new ControlSnapshot(new ArrayList<>(state.values()));
     }

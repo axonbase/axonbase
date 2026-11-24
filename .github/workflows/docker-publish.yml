@@ -88,8 +88,12 @@ jobs:
       - name: Create multi-arch manifest
         run: |
           VERSION="${{ needs.version.outputs.ver }}${{ needs.version.outputs.suffix }}"
-          docker buildx imagetools create \
-            -t "axonbase/axonbase:${VERSION}" \
-            -t "axonbase/axonbase:latest" \
+          TAGS=(-t "axonbase/axonbase:${VERSION}")
+          # `latest` só acompanha uma tag de versão. O push na main publica X.Y.Z-dev e não pode mover o latest
+          # (a execução da main terminava depois da execução da tag e deixava o latest apontando para o -dev).
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAGS+=(-t "axonbase/axonbase:latest")
+          fi
+          docker buildx imagetools create "${TAGS[@]}" \
             "axonbase/axonbase:${VERSION}-amd64" \
             "axonbase/axonbase:${VERSION}-arm64"

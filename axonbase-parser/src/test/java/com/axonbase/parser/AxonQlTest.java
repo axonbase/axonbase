@@ -247,6 +247,32 @@ class AxonQlTest {
             AxonQl.render(AxonQl.parse("SELECT * FROM t WHERE (n >= 1 AND n <= 5) AND x = 2")));
     }
 
+    /** O texto renderizado pode diferir (a base sintética de uma travessia sai como {@code *}), mas relê na mesma árvore. */
+    private static void assertSameTreeAfterRender(String sql) {
+        Query first = AxonQl.parse(sql);
+        assertEquals(first, AxonQl.parse(AxonQl.render(first)), "o texto renderizado deve reler na mesma árvore: " + sql);
+    }
+
+    @Test
+    void roundTripUnrelateETravessiaEncadeada() {
+        assertRoundTrip("UNRELATE pessoa:ana->segue->pessoa:bia");
+        assertRoundTrip("UNRELATE pessoa:ana->segue");
+        assertSameTreeAfterRender("SELECT ->segue->pessoa->segue->pessoa AS amigos FROM pessoa:ana");
+        assertSameTreeAfterRender("SELECT <-segue<-pessoa->comprou->produto AS r FROM pessoa:bia");
+    }
+
+    @Test
+    void campoDepoisDaTravessiaNaoViraNomeQualificado() {
+        assertSameTreeAfterRender("SELECT ->comprou->produto.nome AS nomes FROM pessoa:ana");
+        // com aspas continua sendo o nome qualificado de um DATABASE LINK
+        assertSameTreeAfterRender("SELECT ->knows->\"remoto\".\"pessoa\" AS r FROM pessoa:ana");
+    }
+
+    @Test
+    void unrelateNaoReservaAPalavra() {
+        assertEquals("SELECT unrelate FROM t", AxonQl.render(AxonQl.parse("SELECT unrelate FROM t")));
+    }
+
     @Test
     void roundTripLiveSelect() {
         assertRoundTrip("LIVE SELECT * FROM person");

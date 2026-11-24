@@ -185,6 +185,13 @@ public final class Parser {
         Token t = peek();
         return switch (t.type()) {
             case KEYWORD -> statementKeyword(t);
+            case IDENT -> {
+                // UNRELATE é palavra contextual (não reservada): só vale no começo do statement e seguida de um alvo
+                if (atWord("unrelate") && (peek(1).is(IDENT) || peek(1).is(KEYWORD) || peek(1).is(TokenType.STRING))) {
+                    yield parseUnrelate();
+                }
+                throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
+            }
             default -> throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
         };
     }
@@ -1023,6 +1030,19 @@ public final class Parser {
         }
         ReturnSpec ret = parseReturnSpec();
         return new Statement.Relate(from, kind, to, data, ret);
+    }
+
+    private Statement parseUnrelate() {
+        pos++;
+        Expr from = parseTarget();
+        expect(ARROW);
+        Expr kind = parseTarget();
+        Expr to = null;
+        if (at(ARROW)) {
+            pos++;
+            to = parseTarget();
+        }
+        return new Statement.Unrelate(from, kind, to);
     }
 
     private Statement.Permissions parsePermissions() {
@@ -1988,7 +2008,11 @@ public final class Parser {
     private Expr parseExpr(int minBp) {
         Expr lhs = parsePrefix();
         while (true) {
-            lhs = applyPostfix(lhs);
+            Expr before;
+            do {
+                before = lhs;
+                lhs = applyPostfix(lhs);
+            } while (lhs != before);
             if (minBp <= COMPARISON_BP) {
                 if (atWord("between")) {
                     pos++;
@@ -2076,11 +2100,20 @@ public final class Parser {
             return new Expr.Idiom(base, parts);
         }
         if (t.is(LARROW) || t.is(ARROW) || t.is(B_ARROW)) {
-            pos++;
-            Direction dir = t.is(LARROW) ? Direction.IN : t.is(B_ARROW) ? Direction.BOTH : Direction.OUT;
-            return new Expr.Idiom(base, List.of(new Part.Graph(dir, parseLookup())));
+            List<Part> parts = new ArrayList<>();
+            parseGraphSteps(parts);
+            return new Expr.Idiom(base, parts);
         }
         return base;
+    }
+
+    /** Consome todas as setas seguidas ({@code ->tipo->tabela->tipo->tabela}) como passos de uma travessia. */
+    private void parseGraphSteps(List<Part> parts) {
+        while (at(ARROW) || at(LARROW) || at(B_ARROW)) {
+            Token arrow = take();
+            Direction dir = arrow.is(LARROW) ? Direction.IN : arrow.is(B_ARROW) ? Direction.BOTH : Direction.OUT;
+            parts.add(new Part.Graph(dir, parseLookup()));
+        }
     }
 
     private Part parseDotPart() {
@@ -2123,7 +2156,17 @@ public final class Parser {
             pos++;
             return new Expr.SubQuery(parseNestedQuery());
         }
-        return parseTarget();
+        if (at(PARAM) || at(TokenType.STRING)) {
+            return parseTarget();
+        }
+        // tipo ou tabela sem aspas: um ponto depois dele é acesso a campo (->comprou->produto.nome), não o nome
+        // qualificado de um DATABASE LINK, que exige aspas ("link"."tabela")
+        String name = expectIdentOrString();
+        if (at(COLON)) {
+            pos++;
+            return new Expr.RecordId(new Expr.Ident(name), parseRecordKey());
+        }
+        return new Expr.Ident(name);
     }
 
     private OpInfo binaryOpInfo() {
@@ -2214,11 +2257,8 @@ public final class Parser {
                 return new Expr.Unary(UnaryOp.NOT, parseExpr(9));
             }
             case ARROW, LARROW, B_ARROW -> {
-                pos++;
-                Expr.Direction dir = t.is(ARROW) ? Expr.Direction.OUT
-                    : t.is(B_ARROW) ? Expr.Direction.BOTH : Expr.Direction.IN;
                 List<Expr.Part> parts = new ArrayList<>();
-                parts.add(new Expr.Part.Graph(dir, parseLookup()));
+                parseGraphSteps(parts);
                 return new Expr.Idiom(new Expr.Ident("*"), parts);
             }
             case LT -> {
@@ -2481,7 +2521,8 @@ public final class Parser {
             || t.isKeyword("for") || t.isKeyword("info") || t.isKeyword("relate")
             || t.isKeyword("begin") || t.isKeyword("commit") || t.isKeyword("cancel")
             || t.isKeyword("alter") || t.isKeyword("drop") || t.isKeyword("grant")
-            || t.isKeyword("revoke");
+            || t.isKeyword("revoke")
+            || (t.is(IDENT) && t.text().equalsIgnoreCase("unrelate"));
     }
 
     private boolean isObjectLiteralAhead() {

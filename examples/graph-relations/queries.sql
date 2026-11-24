@@ -30,4 +30,21 @@ SELECT id, nome, <-comprou<-pessoa AS compradores FROM produto;
 -- 6. Quem trabalha em cada empresa e o que a empresa fornece.
 SELECT id, nome, <-trabalha_em<-pessoa AS equipe, ->fornece->produto AS fornece FROM empresa;
 
+-- 7. Amigos de amigos: a travessia pode ser encadeada (dois saltos de segue).
+SELECT id, nome, ->segue->pessoa->segue->pessoa AS amigos_de_amigos FROM pessoa:ana;
+
+-- 8. Campo do registro alcançado: nomes em vez de ids.
+SELECT id, ->comprou->produto.nome AS produtos, ->trabalha_em->empresa.nome AS empresa FROM pessoa;
+
+-- 9. FETCH expande a coluna calculada pela travessia (cada produto vem com todos os campos).
+SELECT id, ->comprou->produto AS produtos FROM pessoa:ana FETCH produtos;
+
+-- 10. Remover arestas: uma aresta específica, ou todas as de saída de um tipo.
+UNRELATE pessoa:ana->amigo_de->pessoa:edu;
+UNRELATE pessoa:dani->segue;
+
+-- 11. Apagar um registro apaga as arestas dele (de entrada e de saída).
+DELETE pessoa:edu;
+SELECT id, <-segue<-pessoa AS seguidores FROM pessoa:ana;
+
 -- Observação: com um único resultado a coluna volta como texto ("pessoa:caio"), não como lista.

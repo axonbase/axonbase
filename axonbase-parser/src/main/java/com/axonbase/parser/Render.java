@@ -204,6 +204,12 @@ public final class Render {
                 data(sb, r.data());
                 ret(sb, r.ret());
             }
+            case Statement.Unrelate u -> {
+                sb.append("UNRELATE ").append(expr(u.from())).append("->").append(expr(u.kind()));
+                if (u.to() != null) {
+                    sb.append("->").append(expr(u.to()));
+                }
+            }
             case Statement.DefineTable dt -> {
                 sb.append("DEFINE TABLE ").append(dt.name());
                 if (dt.schemafull()) {
@@ -705,7 +711,13 @@ public final class Render {
             }
             case Expr.Cast c2 -> sb.append('<').append(c2.type()).append("> ").append(expr(c2.operand()));
             case Expr.Idiom i -> {
-                expr(sb, i.base());
+                // travessia que começa na seta ({@code ->segue->pessoa}) tem uma base sintética "*" que não se
+                // escreve: "*->segue" releria como "todos os campos" seguido de uma seta solta
+                boolean syntheticBase = i.base() instanceof Expr.Ident id && id.name().equals("*")
+                    && !i.parts().isEmpty() && i.parts().get(0) instanceof Expr.Part.Graph;
+                if (!syntheticBase) {
+                    expr(sb, i.base());
+                }
                 for (var part : i.parts()) {
                     idiomPart(sb, part);
                 }
@@ -789,8 +801,24 @@ public final class Render {
             }
             case Expr.Part.Graph g -> {
                 sb.append(g.direction() == Expr.Direction.IN ? "<-" : "->");
-                expr(sb, g.lookup());
+                graphLookup(sb, g.lookup());
             }
+        }
+    }
+
+    /**
+     * Alvo de um passo de travessia. O nome qualificado de um DATABASE LINK sai entre aspas ({@code "link"."tabela"}),
+     * porque sem aspas {@code tabela.campo} numa travessia é acesso a campo ({@code ->comprou->produto.nome}).
+     */
+    private static void graphLookup(StringBuilder sb, Expr lookup) {
+        if (lookup instanceof Expr.Qualified q) {
+            sb.append('"').append(q.link()).append("\".\"").append(q.table()).append('"');
+        } else if (lookup instanceof Expr.RecordId r && r.table() instanceof Expr.Qualified q) {
+            graphLookup(sb, q);
+            sb.append(':');
+            renderRecordKey(sb, r.key());
+        } else {
+            expr(sb, lookup);
         }
     }
 

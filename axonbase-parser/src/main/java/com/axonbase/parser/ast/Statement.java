@@ -87,6 +87,13 @@ public sealed interface Statement {
     record Relate(Expr from, Expr kind, Expr to, Data data, ReturnSpec ret) implements Statement {
     }
 
+    /**
+     * {@code UNRELATE a->tipo->b} remove a aresta; {@code UNRELATE a->tipo} remove todas as arestas de saída
+     * de {@code a} com esse tipo ({@code to} é {@code null}).
+     */
+    record Unrelate(Expr from, Expr kind, Expr to) implements Statement {
+    }
+
     record DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions)
             implements Statement {
     }
