@@ -30,7 +30,7 @@ public final class LoggingFilter implements Filter {
         HttpServletResponse resp = (HttpServletResponse) response;
         String requestId = req.getHeader("X-Request-Id");
         if (requestId == null || requestId.isBlank()) {
-            requestId = UUID.randomUUID().toString();
+            requestId = FastIds.uuid();
         }
         resp.setHeader("X-Request-Id", requestId);
         long startNanos = System.nanoTime();

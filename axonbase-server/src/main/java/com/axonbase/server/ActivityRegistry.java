@@ -137,7 +137,7 @@ public final class ActivityRegistry {
                          Object owner) {
         String text = config.captureSql() && sql != null
             ? (sql.length() > ActivityConfig.MAX_SQL_CHARS ? sql.substring(0, ActivityConfig.MAX_SQL_CHARS) : sql) : null;
-        Running r = new Running(new QueryContext.Handle(UUID.randomUUID().toString()), user, ns, db, text,
+        Running r = new Running(new QueryContext.Handle(FastIds.uuid()), user, ns, db, text,
             Fingerprint.of(sql), protocol, remote, sessionId, owner);
         running.put(r.id(), r);
         return r;

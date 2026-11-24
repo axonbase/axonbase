@@ -23,11 +23,19 @@ public record ServerConfig(String path, String secret, String user, String passw
 
     public static final String DEFAULT_FILE = "axonbase.conf";
 
+    /**
+     * Threads HTTP sem configuração: 8 por núcleo, no mínimo 32 (a consulta roda em thread virtual; a thread do Jetty
+     * só atende a conexão). Quem quiser fixar usa {@code AXON_HTTP_THREADS}.
+     */
+    static int autoHttpThreads() {
+        return Math.max(32, Runtime.getRuntime().availableProcessors() * 8);
+    }
+
     public static ServerConfig defaults() {
         return new ServerConfig("memory", "axonbase-dev-secret", "root", "root",
             8000, "127.0.0.1", true, "", "", "", "",
             30000L, 300000L, 0, "", "", "", "",
-            10000L, 32, 100,
+            10000L, autoHttpThreads(), 100,
             "", "", "", "", "", 0L,
             "", 10, 0, "pt-BR",
             "", "", "", "",

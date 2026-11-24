@@ -1039,7 +1039,10 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             String body = readBody(req);
-            if (com.axonbase.core.engine.Datastore.isMutation(body) && redirectWrites(req, resp)) {
+            // Só um nó que não é o líder precisa saber se a instrução escreve (para redirecionar); no líder ou sem
+            // cluster isso custaria um parse a mais em toda requisição.
+            if (!clusterStatus.status().isLeader() && com.axonbase.core.engine.Datastore.isMutation(body)
+                && redirectWrites(req, resp)) {
                 return;
             }
             Session s = withNames(req);
