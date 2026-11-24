@@ -196,7 +196,51 @@ public final class Executor {
         // Ponto único de acesso ao armazenamento: aqui a consulta cancelada (ou que estourou o timeout) para.
         QueryContext.checkCancelled();
         Transaction tx = session.tx();
-        return tx != null && tx.isOpen() ? tx : db.records();
+        if (tx != null && tx.isOpen()) {
+            return tx;
+        }
+        KvBackend direct = db.records();
+        com.axonbase.core.storage.StatementBatch current = batch;
+        return current != null && current.base() == direct ? current : direct;
+    }
+
+    /** Escritas do statement em curso, gravadas de uma vez (um lote atômico) quando não há transação explícita. */
+    private com.axonbase.core.storage.StatementBatch batch;
+
+    private static boolean batchable(Statement s) {
+        return s instanceof Statement.Create || s instanceof Statement.Insert || s instanceof Statement.Update
+            || s instanceof Statement.Delete || s instanceof Statement.Relate || s instanceof Statement.Unrelate;
+    }
+
+    /**
+     * Roda um statement de escrita com todas as gravações (registro, índices, arestas) num único lote atômico.
+     * Dentro de transação explícita, sem banco selecionado ou em backend sem lote, segue o caminho direto.
+     */
+    private AxonValue runBatched(Statement s) {
+        Transaction tx = session.tx();
+        if (batch != null || (tx != null && tx.isOpen()) || session.namespace() == null || session.database() == null) {
+            return runStatementUnbatched(s);
+        }
+        KvBackend direct;
+        try {
+            direct = db().records();
+        } catch (RuntimeException noDatabase) {
+            return runStatementUnbatched(s);
+        }
+        if (!(direct instanceof com.axonbase.core.storage.RocksDbBackend rocks)) {
+            return runStatementUnbatched(s);
+        }
+        com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
+        batch = mine;
+        try {
+            AxonValue result = runStatementUnbatched(s);
+            batch = null;
+            mine.commit();
+            return result;
+        } finally {
+            batch = null;
+            mine.discard();
+        }
     }
 
     private AxonError errorStmt(String message) {
@@ -319,6 +363,10 @@ public final class Executor {
     }
 
     private AxonValue runStatement(Statement s) {
+        return batchable(s) ? runBatched(s) : runStatementUnbatched(s);
+    }
+
+    private AxonValue runStatementUnbatched(Statement s) {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
         authorize(s);
@@ -498,6 +546,8 @@ public final class Executor {
             LiveBus.Notification note = new LiveBus.Notification(sub.id(), action, payload);
             if (session.inTransaction()) {
                 session.queueLive(() -> bus.deliver(sub, note));
+            } else if (batch != null) {
+                batch.afterCommit(() -> bus.deliver(sub, note));
             } else {
                 bus.deliver(sub, note);
             }
