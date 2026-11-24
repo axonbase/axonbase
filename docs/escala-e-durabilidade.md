@@ -21,9 +21,9 @@ No macOS o fsync completo (`F_FULLFSYNC`) custa cerca de 19 ms. Por isso `always
 - O monitor global do armazenamento foi substituído por 1024 travas por faixa de chave e leituras por iterador sem trava.
 - Valor e versão são gravados num único lote atômico. Cada comando de escrita (`CREATE`, `INSERT`, `UPDATE`, `DELETE`, `RELATE`, `UNRELATE`) grava registro, índices e arestas num único lote. Um comando que falha no meio não deixa linhas nem entradas de índice.
 - `SELECT ... LIMIT` para de varrer ao completar o limite. `ORDER BY ... LIMIT` usa um heap de tamanho fixo (top-K).
-- O índice GEO guarda as coordenadas na própria entrada e responde "os N mais próximos" por expansão de anéis (`GEO_KNN` no `EXPLAIN`).
+- O índice GEO (de posição geográfica) guarda as coordenadas na própria entrada e responde "os N mais próximos" por expansão de anéis (`GEO_KNN` no `EXPLAIN`).
 - Índices de vetor, contadores de versão e a trilha de auditoria têm custo constante por escrita. Antes, cada escrita listava o log inteiro.
-- O caminho quente do `/sql` (impressão digital da consulta, geração de ids, buffer de log e cache do JWT) deixou de alocar e de travar por requisição.
+- O caminho quente do `/sql` (impressão digital da consulta, geração de ids, buffer de log e cache do JWT (JSON Web Token, o token de login)) deixou de alocar e de travar por requisição.
 
 ## Medidas
 
@@ -52,7 +52,7 @@ Carga de 200 mil linhas, máquina de desenvolvimento macOS com a carga do sistem
 
 ### Carga HTTP em contêiner Linux
 
-Gerador de carga em Go (`scripts/loadtest`), 64 conexões, 15 segundos por cenário, imagem Docker no Docker Desktop do macOS (12 CPUs, 8 GB). O gerador roda no host, então o limite aqui é o caminho HTTP e o mapeamento de porta, não o armazenamento. A carga do sistema ficou perto de 20 durante a rodada.
+A carga usa HTTP (HyperText Transfer Protocol). Gerador de carga em Go (`scripts/loadtest`), 64 conexões, 15 segundos por cenário, imagem Docker no Docker Desktop do macOS (12 CPUs, 8 GB). O gerador roda no host, então o limite aqui é o caminho HTTP e o mapeamento de porta, não o armazenamento. A carga do sistema ficou perto de 20 durante a rodada.
 
 | Cenário (ops/s) | 0.8.0 | 0.9.0 `batch` | 0.9.0 `always` | 0.9.0 `off` |
 |---|---|---|---|---|
