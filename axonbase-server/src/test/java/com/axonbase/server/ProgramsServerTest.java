@@ -137,4 +137,15 @@ class ProgramsServerTest {
             .findFirst().orElseThrow();
         assertEquals("g", pkg.asObject().get("functions").asArray().get(0).asString());
     }
+
+    @Test
+    void erroDeProgramaComTracebackSaiComoJsonValido() throws Exception {
+        assertEquals(200, sql("CREATE FUNCTION quebra(x) AS $$\nvalor = 1\nreturn valor / 0\n$$").statusCode());
+        HttpResponse<String> r = sql("RETURN quebra(1)");
+        assertTrue(r.statusCode() >= 400, r.body());
+        // o corpo precisa ser JSON valido mesmo com quebras de linha no traceback
+        AxonValue doc = AxonJson.parseDocument(r.body());
+        assertTrue(doc.isObject(), r.body());
+        assertFalse(r.body().contains("\n"), "quebra de linha crua no JSON de erro");
+    }
 }
