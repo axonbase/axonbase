@@ -22,6 +22,11 @@ public final class Modules {
     private static final Map<String, PyModule> BUILTIN = new LinkedHashMap<>();
     private static final ThreadLocal<Set<String>> LOADING = ThreadLocal.withInitial(HashSet::new);
 
+    /** Verdadeiro se {@code name} e um modulo embutido (math, json, time, decimal). */
+    public static boolean embutido(String name) {
+        return BUILTIN.containsKey(name);
+    }
+
     /** Resolve um import. */
     public static Object importModule(Frame f, String name) {
         PyModule b = BUILTIN.get(name);

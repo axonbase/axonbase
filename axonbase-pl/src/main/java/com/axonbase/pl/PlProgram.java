@@ -15,9 +15,10 @@ public final class PlProgram {
     private final List<PlFunctionInfo> funcoes;
     private final List<PlConstantInfo> constantes;
     private final List<PlImportInfo> imports;
+    private final boolean declaraGlobal;
 
     PlProgram(String nome, String fonte, FunctionCode modulo, String[] globais, List<PlFunctionInfo> funcoes,
-              List<PlConstantInfo> constantes, List<PlImportInfo> imports) {
+              List<PlConstantInfo> constantes, List<PlImportInfo> imports, boolean declaraGlobal) {
         this.nome = nome;
         this.fonte = fonte;
         this.modulo = modulo;
@@ -28,6 +29,7 @@ public final class PlProgram {
         this.funcoes = List.copyOf(funcoes);
         this.constantes = List.copyOf(constantes);
         this.imports = List.copyOf(imports);
+        this.declaraGlobal = declaraGlobal;
     }
 
     /** Nome do programa. */
@@ -53,6 +55,11 @@ public final class PlProgram {
     /** Imports do programa. */
     public List<PlImportInfo> imports() {
         return imports;
+    }
+
+    /** Verdadeiro se alguma funcao declara {@code global} (e portanto pode reatribuir variaveis do modulo). */
+    public boolean declaraGlobal() {
+        return declaraGlobal;
     }
 
     /** Uso interno: quantidade de variaveis globais. */

@@ -29,12 +29,13 @@ public final class Parser extends ExprParser {
 
     /** Resultado da analise de um programa. */
     public record Resultado(FunctionCode modulo, String[] globais, List<PlFunctionInfo> funcoes,
-                            List<PlConstantInfo> constantes, List<PlImportInfo> imports) {
+                            List<PlConstantInfo> constantes, List<PlImportInfo> imports, boolean declaraGlobal) {
     }
 
     private final List<PlFunctionInfo> funcs = new ArrayList<>();
     private final List<PlConstantInfo> consts = new ArrayList<>();
     private final List<PlImportInfo> imports = new ArrayList<>();
+    private boolean declaraGlobal;
 
     private Parser(String src, List<Token> toks) {
         super(src, toks);
@@ -59,7 +60,7 @@ public final class Parser extends ExprParser {
         }
         mc.body = body.toArray(new Stmt[0]);
         String[] globais = Resolver.resolve(module);
-        return new Resultado(mc, globais, funcs, consts, imports);
+        return new Resultado(mc, globais, funcs, consts, imports, declaraGlobal);
     }
 
     // ------------------------------------------------------------------ comandos
@@ -380,6 +381,7 @@ public final class Parser extends ExprParser {
             if (!cur.module) {
                 if (glob) {
                     cur.globals.add(n);
+                    declaraGlobal = true;
                     module.bound.add(n);
                 } else {
                     cur.nonlocals.add(n);

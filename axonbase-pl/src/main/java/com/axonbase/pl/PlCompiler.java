@@ -28,7 +28,8 @@ public final class PlCompiler {
         }
         String src = Lexer.normalizar(source);
         Parser.Resultado r = Parser.analisar(src);
-        PlProgram p = new PlProgram(programName, src, r.modulo(), r.globais(), r.funcoes(), r.constantes(), r.imports());
+        PlProgram p = new PlProgram(programName, src, r.modulo(), r.globais(), r.funcoes(), r.constantes(), r.imports(),
+            r.declaraGlobal());
         if (CACHE.size() >= CACHE_MAX) {
             CACHE.clear();
         }
