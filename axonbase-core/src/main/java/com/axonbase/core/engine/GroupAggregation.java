@@ -168,6 +168,24 @@ final class GroupAggregation {
         }
     }
 
+    /**
+     * Funde os grupos de outra agregação (da mesma consulta) nesta, como se os documentos dela tivessem chegado
+     * depois dos desta. Grupos novos entram no fim, então juntando os lotes na ordem de leitura a ordem de chegada
+     * dos grupos é a de uma varredura sequencial.
+     */
+    void merge(GroupAggregation other) {
+        for (Map.Entry<String, Group> e : other.groups.entrySet()) {
+            Group mine = groups.get(e.getKey());
+            if (mine == null) {
+                groups.put(e.getKey(), e.getValue());
+                continue;
+            }
+            for (int i = 0; i < mine.states.length; i++) {
+                mine.states[i].merge(e.getValue().states[i]);
+            }
+        }
+    }
+
     private String groupKey(Document doc) {
         if (groupExprs.isEmpty()) {
             return "";
@@ -265,6 +283,9 @@ final class GroupAggregation {
     private interface State {
         void add(AxonValue value);
 
+        /** Soma o acumulador de outro lote (mesmo tipo) a este. */
+        void merge(State other);
+
         AxonValue result();
 
         static State of(String name) {
@@ -289,6 +310,11 @@ final class GroupAggregation {
         }
 
         @Override
+        public void merge(State other) {
+            n += ((Count) other).n;
+        }
+
+        @Override
         public AxonValue result() {
             return AxonValue.num(n);
         }
@@ -303,6 +329,11 @@ final class GroupAggregation {
             if (value != null && !value.isNull() && !value.isNone()) {
                 seen.add(keyOf(value));
             }
+        }
+
+        @Override
+        public void merge(State other) {
+            seen.addAll(((CountDistinct) other).seen);
         }
 
         @Override
@@ -322,6 +353,11 @@ final class GroupAggregation {
         }
 
         @Override
+        public void merge(State other) {
+            sum = sum.add(((Sum) other).sum);
+        }
+
+        @Override
         public AxonValue result() {
             return AxonValue.num(sum);
         }
@@ -337,6 +373,12 @@ final class GroupAggregation {
                 sum = sum.add(value.asDecimal());
                 count++;
             }
+        }
+
+        @Override
+        public void merge(State other) {
+            sum = sum.add(((Avg) other).sum);
+            count += ((Avg) other).count;
         }
 
         @Override
@@ -362,6 +404,11 @@ final class GroupAggregation {
             if (best == null || (min ? value.compareTo(best) < 0 : value.compareTo(best) > 0)) {
                 best = value;
             }
+        }
+
+        @Override
+        public void merge(State other) {
+            add(((Extreme) other).best);
         }
 
         @Override

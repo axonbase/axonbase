@@ -35,13 +35,21 @@ final class GeoVector {
         if (a == null || b == null) {
             return AxonValue.nul();
         }
-        double lat1 = Math.toRadians(a[1]);
-        double lat2 = Math.toRadians(b[1]);
-        double dLat = lat2 - lat1;
-        double dLon = Math.toRadians(b[0] - a[0]);
+        return AxonValue.num(haversine(a[0], a[1], b[0], b[1]));
+    }
+
+    /**
+     * Distância em metros entre dois pontos (lon, lat). É a conta de {@code geo::distance}; o índice GEO usa a mesma
+     * para filtrar sem carregar o documento, então o resultado tem de ser idêntico bit a bit.
+     */
+    static double haversine(double lon1, double lat1, double lon2, double lat2) {
+        double r1 = Math.toRadians(lat1);
+        double r2 = Math.toRadians(lat2);
+        double dLat = r2 - r1;
+        double dLon = Math.toRadians(lon2 - lon1);
         double h = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-            + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-        return AxonValue.num(2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(h)));
+            + Math.cos(r1) * Math.cos(r2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return 2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(h));
     }
 
     static AxonValue area(AxonValue geometry) {

@@ -1428,14 +1428,17 @@ public final class Executor {
             // (varredura completa) era calculado antes, e todo SELECT lia a tabela inteira.
             boolean streamable = isStreamableWindow(sel);
             boolean streamableAggregate = isStreamableAggregate(sel);
+            boolean topK = isTopKWindow(sel);
+            // SELECT ... LIMIT n: as fontes indexadas param ao completar START+LIMIT linhas que passam no filtro
+            Window window = streamable ? windowFor(db, sel) : null;
             // WHERE a = 1 AND b > 2: um índice que atende só uma das partes já reduz a leitura; o WHERE inteiro
             // é reavaliado abaixo sobre os candidatos.
-            docs = conjunctIndexDocs(db, sel);
+            docs = conjunctIndexDocs(db, sel, window);
             if (docs == null) {
                 docs = uniqueLookupSourceDocs(db, sel,
-                    () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel,
-                        () -> columnarSourceDocs(db, sel,
-                            () -> streamable || streamableAggregate ? null : searchSourceDocs(db, sel)))));
+                    () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel, window,
+                        () -> columnarSourceDocs(db, sel, window,
+                            () -> streamable || streamableAggregate || topK ? null : searchSourceDocs(db, sel)))));
             }
             if (docs == null) {
                 GroupAggregation covered = streamableAggregate ? columnarCoveredAggregate(db, sel) : null;
@@ -1447,6 +1450,8 @@ public final class Executor {
                     // sem índice: agrega lendo a tabela em fluxo, sem montar a lista de documentos
                     streamedAggregation = streamAggregate(db, sel);
                     docs = new ArrayList<>();
+                } else if (topK) {
+                    docs = streamTopKDocs(db, sel);
                 } else {
                     docs = streamWindowDocs(db, sel);
                 }
@@ -1473,7 +1478,13 @@ public final class Executor {
             docs.sort((a, b) -> Double.compare(b.searchScore(), a.searchScore()));
         } else if (!orders.isEmpty() && !aggregating) {
             Comparator<Document> cmp = orderComparator(orders);
-            docs.sort(cmp);
+            int keep = !joined && sel.limit() != null ? windowEnd(sel) : -1;
+            if (keep >= 0 && keep < docs.size()) {
+                // ORDER BY ... LIMIT n: só as START+LIMIT primeiras linhas importam, então um heap de n em vez de ordenar tudo
+                docs = topKOf(docs, cmp, keep);
+            } else {
+                docs.sort(cmp);
+            }
         }
         int start = sel.start() != null ? (int) eval(sel.start()).asLong() : 0;
         int limit = sel.limit() != null ? (int) eval(sel.limit()).asLong() : docs.size();
@@ -1571,6 +1582,30 @@ public final class Executor {
      * Lê a tabela pelo iterador do storage e soma cada registro que passa por WHERE, Data Rules e permissões
      * direto nos acumuladores. Memória proporcional ao número de grupos, não de linhas.
      */
+    /**
+     * Percorre as chaves de registro de uma tabela em ordem de chave, sem passar pelas entradas de índice UNIQUE
+     * ({@code !uidx}) que ficam no mesmo prefixo e vêm antes dos registros: as chaves de registro começam por
+     * {@code n}, {@code s} ou {@code x} ({@code keyString}), então basta varrer esses três prefixos na ordem. Sem isso
+     * um {@code LIMIT 10} numa tabela com índice UNIQUE lia todas as entradas do índice antes do primeiro registro.
+     */
+    private static void scanRecordKeys(KvBackend kv, String prefix, java.util.function.Predicate<String> visitor) {
+        boolean[] stopped = {false};
+        for (String lead : RECORD_KEY_LEADS) {
+            kv.scanPrefix(prefix + lead, key -> {
+                if (!visitor.test(key)) {
+                    stopped[0] = true;
+                    return false;
+                }
+                return true;
+            });
+            if (stopped[0]) {
+                return;
+            }
+        }
+    }
+
+    private static final String[] RECORD_KEY_LEADS = {"n", "s", "x"};
+
     private GroupAggregation streamAggregate(Database db, Statement.Select sel) {
         String table = ((Expr.Ident) sel.from()).name();
         ensureTable(db, table);
@@ -1580,27 +1615,87 @@ public final class Executor {
         Catalog.TableDef def = db.catalog().table(table);
         boolean checkPermissions = def != null && def.permissions() != null;
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
-        records(db).scanPrefix(prefix, key -> {
+        java.util.function.BiConsumer<GroupAggregation, String> consume = (agg, key) -> {
             Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
             if (doc == null) {
-                return true;
+                return;
             }
             if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
-                return true;
+                return;
             }
             if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
-                return true;
+                return;
             }
             if (checkPermissions && !allowed(doc, table, "select")) {
-                return true;
+                return;
             }
             if (!sel.fetch().isEmpty()) {
                 fetchDocs(doc, sel.fetch());
             }
-            aggregation.accept(doc);
+            agg.accept(doc);
+        };
+        if (canScanInParallel(sel, combinedRules, def)) {
+            // tabela grande: as threads leem e avaliam lotes de registros e os resultados parciais são fundidos na ordem
+            KvBackend kv = records(db);
+            ParallelScan.run(visitor -> scanRecordKeys(kv, prefix, visitor), aggregation,
+                () -> new GroupAggregation(sel, groupRowEval(), this::fieldName),
+                consume, GroupAggregation::merge);
+            return aggregation;
+        }
+        scanRecordKeys(records(db), prefix, key -> {
+            consume.accept(aggregation, key);
             return true;
         });
         return aggregation;
+    }
+
+    /**
+     * A varredura pode ir em várias threads quando nada nela depende de estado da sessão que não seja só leitura:
+     * fora de transação (a transação não é compartilhável entre threads), sem FETCH e com WHERE, agregados, GROUP BY,
+     * HAVING, Data Rules e permissões feitos só de campos, literais, parâmetros, operadores e funções puras. Caso
+     * contrário segue sequencial, com o mesmo resultado.
+     */
+    private boolean canScanInParallel(Statement.Select sel, Expr combinedRules, Catalog.TableDef def) {
+        Transaction tx = session.tx();
+        if ((tx != null && tx.isOpen()) || !sel.fetch().isEmpty() || ParallelScan.degree() < 2) {
+            return false;
+        }
+        if (!isPureRowExpr(sel.cond()) || !isPureRowExpr(combinedRules) || !isPureRowExpr(sel.having())) {
+            return false;
+        }
+        if (def != null && def.permissions() != null && !isPureRowExpr(def.permissions().select())) {
+            return false;
+        }
+        return sel.fields().stream().allMatch(Executor::isPureRowExpr)
+            && sel.group().stream().allMatch(Executor::isPureRowExpr)
+            && sel.orders().stream().allMatch(o -> isPureRowExpr(o.field()));
+    }
+
+    /** Expressão sem subquery, sem acesso ao armazenamento e sem efeito colateral: segura para várias threads. */
+    private static boolean isPureRowExpr(Expr e) {
+        return switch (e) {
+            case null -> true;
+            case Expr.Literal l -> true;
+            case Expr.Param p -> true;
+            case Expr.Ident i -> true;
+            case Expr.Alias a -> isPureRowExpr(a.expr());
+            case Expr.Unary u -> isPureRowExpr(u.operand());
+            case Expr.Cast c -> isPureRowExpr(c.operand());
+            case Expr.Binary b -> isPureRowExpr(b.left()) && isPureRowExpr(b.right());
+            case Expr.ArrayLit a -> a.items().stream().allMatch(Executor::isPureRowExpr);
+            case Expr.ObjectLit o -> o.entries().stream().allMatch(en -> isPureRowExpr(en.value()));
+            case Expr.Idiom i -> isPureRowExpr(i.base()) && i.parts().stream().allMatch(part -> part instanceof Expr.Part.Field);
+            case Expr.Call c -> pureFunction(c.name()) && c.args().stream().allMatch(Executor::isPureRowExpr);
+            default -> false;
+        };
+    }
+
+    private static boolean pureFunction(String name) {
+        String n = name.toLowerCase(java.util.Locale.ROOT);
+        return n.startsWith("string::") || n.startsWith("math::") || n.startsWith("array::")
+            || n.startsWith("geo::") || n.startsWith("type::") || n.startsWith("object::")
+            || n.equals("count") || n.equals("sum") || n.equals("avg") || n.equals("min") || n.equals("max")
+            || n.equals(Expr.COUNT_DISTINCT);
     }
 
     /** Condições ligadas por AND no topo do WHERE, na ordem em que foram escritas. */
@@ -1629,7 +1724,7 @@ public final class Executor {
      * Candidatos vindos de um índice que atenda uma das partes do WHERE ligadas por AND (UNIQUE, GEO ou
      * columnar), ou {@code null} se nenhuma parte tem índice. O chamador reavalia o WHERE inteiro.
      */
-    private List<Document> conjunctIndexDocs(Database db, Statement.Select sel) {
+    private List<Document> conjunctIndexDocs(Database db, Statement.Select sel, Window window) {
         if (!(sel.from() instanceof Expr.Ident) || sel.cond() == null) {
             return null;
         }
@@ -1640,7 +1735,7 @@ public final class Executor {
         for (Expr part : parts) {
             Statement.Select probe = withCond(sel, part);
             List<Document> hit = uniqueLookupSourceDocs(db, probe,
-                () -> geoSourceDocs(db, probe, () -> columnarSourceDocs(db, probe, () -> null)));
+                () -> geoSourceDocs(db, probe, window, () -> columnarSourceDocs(db, probe, window, () -> null)));
             if (hit != null) {
                 return hit;
             }
@@ -1648,34 +1743,135 @@ public final class Executor {
         return null;
     }
 
+    /**
+     * Janela START+LIMIT de um SELECT que dá para ler parando cedo: {@code accepts} aplica o WHERE inteiro, as Data
+     * Rules e as permissões a um documento, e {@code wanted} é quantas linhas completam a janela.
+     */
+    private record Window(int wanted, java.util.function.Predicate<Document> accepts) {
+    }
+
+    /** START+LIMIT (limitado a Integer.MAX_VALUE); só vale com LIMIT. */
+    private int windowEnd(Statement.Select sel) {
+        long start = sel.start() != null ? eval(sel.start()).asLong() : 0L;
+        long wantedLong = start + eval(sel.limit()).asLong();
+        return (int) Math.min(Math.max(wantedLong, 0L), Integer.MAX_VALUE);
+    }
+
+    private Window windowFor(Database db, Statement.Select sel) {
+        String table = ((Expr.Ident) sel.from()).name();
+        List<Expr> rules = dataRulePredicates();
+        Expr combinedRules = rules.isEmpty() ? null : rules.size() == 1 ? rules.get(0) : Expr.and(rules);
+        Catalog.TableDef def = db.catalog().table(table);
+        boolean checkPermissions = def != null && def.permissions() != null;
+        return new Window(windowEnd(sel), doc -> {
+            if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
+                return false;
+            }
+            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+                return false;
+            }
+            return !checkPermissions || allowed(doc, table, "select");
+        });
+    }
+
     private List<Document> streamWindowDocs(Database db, Statement.Select sel) {
         String table = ((Expr.Ident) sel.from()).name();
         ensureTable(db, table);
-        long wantedLong = (sel.start() != null ? eval(sel.start()).asLong() : 0L)
-            + eval(sel.limit()).asLong();
-        int wanted = (int) Math.min(Math.max(wantedLong, 0L), Integer.MAX_VALUE);
+        Window window = windowFor(db, sel);
         List<Document> out = new ArrayList<>();
-        if (wanted == 0) {
+        if (window.wanted() == 0) {
             return out;
         }
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
-        records(db).scanPrefix(prefix, key -> {
+        scanRecordKeys(records(db), prefix, key -> {
             Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
             if (doc == null) {
                 return true;
             }
-            if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
-                return true;
-            }
-            List<Document> candidate = new ArrayList<>(List.of(doc));
-            applyDataRulesFilter(candidate);
-            if (candidate.isEmpty() || !allowed(doc, table, "select")) {
+            if (!window.accepts().test(doc)) {
                 return true;
             }
             out.add(doc);
-            return out.size() < wanted;
+            return out.size() < window.wanted();
         });
         return out;
+    }
+
+    /** ORDER BY ... LIMIT sobre tabela simples, sem JOIN, agregação nem MATCH: dá para guardar só as START+LIMIT melhores. */
+    private boolean isTopKWindow(Statement.Select sel) {
+        return sel.from() instanceof Expr.Ident
+            && sel.limit() != null
+            && !sel.orders().isEmpty()
+            && sel.joins().isEmpty()
+            && !sel.grouped()
+            && sel.having() == null
+            && sel.fields().stream().noneMatch(this::isAggregateCall)
+            && (sel.cond() == null || !isSearchMatch(sel.cond()));
+    }
+
+    /**
+     * Lê a tabela em fluxo e guarda num heap só as START+LIMIT primeiras linhas na ordem do ORDER BY. As chaves de
+     * ordenação saem uma vez por linha e o desempate é a ordem de leitura, o que dá o mesmo resultado de ordenar
+     * tudo com a ordenação estável.
+     */
+    private List<Document> streamTopKDocs(Database db, Statement.Select sel) {
+        String table = ((Expr.Ident) sel.from()).name();
+        ensureTable(db, table);
+        Window window = windowFor(db, sel);
+        List<Document> out = new ArrayList<>();
+        if (window.wanted() == 0) {
+            return out;
+        }
+        List<OrderTerm> orders = ordersByAlias(sel);
+        Comparator<AxonValue[]> keyCmp = keyedComparator(orders);
+        TopK<Keyed> top = new TopK<>(window.wanted(), (a, b) -> keyCmp.compare(a.keys(), b.keys()));
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        scanRecordKeys(records(db), prefix, key -> {
+            Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
+            if (doc != null && window.accepts().test(doc)) {
+                top.offer(new Keyed(doc, sortKeys(orders, doc)));
+            }
+            return true;
+        });
+        for (Keyed k : top.sorted()) {
+            out.add(k.doc());
+        }
+        return out;
+    }
+
+    private record Keyed(Document doc, AxonValue[] keys) {
+    }
+
+    private AxonValue[] sortKeys(List<OrderTerm> orders, Document doc) {
+        AxonValue[] keys = new AxonValue[orders.size()];
+        for (int i = 0; i < keys.length; i++) {
+            keys[i] = evalField(orders.get(i).field(), doc);
+        }
+        return keys;
+    }
+
+    private static Comparator<AxonValue[]> keyedComparator(List<OrderTerm> orders) {
+        return (a, b) -> {
+            for (int i = 0; i < a.length; i++) {
+                int c = a[i].compareTo(b[i]);
+                if (c != 0) {
+                    return orders.get(i).descending() ? -c : c;
+                }
+            }
+            return 0;
+        };
+    }
+
+    /** As {@code k} primeiras linhas de {@code docs} na ordem de {@code cmp}, igual a ordenar tudo (estável) e cortar. */
+    private List<Document> topKOf(List<Document> docs, Comparator<Document> cmp, int k) {
+        if (k <= 0) {
+            return new ArrayList<>();
+        }
+        TopK<Document> top = new TopK<>(k, cmp);
+        for (Document d : docs) {
+            top.offer(d);
+        }
+        return top.sorted();
     }
 
     private List<Document> joinDocs(Database db, Statement.Select sel, List<Document> outer) {
@@ -1867,8 +2063,24 @@ public final class Executor {
         return docs;
     }
 
-    /** Maior nível com entrada persistida no grafo HNSW, ou -1 quando vazio. */
+    /** Chave do maior nível do grafo HNSW: o contador que evita varrer o grafo para descobri-lo. */
+    private String vhTopKey(Database db, String table, String index) {
+        return "VHT|" + db.ns() + "|" + db.db() + "|" + table + "|" + index;
+    }
+
+    /**
+     * Maior nível do grafo HNSW, ou -1 quando vazio. Lê o contador persistido; um grafo antigo, sem contador, é
+     * varrido uma única vez e o resultado fica gravado (migração preguiçosa).
+     */
     private int maxLevel(Database db, String table, Catalog.IndexDef index) {
+        Optional<byte[]> stored = records(db).get(vhTopKey(db, table, index.name()));
+        if (stored.isPresent()) {
+            try {
+                return Integer.parseInt(new String(stored.get(), java.nio.charset.StandardCharsets.UTF_8));
+            } catch (NumberFormatException ignored) {
+                // contador ilegível: recalcula abaixo
+            }
+        }
         String base = "VH|" + db.ns() + "|" + db.db() + "|" + table + "|" + index.name() + "|";
         int max = -1;
         for (String key : records(db).keysWithPrefix(base)) {
@@ -1880,6 +2092,10 @@ public final class Executor {
                     // prefixo de outro índice não casaria aqui
                 }
             }
+        }
+        if (max >= 0) {
+            records(db).put(vhTopKey(db, table, index.name()),
+                Integer.toString(max).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
         return max;
     }
@@ -1925,9 +2141,10 @@ public final class Executor {
      */
     private String repairEntry(Database db, String table, String index, int level) {
         String prefix = vhLevelPrefix(db, table, index, level);
-        for (String key : records(db).keysWithPrefix(prefix)) {
+        String[] found = {null};
+        records(db).scanPrefix(prefix, key -> {
             if (key.endsWith("|@entry")) {
-                continue;
+                return true;
             }
             String body = key.substring(prefix.length());
             String node;
@@ -1938,10 +2155,15 @@ public final class Executor {
                 node = bar < 0 ? body : body.substring(0, bar);
             }
             if (!node.isEmpty()) {
-                records(db).put(vhEntryKey(db, table, index, level),
-                    node.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                return node;
+                found[0] = node;
+                return false;
             }
+            return true;
+        });
+        if (found[0] != null) {
+            records(db).put(vhEntryKey(db, table, index, level),
+                found[0].getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return found[0];
         }
         records(db).delete(vhEntryKey(db, table, index, level));
         return null;
@@ -1990,8 +2212,26 @@ public final class Executor {
         return out;
     }
 
+    /** Distâncias já calculadas durante uma inserção no grafo (o nó se repete em vários níveis); {@code null} fora dela. */
+    private java.util.Map<String, Double> hnswDistances;
+
     private double vectorNodeDistance(Database db, String table, Catalog.IndexDef index, String key,
                                       AxonValue query) {
+        java.util.Map<String, Double> cache = hnswDistances;
+        if (cache != null) {
+            Double known = cache.get(key);
+            if (known != null) {
+                return known;
+            }
+            double computed = vectorNodeDistanceUncached(db, table, index, key, query);
+            cache.put(key, computed);
+            return computed;
+        }
+        return vectorNodeDistanceUncached(db, table, index, key, query);
+    }
+
+    private double vectorNodeDistanceUncached(Database db, String table, Catalog.IndexDef index, String key,
+                                              AxonValue query) {
         Document doc = loadDoc(db, new RecordId(table, parseKey(key)));
         if (doc == null || !doc.current().isObject()) {
             return Double.MAX_VALUE;
@@ -2078,6 +2318,16 @@ public final class Executor {
     }
 
     private List<Document> geoSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
+        return geoSourceDocs(db, sel, null, fallback);
+    }
+
+    /**
+     * Fonte pelo índice GEO. Raio: {@code geo::distance(campo, ponto) <= raio}; vizinhos mais próximos:
+     * {@code ORDER BY geo::distance(campo, ponto) LIMIT n}; e {@code geo::contains}. Com {@code window} a leitura
+     * para ao completar START+LIMIT linhas que passam no filtro.
+     */
+    private List<Document> geoSourceDocs(Database db, Statement.Select sel, Window window,
+                                         java.util.function.Supplier<List<Document>> fallback) {
         if (sel.from() instanceof Expr.Ident geoTable && sel.cond() instanceof Expr.Call contains
             && contains.name().equals("geo::contains") && contains.args().size() == 2) {
             return geoContainsSourceDocs(db, sel, geoTable, contains, fallback);
@@ -2087,7 +2337,8 @@ public final class Executor {
             || !(comparison.left() instanceof Expr.Call distance)
             || !distance.name().equals("geo::distance") || distance.args().size() != 2
             || !(distance.args().get(0) instanceof Expr.Ident field)) {
-            return fallback.get();
+            List<Document> nearest = geoNearestDocs(db, sel);
+            return nearest != null ? nearest : fallback.get();
         }
         AxonValue center = eval(distance.args().get(1));
         AxonValue radius = eval(comparison.right());
@@ -2107,12 +2358,18 @@ public final class Executor {
         double meters = radius.asDouble();
         double latRange = meters / 111_320d;
         double lonRange = meters / Math.max(1d, 111_320d * Math.cos(Math.toRadians(point[1])));
-        int precision = geoPrecision(meters);
+        boolean withCoordinates = geoHasCoordinates(db, table.name(), index);
+        // só pontos: células finas e podadas pela distância; com linhas ou polígonos no índice, as mesmas células do índice antigo
+        boolean pointsOnly = withCoordinates && !geoHasNonPoint(db, table.name(), index);
+        int precision = pointsOnly ? GEO_PRECISION : geoPrecision(meters);
         java.util.Set<String> cells = GeoHash.covering(
             point[1] - latRange, point[0] - lonRange,
             point[1] + latRange, point[0] + lonRange, precision);
-        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
         String base = geoIndexBase(db, table.name(), index.name());
+        if (withCoordinates) {
+            return geoRadiusDocs(db, table.name(), base, cells, point, meters, window, pointsOnly);
+        }
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
         for (String cell : cells) {
             for (String key : records(db).keysWithPrefix(base + cell)) {
                 ids.add(key.substring(key.lastIndexOf('|') + 1));
@@ -2126,6 +2383,228 @@ public final class Executor {
             }
         }
         return docs;
+    }
+
+    private boolean geoHasNonPoint(Database db, String table, Catalog.IndexDef index) {
+        return records(db).get(GeoEntry.nonPointKey(db.ns(), db.db(), table, index.name())).isPresent();
+    }
+
+    /** O índice foi gravado inteiro no formato com coordenadas (marcador {@code SPV|...}). */
+    private boolean geoHasCoordinates(Database db, String table, Catalog.IndexDef index) {
+        return records(db).get(GeoEntry.readyKey(db.ns(), db.db(), table, index.name())).isPresent();
+    }
+
+    /**
+     * Candidatos do raio com o índice no formato novo: cada entrada traz o ponto, então quem está fora do raio nem
+     * chega a ser carregado. As células vão da mais próxima do centro para a mais distante, e células que a
+     * circunferência não alcança são puladas. A distância é a mesma conta de {@code geo::distance}; o WHERE inteiro
+     * ainda é reavaliado sobre os documentos devolvidos, então a margem do corte só precisa ser conservadora.
+     */
+    private List<Document> geoRadiusDocs(Database db, String table, String base, java.util.Set<String> cells,
+                                         double[] center, double meters, Window window, boolean prune) {
+        double limit = meters * 1.000001 + 1e-3;
+        record Reach(String cell, double meters) {
+        }
+        List<Reach> reach = new ArrayList<>();
+        for (String cell : cells) {
+            double near = prune ? geoCellDistance(cell, center) : 0;
+            if (near <= limit) {
+                reach.add(new Reach(cell, near));
+            }
+        }
+        if (prune) {
+            reach.sort(Comparator.comparingDouble(Reach::meters));
+        }
+        List<Document> docs = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        boolean[] done = {false};
+        for (Reach r : reach) {
+            if (done[0]) {
+                break;
+            }
+            records(db).scanEntries(base + r.cell(), (key, value) -> {
+                double[] at = GeoEntry.decode(value);
+                if (at != null && GeoVector.haversine(at[0], at[1], center[0], center[1]) > limit) {
+                    return true;
+                }
+                String id = key.substring(key.lastIndexOf('|') + 1);
+                if (!seen.add(id)) {
+                    return true;
+                }
+                Document doc = loadDoc(db, new RecordId(table, parseKey(id)));
+                if (doc == null) {
+                    return true;
+                }
+                if (window == null) {
+                    docs.add(doc);
+                    return true;
+                }
+                if (window.accepts().test(doc)) {
+                    docs.add(doc);
+                }
+                done[0] = docs.size() >= window.wanted();
+                return !done[0];
+            });
+        }
+        return docs;
+    }
+
+    /**
+     * Menor distância (m) do centro à célula. Células menores que ~0,1 grau usam o ponto da caixa mais perto do
+     * centro; células grandes (raios enormes) não são podadas.
+     */
+    private double geoCellDistance(String cell, double[] center) {
+        if (cell.length() < 5) {
+            return 0;
+        }
+        double[] box = GeoHash.bounds(cell);
+        double lat = Math.max(box[0], Math.min(box[2], center[1]));
+        double lon = Math.max(box[1], Math.min(box[3], center[0]));
+        return Math.max(0, GeoVector.haversine(center[0], center[1], lon, lat) - 1);
+    }
+
+    /** Metros por grau de latitude, para baixo: a caixa de busca nunca fica menor que o raio. */
+    private static final double KNN_METERS_PER_DEGREE = 111_000d;
+    private static final double KNN_EARTH_RADIUS = 6_371_008.8;
+    /** Raio inicial da busca dos mais próximos e limite de células antes de varrer o índice todo. */
+    private static final double KNN_START_METERS = 1_000d;
+    private static final int KNN_MAX_CELLS = 4_096;
+
+    /** Plano dos vizinhos mais próximos: tabela, índice, centro e quantos (START+LIMIT). */
+    private record NearestPlan(String table, Catalog.IndexDef index, double[] center, int wanted) {
+    }
+
+    /**
+     * {@code ORDER BY geo::distance(campo, ponto) [ASC] LIMIT n} sobre tabela simples com índice GEO no formato novo,
+     * ou {@code null}. O WHERE (se houver) é reavaliado em cada candidato.
+     */
+    private NearestPlan nearestPlan(Database db, Statement.Select sel) {
+        if (!(sel.from() instanceof Expr.Ident table) || sel.limit() == null || sel.orders().size() != 1
+            || !sel.joins().isEmpty() || sel.grouped() || sel.having() != null
+            || sel.fields().stream().anyMatch(this::isAggregateCall)
+            || (sel.cond() != null && isSearchMatch(sel.cond()))) {
+            return null;
+        }
+        OrderTerm term = ordersByAlias(sel).get(0);
+        if (term.descending() || !(term.field() instanceof Expr.Call call) || !call.name().equals("geo::distance")
+            || call.args().size() != 2 || !(call.args().get(0) instanceof Expr.Ident field)
+            || !isRowIndependent(call.args().get(1))) {
+            return null;
+        }
+        Catalog.TableDef def = db.catalog().table(table.name());
+        if (def == null) {
+            return null;
+        }
+        Catalog.IndexDef index = def.indexes().values().stream()
+            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        if (index == null || !geoHasCoordinates(db, table.name(), index) || geoHasNonPoint(db, table.name(), index)) {
+            return null;
+        }
+        double[] center = geoPoint(eval(call.args().get(1)));
+        int wanted = windowEnd(sel);
+        return center == null || wanted <= 0 ? null : new NearestPlan(table.name(), index, center, wanted);
+    }
+
+    private record Candidate(String id, double meters) {
+    }
+
+    /**
+     * Os {@code n} mais próximos do ponto, em ordem de distância, sem varrer o raio inteiro: amplia a caixa de busca
+     * (dobrando o raio) e só lê as células novas, até ter {@code n} linhas válidas dentro de um raio já inteiramente
+     * lido, o que garante que não existe outra mais perto. Passando de {@code KNN_MAX_CELLS} células lê o índice todo.
+     */
+    private List<Document> geoNearestDocs(Database db, Statement.Select sel) {
+        NearestPlan plan = nearestPlan(db, sel);
+        if (plan == null) {
+            return null;
+        }
+        String base = geoIndexBase(db, plan.table(), plan.index().name());
+        String column = plan.index().columns().get(0);
+        Catalog.TableDef tableDef = db.catalog().table(plan.table());
+        boolean filtered = sel.cond() != null || !dataRulePredicates().isEmpty()
+            || (tableDef != null && tableDef.permissions() != null);
+        Window filter = filtered ? windowFor(db, sel) : null;
+        java.util.Set<String> scanned = new java.util.HashSet<>();
+        java.util.Set<String> listed = new java.util.HashSet<>();
+        List<Candidate> candidates = new ArrayList<>();
+        java.util.Map<String, Document> accepted = new java.util.HashMap<>();
+        java.util.Set<String> rejected = new java.util.HashSet<>();
+        double[] center = plan.center();
+        double radius = KNN_START_METERS;
+        boolean everything = false;
+        while (true) {
+            List<String> fresh = new ArrayList<>();
+            if (!everything) {
+                double delta = Math.toDegrees(Math.min(Math.PI / 2, radius * 1.01 / KNN_EARTH_RADIUS));
+                double latRange = radius * 1.01 / KNN_METERS_PER_DEGREE;
+                java.util.Set<String> cells = null;
+                if (Math.abs(center[1]) + delta < 85) {
+                    double lonRange = Math.toDegrees(Math.asin(Math.min(1d,
+                        Math.sin(Math.toRadians(delta)) / Math.cos(Math.toRadians(Math.abs(center[1]) + delta)))));
+                    cells = GeoHash.cellsInBox(center[1] - latRange, center[0] - lonRange,
+                        center[1] + latRange, center[0] + lonRange, GEO_PRECISION, KNN_MAX_CELLS);
+                }
+                if (cells == null) {
+                    everything = true;
+                } else {
+                    for (String cell : cells) {
+                        if (scanned.add(cell)) {
+                            fresh.add(base + cell);
+                        }
+                    }
+                }
+            }
+            if (everything) {
+                fresh = List.of(base);
+            }
+            for (String prefix : fresh) {
+                records(db).scanEntries(prefix, (key, value) -> {
+                    String id = key.substring(key.lastIndexOf('|') + 1);
+                    if (!listed.add(id)) {
+                        return true;
+                    }
+                    double[] at = GeoEntry.decode(value);
+                    if (at == null) {
+                        // entrada sem coordenadas: o ponto vem do documento
+                        Document doc = loadDoc(db, new RecordId(plan.table(), parseKey(id)));
+                        at = doc != null && doc.current().isObject() ? geoPoint(doc.current().asObject().get(column)) : null;
+                        if (at == null) {
+                            return true;
+                        }
+                    }
+                    candidates.add(new Candidate(id, GeoVector.haversine(at[0], at[1], center[0], center[1])));
+                    return true;
+                });
+            }
+            candidates.sort((a, b) -> {
+                int c = Double.compare(a.meters(), b.meters());
+                return c != 0 ? c : a.id().compareTo(b.id());
+            });
+            double certain = everything ? Double.POSITIVE_INFINITY : radius;
+            List<Document> out = new ArrayList<>();
+            for (Candidate c : candidates) {
+                if (c.meters() > certain || out.size() >= plan.wanted()) {
+                    break;
+                }
+                if (rejected.contains(c.id())) {
+                    continue;
+                }
+                Document doc = accepted.get(c.id());
+                if (doc == null) {
+                    doc = loadDoc(db, new RecordId(plan.table(), parseKey(c.id())));
+                    if (doc == null || (filter != null && !filter.accepts().test(doc))) {
+                        rejected.add(c.id());
+                        continue;
+                    }
+                    accepted.put(c.id(), doc);
+                }
+                out.add(doc);
+            }
+            if (out.size() >= plan.wanted() || everything) {
+                return out;
+            }
+            radius *= 2;
+        }
     }
 
     /** Precisão do geohash usado pelo índice espacial (≈5 km por célula). */
@@ -2175,8 +2654,16 @@ public final class Executor {
             kv.delete(reverse);
             return;
         }
+        double[] point = geoPoint(value);
+        byte[] entry = GeoEntry.encode(point);
+        if (point == null) {
+            String flag = GeoEntry.nonPointKey(db.ns(), db.db(), rid.table(), index.name());
+            if (kv.get(flag).isEmpty()) {
+                kv.put(flag, new byte[]{1});
+            }
+        }
         for (String cell : cells) {
-            kv.put(base + cell + "|" + key, new byte[0]);
+            kv.put(base + cell + "|" + key, entry);
         }
         kv.put(reverse, String.join(",", cells).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
@@ -2707,6 +3194,8 @@ return score;
     private static final String PS_UNIQUE = "UNIQUE_LOOKUP";
     private static final String PS_FULLTEXT = "FULLTEXT";
     private static final String PS_GEO = "GEO";
+    /** ORDER BY geo::distance(...) LIMIT n pelo índice GEO: amplia anéis de células até ter n certos. */
+    private static final String PS_GEO_KNN = "GEO_KNN";
     private static final String PS_VECTOR = "VECTOR";
     private static final String PS_HYBRID = "HYBRID";
     private static final String PS_COLUMNAR = "COLUMNAR";
@@ -2787,6 +3276,10 @@ return score;
         ix = geoIndexFor(db, table, sel);
         if (ix != null) {
             return new ExplainPlan(PS_GEO, ix, table);
+        }
+        NearestPlan nearest = nearestPlan(db, sel);
+        if (nearest != null) {
+            return new ExplainPlan(PS_GEO_KNN, nearest.index(), table);
         }
         ix = searchIndexFor(db, table, sel);
         if (ix != null) {
@@ -2931,7 +3424,7 @@ return score;
         List<Document> docs = switch (plan.strategy()) {
             case PS_UNIQUE -> loadUniqueDocs(db, sel, plan.index());
             case PS_FULLTEXT -> searchSourceDocs(db, sel);
-            case PS_GEO -> geoSourceDocs(db, sel, () -> fullScanDocs(db, sel));
+            case PS_GEO, PS_GEO_KNN -> geoSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_VECTOR -> vectorSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_HYBRID -> hybridSourceDocs(db, sel, hybridSearch(sel));
             case PS_COLUMNAR -> columnarSourceDocs(db, sel);
@@ -3457,6 +3950,10 @@ return score;
             if (di.columnar()) {
                 records(db).put(com.axonbase.core.storage.ColumnarIndex.readyKey(db.ns(), db.db(), di.table(), di.name()),
                     new byte[]{1});
+            }
+            if (di.geo()) {
+                // todas as entradas acabaram de ser gravadas com as coordenadas: a consulta pode filtrar pelo índice
+                records(db).put(GeoEntry.readyKey(db.ns(), db.db(), di.table(), di.name()), new byte[]{1});
             }
         }
         control(db, ControlCommand.Kind.INDEX, di.table() + ":" + di.name(),
@@ -4123,6 +4620,20 @@ return score;
                     String prefix = com.axonbase.core.storage.ColumnarIndex.indexPrefix(
                         db.ns(), db.db(), def.name(), removed.name());
                     for (String key : records(db).keysWithPrefix(prefix)) {
+                        records(db).delete(key);
+                    }
+                }
+                if (removed.vector()) {
+                    records(db).delete(vhTopKey(db, def.name(), removed.name()));
+                }
+                if (removed.geo()) {
+                    records(db).delete(GeoEntry.readyKey(db.ns(), db.db(), def.name(), removed.name()));
+                    records(db).delete(GeoEntry.nonPointKey(db.ns(), db.db(), def.name(), removed.name()));
+                    for (String key : records(db).keysWithPrefix(geoIndexBase(db, def.name(), removed.name()))) {
+                        records(db).delete(key);
+                    }
+                    String reverse = "SPR|" + db.ns() + "|" + db.db() + "|" + def.name() + "|" + removed.name() + "|";
+                    for (String key : records(db).keysWithPrefix(reverse)) {
                         records(db).delete(key);
                     }
                 }
@@ -5697,23 +6208,10 @@ return score;
                 cellsUpdate(db, rid, index, geometry, before != null);
                 continue;
             }
-            String prefix = advancedPrefix(db, rid.table(), index.name(), rid);
-            for (String key : records(db).keysWithPrefix(prefix)) {
-                if (key.endsWith("|" + rid.key().keyString())) {
-                    records(db).delete(key);
-                }
-            }
             String vectorKey = "VX|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|"
                 + index.name() + "|" + rid.key().keyString();
             records(db).delete(vectorKey);
-            String graphBase = "VH|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|"
-                + index.name() + "|";
-            for (String key : records(db).keysWithPrefix(graphBase)) {
-                if (key.contains("|" + rid.key().keyString() + "|")
-                    || key.endsWith("|" + rid.key().keyString())) {
-                    records(db).delete(key);
-                }
-            }
+            unlinkHnsw(db, rid, index);
             if (after == null || !after.isObject() || index.columns().isEmpty()) {
                 continue;
             }
@@ -5918,6 +6416,15 @@ return score;
     }
 
     private List<Document> columnarSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
+        return columnarSourceDocs(db, sel, null, fallback);
+    }
+
+    /**
+     * Igualdade em coluna com índice COLUMNAR. Com {@code window} a leitura das entradas para ao completar
+     * START+LIMIT linhas que passam no filtro; sem ele devolve todos os candidatos, como sempre.
+     */
+    private List<Document> columnarSourceDocs(Database db, Statement.Select sel, Window window,
+                                              java.util.function.Supplier<List<Document>> fallback) {
         String table = tableName(sel.from());
         Catalog.IndexDef index = columnarIndexFor(db, table, sel);
         if (index == null) return fallback.get();
@@ -5936,14 +6443,27 @@ return score;
             exactPrefix = exactPrefix.substring(0, exactPrefix.length() - 1);
             int prefixLen = prefix.length();
             List<Document> docs = new ArrayList<>();
-            for (String key : records(db).keysWithPrefix(exactPrefix)) {
+            int[] candidates = {0};
+            records(db).scanPrefix(exactPrefix, key -> {
                 byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 int encodedLen = com.axonbase.core.storage.ColumnarIndex.encodedDataLength(keyBytes, prefixLen);
                 String rowKey = com.axonbase.core.storage.ColumnarIndex.extractRowKey(key, prefixLen, encodedLen);
                 Document doc = loadDoc(db, new RecordId(table, parseKey(rowKey)));
-                if (doc != null) docs.add(doc);
-            }
-            return docs.isEmpty() ? fallback.get() : docs;
+                if (doc == null) {
+                    return true;
+                }
+                candidates[0]++;
+                if (window == null) {
+                    docs.add(doc);
+                    return true;
+                }
+                if (window.accepts().test(doc)) {
+                    docs.add(doc);
+                }
+                return docs.size() < window.wanted();
+            });
+            // sem nenhuma entrada no índice a consulta cai na varredura; entradas que o WHERE descarta valem como resposta vazia
+            return candidates[0] == 0 ? fallback.get() : docs;
         }
 
         return fallback.get();
@@ -5969,49 +6489,79 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         int nodeTop = randomLevel();
         int topExisting = maxLevel(db, rid.table(), index);
         int top = Math.max(nodeTop, topExisting);
+        // a entrada do nível mais alto é lida antes de o nó novo aparecer no grafo, para que ele não se ache a si mesmo
+        String entry = topExisting >= 0 ? entryAt(db, rid.table(), index.name(), topExisting) : null;
         for (int level = 0; level <= top; level++) {
             records(db).put(vhPresenceKey(db, rid.table(), index.name(), level, key), new byte[0]);
         }
-        List<String> neighbors = new ArrayList<>();
-        String vxBase = "VX|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|" + index.name() + "|";
-        for (String vk : records(db).keysWithPrefix(vxBase)) {
-            String otherKey = vk.substring(vxBase.length());
-            if (otherKey.equals(key)) {
-                continue;
-            }
-            Document doc = loadDoc(db, new RecordId(rid.table(), parseKey(otherKey)));
-            if (doc == null || !doc.current().isObject()) {
-                continue;
-            }
-            AxonValue candidate = doc.current().asObject().get(index.columns().get(0));
-            if (validVector(candidate, index.vectorDimension())) {
-                neighbors.add(otherKey);
-            }
+        if (top > topExisting) {
+            records(db).put(vhTopKey(db, rid.table(), index.name()),
+                Integer.toString(top).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
-for (int level = 0; level <= top; level++) {
-            List<Neighbor> levelNearest = new ArrayList<>();
-            for (String otherKey : neighbors) {
-                Document otherDoc = loadDoc(db, new RecordId(rid.table(), parseKey(otherKey)));
-                if (otherDoc == null || !otherDoc.current().isObject()) {
-                    continue;
-                }
-                AxonValue otherVec = otherDoc.current().asObject().get(index.columns().get(0));
-                if (!validVector(otherVec, index.vectorDimension())) {
-                    continue;
-                }
-                levelNearest.add(new Neighbor(otherKey,
-                    vectorDistance(index.vectorDistance(), vector, otherVec)));
+        int maxLinks = Math.max(4, index.hnswM());
+        int efConstruction = Math.max(Math.max(16, index.hnswEfc()), maxLinks * 2);
+        // Inserção HNSW: desce do nível mais alto seguindo a busca no grafo e liga o nó aos mais próximos de cada
+        // nível. O custo depende de efConstruction e M, não do número de nós do índice.
+        hnswDistances = new java.util.HashMap<>();
+        try {
+            linkLevels(db, rid, index, vector, key, top, topExisting, entry, maxLinks, efConstruction);
+        } finally {
+            hnswDistances = null;
+        }
+    }
+
+    private void linkLevels(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector, String key, int top,
+                            int topExisting, String entry, int maxLinks, int efConstruction) {
+        for (int level = top; level >= 0; level--) {
+            List<Neighbor> nearest = List.of();
+            if (entry != null && level <= topExisting) {
+                // o nível 0 usa a largura cheia; nos de cima basta a vizinhança (os nós estão em todos os níveis)
+                nearest = searchLevel(db, rid.table(), index, level, entry, vector,
+                    level == 0 ? efConstruction : Math.max(maxLinks, 8));
             }
-            levelNearest.sort(java.util.Comparator.comparingDouble(Neighbor::distance));
-            int maxLinks = Math.max(4, index.hnswM());
             int linkLimit = level == 0 ? maxLinks : Math.max(2, maxLinks / 2);
-            for (Neighbor nb : levelNearest.stream().limit(linkLimit).toList()) {
+            int linked = 0;
+            for (Neighbor nb : nearest) {
+                if (nb.key().equals(key) || nb.distance() == Double.MAX_VALUE) {
+                    continue;
+                }
+                if (linked == 0) {
+                    entry = nb.key();
+                }
+                if (linked++ >= linkLimit) {
+                    break;
+                }
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, key) + nb.key(), new byte[0]);
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, nb.key()) + key, new byte[0]);
             }
             String entryKey = vhEntryKey(db, rid.table(), index.name(), level);
             if (records(db).get(entryKey).isEmpty()) {
                 records(db).put(entryKey, key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    /**
+     * Tira um nó do grafo HNSW sem varrer o grafo: a presença do nó em cada nível ({@code @N|chave}) diz em quais
+     * níveis ele está, e as arestas saem do prefixo do próprio nó; a aresta inversa fica no prefixo do vizinho. Os
+     * índices criados antes já têm esses marcadores, então não há o que migrar.
+     */
+    private void unlinkHnsw(Database db, RecordId rid, Catalog.IndexDef index) {
+        String key = rid.key().keyString();
+        for (int level = 0; level < 64; level++) {
+            String presence = vhPresenceKey(db, rid.table(), index.name(), level, key);
+            boolean present = records(db).get(presence).isPresent();
+            List<String> edges = records(db).keysWithPrefix(vhNodePrefix(db, rid.table(), index.name(), level, key));
+            if (!present && edges.isEmpty()) {
+                break;
+            }
+            for (String edge : edges) {
+                String neighbor = edge.substring(edge.lastIndexOf('|') + 1);
+                records(db).delete(edge);
+                records(db).delete(vhNodePrefix(db, rid.table(), index.name(), level, neighbor) + key);
+            }
+            if (present) {
+                records(db).delete(presence);
             }
         }
     }

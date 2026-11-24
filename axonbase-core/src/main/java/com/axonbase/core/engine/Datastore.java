@@ -314,7 +314,8 @@ public final class Datastore {
         if (user == null || user.isBlank()) user = "unknown";
         try {
             String prefix = "!audit_op|" + ns + "|" + dbName + "|";
-            long id = nextAuditId(prefix);
+            String counterKey = "!audit_seq|" + ns + "|" + dbName;
+            long id = nextAuditId(prefix, counterKey);
             while (true) {
                 Map<String, AxonValue> entry = new LinkedHashMap<>();
                 entry.put("id", AxonValue.str(String.format("%010d", id)));
@@ -331,22 +332,52 @@ public final class Datastore {
                 if (backend.putIfAbsent(key, AxonJson.encode(AxonValue.object(entry)))) break;
                 id++;
             }
+            persistAuditCounter(prefix, counterKey, id);
         } catch (Exception e) {
             System.err.println("{\"event\":\"audit_log_failed\",\"error\":\"" +
                 e.getMessage() + "\"}");
         }
     }
 
-    private long nextAuditId(String prefix) {
-        long lastId = 0;
-        for (String key : backend.keysWithPrefix(prefix)) {
-            try {
-                lastId = Math.max(lastId, Long.parseLong(key.substring(prefix.length())));
-            } catch (NumberFormatException ignored) {
-                // Ignore malformed keys outside the audit sequence format.
+    /** Último id de auditoria usado por prefixo ({@code !audit_op|ns|db|}), para não listar o log a cada DML. */
+    private final ConcurrentMap<String, java.util.concurrent.atomic.AtomicLong> auditCounters = new ConcurrentHashMap<>();
+
+    /**
+     * Próximo id da trilha. O contador fica em memória e persistido em {@code !audit_seq|ns|db}; o custo por escrita
+     * não depende do tamanho do log. Banco antigo, sem contador, é varrido uma única vez (migração preguiçosa). Se
+     * outro nó gravar na frente, o {@code putIfAbsent} do chamador acerta o id.
+     */
+    private long nextAuditId(String prefix, String counterKey) {
+        java.util.concurrent.atomic.AtomicLong counter = auditCounters.computeIfAbsent(prefix, k -> {
+            long last = 0;
+            java.util.Optional<byte[]> stored = backend.get(counterKey);
+            if (stored.isPresent()) {
+                try {
+                    last = Long.parseLong(new String(stored.get(), java.nio.charset.StandardCharsets.UTF_8));
+                } catch (NumberFormatException ignored) {
+                    // contador ilegível: recalcula pela varredura
+                }
             }
+            if (last == 0) {
+                for (String key : backend.keysWithPrefix(prefix)) {
+                    try {
+                        last = Math.max(last, Long.parseLong(key.substring(prefix.length())));
+                    } catch (NumberFormatException ignored) {
+                        // Ignore malformed keys outside the audit sequence format.
+                    }
+                }
+            }
+            return new java.util.concurrent.atomic.AtomicLong(last);
+        });
+        return counter.incrementAndGet();
+    }
+
+    private void persistAuditCounter(String prefix, String counterKey, long id) {
+        java.util.concurrent.atomic.AtomicLong counter = auditCounters.get(prefix);
+        if (counter != null) {
+            counter.accumulateAndGet(id, Math::max);
         }
-        return lastId + 1;
+        backend.put(counterKey, Long.toString(id).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private static AxonValue sessionUserId(Session session) {
@@ -845,7 +876,9 @@ public final class Datastore {
             AxonValue result = exec.execute(query, session, vars);
             if (implicitClusterTransaction) {
                 commitSession(session);
-            } else {
+            } else if (!query.statements().stream().allMatch(st -> st instanceof Statement.Select
+                || st instanceof Statement.Explain || st instanceof Statement.Info)) {
+                // só escrita precisa ir ao disco; um SELECT não pode pagar o flush do RocksDB (a escrita já está no WAL)
                 backend.flush();
             }
             return result;
