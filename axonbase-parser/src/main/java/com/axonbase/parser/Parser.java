@@ -1243,7 +1243,7 @@ public final class Parser {
                 expectKeyword("dimension");
                 vectorDimension = ((Number) expect(TokenType.INT).literal()).intValue();
                 if (matchKeyword("dist")) {
-                    vectorDistance = expectIdent();
+                    vectorDistance = vectorDistanceName(expectIdent());
                 } else {
                     vectorDistance = "euclidean";
                 }
@@ -1337,7 +1337,7 @@ public final class Parser {
             expectKeyword("dimension");
             vectorDimension = ((Number) expect(TokenType.INT).literal()).intValue();
             if (matchKeyword("dist")) {
-                vectorDistance = expectIdent();
+                vectorDistance = vectorDistanceName(expectIdent());
             } else {
                 vectorDistance = "euclidean";
             }
@@ -1362,6 +1362,20 @@ public final class Parser {
         expectKeyword("then");
         List<Statement> then = parseParenStatements();
         return new Statement.CreateEvent(name, table, when, then);
+    }
+
+    /**
+     * Distância do índice HNSW: {@code cosine} (ou {@code cos}), {@code euclidean} (ou {@code euclid}, {@code l2}) e
+     * {@code manhattan} (ou {@code l1}). Antes qualquer nome era aceito e os desconhecidos viravam euclidiana sem aviso.
+     */
+    private String vectorDistanceName(String name) {
+        return switch (name.toLowerCase(java.util.Locale.ROOT)) {
+            case "cos", "cosine" -> "cosine";
+            case "euclid", "euclidean", "l2" -> "euclidean";
+            case "manhattan", "l1" -> "manhattan";
+            default -> throw error("distância desconhecida no índice HNSW: " + name
+                + " (use cosine, euclidean ou manhattan)");
+        };
     }
 
     private Statement parseCreateAnalyzer() {

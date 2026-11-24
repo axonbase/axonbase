@@ -220,4 +220,21 @@ class SearchVectorColumnarTest {
         run("DROP INDEX ind_dept");
         assertFalse(run("INFO FOR TABLE ind").asObject().get("indexes").asObject().containsKey("ind_dept"));
     }
+
+    @Test
+    @DisplayName("DIST cos vira cosseno de verdade; distância desconhecida é recusada")
+    void hnswDistanceAliases() {
+        run("DEFINE TABLE v SCHEMALESS");
+        run("CREATE INDEX v_cos ON TABLE v COLUMNS a HNSW DIMENSION 3 DIST cos");
+        run("CREATE INDEX v_l2 ON TABLE v COLUMNS b HNSW DIMENSION 3 DIST l2");
+        run("CREATE INDEX v_l1 ON TABLE v COLUMNS c HNSW DIMENSION 3 DIST manhattan");
+        run("CREATE INDEX v_def ON TABLE v COLUMNS d HNSW DIMENSION 3");
+        var idx = run("INFO FOR TABLE v").asObject().get("indexes").asObject();
+        assertEquals("cosine", idx.get("v_cos").asObject().get("vector_distance").asString());
+        assertEquals("euclidean", idx.get("v_l2").asObject().get("vector_distance").asString());
+        assertEquals("manhattan", idx.get("v_l1").asObject().get("vector_distance").asString());
+        assertEquals("euclidean", idx.get("v_def").asObject().get("vector_distance").asString());
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
+            () -> run("CREATE INDEX v_bad ON TABLE v COLUMNS e HNSW DIMENSION 3 DIST hamming"));
+    }
 }
