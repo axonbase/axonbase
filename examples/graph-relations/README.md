@@ -21,9 +21,10 @@ Rode o arquivo inteiro com "Run all" no Workspace. Ele apaga o que criou antes, 
 Abra **Relations graph**, escolha a tabela `pessoa`, digite o id `ana` e aumente a profundidade para 2 saltos.
 Aparecem 12 registros e 21 ligações, com uma cor por tabela. Clique num nó para ver as propriedades dele.
 
-Os tipos de aresta precisam estar declarados no catálogo (`DEFINE TABLE segue SCHEMALESS` e os demais, que o
-`seed.sql` já faz), porque a página descobre as arestas pelo catálogo do banco. Sem a declaração a página mostra
-só o registro escolhido, sem ligações.
+A página descobre as arestas pelo catálogo do banco. A partir da versão 0.5.1 o `RELATE` registra o tipo da aresta
+sozinho (como um `DEFINE TABLE tipo SCHEMALESS`), e na primeira subida o servidor registra os tipos de grafos criados
+antes. Em versões anteriores é preciso declarar cada tipo (o `seed.sql` já faz isso, e declarar um tipo que existe
+não muda nada); sem a declaração a página mostra só o registro escolhido, sem ligações.
 
 ## Consultas no Workspace
 

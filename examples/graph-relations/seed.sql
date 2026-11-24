@@ -1,8 +1,8 @@
 -- Rede de exemplo para a página "Relations graph" e para consultas de grafo no Workspace.
 -- Rode com "Run all" no Workspace (ou com POST /sql). O script apaga o que criou antes, então pode ser repetido.
 
--- Os tipos de aresta precisam existir no catálogo para a página Relations graph enxergá-los.
--- Declare cada tipo usado em RELATE (a página descobre as arestas pelo catálogo).
+-- A partir da versão 0.5.1 o RELATE registra o tipo de aresta sozinho. As linhas DEFINE TABLE abaixo só são
+-- necessárias em versões anteriores, e continuam valendo (declarar um tipo que já existe não muda nada).
 DEFINE TABLE segue SCHEMALESS;
 DEFINE TABLE trabalha_em SCHEMALESS;
 DEFINE TABLE comprou SCHEMALESS;
