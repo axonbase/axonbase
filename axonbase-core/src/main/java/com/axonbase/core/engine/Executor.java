@@ -4266,11 +4266,14 @@ return score;
         return AxonValue.num(num(l, r, 0).subtract(num(r, l, 0)));
     }
 
+    /** Escala e arredondamento da divisão e do avg, os mesmos de math::mean. */
+    private static final int DIVISION_SCALE = 10;
+
     private AxonValue divide(AxonValue l, AxonValue r) {
         if (num(r, l, 1).signum() == 0) {
             throw AxonError.internal(Messages.get("stmt_division_by_zero"));
         }
-        return AxonValue.num(num(l, r, 0).divide(num(r, l, 1)));
+        return AxonValue.num(num(l, r, 0).divide(num(r, l, 1), DIVISION_SCALE, java.math.RoundingMode.HALF_UP).stripTrailingZeros());
     }
 
     private AxonValue mod(AxonValue l, AxonValue r) {
