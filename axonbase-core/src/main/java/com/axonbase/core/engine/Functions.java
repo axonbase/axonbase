@@ -682,12 +682,22 @@ public final class Functions {
             return ZoneOffset.UTC;
         }
         String name = str(args.get(index));
+        java.time.ZoneId cached = ZONES.get(name);
+        if (cached != null) {
+            return cached;
+        }
         try {
-            return java.time.ZoneId.of(name);
+            java.time.ZoneId zone = java.time.ZoneId.of(name);
+            ZONES.put(name, zone);
+            return zone;
         } catch (java.time.DateTimeException e) {
             throw AxonError.internal(Messages.get("fn_timezone_invalid", name));
         }
     }
+
+    /** Fusos já resolvidos: {@code ZoneId.of} custa caro quando roda em cada linha de uma varredura. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.time.ZoneId> ZONES =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * {@code time::floor(t, '10m' [, fuso])}: início da janela de tamanho fixo que contém {@code t}. As janelas

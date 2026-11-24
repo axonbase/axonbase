@@ -317,6 +317,8 @@ public final class Executor {
     }
 
     private AxonValue runStatement(Statement s) {
+        // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
+        subqueryCache.clear();
         authorize(s);
         requireWritableIfNeeded(s);
         return switch (s) {
@@ -1254,6 +1256,7 @@ public final class Executor {
         Database db = db();
         HybridSearch hy = hybridSearch(sel);
         List<Document> docs;
+        GroupAggregation streamedAggregation = null;
         if (sel.from() == null) {
             // SELECT VALUE expr() — sem FROM, cria documento virtual vazio
             docs = virtualDocs(AxonValue.object(Map.of()));
@@ -1265,20 +1268,34 @@ public final class Executor {
             // Cada nível só calcula o fallback se não puder usar o próprio índice. Antes o fallback
             // (varredura completa) era calculado antes, e todo SELECT lia a tabela inteira.
             boolean streamable = isStreamableWindow(sel);
-            docs = uniqueLookupSourceDocs(db, sel,
-                () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel,
-                    () -> columnarSourceDocs(db, sel,
-                        () -> streamable ? null : searchSourceDocs(db, sel)))));
+            boolean streamableAggregate = isStreamableAggregate(sel);
+            // WHERE a = 1 AND b > 2: um índice que atende só uma das partes já reduz a leitura; o WHERE inteiro
+            // é reavaliado abaixo sobre os candidatos.
+            docs = conjunctIndexDocs(db, sel);
             if (docs == null) {
-                docs = streamWindowDocs(db, sel);
+                docs = uniqueLookupSourceDocs(db, sel,
+                    () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel,
+                        () -> columnarSourceDocs(db, sel,
+                            () -> streamable || streamableAggregate ? null : searchSourceDocs(db, sel)))));
+            }
+            if (docs == null) {
+                if (streamableAggregate) {
+                    // sem índice: agrega lendo a tabela em fluxo, sem montar a lista de documentos
+                    streamedAggregation = streamAggregate(db, sel);
+                    docs = new ArrayList<>();
+                } else {
+                    docs = streamWindowDocs(db, sel);
+                }
             }
         }
-        if (sel.cond() != null) {
-            docs.removeIf(doc -> !truthy(evalCond(sel.cond(), doc)));
+        if (streamedAggregation == null) {
+            if (sel.cond() != null) {
+                docs.removeIf(doc -> !truthy(evalCond(sel.cond(), doc)));
+            }
+            applyDataRulesFilter(docs);
+            applySearchScores(sel, docs);
+            docs.removeIf(doc -> sel.from() != null && !allowed(doc, tableName(sel.from()), "select"));
         }
-        applyDataRulesFilter(docs);
-        applySearchScores(sel, docs);
-        docs.removeIf(doc -> sel.from() != null && !allowed(doc, tableName(sel.from()), "select"));
         boolean joined = !sel.joins().isEmpty();
         if (joined) {
             docs = joinDocs(db, sel, docs);
@@ -1304,9 +1321,12 @@ public final class Executor {
             if (!sel.fetch().isEmpty()) {
                 docs.forEach(d -> fetchDocs(d, sel.fetch()));
             }
-            GroupAggregation aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
-            for (Document d : docs) {
-                aggregation.accept(d);
+            GroupAggregation aggregation = streamedAggregation;
+            if (aggregation == null) {
+                aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
+                for (Document d : docs) {
+                    aggregation.accept(d);
+                }
             }
             List<AxonValue> rows = aggregation.finish();
             int from = Math.min(Math.max(start, 0), rows.size());
@@ -1372,6 +1392,96 @@ public final class Executor {
      * Rules e permissões, parando ao completar {@code START + LIMIT}. Os filtros que o
      * {@code runSelect} aplica depois são idempotentes sobre esse resultado.
      */
+    /** Agregação sobre tabela simples, que pode ser feita lendo os registros em fluxo (sem JOIN nem busca). */
+    private boolean isStreamableAggregate(Statement.Select sel) {
+        return sel.from() instanceof Expr.Ident
+            && sel.joins().isEmpty()
+            && (sel.grouped() || sel.having() != null
+                || sel.fields().stream().anyMatch(GroupAggregation::containsAggregate))
+            && (sel.cond() == null || !isSearchMatch(sel.cond()));
+    }
+
+    /**
+     * Lê a tabela pelo iterador do storage e soma cada registro que passa por WHERE, Data Rules e permissões
+     * direto nos acumuladores. Memória proporcional ao número de grupos, não de linhas.
+     */
+    private GroupAggregation streamAggregate(Database db, Statement.Select sel) {
+        String table = ((Expr.Ident) sel.from()).name();
+        ensureTable(db, table);
+        GroupAggregation aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
+        List<Expr> rules = dataRulePredicates();
+        Expr combinedRules = rules.isEmpty() ? null : rules.size() == 1 ? rules.get(0) : Expr.and(rules);
+        Catalog.TableDef def = db.catalog().table(table);
+        boolean checkPermissions = def != null && def.permissions() != null;
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        records(db).scanPrefix(prefix, key -> {
+            Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
+            if (doc == null) {
+                return true;
+            }
+            if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
+                return true;
+            }
+            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+                return true;
+            }
+            if (checkPermissions && !allowed(doc, table, "select")) {
+                return true;
+            }
+            if (!sel.fetch().isEmpty()) {
+                fetchDocs(doc, sel.fetch());
+            }
+            aggregation.accept(doc);
+            return true;
+        });
+        return aggregation;
+    }
+
+    /** Condições ligadas por AND no topo do WHERE, na ordem em que foram escritas. */
+    private static List<Expr> conjuncts(Expr cond) {
+        List<Expr> out = new ArrayList<>();
+        collectConjuncts(cond, out);
+        return out;
+    }
+
+    private static void collectConjuncts(Expr cond, List<Expr> out) {
+        if (cond instanceof Expr.Binary b && b.op() == Expr.BinaryOp.AND) {
+            collectConjuncts(b.left(), out);
+            collectConjuncts(b.right(), out);
+        } else if (cond != null) {
+            out.add(cond);
+        }
+    }
+
+    private static Statement.Select withCond(Statement.Select sel, Expr cond) {
+        return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), cond, sel.orders(),
+            sel.group(), sel.limit(), sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(),
+            sel.groupAll());
+    }
+
+    /**
+     * Candidatos vindos de um índice que atenda uma das partes do WHERE ligadas por AND (UNIQUE, GEO ou
+     * columnar), ou {@code null} se nenhuma parte tem índice. O chamador reavalia o WHERE inteiro.
+     */
+    private List<Document> conjunctIndexDocs(Database db, Statement.Select sel) {
+        if (!(sel.from() instanceof Expr.Ident) || sel.cond() == null) {
+            return null;
+        }
+        List<Expr> parts = conjuncts(sel.cond());
+        if (parts.size() < 2) {
+            return null;
+        }
+        for (Expr part : parts) {
+            Statement.Select probe = withCond(sel, part);
+            List<Document> hit = uniqueLookupSourceDocs(db, probe,
+                () -> geoSourceDocs(db, probe, () -> columnarSourceDocs(db, probe, () -> null)));
+            if (hit != null) {
+                return hit;
+            }
+        }
+        return null;
+    }
+
     private List<Document> streamWindowDocs(Database db, Statement.Select sel) {
         String table = ((Expr.Ident) sel.from()).name();
         ensureTable(db, table);
@@ -1726,7 +1836,86 @@ public final class Executor {
     }
 
     /** Usa a grade GEO para pré-filtrar uma distância radial antes do WHERE exato. */
+    /** Teto de células geohash que a busca por polígono lê; acima disso a varredura completa sai mais barata. */
+    private static final int GEO_CONTAINS_MAX_CELLS = 4096;
+
+    /**
+     * {@code WHERE geo::contains(<polígono>, campo)} com um índice GEO em {@code campo}: lê só as células que
+     * cobrem a caixa do polígono. O polígono não pode depender da linha (literal, variável, {@code $parent...}
+     * ou subquery); o teste exato é refeito pelo WHERE sobre os candidatos.
+     */
+    private List<Document> geoContainsSourceDocs(Database db, Statement.Select sel, Expr.Ident table, Expr.Call call,
+                                                 java.util.function.Supplier<List<Document>> fallback) {
+        if (!(call.args().get(1) instanceof Expr.Ident field) || !isRowIndependent(call.args().get(0))) {
+            return fallback.get();
+        }
+        Catalog.TableDef def = db.catalog().table(table.name());
+        Catalog.IndexDef index = def == null ? null : def.indexes().values().stream()
+            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        if (index == null) {
+            return fallback.get();
+        }
+        double[] box;
+        try {
+            box = GeoVector.bbox(eval(call.args().get(0)));
+        } catch (RuntimeException e) {
+            return fallback.get();
+        }
+        if (box == null) {
+            return fallback.get();
+        }
+        double midLat = (box[1] + box[3]) / 2;
+        double heightMeters = (box[3] - box[1]) * 111_320d;
+        double widthMeters = (box[2] - box[0]) * 111_320d * Math.max(0.01, Math.cos(Math.toRadians(midLat)));
+        int precision = geoPrecision(Math.max(heightMeters, widthMeters) / 2);
+        java.util.Set<String> cells = GeoHash.covering(box[1], box[0], box[3], box[2], precision);
+        if (cells.size() > GEO_CONTAINS_MAX_CELLS) {
+            return fallback.get();
+        }
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+        String base = geoIndexBase(db, table.name(), index.name());
+        for (String cell : cells) {
+            for (String key : records(db).keysWithPrefix(base + cell)) {
+                ids.add(key.substring(key.lastIndexOf('|') + 1));
+            }
+        }
+        List<Document> docs = new ArrayList<>();
+        for (String id : ids) {
+            Document doc = loadDoc(db, new RecordId(table.name(), parseKey(id)));
+            if (doc != null) {
+                docs.add(doc);
+            }
+        }
+        return docs;
+    }
+
+    /** A expressão não lê campos da linha (só literais, variáveis e subqueries), então vale o mesmo para todas. */
+    private static boolean isRowIndependent(Expr e) {
+        return switch (e) {
+            case Expr.Literal l -> true;
+            case Expr.Param p -> true;
+            case Expr.SubQuery q -> true;
+            case Expr.Idiom i -> isRowIndependent(i.base()) && i.parts().stream().allMatch(part -> switch (part) {
+                case Expr.Part.Field f -> true;
+                case Expr.Part.First f -> true;
+                case Expr.Part.Last l -> true;
+                case Expr.Part.Index x -> isRowIndependent(x.index());
+                default -> false;
+            });
+            case Expr.Call c -> c.args().stream().allMatch(Executor::isRowIndependent);
+            case Expr.ObjectLit o -> o.entries().stream().allMatch(en -> isRowIndependent(en.value()));
+            case Expr.ArrayLit a -> a.items().stream().allMatch(Executor::isRowIndependent);
+            case Expr.Unary u -> isRowIndependent(u.operand());
+            case Expr.Binary b -> isRowIndependent(b.left()) && isRowIndependent(b.right());
+            default -> false;
+        };
+    }
+
     private List<Document> geoSourceDocs(Database db, Statement.Select sel, java.util.function.Supplier<List<Document>> fallback) {
+        if (sel.from() instanceof Expr.Ident geoTable && sel.cond() instanceof Expr.Call contains
+            && contains.name().equals("geo::contains") && contains.args().size() == 2) {
+            return geoContainsSourceDocs(db, sel, geoTable, contains, fallback);
+        }
         if (!(sel.from() instanceof Expr.Ident table) || !(sel.cond() instanceof Expr.Binary comparison)
             || (comparison.op() != Expr.BinaryOp.LT && comparison.op() != Expr.BinaryOp.LE)
             || !(comparison.left() instanceof Expr.Call distance)
@@ -1787,16 +1976,47 @@ public final class Executor {
     }
 
     /** Atualiza as células geohash de um documento após uma mutação geo. */
-    private void cellsUpdate(Database db, RecordId rid, Catalog.IndexDef index, AxonValue value) {
-        String base = geoIndexBase(db, rid.table(), index.name())
-            + rid.key().keyString() + "|";
-        for (String key : records(db).keysWithPrefix(base)) {
-            records(db).delete(key);
+    /**
+     * Troca as células geohash do registro no índice GEO. As células antigas vêm da chave reversa
+     * ({@code SPR|...|id}, lista de células separada por vírgula), então o custo de cada escrita não depende do
+     * tamanho do índice. Registros gravados antes da chave reversa existir só têm as células achadas olhando o
+     * índice inteiro, uma única vez: a primeira atualização ou exclusão deles grava a chave reversa.
+     *
+     * @param existed o registro já estava gravado (atualização ou exclusão); numa criação não há células antigas
+     */
+    private void cellsUpdate(Database db, RecordId rid, Catalog.IndexDef index, AxonValue value, boolean existed) {
+        KvBackend kv = records(db);
+        String base = geoIndexBase(db, rid.table(), index.name());
+        String key = rid.key().keyString();
+        String reverse = geoReverseKey(db, rid, index);
+        Optional<byte[]> old = kv.get(reverse);
+        if (old.isPresent()) {
+            for (String cell : new String(old.get(), java.nio.charset.StandardCharsets.UTF_8).split(",")) {
+                if (!cell.isEmpty()) {
+                    kv.delete(base + cell + "|" + key);
+                }
+            }
+        } else if (existed) {
+            String suffix = "|" + key;
+            for (String stale : kv.keysWithPrefix(base)) {
+                if (stale.endsWith(suffix)) {
+                    kv.delete(stale);
+                }
+            }
         }
-        for (String cell : geoCoverCells(value)) {
-            records(db).put(geoIndexBase(db, rid.table(), index.name())
-                + cell + "|" + rid.key().keyString(), new byte[0]);
+        java.util.Set<String> cells = geoCoverCells(value);
+        if (cells.isEmpty()) {
+            kv.delete(reverse);
+            return;
         }
+        for (String cell : cells) {
+            kv.put(base + cell + "|" + key, new byte[0]);
+        }
+        kv.put(reverse, String.join(",", cells).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private String geoReverseKey(Database db, RecordId rid, Catalog.IndexDef index) {
+        return "SPR|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|" + index.name() + "|" + rid.key().keyString();
     }
 
     private String geoIndexBase(Database db, String table, String index) {
@@ -2300,7 +2520,11 @@ return score;
     private static final String PS_HYBRID = "HYBRID";
     private static final String PS_COLUMNAR = "COLUMNAR";
 
-    private record ExplainPlan(String strategy, Catalog.IndexDef index, String table) {
+    /** {@code via}: a parte do WHERE (ligada por AND) que o índice atende, ou {@code null} se for o WHERE inteiro. */
+    private record ExplainPlan(String strategy, Catalog.IndexDef index, String table, Expr via) {
+        ExplainPlan(String strategy, Catalog.IndexDef index, String table) {
+            this(strategy, index, table, null);
+        }
     }
 
     /**
@@ -2331,6 +2555,21 @@ return score;
      * vector, geo, full-text e por último varrido completo.
      */
     private ExplainPlan planExplain(Database db, Statement.Select sel) {
+        // WHERE a AND b: se uma das partes tem índice (UNIQUE, columnar ou GEO) é ela que abre a leitura
+        List<Expr> parts = sel.cond() == null || !(sel.from() instanceof Expr.Ident) ? List.of() : conjuncts(sel.cond());
+        if (parts.size() > 1) {
+            for (Expr part : parts) {
+                ExplainPlan viaPart = planFor(db, withCond(sel, part));
+                if (PS_UNIQUE.equals(viaPart.strategy()) || PS_COLUMNAR.equals(viaPart.strategy())
+                    || PS_GEO.equals(viaPart.strategy())) {
+                    return new ExplainPlan(viaPart.strategy(), viaPart.index(), viaPart.table(), part);
+                }
+            }
+        }
+        return planFor(db, sel);
+    }
+
+    private ExplainPlan planFor(Database db, Statement.Select sel) {
         String table = tableName(sel.from());
         Catalog.IndexDef ix = uniqueIndexFor(db, table, sel);
         if (ix != null) {
@@ -2391,8 +2630,18 @@ return score;
             .filter(i -> i.vector() && i.columns().contains(field.name())).findFirst().orElse(null);
     }
 
-    /** `geo::distance(campo, centro) &lt; radio`: índice GEO do campo. */
+    /**
+     * `geo::distance(campo, centro) &lt; radio` ou `geo::contains(polígono, campo)`: índice GEO do campo.
+     * O polígono não pode depender da linha.
+     */
     private Catalog.IndexDef geoIndexFor(Database db, String table, Statement.Select sel) {
+        if (!table.isBlank() && sel.cond() instanceof Expr.Call contains && contains.name().equals("geo::contains")
+            && contains.args().size() == 2 && contains.args().get(1) instanceof Expr.Ident containsField
+            && isRowIndependent(contains.args().get(0))) {
+            Catalog.TableDef tdef = db.catalog().table(table);
+            return tdef == null ? null : tdef.indexes().values().stream()
+                .filter(i -> i.geo() && i.columns().contains(containsField.name())).findFirst().orElse(null);
+        }
         if (table.isBlank() || !(sel.cond() instanceof Expr.Binary comparison)
             || (comparison.op() != Expr.BinaryOp.LT && comparison.op() != Expr.BinaryOp.LE)
             || !(comparison.left() instanceof Expr.Call distance)
@@ -2467,7 +2716,8 @@ return score;
         return fullScanDocs(db, sel).size();
     }
 
-    private long explainedRows(Database db, Statement.Select sel, ExplainPlan plan) {
+    private long explainedRows(Database db, Statement.Select whole, ExplainPlan plan) {
+        Statement.Select sel = plan.via() == null ? whole : withCond(whole, plan.via());
         List<Document> docs = switch (plan.strategy()) {
             case PS_UNIQUE -> loadUniqueDocs(db, sel, plan.index());
             case PS_FULLTEXT -> searchSourceDocs(db, sel);
@@ -4325,6 +4575,36 @@ return score;
      * para permitir correlação, e restaura o valor anterior no fim.
      */
     private AxonValue evalSubQuery(Expr.SubQuery sq, Document outer) {
+        if (!isCacheableSubQuery(sq)) {
+            return runSubQuery(sq, outer);
+        }
+        AxonValue cached = subqueryCache.get(sq);
+        if (cached == null) {
+            cached = runSubQuery(sq, outer);
+            subqueryCache.put(sq, cached);
+        }
+        return cached;
+    }
+
+    /** Resultado das subqueries independentes da linha, válido até o próximo statement deste executor. */
+    private final Map<Expr.SubQuery, AxonValue> subqueryCache = new java.util.IdentityHashMap<>();
+    private final Map<Expr.SubQuery, Boolean> subqueryCacheable = new java.util.IdentityHashMap<>();
+
+    /**
+     * Subquery que não depende da linha de fora e não muda entre uma avaliação e outra: o mesmo texto serve para
+     * todas as linhas, então o resultado é guardado. Sem {@code $} (nem {@code $parent}, nem variáveis que um
+     * evento ou bloco possa trocar) e sem funções que variam (rand, now), e só leitura.
+     */
+    private boolean isCacheableSubQuery(Expr.SubQuery sq) {
+        return subqueryCacheable.computeIfAbsent(sq, q -> {
+            String text = AxonQl.render(q.query());
+            String lower = text.toLowerCase(java.util.Locale.ROOT);
+            return lower.startsWith("select") && text.indexOf('$') < 0
+                && !lower.contains("rand") && !lower.contains("now");
+        });
+    }
+
+    private AxonValue runSubQuery(Expr.SubQuery sq, Document outer) {
         AxonValue previousParent = session.vars().get("parent");
         if (outer != null) {
             session.vars().set("parent", outer.current());
@@ -4657,6 +4937,12 @@ return score;
             if (!index.geo() && !index.vector()) {
                 continue;
             }
+            if (index.geo()) {
+                AxonValue geometry = after != null && after.isObject() && !index.columns().isEmpty()
+                    ? after.asObject().get(index.columns().get(0)) : null;
+                cellsUpdate(db, rid, index, geometry, before != null);
+                continue;
+            }
             String prefix = advancedPrefix(db, rid.table(), index.name(), rid);
             for (String key : records(db).keysWithPrefix(prefix)) {
                 if (key.endsWith("|" + rid.key().keyString())) {
@@ -4678,9 +4964,6 @@ return score;
                 continue;
             }
             AxonValue value = after.asObject().get(index.columns().get(0));
-            if (index.geo()) {
-                cellsUpdate(db, rid, index, value);
-            }
             if (index.vector() && validVector(value, index.vectorDimension())) {
                 // A primeira camada é exata: o prefixo torna o conjunto de candidatos explícito
                 // e permite substituir por grafo HNSW sem mudar o formato da consulta.

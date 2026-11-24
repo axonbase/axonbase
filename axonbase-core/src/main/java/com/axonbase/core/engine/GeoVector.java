@@ -104,6 +104,39 @@ final class GeoVector {
         return polygon(AxonValue.array(List.of(AxonValue.array(ring))));
     }
 
+    /**
+     * Caixa que envolve todas as coordenadas de uma geometria: {@code {oeste, sul, leste, norte}}. Serve para
+     * escolher as células do índice geo que podem conter pontos da geometria. {@code null} se não houver ponto.
+     */
+    static double[] bbox(AxonValue geometry) {
+        double[] box = {Double.MAX_VALUE, Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE};
+        boolean[] any = {false};
+        collect(coordinatesOf(geometry), box, any);
+        return any[0] ? box : null;
+    }
+
+    private static void collect(AxonValue coordinates, double[] box, boolean[] any) {
+        if (coordinates == null || !coordinates.isArray() || coordinates.asArray().isEmpty()) {
+            return;
+        }
+        List<AxonValue> items = coordinates.asArray();
+        if (items.get(0).isNumber()) {
+            if (items.size() >= 2 && items.get(1).isNumber()) {
+                double lon = items.get(0).asDouble();
+                double lat = items.get(1).asDouble();
+                box[0] = Math.min(box[0], lon);
+                box[1] = Math.min(box[1], lat);
+                box[2] = Math.max(box[2], lon);
+                box[3] = Math.max(box[3], lat);
+                any[0] = true;
+            }
+            return;
+        }
+        for (AxonValue item : items) {
+            collect(item, box, any);
+        }
+    }
+
     /** Vértice com 6 casas decimais (≈ 11 cm): evita lixo de ponto flutuante nos polígonos de célula. */
     private static AxonValue corner(double lon, double lat) {
         return AxonValue.array(List.of(rounded(lon), rounded(lat)));
