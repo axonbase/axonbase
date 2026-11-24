@@ -93,6 +93,51 @@ public final class Datastore {
         synchronized (controlLock) {
             controlState.restore(controlStore.load());
             replayControl();
+            registerLegacyEdgeKinds();
+        }
+    }
+
+    /** Nome simples de tabela: o único que o RELATE registra e que a migração aceita (relê sem aspas). */
+    static final java.util.regex.Pattern PLAIN_NAME = java.util.regex.Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+
+    /**
+     * Registra no catálogo os tipos de aresta criados por {@code RELATE} antes de o RELATE passar a registrá-los.
+     * Cada banco é varrido uma única vez (chave {@code EKM|ns|db} marca o que já foi feito). Chave de aresta:
+     * {@code E|ns|db|out|tabelaOrigem|chaveOrigem|tipo|tabelaDestino|chaveDestino}.
+     */
+    private void registerLegacyEdgeKinds() {
+        for (Map.Entry<String, ConcurrentMap<String, Database>> nsEntry : namespaces.entrySet()) {
+            for (Map.Entry<String, Database> dbEntry : nsEntry.getValue().entrySet()) {
+                String ns = nsEntry.getKey();
+                String db = dbEntry.getKey();
+                String marker = "EKM|" + ns + "|" + db;
+                if (backend.get(marker).isPresent()) {
+                    continue;
+                }
+                java.util.Set<String> kinds = new java.util.TreeSet<>();
+                String prefix = "E|" + ns + "|" + db + "|out|";
+                backend.scanPrefix(prefix, key -> {
+                    String[] parts = key.substring(prefix.length()).split("\\|", 4);
+                    if (parts.length == 4 && PLAIN_NAME.matcher(parts[2]).matches()) {
+                        kinds.add(parts[2]);
+                    }
+                    return true;
+                });
+                boolean registered = false;
+                for (String kind : kinds) {
+                    if (dbEntry.getValue().catalog().table(kind) == null) {
+                        dbEntry.getValue().catalog().defineTable(new com.axonbase.core.catalog.Catalog.TableDef(kind, false, false));
+                        controlState.apply(ControlCommand.of(ControlCommand.Kind.TABLE, ns, db, kind,
+                            "DEFINE TABLE " + kind + " SCHEMALESS"));
+                        registered = true;
+                    }
+                }
+                if (registered) {
+                    controlStore.save(controlState, backend);
+                }
+                backend.put(marker, new byte[] {1});
+                backend.flush();
+            }
         }
     }
 
