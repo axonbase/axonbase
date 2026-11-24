@@ -405,6 +405,18 @@ class ProgramsTest {
     }
 
     @Test
+    void dumpEImportacaoLevamOsProgramas() {
+        run("CREATE FUNCTION f(x int = 2) AS $$ return x + 1 $$");
+        run("CREATE PACKAGE util AS $$ K = 9 $$");
+        String dump = ds.exportDatabase("t", "d");
+        assertTrue(dump.contains("CREATE OR REPLACE FUNCTION f"), dump);
+        Datastore other = Datastore.memory();
+        other.importDatabase("t", "d", dump);
+        assertEquals(3, other.execute("RETURN f()", session(other), null).asLong());
+        assertEquals(1, other.execute("INFO FOR FUNCTION f", session(other), null).asObject().get("version").asLong());
+    }
+
+    @Test
     void comRocksDb(@TempDir Path dir) throws Exception {
         Path path = Files.createDirectory(dir.resolve("rocks"));
         Session sa;

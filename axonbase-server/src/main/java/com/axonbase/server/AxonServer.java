@@ -114,6 +114,10 @@ public final class AxonServer {
             events.publish(type, data);
             AxonLog.log("warn", type.replace('.', '_'), type, data);
         });
+        // AxonPL: o prazo de cada chamada segue AXON_QUERY_TIMEOUT e o log dos programas vai para o AxonLog
+        ds.programs().timeoutMs(config.queryTimeout());
+        ds.programs().logSink((level, msg) -> AxonLog.log(level.toLowerCase(java.util.Locale.ROOT), "axonpl", msg,
+            Map.of()));
         if (auth != null) {
             auth.serviceTokens().persistTo(ds);
         }
@@ -709,6 +713,16 @@ public final class AxonServer {
               .append("axe_embedding_characters_total ").append(ds.embeddings().stats().characters()).append("\n")
               .append("# TYPE axe_embedding_seconds_total counter\n")
               .append("axe_embedding_seconds_total ").append(ds.embeddings().stats().nanos() / 1e9).append("\n")
+              .append("# TYPE axe_pl_calls_total counter\n")
+              .append("axe_pl_calls_total ").append(ds.programs().stats().calls()).append("\n")
+              .append("# TYPE axe_pl_errors_total counter\n")
+              .append("axe_pl_errors_total ").append(ds.programs().stats().errors()).append("\n")
+              .append("# TYPE axe_pl_seconds_total counter\n")
+              .append("axe_pl_seconds_total ").append(ds.programs().stats().seconds()).append("\n")
+              .append("# TYPE axe_pl_steps_total counter\n")
+              .append("axe_pl_steps_total ").append(ds.programs().stats().steps()).append("\n")
+              .append("# TYPE axe_pl_limit_errors_total counter\n")
+              .append("axe_pl_limit_errors_total ").append(ds.programs().stats().limitErrors()).append("\n")
               .append("# TYPE axe_txn_open gauge\n")
               .append("axe_txn_open ").append(activity.openTransactions()).append("\n")
               .append("# TYPE axe_txn_conflicts_total counter\n")

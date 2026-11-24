@@ -967,6 +967,13 @@ public final class Datastore {
                 sb.append(";\n");
             }
         }
+        for (com.axonbase.core.pl.ProgramDef program : database.programs().all()) {
+            if (!program.broken()) {
+                // sem o cabeçalho de metadados: a importação cria o objeto como novo
+                String text = program.definition();
+                sb.append(text.startsWith("-- axonpl ") ? text.substring(text.indexOf('\n') + 1) : text).append(";\n");
+            }
+        }
         String prefix = ns + "\u0000" + db + "\u0000";
         for (String key : database.records().keysWithPrefix(prefix)) {
             Optional<byte[]> raw = database.records().get(key);

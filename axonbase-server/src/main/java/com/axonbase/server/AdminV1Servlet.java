@@ -154,6 +154,9 @@ final class AdminV1Servlet extends HttpServlet {
         if (get && head.equals("databases") && n == 4 && seg.get(3).equals("tables")) {
             return ok(tables(c, seg.get(1), seg.get(2)));
         }
+        if (get && head.equals("databases") && n == 4 && seg.get(3).equals("programs")) {
+            return ok(programs(c, seg.get(1), seg.get(2)));
+        }
         if (get && head.equals("databases") && n == 6 && seg.get(3).equals("tables") && seg.get(5).equals("stats")) {
             needScope(c, seg.get(1), seg.get(2), Authz.Role.VIEWER);
             Database database = database(seg.get(1), seg.get(2));
@@ -436,6 +439,17 @@ final class AdminV1Servlet extends HttpServlet {
                 "databases", srv.ds().databases(ns).stream().sorted().toList()));
         }
         return AdminJson.of(out);
+    }
+
+    /** Funções, procedures e packages AxonPL do banco, para o painel do Enterprise. */
+    private AxonValue programs(Caller c, String ns, String db) {
+        needScope(c, ns, db, Authz.Role.VIEWER);
+        Database database = database(ns, db);
+        List<AxonValue> out = new ArrayList<>();
+        for (com.axonbase.core.pl.ProgramDef d : database.programs().all()) {
+            out.add(com.axonbase.core.pl.ProgramInfo.listing(d));
+        }
+        return AxonValue.array(out);
     }
 
     private AxonValue tables(Caller c, String ns, String db) {
