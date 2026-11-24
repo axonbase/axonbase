@@ -301,6 +301,21 @@ class EngineTest {
     }
 
     @Test
+    void auditAceitaChaveNumerica() {
+        Datastore ds = ns();
+        ds.auditConfig(true, "auth", false, 65536);
+        Session s = session();
+        s.auth(AxonValue.object(java.util.Map.of("id", AxonValue.str("alice"))));
+
+        ds.execute("CREATE t:1 CONTENT { a: 1 }", s, null);
+        ds.execute("UPDATE t:1 SET a = 2", s, null);
+
+        List<AxonValue> entries = ds.readAuditEntries("test", "dev");
+        assertEquals(2, entries.size());
+        assertEquals("t:1", entries.get(0).asObject().get("rid").asString());
+    }
+
+    @Test
     void auditCriaEntradasParaCreateUpdateDelete() {
         Datastore ds = ns();
         ds.auditConfig(true, "auth", false, 65536);

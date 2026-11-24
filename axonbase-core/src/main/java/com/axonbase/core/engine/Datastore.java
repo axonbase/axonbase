@@ -393,7 +393,7 @@ public final class Datastore {
 
     private static AxonValue ridAsValue(RecordId rid) {
         return rid == null ? AxonValue.nul()
-            : AxonValue.str(rid.table() + ":" + (rid.key() instanceof AxonValue kv ? kv.asString() : String.valueOf(rid.key())));
+            : AxonValue.str(rid.table() + ":" + (rid.key() instanceof AxonValue kv ? (kv.isString() ? kv.asString() : kv.toString()) : String.valueOf(rid.key())));
     }
 
     private static AxonValue truncatePayload(AxonValue value, int maxBytes) {
