@@ -1284,9 +1284,13 @@ public final class Executor {
             docs = joinDocs(db, sel, docs);
         }
         List<OrderTerm> orders = sel.orders();
+        // Com agregação, ORDER BY e LIMIT valem para as linhas agrupadas (depois de GROUP BY e HAVING), não
+        // para os documentos de origem: ordenar ou cortar antes mudaria o resultado dos agregados.
+        boolean aggregating = !joined && (sel.grouped() || sel.fields().stream().anyMatch(GroupAggregation::containsAggregate)
+            || sel.having() != null);
         if (hy != null && orders.isEmpty()) {
             docs.sort((a, b) -> Double.compare(b.searchScore(), a.searchScore()));
-        } else if (!orders.isEmpty()) {
+        } else if (!orders.isEmpty() && !aggregating) {
             Comparator<Document> cmp = orderComparator(orders);
             docs.sort(cmp);
         }
@@ -1294,13 +1298,22 @@ public final class Executor {
         int limit = sel.limit() != null ? (int) eval(sel.limit()).asLong() : docs.size();
         int stop = Math.min(docs.size(), start + limit);
         List<AxonValue> out = new ArrayList<>();
-        boolean hasAgg = !joined && sel.fields().stream().anyMatch(this::isAggregateCall);
-        if (hasAgg) {
+        boolean scalarAggregate = false;
+        if (aggregating) {
             // FETCH resolve antes da agregación, que traballa sobre todo o conxunto
             if (!sel.fetch().isEmpty()) {
                 docs.forEach(d -> fetchDocs(d, sel.fetch()));
             }
-            out.addAll(aggregate(sel, docs));
+            GroupAggregation aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
+            for (Document d : docs) {
+                aggregation.accept(d);
+            }
+            List<AxonValue> rows = aggregation.finish();
+            int from = Math.min(Math.max(start, 0), rows.size());
+            int to = sel.limit() != null ? (int) Math.min(rows.size(), (long) from + Math.max(limit, 0)) : rows.size();
+            out.addAll(rows.subList(from, to));
+            // sem GROUP BY o agregado é uma linha só: SELECT VALUE count() devolve o número, não [{count: n}]
+            scalarAggregate = sel.valueOnly() && !sel.grouped() && out.size() == 1;
         } else {
             // FETCH resolvase só sobre a fiestra [start, stop), non sobre todos os docs
             for (int i = Math.min(start, docs.size()); i < stop; i++) {
@@ -1310,6 +1323,9 @@ public final class Executor {
                 }
                 out.add(joined ? projectJoin(sel, d) : project(sel, d));
             }
+        }
+        if (scalarAggregate) {
+            return out.get(0);
         }
         if (!sel.only() && !sel.valueOnly()) {
             out.replaceAll(this::applyDataRuleMask);
@@ -1345,7 +1361,8 @@ public final class Executor {
             && sel.limit() != null
             && sel.orders().isEmpty()
             && sel.joins().isEmpty()
-            && sel.group().isEmpty()
+            && !sel.grouped()
+            && sel.having() == null
             && sel.fields().stream().noneMatch(this::isAggregateCall)
             && (sel.cond() == null || !isSearchMatch(sel.cond()));
     }
@@ -2515,133 +2532,22 @@ return score;
     }
 
     private boolean isAggregateCall(Expr f) {
-        if (f instanceof Expr.Alias a) {
-            return isAggregateCall(a.expr());
-        }
-        if (f instanceof Expr.Call c) {
-            String n = c.name();
-            return n.equals("count") || n.equals("sum") || n.equals("avg")
-                || n.equals("min") || n.equals("max");
-        }
-        return false;
+        return GroupAggregation.containsAggregate(f);
     }
 
-    private java.util.List<AxonValue> aggregate(Statement.Select sel, java.util.List<Document> docs) {
-        java.util.List<AxonValue> result = new java.util.ArrayList<>();
-        if (sel.group() != null && !sel.group().isEmpty()) {
-            // agrupar por valor das expr de group
-            java.util.Map<String, java.util.List<Document>> groups = new java.util.LinkedHashMap<>();
-            for (Document d : docs) {
-                StringBuilder key = new StringBuilder();
-                for (Expr ge : sel.group()) {
-                    key.append(evalField(ge, d)).append('');
-                }
-                groups.computeIfAbsent(key.toString(), k -> new java.util.ArrayList<>()).add(d);
+    /** Avalia expressões sobre uma linha para o agregador. */
+    private GroupAggregation.RowEval groupRowEval() {
+        return new GroupAggregation.RowEval() {
+            @Override
+            public AxonValue eval(Expr expr, Document row) {
+                return evalExprInDoc(expr, row);
             }
-            for (var e : groups.entrySet()) {
-                java.util.List<Document> groupDocs = e.getValue();
-                java.util.Map<String, AxonValue> row = new LinkedHashMap<>();
-                // campos de group
-                java.util.List<Expr> groupExprs = sel.group();
-                for (int i = 0; i < groupExprs.size(); i++) {
-                    Document rep = groupDocs.get(0);
-                    row.put("group." + i, evalField(groupExprs.get(i), rep));
-                }
-                for (Expr f : sel.fields()) {
-                    if (isAggregateCall(f)) {
-                        Expr unwrapped = f instanceof Expr.Alias a ? a.expr() : f;
-                        Expr.Call c = (Expr.Call) unwrapped;
-                        String n = c.name();
-                        Expr arg = c.args().isEmpty() ? null : c.args().get(0);
-                        row.put(fieldName(f), evalAggregate(n, arg, groupDocs));
-                    }
-                }
-                result.add(AxonValue.object(row));
-            }
-            return result;
-        }
-        // sem group: agregar sobre todos os docs num só campo (count(*) padrão)
-        Map<String, AxonValue> row = new LinkedHashMap<>();
-        for (Expr f : sel.fields()) {
-            if (isAggregateCall(f)) {
-                Expr unwrapped = f instanceof Expr.Alias a ? a.expr() : f;
-                Expr.Call c = (Expr.Call) unwrapped;
-                Expr arg = c.args().isEmpty() ? null : c.args().get(0);
-                row.put(fieldName(f), evalAggregate(c.name(), arg, docs));
-            }
-        }
-        result.add(AxonValue.object(row));
-        return result;
-    }
 
-    private boolean AggregateExpr(Expr f) {
-        return isAggregateCall(f);
-    }
-
-    private AxonValue evalAggregate(String name, Expr arg, java.util.List<Document> docs) {
-        java.util.List<AxonValue> values = new java.util.ArrayList<>();
-        for (Document d : docs) {
-            AxonValue v = arg == null ? AxonValue.num(1) : evalField(arg, d);
-            if (name.equals("count")) {
-                values.add(AxonValue.num(1));
-            } else {
-                values.add(v);
+            @Override
+            public boolean truthy(AxonValue value) {
+                return Executor.this.truthy(value);
             }
-        }
-        switch (name) {
-            case "count" -> {
-                long c = 0;
-                for (AxonValue v : values) {
-                    if (v.isNumber()) {
-                        c += v.asLong();
-                    } else if (!v.isNull() && !v.isNone()) {
-                        c += 1;
-                    }
-                }
-                return AxonValue.num(c);
-            }
-            case "sum" -> {
-                java.math.BigDecimal sum = java.math.BigDecimal.ZERO;
-                for (AxonValue v : values) {
-                    if (v.isNumber()) {
-                        sum = sum.add(v.asDecimal());
-                    }
-                }
-                return AxonValue.num(sum);
-            }
-            case "avg" -> {
-                java.math.BigDecimal sum = java.math.BigDecimal.ZERO;
-                long count = 0;
-                for (AxonValue v : values) {
-                    if (v.isNumber()) {
-                        sum = sum.add(v.asDecimal());
-                        count++;
-                    }
-                }
-                return count == 0 ? AxonValue.nul() : AxonValue.num(sum.divide(java.math.BigDecimal.valueOf(count)));
-            }
-            case "min" -> {
-                AxonValue best = null;
-                for (AxonValue v : values) {
-                    if (!v.isNull() && !v.isNone() && (best == null || v.compareTo(best) < 0)) {
-                        best = v;
-                    }
-                }
-                return best == null ? AxonValue.nul() : best;
-            }
-            case "max" -> {
-                AxonValue best = null;
-                for (AxonValue v : values) {
-                    if (!v.isNull() && !v.isNone() && (best == null || v.compareTo(best) > 0)) {
-                        best = v;
-                    }
-                }
-                return best == null ? AxonValue.nul() : best;
-            }
-            default -> {
-                return AxonValue.nul();
-            }
-        }
+        };
     }
 
     private void fetchDocs(Document d, java.util.List<String> fields) {
@@ -2738,7 +2644,7 @@ return score;
             return idiomToString(i);
         }
         if (e instanceof Expr.Call c) {
-            return c.name();
+            return c.name().equals(Expr.COUNT_DISTINCT) ? "count" : c.name();
         }
         return "value";
     }
