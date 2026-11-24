@@ -24,6 +24,8 @@ public final class QueryContext {
         private final long startedAtMs = System.currentTimeMillis();
         private volatile boolean cancelled;
         private volatile String cancelledBy;
+        private final java.util.concurrent.CopyOnWriteArrayList<Runnable> cancelHooks =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
 
         public Handle(String id) {
             this.id = id;
@@ -53,6 +55,21 @@ public final class QueryContext {
         public void cancel(String by) {
             this.cancelledBy = by;
             this.cancelled = true;
+            for (Runnable hook : cancelHooks) {
+                hook.run();
+            }
+        }
+
+        /** Registra o que fazer quando a consulta for cancelada (roda já, se ela já foi). Usado pelo AxonPL. */
+        public void onCancel(Runnable hook) {
+            cancelHooks.add(hook);
+            if (cancelled) {
+                hook.run();
+            }
+        }
+
+        public void removeOnCancel(Runnable hook) {
+            cancelHooks.remove(hook);
         }
     }
 

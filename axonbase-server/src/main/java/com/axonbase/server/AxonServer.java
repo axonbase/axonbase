@@ -114,6 +114,15 @@ public final class AxonServer {
             events.publish(type, data);
             AxonLog.log("warn", type.replace('.', '_'), type, data);
         });
+        // AxonPL: o prazo de cada chamada segue AXON_QUERY_TIMEOUT e o log dos programas vai para o AxonLog
+        ds.programs().timeoutMs(config.queryTimeout());
+        // depuração do AxonPL: ociosidade opcional (segundos) de uma sessão pausada
+        String debugIdle = System.getenv("AXON_PL_DEBUG_IDLE");
+        if (debugIdle != null && debugIdle.trim().matches("\\d{1,9}")) {
+            ds.programs().debug().idleSeconds(Long.parseLong(debugIdle.trim()));
+        }
+        ds.programs().logSink((level, msg) -> AxonLog.log(level.toLowerCase(java.util.Locale.ROOT), "axonpl", msg,
+            Map.of()));
         if (auth != null) {
             auth.serviceTokens().persistTo(ds);
         }
@@ -709,6 +718,20 @@ public final class AxonServer {
               .append("axe_embedding_characters_total ").append(ds.embeddings().stats().characters()).append("\n")
               .append("# TYPE axe_embedding_seconds_total counter\n")
               .append("axe_embedding_seconds_total ").append(ds.embeddings().stats().nanos() / 1e9).append("\n")
+              .append("# TYPE axe_pl_calls_total counter\n")
+              .append("axe_pl_calls_total ").append(ds.programs().stats().calls()).append("\n")
+              .append("# TYPE axe_pl_errors_total counter\n")
+              .append("axe_pl_errors_total ").append(ds.programs().stats().errors()).append("\n")
+              .append("# TYPE axe_pl_seconds_total counter\n")
+              .append("axe_pl_seconds_total ").append(ds.programs().stats().seconds()).append("\n")
+              .append("# TYPE axe_pl_steps_total counter\n")
+              .append("axe_pl_steps_total ").append(ds.programs().stats().steps()).append("\n")
+              .append("# TYPE axe_pl_limit_errors_total counter\n")
+              .append("axe_pl_limit_errors_total ").append(ds.programs().stats().limitErrors()).append("\n")
+              .append("# TYPE axe_pl_debug_sessions gauge\n")
+              .append("axe_pl_debug_sessions ").append(ds.programs().debug().active()).append("\n")
+              .append("# TYPE axe_pl_debug_timeouts_total counter\n")
+              .append("axe_pl_debug_timeouts_total ").append(ds.programs().debug().timeouts()).append("\n")
               .append("# TYPE axe_txn_open gauge\n")
               .append("axe_txn_open ").append(activity.openTransactions()).append("\n")
               .append("# TYPE axe_txn_conflicts_total counter\n")
@@ -1039,7 +1062,10 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             String body = readBody(req);
-            if (com.axonbase.core.engine.Datastore.isMutation(body) && redirectWrites(req, resp)) {
+            // Só um nó que não é o líder precisa saber se a instrução escreve (para redirecionar); no líder ou sem
+            // cluster isso custaria um parse a mais em toda requisição.
+            if (!clusterStatus.status().isLeader() && com.axonbase.core.engine.Datastore.isMutation(body)
+                && redirectWrites(req, resp)) {
                 return;
             }
             Session s = withNames(req);
@@ -1324,7 +1350,28 @@ public final class AxonServer {
     }
 
     private static String esc(String s) {
-        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
+        if (s == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> out.append("\\\\");
+                case '"' -> out.append("\\\"");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        out.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
+        }
+        return out.toString();
     }
 
     /**

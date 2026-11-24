@@ -453,6 +453,48 @@ public sealed interface Statement {
     }
 
     // ------------------------------------------------------------------
+    // AxonPL: funções, procedures e packages escritos em Python simplificado
+    // ------------------------------------------------------------------
+
+    /** Parâmetro de função ou procedure: tipo (documental e validado na chamada) e padrão (expressão constante). */
+    record ProgramParam(String name, String type, Expr defaultExpr) {
+    }
+
+    /**
+     * {@code CREATE [OR REPLACE] FUNCTION nome(p1 [tipo] [= padrão], ...) [RETURNS tipo] [SECURITY DEFINER|INVOKER]
+     * AS $$ corpo $$}. O corpo é o texto de uma função Python.
+     */
+    record CreateFunction(boolean orReplace, String name, List<ProgramParam> params, String returns,
+                          boolean definer, String body) implements Statement {
+        public CreateFunction {
+            params = List.copyOf(params);
+        }
+    }
+
+    /** {@code CREATE [OR REPLACE] PROCEDURE ...}: igual à função, mas pode escrever. */
+    record CreateProcedure(boolean orReplace, String name, List<ProgramParam> params, String returns,
+                           boolean definer, String body) implements Statement {
+        public CreateProcedure {
+            params = List.copyOf(params);
+        }
+    }
+
+    /** {@code CREATE [OR REPLACE] PACKAGE nome [SECURITY DEFINER] AS $$ módulo Python $$}. */
+    record CreatePackage(boolean orReplace, String name, boolean definer, String body) implements Statement {
+    }
+
+    /** {@code DROP FUNCTION|PROCEDURE|PACKAGE nome}; {@code kind} é FUNCTION, PROCEDURE ou PACKAGE. */
+    record DropProgram(String kind, String name) implements Statement {
+    }
+
+    /** {@code CALL nome(args)} ou {@code CALL pacote::nome(args)}: o valor devolvido é o resultado da sentença. */
+    record CallProgram(String name, List<Expr> args) implements Statement {
+        public CallProgram {
+            args = List.copyOf(args);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // tipos auxiliares das sentenças
     // ------------------------------------------------------------------
 

@@ -7,6 +7,7 @@ COPY pom.xml .
 COPY axonbase-common/pom.xml axonbase-common/
 COPY axonbase-value/pom.xml axonbase-value/
 COPY axonbase-parser/pom.xml axonbase-parser/
+COPY axonbase-pl/pom.xml axonbase-pl/
 COPY axonbase-core/pom.xml axonbase-core/
 COPY axonbase-server/pom.xml axonbase-server/
 COPY axonbase-sdk-java/pom.xml axonbase-sdk-java/
@@ -19,6 +20,7 @@ RUN --mount=type=cache,target=/root/.m2/repository \
 COPY axonbase-common/src axonbase-common/src
 COPY axonbase-value/src axonbase-value/src
 COPY axonbase-parser/src axonbase-parser/src
+COPY axonbase-pl/src axonbase-pl/src
 COPY axonbase-core/src axonbase-core/src
 COPY axonbase-server/src axonbase-server/src
 COPY axonbase-sdk-java/src axonbase-sdk-java/src
@@ -35,9 +37,10 @@ WORKDIR /app
 COPY --from=build /build/axonbase-common/target/classes /app/classes/axonbase-common
 COPY --from=build /build/axonbase-value/target/classes /app/classes/axonbase-value
 COPY --from=build /build/axonbase-parser/target/classes /app/classes/axonbase-parser
+COPY --from=build /build/axonbase-pl/target/classes /app/classes/axonbase-pl
 COPY --from=build /build/axonbase-core/target/classes /app/classes/axonbase-core
 COPY --from=build /build/axonbase-server/target/classes /app/classes/axonbase-server
 COPY --from=build /build/deps /app/deps
 EXPOSE 8000
-ENTRYPOINT ["sh", "-c", "java -cp '/app/classes/axonbase-common:/app/classes/axonbase-value:/app/classes/axonbase-parser:/app/classes/axonbase-core:/app/classes/axonbase-server:/app/deps/*' com.axonbase.server.Main \"$@\"", "--"]
+ENTRYPOINT ["sh", "-c", "java -cp '/app/classes/axonbase-common:/app/classes/axonbase-value:/app/classes/axonbase-parser:/app/classes/axonbase-pl:/app/classes/axonbase-core:/app/classes/axonbase-server:/app/deps/*' com.axonbase.server.Main \"$@\"", "--"]
 CMD ["start", "--path", "/data", "--port", "8000", "--bind", "0.0.0.0"]

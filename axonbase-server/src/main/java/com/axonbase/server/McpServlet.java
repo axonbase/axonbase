@@ -167,11 +167,20 @@ public final class McpServlet extends HttpServlet {
                     int limit = args.containsKey("limit") ? Math.min(100, Math.max(1, (int) args.get("limit").asLong())) : 100;
                     yield ds.execute("SELECT * FROM " + table + " LIMIT " + limit, s, null);
                 }
+                case "axon_call" -> {
+                    AxonValue n = args.get("name");
+                    AxonValue a = args.get("args");
+                    yield ProgramCalls.call(ds, s, n == null || !n.isString() ? null : n.asString(),
+                        a != null && a.isArray() ? a.asArray() : List.of());
+                }
                 case "axon_info" -> {
                     yield ds.execute("INFO FOR DATABASE", s, null);
                 }
                 default -> AxonValue.object(Map.of("error", AxonValue.str(Messages.get("mcp_tool_not_found", name.asString()))));
             };
+        } catch (com.axonbase.common.AxonError e) {
+            return AxonValue.object(Map.of("error", AxonValue.str(e.getMessage()),
+                "code", AxonValue.num(e.code())));
         } catch (Exception e) {
             return AxonValue.object(Map.of("error", AxonValue.str(e.getMessage())));
         }
@@ -180,7 +189,9 @@ public final class McpServlet extends HttpServlet {
     private AxonValue toolsResult() {
         return AxonValue.object(Map.of("tools", AxonValue.array(List.of(
             tool("axon_select", "Seleciona registros de uma tabela", Map.of("table", "string", "limit", "number?")),
-            tool("axon_info", "Informações do catálogo do banco atual", Map.of())
+            tool("axon_call", "Chama uma funcao, procedure ou funcao de package AxonPL (pkg::fn) pelo nome",
+                Map.of("name", "string", "args", "array?")),
+            tool("axon_info","Informações do catálogo do banco atual", Map.of())
         ))));
     }
 

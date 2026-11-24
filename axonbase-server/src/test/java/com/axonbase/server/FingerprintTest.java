@@ -42,4 +42,47 @@ class FingerprintTest {
         assertTrue(Fingerprint.of("SELECT " + "x, ".repeat(500) + "y FROM t").length() <= Fingerprint.MAX_CHARS + 3);
         assertEquals("", Fingerprint.of(null));
     }
+
+    // ---- equivalência com a implementação anterior (quatro expressões regulares) ----
+
+    private static final java.util.regex.Pattern STRINGS = java.util.regex.Pattern.compile("'(?:[^'\\\\]|\\\\.)*'|\"(?:[^\"\\\\]|\\\\.)*\"");
+    private static final java.util.regex.Pattern NUMBERS = java.util.regex.Pattern.compile("\\b\\d+(?:\\.\\d+)?\\b");
+    private static final java.util.regex.Pattern LISTS = java.util.regex.Pattern.compile("\\?(?:\\s*,\\s*\\?)+");
+    private static final java.util.regex.Pattern SPACES = java.util.regex.Pattern.compile("\\s+");
+
+    private static String legacy(String sql) {
+        String s = STRINGS.matcher(sql).replaceAll("?");
+        s = NUMBERS.matcher(s).replaceAll("?");
+        s = LISTS.matcher(s).replaceAll("?");
+        s = SPACES.matcher(s).replaceAll(" ").trim();
+        return s.length() > Fingerprint.MAX_CHARS ? s.substring(0, Fingerprint.MAX_CHARS) + "..." : s;
+    }
+
+    @org.junit.jupiter.api.Test
+    void igualAImplementacaoAnteriorEmCentenasDeMilharesDeEntradas() {
+        String[] pieces = {"SELECT", "*", "FROM", "pedido", "pedido:1", "c123", "x1y", "WHERE", "id", "=", "<=", "AND", "'abc'", "'a\\'b'",
+            "\"dois\"", "12", "3.14", "007", "1.", ".5", "1e5", "12abc", "abc12", ",", "(", ")", "[", "]", "{a: 1}", "?", "IN", "LIMIT", "10",
+            "\n", "\t", "  ", "'", "\"", "\\", "->", "$x", "9999999999", "1.2.3", "a.b", "a,b,c", "', '", "1,2,3"};
+        java.util.Random r = new java.util.Random(42);
+        for (int n = 0; n < 200_000; n++) {
+            StringBuilder sb = new StringBuilder();
+            int len = 1 + r.nextInt(18);
+            for (int k = 0; k < len; k++) {
+                sb.append(pieces[r.nextInt(pieces.length)]);
+                if (r.nextInt(3) > 0) {
+                    sb.append(r.nextBoolean() ? " " : "");
+                }
+            }
+            String sql = sb.toString();
+            org.junit.jupiter.api.Assertions.assertEquals(legacy(sql), Fingerprint.of(sql), "entrada: [" + sql + "]");
+        }
+    }
+
+    @org.junit.jupiter.api.Test
+    void textosLongosSaemCortadosComoAntes() {
+        String sql = "SELECT " + "campo_muito_longo_numero_".repeat(40) + " FROM t WHERE a IN (1, 2, 3)";
+        org.junit.jupiter.api.Assertions.assertEquals(legacy(sql), Fingerprint.of(sql));
+        String lista = "SELECT * FROM t WHERE id IN (" + "1, ".repeat(400) + "2)";
+        org.junit.jupiter.api.Assertions.assertEquals(legacy(lista), Fingerprint.of(lista));
+    }
 }

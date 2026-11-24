@@ -301,6 +301,36 @@ class EngineTest {
     }
 
     @Test
+    void deleteLiberaEntradaDoIndiceUnique() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("DEFINE TABLE p SCHEMALESS", s, null);
+        ds.execute("DEFINE INDEX p_email ON TABLE p COLUMNS email UNIQUE", s, null);
+        ds.execute("CREATE p:1 CONTENT { email: \"a@x\" }", s, null);
+        ds.execute("DELETE p:1", s, null);
+        // o valor volta a ficar livre depois do DELETE
+        ds.execute("CREATE p:2 CONTENT { email: \"a@x\" }", s, null);
+        assertEquals(1, ds.execute("SELECT * FROM p WHERE email = \"a@x\"", s, null).asArray().size());
+        // e continua unico para quem existe
+        assertThrows(RuntimeException.class, () -> ds.execute("CREATE p:3 CONTENT { email: \"a@x\" }", s, null));
+    }
+
+    @Test
+    void auditAceitaChaveNumerica() {
+        Datastore ds = ns();
+        ds.auditConfig(true, "auth", false, 65536);
+        Session s = session();
+        s.auth(AxonValue.object(java.util.Map.of("id", AxonValue.str("alice"))));
+
+        ds.execute("CREATE t:1 CONTENT { a: 1 }", s, null);
+        ds.execute("UPDATE t:1 SET a = 2", s, null);
+
+        List<AxonValue> entries = ds.readAuditEntries("test", "dev");
+        assertEquals(2, entries.size());
+        assertEquals("t:1", entries.get(0).asObject().get("rid").asString());
+    }
+
+    @Test
     void auditCriaEntradasParaCreateUpdateDelete() {
         Datastore ds = ns();
         ds.auditConfig(true, "auth", false, 65536);

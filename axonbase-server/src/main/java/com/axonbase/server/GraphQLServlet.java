@@ -67,6 +67,29 @@ public final class GraphQLServlet extends HttpServlet {
             return;
         }
 
+        // Chamada de programa AxonPL: { call(name: "pkg::fn", args: [1, 2]) } ou args: $variavel
+        java.util.regex.Matcher cm = CALL_FIELD.matcher(query);
+        if (cm.find()) {
+            try {
+                AxonValue args = AxonValue.array(List.of());
+                String raw = cm.group(2);
+                if (raw != null && raw.startsWith("$")) {
+                    AxonValue v = vars != null && vars.isObject() ? vars.asObject().get(raw.substring(1)) : null;
+                    args = v != null && v.isArray() ? v : args;
+                } else if (raw != null) {
+                    args = AxonJson.parseDocument(raw);
+                }
+                AxonValue result = ProgramCalls.call(ds, session, cm.group(1), args.asArray());
+                json(resp, 200, "{\"data\":{\"call\":" + AxonJson.write(result) + "}}");
+            } catch (com.axonbase.common.AxonError e) {
+                json(resp, 200, "{\"errors\":[{\"message\":\"" + esc(e.getMessage())
+                    + "\",\"extensions\":{\"code\":" + e.code() + "}}]}");
+            } catch (Exception e) {
+                json(resp, 200, "{\"errors\":[{\"message\":\"" + esc(e.getMessage()) + "\"}]}");
+            }
+            return;
+        }
+
         // Extrair nome da tabela da consulta
         String table = extractTable(query);
         if (table == null) {
@@ -91,6 +114,9 @@ public final class GraphQLServlet extends HttpServlet {
             json(resp, 200, "{\"errors\":[{\"message\":\"" + esc(e.getMessage()) + "\"}]}");
         }
     }
+
+    private static final java.util.regex.Pattern CALL_FIELD = java.util.regex.Pattern.compile(
+        "\\bcall\\s*\\(\\s*name\\s*:\\s*\"([^\"]+)\"(?:\\s*,\\s*args\\s*:\\s*(\\$[A-Za-z_][A-Za-z0-9_]*|\\[[^\\]]*\\]))?\\s*\\)");
 
     private String buildSchema(Session s) {
         try {

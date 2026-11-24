@@ -4,7 +4,6 @@ import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,12 +38,14 @@ public final class LogBuffer {
     }
 
     private final int capacity;
-    private final ArrayDeque<Entry> ring;
+    /** Anel sem trava: cada escrita reserva uma posição com um contador atômico (várias threads por requisição). */
+    private final java.util.concurrent.atomic.AtomicReferenceArray<Entry> ring;
+    private final java.util.concurrent.atomic.AtomicLong written = new java.util.concurrent.atomic.AtomicLong();
     private final Set<Consumer<Entry>> subscribers = new CopyOnWriteArraySet<>();
 
     public LogBuffer(int capacity) {
         this.capacity = Math.max(1, capacity);
-        this.ring = new ArrayDeque<>(Math.min(this.capacity, 1024));
+        this.ring = new java.util.concurrent.atomic.AtomicReferenceArray<>(this.capacity);
     }
 
     /** Severidade numérica para filtrar por nível mínimo; níveis desconhecidos contam como info. */
@@ -61,12 +62,8 @@ public final class LogBuffer {
     }
 
     public void add(Entry entry) {
-        synchronized (ring) {
-            if (ring.size() >= capacity) {
-                ring.pollFirst();
-            }
-            ring.addLast(entry);
-        }
+        long slot = written.getAndIncrement();
+        ring.set((int) (slot % capacity), entry);
         for (Consumer<Entry> s : subscribers) {
             try {
                 s.accept(entry);
@@ -85,10 +82,7 @@ public final class LogBuffer {
      */
     public List<Entry> snapshot(int limit, String minLevel, long since) {
         int min = minLevel == null || minLevel.isBlank() ? -1 : severity(minLevel);
-        List<Entry> all;
-        synchronized (ring) {
-            all = new ArrayList<>(ring);
-        }
+        List<Entry> all = ordered();
         List<Entry> out = new ArrayList<>();
         for (int i = all.size() - 1; i >= 0 && out.size() < limit; i--) {
             Entry e = all.get(i);
@@ -102,9 +96,21 @@ public final class LogBuffer {
     }
 
     public int size() {
-        synchronized (ring) {
-            return ring.size();
+        return (int) Math.min(written.get(), capacity);
+    }
+
+    /** Linhas do anel da mais antiga para a mais nova (posição ainda não preenchida por uma escrita em curso é pulada). */
+    private List<Entry> ordered() {
+        long end = written.get();
+        long start = Math.max(0, end - capacity);
+        List<Entry> all = new ArrayList<>((int) (end - start));
+        for (long i = start; i < end; i++) {
+            Entry e = ring.get((int) (i % capacity));
+            if (e != null) {
+                all.add(e);
+            }
         }
+        return all;
     }
 
     public int capacity() {

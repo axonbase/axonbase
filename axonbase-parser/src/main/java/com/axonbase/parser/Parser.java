@@ -193,6 +193,9 @@ public final class Parser {
                 if (atWord("reembed") && peekIsWord(1, "table")) {
                     yield parseReembed();
                 }
+                if (atWord("call") && (peek(1).is(IDENT) || peek(1).is(KEYWORD))) {
+                    yield parseCall();
+                }
                 throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
             }
             default -> throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
@@ -567,6 +570,9 @@ public final class Parser {
                 return parseCreateDataRule();
             }
             throw error(Messages.get("parser_create_data_expected_rule", peek().start()));
+        }
+        if (atProgramCreate()) {
+            return parseCreateProgram();
         }
         boolean only = matchKeyword("only");
         Expr target = parseTarget();
@@ -1453,6 +1459,126 @@ public final class Parser {
     }
 
     /** {@code REEMBED TABLE t [FIELD f] [DRY RUN]} */
+    // ------------------------------------------------------------------
+    // AxonPL: FUNCTION, PROCEDURE, PACKAGE e CALL
+    // ------------------------------------------------------------------
+
+    /** FUNCTION, PROCEDURE ou PACKAGE se a palavra na posição for uma delas; senão {@code null}. */
+    private String atProgramWord(int ahead) {
+        for (String w : new String[] {"function", "procedure", "package"}) {
+            if (peekIsWord(ahead, w)) {
+                return w.toUpperCase(java.util.Locale.ROOT);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Depois de {@code CREATE}: é um objeto AxonPL? {@code CREATE FUNCTION f(} e {@code CREATE PACKAGE p AS} só
+     * valem com esse formato, para não tomar uma tabela chamada {@code function} ou {@code package}.
+     */
+    private boolean atProgramCreate() {
+        int off = 0;
+        if (atKeyword("or") && peek(1).isKeyword("replace")) {
+            off = 2;
+        }
+        String kind = atProgramWord(off);
+        if (kind == null) {
+            return false;
+        }
+        Token name = peek(off + 1);
+        if (!(name.is(IDENT) || name.is(KEYWORD) || name.is(TokenType.STRING))) {
+            return false;
+        }
+        Token next = peek(off + 2);
+        if (kind.equals("PACKAGE")) {
+            return next.isKeyword("as") || peekIsWord(off + 2, "security");
+        }
+        return next.is(LPAREN);
+    }
+
+    private Statement parseCreateProgram() {
+        boolean orReplace = false;
+        if (matchKeyword("or")) {
+            expectKeyword("replace");
+            orReplace = true;
+        }
+        String kind = atProgramWord(0);
+        pos++;
+        String name = expectIdentOrString();
+        List<Statement.ProgramParam> params = new ArrayList<>();
+        String returns = null;
+        if (!kind.equals("PACKAGE")) {
+            expect(LPAREN);
+            if (!at(RPAREN)) {
+                do {
+                    params.add(parseProgramParam());
+                } while (match(COMMA));
+            }
+            expect(RPAREN);
+            if (matchWord("returns")) {
+                returns = parseTypeWord();
+            }
+        }
+        boolean definer = false;
+        if (matchWord("security")) {
+            if (matchWord("definer")) {
+                definer = true;
+            } else if (!matchWord("invoker")) {
+                throw error(Messages.get("parser_expected_keyword", "DEFINER ou INVOKER", peek().start()));
+            }
+        }
+        expectKeyword("as");
+        String body = expect(TokenType.STRING).literal() instanceof String text ? text : "";
+        body = ProgramText.normalizeBody(body);
+        return switch (kind) {
+            case "FUNCTION" -> new Statement.CreateFunction(orReplace, name, params, returns, definer, body);
+            case "PROCEDURE" -> new Statement.CreateProcedure(orReplace, name, params, returns, definer, body);
+            default -> new Statement.CreatePackage(orReplace, name, definer, body);
+        };
+    }
+
+    private Statement.ProgramParam parseProgramParam() {
+        String name = expectIdent();
+        String type = null;
+        if (at(IDENT) || at(KEYWORD)) {
+            type = parseTypeWord();
+        }
+        Expr def = null;
+        if (match(EQ)) {
+            def = parseExpr();
+        }
+        return new Statement.ProgramParam(name, type, def);
+    }
+
+    /** Nome de tipo, com {@code <...>} opcional (array&lt;int&gt;). */
+    private String parseTypeWord() {
+        StringBuilder sb = new StringBuilder(expectIdent());
+        if (at(TokenType.LT)) {
+            int depth = 0;
+            do {
+                Token t = take();
+                if (t.is(TokenType.LT)) {
+                    depth++;
+                } else if (t.is(TokenType.GT)) {
+                    depth--;
+                }
+                sb.append(t.text());
+            } while (depth > 0 && !at(EOF));
+        }
+        return sb.toString();
+    }
+
+    private Statement parseCall() {
+        pos++; // CALL
+        StringBuilder name = new StringBuilder(expectIdent());
+        while (match(COLON_COLON)) {
+            name.append("::").append(expectIdent());
+        }
+        List<Expr> args = at(LPAREN) ? parseArgs() : List.of();
+        return new Statement.CallProgram(name.toString(), args);
+    }
+
     private Statement parseReembed() {
         pos++; // REEMBED
         expectWord("table");
@@ -1763,6 +1889,11 @@ public final class Parser {
         if (matchWord("embedding")) {
             return new Statement.DropEmbedding(expectIdent());
         }
+        if (atProgramWord(0) != null) {
+            String kind = atProgramWord(0);
+            pos++;
+            return new Statement.DropProgram(kind, expectIdentOrString());
+        }
         if (matchKeyword("index")) {
             String name = expectIdent();
             // forma com a tabela (DROP INDEX nome ON [TABLE] tabela), a mesma do CREATE INDEX; o nome já basta
@@ -1847,6 +1978,11 @@ public final class Parser {
         }
         if (matchKeyword("table")) {
             return new Statement.Info("table", expectIdent());
+        }
+        if (atProgramWord(0) != null) {
+            String kind = atProgramWord(0).toLowerCase(java.util.Locale.ROOT);
+            pos++;
+            return new Statement.Info(kind, expectIdentOrString());
         }
         throw error(Messages.get("parser_invalid_info", peek().start()));
     }

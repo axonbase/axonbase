@@ -56,8 +56,20 @@ public final class AdmissionControl {
 
     /** Tenta entrar. Quem recebe {@code true} precisa chamar {@link #exit()}. */
     public boolean tryEnter() {
-        return permits.tryAcquire();
+        if (permits.tryAcquire()) {
+            return true;
+        }
+        // Rajada acima do limite: espera um instante por uma vaga (uma leitura por id leva microssegundos) em vez de
+        // recusar na hora; só recusa se a fila de espera não andar.
+        try {
+            return permits.tryAcquire(WAIT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
+
+    static final long WAIT_MILLIS = 250;
 
     public void exit() {
         permits.release();
