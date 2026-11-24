@@ -14,15 +14,26 @@ import java.util.Map;
 public final class ControlStateMachine {
 
     private final Map<String, ControlCommand> state = new LinkedHashMap<>();
+    private long version;
 
     public synchronized void apply(ControlCommand command) {
         state.put(command.identity(), command);
+        version++;
+    }
+
+    /**
+     * Contador que só cresce a cada mudança do plano de controle. Quem desfaz uma transação compara a versão do
+     * começo com a atual e só reconstrói o catálogo se houve DDL no meio.
+     */
+    public synchronized long version() {
+        return version;
     }
 
     /** Remove os comandos que casam com o filtro (DROP TABLE tira a tabela e o que pertence a ela do replay). */
     public synchronized int removeWhere(java.util.function.Predicate<ControlCommand> filter) {
         int before = state.size();
         state.values().removeIf(filter);
+        version++;
         return before - state.size();
     }
 

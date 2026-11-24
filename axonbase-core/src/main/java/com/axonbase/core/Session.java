@@ -99,6 +99,17 @@ public final class Session {
         this.txt = tx;
     }
 
+    private long txControlVersion = -1;
+
+    /** Versão do plano de controle quando a transação começou, ou {@code -1} se não se sabe. */
+    public long txControlVersion() {
+        return txControlVersion;
+    }
+
+    public void txControlVersion(long version) {
+        this.txControlVersion = version;
+    }
+
     private Transaction requireTx() {
         if (txt == null || !txt.isOpen()) {
             throw new com.axonbase.common.AxonError(-32000, Messages.get("txn_inactive"));
