@@ -111,10 +111,13 @@ class ScaleBaselineBenchmarkTest {
             out("B1 leitura por id %d threads              %8.0f ops/s  p50 %.2f ms  p99 %.2f ms  max %.0f ms", THREADS, b1[0], b1[1], b1[2], b1[3]);
             out("B2 WHERE codigo = x (UNIQUE)              %8.1f ms", time(ds, "SELECT * FROM pedido WHERE codigo = 'c" + (rows / 2) + "'"));
             out("B3 SELECT * LIMIT 10                      %8.1f ms", time(ds, "SELECT * FROM pedido LIMIT 10"));
+            out("B3b mesma consulta, 2a vez                %8.1f ms", time(ds, "SELECT * FROM pedido LIMIT 10"));
+            out("B3c LIMIT 10 em tabela sem indice         %8.1f ms", time(ds, "SELECT * FROM pedido_b LIMIT 10"));
             out("B4 WHERE status = 'novo' LIMIT 10 (COL.)  %8.1f ms", time(ds, "SELECT * FROM pedido WHERE status = 'novo' LIMIT 10"));
             out("B5 count() GROUP ALL (coluna indexada)    %8.1f ms", time(ds, "SELECT count() FROM pedido GROUP ALL"));
             out("B6 WHERE valor > 9999 LIMIT 10 (sem idx)  %8.1f ms", time(ds, "SELECT * FROM pedido WHERE valor > 9999 LIMIT 10"));
             out("B7 GROUP BY loja (sem indice)             %8.1f ms", time(ds, "SELECT loja, count() AS n FROM pedido GROUP BY loja ORDER BY n DESC LIMIT 3"));
+            out("B8 ORDER BY valor DESC LIMIT 10 (top-K)   %8.1f ms", time(ds, "SELECT * FROM pedido ORDER BY valor DESC LIMIT 10"));
 
             // ---- C. interferência: DML com e sem SELECT lento ao lado
             AtomicBoolean stop = new AtomicBoolean();
@@ -145,6 +148,39 @@ class ScaleBaselineBenchmarkTest {
             double[] d2 = run(ds, 4, 2_000, (i, s) -> "SELECT nome FROM entregador WHERE geo::distance(pos, {type: 'Point', coordinates: ["
                 + (-46.7 + (i % 100) * 0.001) + ", -23.6]}) <= 2000 LIMIT 20");
             out("D2 raio de 2 km, 4 threads                %8.0f ops/s  p50 %.2f ms  p99 %.2f ms  max %.0f ms", d2[0], d2[1], d2[2], d2[3]);
+            double[] d3 = run(ds, 4, 2_000, (i, s) -> "SELECT nome FROM entregador ORDER BY geo::distance(pos, {type: 'Point', coordinates: ["
+                + (-46.7 + (i % 100) * 0.001) + ", -23.6]}) LIMIT 20");
+            out("D3 20 mais proximos, 4 threads            %8.0f ops/s  p50 %.2f ms  p99 %.2f ms  max %.0f ms", d3[0], d3[1], d3[2], d3[3]);
+
+            // ---- E. manutenção de índice vetorial e trilha de auditoria: o custo por escrita não deve crescer com o tamanho
+            ds.execute("DEFINE TABLE vet SCHEMALESS; CREATE INDEX vet_i ON TABLE vet COLUMNS emb HNSW DIMENSION 8 DIST euclidean", admin, null);
+            Random vr = new Random(9);
+            int vectors = Math.min(rows / 50, 4_000);
+            long[] vlat = new long[vectors];
+            for (int i = 0; i < vectors; i++) {
+                StringBuilder v = new StringBuilder("[");
+                for (int k = 0; k < 8; k++) {
+                    v.append(k > 0 ? ", " : "").append(vr.nextDouble());
+                }
+                long a = System.nanoTime();
+                ds.execute("CREATE vet:" + i + " CONTENT {n: " + i + ", emb: " + v + "]}", admin, null);
+                vlat[i] = System.nanoTime() - a;
+            }
+            int slice = Math.max(1, vectors / 10);
+            out("E1 insert vetorial: primeiras %d p50 %.2f ms, ultimas %d p50 %.2f ms", slice,
+                pct(Arrays.copyOfRange(vlat, 0, slice), slice, 0.5), slice, pct(Arrays.copyOfRange(vlat, vectors - slice, vectors), slice, 0.5));
+            ds.auditConfig(true, "auth", false, 65536);
+            admin.auth(com.axonbase.value.AxonValue.object(java.util.Map.of("id", com.axonbase.value.AxonValue.str("bench"))));
+            int audited = Math.min(rows / 4, 40_000);
+            long[] alat = new long[audited];
+            for (int i = 0; i < audited; i++) {
+                long a = System.nanoTime();
+                ds.execute("CREATE aud CONTENT {n: " + i + "}", admin, null);
+                alat[i] = System.nanoTime() - a;
+            }
+            int aslice = Math.max(1, audited / 10);
+            out("E2 DML com auditoria: primeiras %d p50 %.3f ms, ultimas %d p50 %.3f ms", aslice,
+                pct(Arrays.copyOfRange(alat, 0, aslice), aslice, 0.5), aslice, pct(Arrays.copyOfRange(alat, audited - aslice, audited), aslice, 0.5));
             out("FIM rows=%d", rows);
         }
     }

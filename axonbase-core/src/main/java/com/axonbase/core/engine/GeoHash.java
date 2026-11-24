@@ -115,6 +115,60 @@ public final class GeoHash {
         return out;
     }
 
+    /** Caixa da célula: {@code {latMin, lonMin, latMax, lonMax}}. */
+    public static double[] bounds(String geoHash) {
+        double latMin = -90, latMax = 90, lonMin = -180, lonMax = 180;
+        boolean even = true;
+        for (char c : geoHash.toCharArray()) {
+            int index = indexOf(c);
+            if (index < 0) {
+                throw new IllegalArgumentException(Messages.get("geo_hash_invalid", geoHash));
+            }
+            for (int mask : BITS) {
+                if ((index & mask) != 0) {
+                    if (even) {
+                        lonMin = (lonMin + lonMax) / 2;
+                    } else {
+                        latMin = (latMin + latMax) / 2;
+                    }
+                } else if (even) {
+                    lonMax = (lonMin + lonMax) / 2;
+                } else {
+                    latMax = (latMin + latMax) / 2;
+                }
+                even = !even;
+            }
+        }
+        return new double[]{latMin, lonMin, latMax, lonMax};
+    }
+
+    /**
+     * Células de precisão {@code p} que cobrem a caixa, sem o limite de {@link #covering}. {@code null} quando a
+     * caixa pede mais de {@code maxCells} células (o chamador então varre o índice inteiro).
+     */
+    public static Set<String> cellsInBox(double lat0, double lon0, double lat1, double lon1, int precision,
+                                         int maxCells) {
+        double latStep = cellSizeDegrees(precision);
+        double lonStep = lonCellDegrees(precision);
+        double lonSpan = lon1 - lon0;
+        double latSpan = Math.min(lat1, 90) - Math.max(lat0, -90);
+        if ((Math.ceil(lonSpan / lonStep) + 2) * (Math.ceil(latSpan / latStep) + 2) > maxCells) {
+            return null;
+        }
+        int lonSteps = (int) Math.ceil(lonSpan / lonStep) + 2;
+        int latSteps = (int) Math.ceil(latSpan / latStep) + 2;
+        Set<String> out = new LinkedHashSet<>();
+        for (int j = 0; j < latSteps; j++) {
+            double lat = Math.max(-90, Math.min(90, lat0 - latStep + j * latStep));
+            for (int i = 0; i < lonSteps; i++) {
+                double lon = lon0 - lonStep + i * lonStep;
+                lon = ((lon + 180) % 360 + 360) % 360 - 180;
+                out.add(encode(lat, lon, precision));
+            }
+        }
+        return out;
+    }
+
     /** Tamanho aproximado da célula em latitude (graus) para uma precisão. */
     public static double cellSizeDegrees(int precision) {
         int latBits = precision * 5 / 2;
