@@ -257,4 +257,85 @@ class GraphEdgesAndTraversalTest {
         assertFalse(run("RETURN graph::connected(pessoa:dani, pessoa:ana)").asBool());
         assertEquals(0, run("RETURN graph::path(pessoa:dani, pessoa:ana)").asArray().size());
     }
+
+    private static String rowIds(AxonValue rows) {
+        List<String> out = new ArrayList<>();
+        rows.asArray().forEach(r -> out.add(r.asObject().get("id").toString()));
+        return String.join(",", out);
+    }
+
+    @Test
+    @DisplayName("graph::trail devolve uma linha por nó do caminho, com a coluna do tipo apontando para o próximo")
+    void trailReturnsRowsForTheGraphTab() {
+        AxonValue rows = run("RETURN graph::trail(pessoa:ana, pessoa:dani, 'segue', 5)");
+        assertEquals("pessoa:ana,pessoa:caio,pessoa:dani", rowIds(rows));
+        var ana = rows.asArray().get(0).asObject();
+        assertEquals("Ana", ana.get("nome").asString());
+        assertEquals("pessoa:caio", ana.get("segue").toString());
+        assertEquals("pessoa:dani", rows.asArray().get(1).asObject().get("segue").toString());
+        // o último nó não tem seta de saída no caminho, e a Bia (fora do caminho) não aparece
+        assertFalse(rows.asArray().get(2).asObject().containsKey("segue"));
+    }
+
+    @Test
+    @DisplayName("sem caminho, trail e path devolvem lista vazia; connected devolve falso")
+    void noPathMeansEmpty() {
+        assertEquals(0, run("RETURN graph::trail(pessoa:dani, pessoa:ana, 'segue')").asArray().size());
+        assertEquals(0, run("RETURN graph::path(pessoa:dani, pessoa:ana)").asArray().size());
+        assertFalse(run("RETURN graph::connected(pessoa:dani, pessoa:ana)").asBool());
+    }
+
+    @Test
+    @DisplayName("o limite de saltos conta arestas")
+    void maxDepthCountsEdges() {
+        assertEquals(0, run("RETURN graph::path(pessoa:ana, pessoa:dani, 'segue', 1)").asArray().size());
+        assertEquals(3, run("RETURN graph::path(pessoa:ana, pessoa:dani, 'segue', 2)").asArray().size());
+    }
+
+    @Test
+    @DisplayName("sentido 'in' e 'both': o trail desenha a seta no sentido real")
+    void directionInAndBoth() {
+        AxonValue rows = run("RETURN graph::trail(pessoa:dani, pessoa:ana, 'segue', 5, 'in')");
+        assertEquals("pessoa:dani,pessoa:caio,pessoa:ana", rowIds(rows));
+        // as arestas reais são ana->caio e caio->dani: a coluna fica na linha de quem segue
+        assertEquals("pessoa:dani", rows.asArray().get(1).asObject().get("segue").toString());
+        assertEquals("pessoa:caio", rows.asArray().get(2).asObject().get("segue").toString());
+        assertFalse(rows.asArray().get(0).asObject().containsKey("segue"));
+
+        assertTrue(run("RETURN graph::connected(pessoa:dani, pessoa:ana, 'segue', 5, 'both')").asBool());
+        assertEquals(3, run("RETURN graph::path(pessoa:dani, pessoa:bia, 'segue', 5, 'both')").asArray().size());
+    }
+
+    @Test
+    @DisplayName("sem tipo, a coluna leva o nome da aresta usada em cada salto")
+    void trailWithoutKindNamesEachHop() {
+        run("RELATE pessoa:dani->amigo_de->pessoa:bia");
+        AxonValue rows = run("RETURN graph::trail(pessoa:dani, pessoa:bia, null, 5)");
+        assertEquals("pessoa:dani,pessoa:bia", rowIds(rows));
+        assertEquals("pessoa:bia", rows.asArray().get(0).asObject().get("amigo_de").toString());
+    }
+
+    @Test
+    @DisplayName("id de linha (texto) e id de registro se comparam em =, IN e NOT IN")
+    void rowIdTextEqualsRecordId() {
+        assertEquals(1, run("SELECT id FROM pessoa WHERE id = pessoa:ana").asArray().size());
+        assertEquals(2, run("SELECT id FROM pessoa WHERE id IN [pessoa:ana, pessoa:caio]").asArray().size());
+        assertEquals(2, run("SELECT id FROM pessoa WHERE id NOT IN [pessoa:ana, pessoa:caio]").asArray().size());
+        assertTrue(run("RETURN pessoa:dani IN pessoa:caio->segue->pessoa").asBool());
+        assertFalse(run("RETURN pessoa:ana IN pessoa:caio->segue->pessoa").asBool());
+    }
+
+    @Test
+    @DisplayName("FROM com lista de ids carrega os registros (LET com graph::path e lista literal)")
+    void fromListOfRecordIds() {
+        AxonValue byVar = run("LET $p = graph::path(pessoa:ana, pessoa:dani, 'segue', 5); SELECT id, nome FROM $p");
+        assertEquals(3, byVar.asArray().size());
+        assertEquals("Ana", byVar.asArray().get(0).asObject().get("nome").asString());
+        AxonValue literal = run("SELECT nome, ->segue->pessoa AS segue FROM [pessoa:ana, pessoa:caio]");
+        assertEquals(2, literal.asArray().size());
+        assertEquals("Caio", literal.asArray().get(1).asObject().get("nome").asString());
+        assertEquals("pessoa:dani", literal.asArray().get(1).asObject().get("segue").toString());
+        // lista com ids de registros que não existem não devolve linhas vazias
+        assertEquals(0, run("SELECT nome FROM [pessoa:ninguem]").asArray().size());
+    }
 }

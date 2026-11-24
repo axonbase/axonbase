@@ -50,3 +50,11 @@ SELECT id, ->segue->pessoa AS segue, ->trabalha_em->empresa AS empresa FROM pess
 - Um campo comum com um id (`autor: pessoa:ana` em `CONTENT`) é guardado como texto, então `autor.nome` e
   `FETCH autor` não expandem; use arestas (`RELATE`) para ligações que você quer navegar.
 - `UNRELATE` ainda não funciona em DATABASE LINK.
+
+## Como duas pessoas se conhecem (a partir da versão 0.6.2)
+
+`trail.sql` é um exemplo à parte (rode num banco só dele): Ana segue Caio, que segue Dani, e Ana e Dani não se seguem.
+`graph::trail(pessoa:ana, pessoa:dani, 'segue', 5)` devolve uma linha por pessoa do caminho e, em cada linha, uma coluna
+`segue` apontando para a próxima. Na aba **Graph** do resultado aparece só `Ana -> Caio -> Dani`, sem as outras pessoas
+da rede. O quinto argumento escolhe o sentido (`'out'`, `'in'` ou `'both'`), e sem o tipo (`null`) o caminho pode usar
+qualquer aresta, com a coluna de cada linha levando o nome da aresta usada.
