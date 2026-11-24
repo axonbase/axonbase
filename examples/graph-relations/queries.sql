@@ -63,11 +63,13 @@ RETURN {
   compras_em_comum: array::intersect(array::flatten([$x->comprou->produto]), array::flatten([$y->comprou->produto]))
 };
 
--- 13. Caminho entre duas pessoas: graph::path(origem, destino, tipo_da_aresta, saltos_maximos) devolve a
--- sequência de registros pelo menor caminho (lista vazia se não houver). O tipo e o limite são opcionais.
--- O caminho segue o sentido das arestas; para o outro sentido, troque a ordem das pessoas.
+-- 13. Caminho entre duas pessoas: graph::path(origem, destino, tipo_da_aresta, saltos_maximos, sentido) devolve a
+-- sequência de registros pelo menor caminho (lista vazia se não houver). Tipo, limite e sentido são opcionais; o
+-- sentido é 'out' (segue as setas, padrão), 'in' ou 'both'. graph::trail devolve o mesmo caminho em linhas, com uma
+-- coluna com o nome da aresta apontando para o próximo nó: clique em Graph no resultado para ver o desenho.
 RETURN graph::path(pessoa:ana, pessoa:dani, 'segue', 5);
-RETURN graph::path(pessoa:dani, pessoa:ana);
+RETURN graph::trail(pessoa:ana, pessoa:dani, 'segue', 5);
+RETURN graph::trail(pessoa:dani, pessoa:ana, null, 5, 'both');
 RETURN graph::connected(pessoa:ana, pessoa:dani);
 
 -- 14. Quem está a 1, 2 ou 3 saltos (travessia encadeada) e se uma pessoa aparece no alcance da outra.

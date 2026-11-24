@@ -2381,6 +2381,10 @@ return score;
         if (from instanceof Expr.SubQuery || from instanceof Expr.ArrayLit || from instanceof Expr.Param) {
             // FROM $variavel: o valor guardado por LET (array de objetos) vira a fonte, como numa subquery
             AxonValue source = eval(from);
+            List<Document> byId = docsOfRecordIds(db, source);
+            if (byId != null) {
+                return byId;
+            }
             return virtualDocs(source.isArray() || source.isObject() ? source : AxonValue.array(List.of(source)));
         }
         // DATABASE LINK or local qualified database (table reference)
@@ -2777,6 +2781,23 @@ return score;
     }
 
     /** Converte um valor (array ou objeto) em documentos sem armazenamento. */
+    /** Quando o valor é uma lista (ou um único) de ids de registro, carrega os registros; senão, {@code null}. */
+    private List<Document> docsOfRecordIds(Database db, AxonValue value) {
+        List<AxonValue> items = value.isArray() ? value.asArray() : value.isRecordId() ? List.of(value) : null;
+        if (items == null || items.isEmpty() || !items.stream().allMatch(AxonValue::isRecordId)) {
+            return null;
+        }
+        List<Document> docs = new ArrayList<>();
+        for (AxonValue item : items) {
+            AxonValue.RecordId id = item.asRecordId();
+            Document doc = loadDoc(db, new RecordId(id.table(), id.key() instanceof AxonValue kv ? kv : keyOf(id.key())));
+            if (doc != null) {
+                docs.add(doc);
+            }
+        }
+        return docs;
+    }
+
     private List<Document> virtualDocs(AxonValue value) {
         List<AxonValue> rows = value.isArray() ? value.asArray()
             : value.isSet() ? value.asSet() : List.of(value);
@@ -4341,6 +4362,10 @@ return score;
         if (haystack.isArray() || haystack.isSet()) {
             return elements(haystack).stream().anyMatch(item -> equal(item, needle));
         }
+        if (haystack.isRecordId()) {
+            // resultado único de uma travessia chega como valor, não como lista
+            return equal(haystack, needle);
+        }
         if (haystack.isString()) {
             return needle.isString() && haystack.asString().contains(needle.asString());
         }
@@ -4422,6 +4447,13 @@ return score;
             } catch (NumberFormatException e) {
                 return false;
             }
+        }
+        // o id da linha chega como texto ("pessoa:ana") e o literal como id de registro: são o mesmo registro
+        if (a.isRecordId() && b.isString()) {
+            return a.asRecordId().toString().equals(b.asString());
+        }
+        if (a.isString() && b.isRecordId()) {
+            return b.asRecordId().toString().equals(a.asString());
         }
         return a.equals(b);
     }
@@ -4585,8 +4617,11 @@ return score;
     // ------------------------------------------------------------------
 
     /**
-     * Graph operations: {@code graph::connected(from, to, edge, maxDepth)} and
-     * {@code graph::path(from, to, edge, maxDepth)}.
+     * Funções de grafo: {@code graph::connected}, {@code graph::path} e {@code graph::trail}, todas com
+     * {@code (origem, destino [, tipo_de_aresta, saltos_maximos, sentido])}. O sentido é {@code 'out'}
+     * (padrão, segue as setas), {@code 'in'} (contra as setas) ou {@code 'both'}.
+     * {@code connected} devolve verdadeiro/falso, {@code path} a lista de ids do menor caminho e
+     * {@code trail} uma linha por nó do caminho, pronta para a aba Graph do Workspace.
      */
     private AxonValue invokeGraph(String name, List<AxonValue> args) {
         String ns = session.namespace();
@@ -4605,88 +4640,140 @@ return score;
         Database db = db();
         String edge = args.size() > 2 && args.get(2).isString() ? args.get(2).asString() : "*";
         int maxDepth = args.size() > 3 && args.get(3).isNumber() ? (int) args.get(3).asLong() : 10;
+        List<String> dirs = graphDirections(args.size() > 4 ? args.get(4) : null);
 
         return switch (name.substring(7)) {
-            case "connected" -> graphBfs(db, from, to, edge, maxDepth);
-            case "path" -> graphBfsPath(db, from, to, edge, maxDepth);
+            case "connected" -> AxonValue.bool(!findHops(db, from, to, edge, maxDepth, dirs).isEmpty());
+            case "path" -> {
+                List<AxonValue> ids = new ArrayList<>();
+                for (Hop h : findHops(db, from, to, edge, maxDepth, dirs)) {
+                    ids.add(AxonValue.record(h.node().table(), h.node().key()));
+                }
+                yield AxonValue.array(ids);
+            }
+            case "trail" -> graphTrail(db, findHops(db, from, to, edge, maxDepth, dirs));
             default -> throw AxonError.internal(Messages.get("stmt_graph_function_unknown", name));
         };
     }
 
-    /** BFS reachability check. Returns true if there is a path within maxDepth. */
-    private AxonValue graphBfs(Database db, AxonValue.RecordId from, AxonValue.RecordId to,
-                                String edge, int maxDepth) {
-        if (from.equals(to)) {
-            return AxonValue.bool(true);
-        }
-        java.util.Set<String> visited = new java.util.HashSet<>();
-        java.util.ArrayDeque<AxonValue.RecordId> queue = new java.util.ArrayDeque<>();
-        queue.addLast(from);
-        visited.add(from.toString());
-
-        for (int depth = 0; !queue.isEmpty() && depth <= maxDepth; depth++) {
-            int size = queue.size();
-            for (int i = 0; i < size; i++) {
-                AxonValue.RecordId current = queue.removeFirst();
-                for (AxonValue target : edgeTargets(db, current, "out", edge)) {
-                    if (target.isRecordId()) {
-                        AxonValue.RecordId next = target.asRecordId();
-                        if (next.equals(to)) {
-                            return AxonValue.bool(true);
-                        }
-                        if (visited.add(next.toString())) {
-                            queue.addLast(next);
-                        }
-                    }
-                }
-            }
-        }
-        return AxonValue.bool(false);
+    /** Sentido da busca: out (padrão), in ou both. */
+    private static List<String> graphDirections(AxonValue arg) {
+        String d = arg != null && arg.isString() ? arg.asString().trim().toLowerCase() : "out";
+        return switch (d) {
+            case "in" -> List.of("in");
+            case "both" -> List.of("out", "in");
+            default -> List.of("out");
+        };
     }
 
-    /** BFS path finding. Returns the path as an array of record IDs, or empty array. */
-    private AxonValue graphBfsPath(Database db, AxonValue.RecordId from, AxonValue.RecordId to,
-                                    String edge, int maxDepth) {
-        if (from.equals(to)) {
-            return AxonValue.array(java.util.List.of(AxonValue.record(from.table(), from.key())));
+    /** Um passo do caminho: o nó alcançado, o tipo da aresta usada e se ela foi percorrida a favor da seta. */
+    private record Hop(AxonValue.RecordId node, String kind, boolean forward) { }
+
+    /** Vértice vizinho com o tipo da aresta que o liga. */
+    private record GraphLink(AxonValue.RecordId node, String kind, boolean forward) { }
+
+    private List<GraphLink> graphLinks(Database db, AxonValue.RecordId from, List<String> dirs, String want) {
+        List<GraphLink> out = new ArrayList<>();
+        for (String dir : dirs) {
+            String prefix = edgePrefix(db, dir, from);
+            for (String k : records(db).keysWithPrefix(prefix)) {
+                String[] parts = k.substring(prefix.length()).split(java.util.regex.Pattern.quote("|"));
+                if (parts.length < 3) {
+                    continue;
+                }
+                if (!want.equals("*") && !want.equals(parts[0])) {
+                    continue;
+                }
+                out.add(new GraphLink(new AxonValue.RecordId(parts[1], parseKeyVal(parts[2])), parts[0], dir.equals("out")));
+            }
         }
-        java.util.Set<String> visited = new java.util.HashSet<>();
-        java.util.ArrayDeque<java.util.List<AxonValue.RecordId>> queue = new java.util.ArrayDeque<>();
-        queue.addLast(java.util.List.of(from));
-        visited.add(from.toString());
+        return out;
+    }
 
+    /**
+     * Menor caminho entre dois registros (busca em largura), com no máximo {@code maxDepth} arestas.
+     * O primeiro passo é a origem (sem aresta). Lista vazia quando não há caminho.
+     */
+    private List<Hop> findHops(Database db, AxonValue.RecordId from, AxonValue.RecordId to,
+                               String edge, int maxDepth, List<String> dirs) {
+        if (from.equals(to)) {
+            return List.of(new Hop(from, null, true));
+        }
+        Map<AxonValue.RecordId, Hop> arrived = new java.util.HashMap<>();
+        Map<AxonValue.RecordId, AxonValue.RecordId> parent = new java.util.HashMap<>();
+        java.util.ArrayDeque<AxonValue.RecordId> queue = new java.util.ArrayDeque<>();
+        java.util.ArrayDeque<Integer> depths = new java.util.ArrayDeque<>();
+        queue.addLast(from);
+        depths.addLast(0);
+        arrived.put(from, new Hop(from, null, true));
         while (!queue.isEmpty()) {
-            java.util.List<AxonValue.RecordId> path = queue.removeFirst();
-            AxonValue.RecordId last = path.getLast();
-
-            if (path.size() > maxDepth) {
+            AxonValue.RecordId current = queue.removeFirst();
+            int depth = depths.removeFirst();
+            if (depth >= maxDepth) {
                 continue;
             }
-
-            for (AxonValue target : edgeTargets(db, last, "out", edge)) {
-                if (!target.isRecordId()) continue;
-                AxonValue.RecordId next = target.asRecordId();
-                String key = next.toString();
-
-                if (next.equals(to)) {
-                    java.util.List<AxonValue> result = new java.util.ArrayList<>();
-                    for (AxonValue.RecordId p : path) {
-                        result.add(AxonValue.record(p.table(), p.key()));
+            for (GraphLink n : graphLinks(db, current, dirs, edge)) {
+                if (arrived.containsKey(n.node())) {
+                    continue;
+                }
+                arrived.put(n.node(), new Hop(n.node(), n.kind(), n.forward()));
+                parent.put(n.node(), current);
+                if (n.node().equals(to)) {
+                    java.util.LinkedList<Hop> path = new java.util.LinkedList<>();
+                    for (AxonValue.RecordId at = to; at != null; at = parent.get(at)) {
+                        path.addFirst(arrived.get(at));
                     }
-                    result.add(AxonValue.record(next.table(), next.key()));
-                    return AxonValue.array(result);
+                    return new ArrayList<>(path);
                 }
-
-                if (visited.add(key)) {
-                    java.util.List<AxonValue.RecordId> newPath = new java.util.ArrayList<>(path);
-                    newPath.addLast(next);
-                    queue.addLast(newPath);
-                }
+                queue.addLast(n.node());
+                depths.addLast(depth + 1);
             }
         }
-        return AxonValue.array(java.util.List.of());
+        return List.of();
     }
 
+    /**
+     * Uma linha por nó do caminho (campos do registro) e, em cada linha, uma coluna com o nome do tipo de
+     * aresta apontando para o nó seguinte. Quando a aresta foi percorrida contra a seta, a coluna fica na linha
+     * do nó seguinte e aponta para o anterior, para que a aba Graph desenhe o sentido real.
+     */
+    private AxonValue graphTrail(Database db, List<Hop> hops) {
+        List<Map<String, AxonValue>> rows = new ArrayList<>();
+        for (Hop h : hops) {
+            Map<String, AxonValue> row = new LinkedHashMap<>();
+            Document doc = loadDoc(db, new RecordId(h.node().table(), h.node().key() instanceof AxonValue kv ? kv : keyOf(h.node().key())));
+            if (doc != null && doc.current() != null && doc.current().isObject()) {
+                row.putAll(doc.current().asObject());
+            }
+            row.put("id", AxonValue.record(h.node().table(), h.node().key()));
+            rows.add(row);
+        }
+        for (int i = 1; i < hops.size(); i++) {
+            Hop h = hops.get(i);
+            int owner = h.forward() ? i - 1 : i;
+            AxonValue target = AxonValue.record(
+                hops.get(h.forward() ? i : i - 1).node().table(), hops.get(h.forward() ? i : i - 1).node().key());
+            Map<String, AxonValue> row = rows.get(owner);
+            AxonValue existing = row.get(h.kind());
+            if (existing == null || !(existing.isRecordId() || existing.isArray())) {
+                row.put(h.kind(), target);
+            } else {
+                List<AxonValue> both = new ArrayList<>();
+                if (existing.isArray()) {
+                    both.addAll(existing.asArray());
+                } else {
+                    both.add(existing);
+                }
+                both.add(target);
+                row.put(h.kind(), AxonValue.array(both));
+            }
+        }
+        List<AxonValue> out = new ArrayList<>();
+        for (Map<String, AxonValue> r : rows) {
+            out.add(AxonValue.object(r));
+        }
+        return AxonValue.array(out);
+    }
 
     /** Envolve cada termo da busca em tags HTML (HyperText Markup Language) configuráveis. */
     private AxonValue highlight(List<AxonValue> args, List<String> terms) {

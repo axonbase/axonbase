@@ -771,7 +771,7 @@ public final class Functions {
         "vector::distance::cosine",
         "vector::similarity::cosine",
         "search::score", "search::highlight",
-        "graph::connected", "graph::path",
+        "graph::connected", "graph::path", "graph::trail",
         "time::now", "now", "time::unix", "time::millis", "time::year", "time::month", "time::day",
         "time::hour", "time::minute", "time::second", "time::wday", "time::yday", "time::clock", "time::floor",
         "time::from::unix", "time::from::millis",
