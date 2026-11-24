@@ -5504,23 +5504,39 @@ return score;
         sel.group().forEach(g -> columnRefs(g, refs));
         sel.orders().forEach(o -> columnRefs(o.field(), refs));
         List<String> columns = refs.isEmpty() ? List.of(indexes.get(0).columns().get(0)) : new ArrayList<>(refs);
-        Map<String, Map<String, AxonValue>> rows = new LinkedHashMap<>();
+        GroupAggregation aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
         boolean[] complete = {true};
-        for (int c = 0; c < columns.size() && complete[0]; c++) {
-            String column = columns.get(c);
-            Catalog.IndexDef index = refs.isEmpty() ? indexes.get(0)
-                : indexes.get(c);
+        if (columns.size() == 1) {
+            // uma coluna só: cada entrada já é uma linha, sem juntar por chave
+            String column = columns.get(0);
             String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
-                db.ns(), db.db(), table, index.name(), column);
-            int[] seen = {0};
+                db.ns(), db.db(), table, indexes.get(0).name(), column);
             records(db).scanEntries(prefix, (key, bytes) -> {
-                AxonValue entry = com.axonbase.core.storage.ColumnarIndex.decodeEntry(bytes);
+                com.axonbase.core.storage.ColumnarIndex.Entry entry =
+                    com.axonbase.core.storage.ColumnarIndex.decodeEntry(bytes);
                 if (entry == null) {
                     complete[0] = false;
                     return false;
                 }
-                String rowKey = entry.asObject().get("k").asString();
-                rows.computeIfAbsent(rowKey, k -> new LinkedHashMap<>()).put(column, entry.asObject().get("v"));
+                acceptCovered(aggregation, sel, table, entry.rowKey(), Map.of(column, entry.value()));
+                return true;
+            });
+            return complete[0] ? aggregation : null;
+        }
+        Map<String, Map<String, AxonValue>> rows = new LinkedHashMap<>();
+        for (int c = 0; c < columns.size() && complete[0]; c++) {
+            String column = columns.get(c);
+            String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
+                db.ns(), db.db(), table, indexes.get(c).name(), column);
+            int[] seen = {0};
+            records(db).scanEntries(prefix, (key, bytes) -> {
+                com.axonbase.core.storage.ColumnarIndex.Entry entry =
+                    com.axonbase.core.storage.ColumnarIndex.decodeEntry(bytes);
+                if (entry == null) {
+                    complete[0] = false;
+                    return false;
+                }
+                rows.computeIfAbsent(entry.rowKey(), k -> new LinkedHashMap<>()).put(column, entry.value());
                 seen[0]++;
                 return true;
             });
@@ -5531,16 +5547,20 @@ return score;
         if (!complete[0]) {
             return null;
         }
-        GroupAggregation aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
         for (Map.Entry<String, Map<String, AxonValue>> row : rows.entrySet()) {
-            Document doc = new Document(new RecordId(table, parseKey(row.getKey())),
-                AxonValue.object(row.getValue()));
-            if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
-                continue;
-            }
-            aggregation.accept(doc);
+            acceptCovered(aggregation, sel, table, row.getKey(), row.getValue());
         }
         return aggregation;
+    }
+
+    /** Soma uma linha reconstruída do índice no agregador, depois do WHERE. */
+    private void acceptCovered(GroupAggregation aggregation, Statement.Select sel, String table, String rowKey,
+                               Map<String, AxonValue> columns) {
+        Document doc = new Document(new RecordId(table, parseKey(rowKey)), AxonValue.object(columns));
+        if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
+            return;
+        }
+        aggregation.accept(doc);
     }
 
     private List<Document> columnarSourceDocs(Database db, Statement.Select sel) {
