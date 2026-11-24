@@ -1281,6 +1281,7 @@ public final class Executor {
                 sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "DELETE");
             }
             records(db).delete(rid.storageKey(db.ns(), db.db()));
+            enforceUnique(db, rid, doc.current(), null);
             if (edges) {
                 removeEdgesOf(db, rid);
             }

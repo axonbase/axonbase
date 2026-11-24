@@ -52,5 +52,4 @@ As linhas de resultado começam com `BASE`.
 
 - Os comandos que leem varreduras com leitura fantasma em transações explícitas ou no cluster ainda serializam, como o monitor antigo.
 - Um comando muito grande guarda suas escritas em memória até o fim, proporcionalmente ao tamanho.
-- `DELETE` ainda não libera a entrada do índice UNIQUE: criar de novo o mesmo valor depois de apagar o registro falha.
 - O ganho multi-nó (grupo de commit no Raft, leituras em seguidores, múltiplos grupos Raft) não faz parte desta versão.
