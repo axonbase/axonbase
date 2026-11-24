@@ -54,4 +54,4 @@ SELECT nome, estoque FROM produto ORDER BY codigo;   -- nada mudou
 
 ## Depurar
 
-No Workspace, abra `registrar_pedido`, clique na margem para colocar um breakpoint (por exemplo na linha da baixa de estoque) e use "Depurar". A execução para na linha, mostra a pilha e as variáveis, e permite avaliar uma expressão. Por padrão a depuração roda numa transação que é sempre revertida, então nenhum pedido é gravado.
+No Workspace, abra `registrar_pedido`. Como a assinatura declara os tipos, o formulário mostra o campo certo de cada parâmetro: `cliente_id` (tipo `record`) recebe `cliente:1` e `itens` (tipo `list`) recebe JSON, por exemplo `[{"codigo": "PIZ-001", "qtd": 1}]`. Clique na margem para colocar um breakpoint (por exemplo na linha da baixa de estoque) e use "Depurar". A execução para na linha, mostra a pilha e as variáveis, e permite avaliar uma expressão. Por padrão a depuração roda numa transação que é sempre revertida, então nenhum pedido é gravado.

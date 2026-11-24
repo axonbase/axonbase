@@ -2,20 +2,20 @@
 -- Cada objeto é uma instrução só, com o corpo entre $$ ... $$ (Python simplificado).
 
 -- FUNÇÃO: só lê, serve em SELECT, WHERE e DEFINE FIELD. Parâmetro com tipo e valor padrão.
-CREATE OR REPLACE FUNCTION desconto(valor, pct int = 10) RETURNS number AS $$
+CREATE OR REPLACE FUNCTION desconto(valor number, pct int = 10) RETURNS number AS $$
 """Aplica um desconto percentual ao valor."""
 return round(valor * (100 - pct) / 100, 2)
 $$;
 
 -- FUNÇÃO: frete grátis a partir de 100, senão taxa fixa mais um valor por quilômetro.
-CREATE OR REPLACE FUNCTION frete(distancia_km, valor) RETURNS number AS $$
+CREATE OR REPLACE FUNCTION frete(distancia_km number, valor number) RETURNS number AS $$
 if valor >= 100:
     return 0
 return round(5 + 1.5 * distancia_km, 2)
 $$;
 
 -- FUNÇÃO que consulta o banco com db.one e db.query (somente leitura).
-CREATE OR REPLACE FUNCTION estoque_de(codigo) RETURNS int AS $$
+CREATE OR REPLACE FUNCTION estoque_de(codigo string) RETURNS int AS $$
 p = db.one("SELECT estoque FROM produto WHERE codigo = $c", {"c": codigo})
 if p is None:
     return -1
@@ -76,8 +76,8 @@ def proximo_numero():
 $$;
 
 -- PROCEDURE: escreve no banco. É atômica: se qualquer item falhar, nada fica gravado.
--- itens é uma lista de objetos {codigo, qtd}.
-CREATE OR REPLACE PROCEDURE registrar_pedido(cliente_id, itens, distancia_km = 3) AS $$
+-- itens é uma lista de objetos {codigo, qtd}. No formulário do Workspace, digite JSON: [{"codigo": "PIZ-001", "qtd": 1}].
+CREATE OR REPLACE PROCEDURE registrar_pedido(cliente_id record, itens list, distancia_km int = 3) AS $$
 import loja
 cliente = db.one("SELECT * FROM cliente WHERE id = $c", {"c": cliente_id})
 if cliente is None:
@@ -103,7 +103,7 @@ return pedido
 $$;
 
 -- PROCEDURE: cancela um pedido novo (pelo número) e devolve os itens ao estoque.
-CREATE OR REPLACE PROCEDURE cancelar_pedido(numero) AS $$
+CREATE OR REPLACE PROCEDURE cancelar_pedido(numero int) AS $$
 p = db.one("SELECT * FROM pedido WHERE numero = $n", {"n": numero})
 if p is None:
     raise ValueError("pedido não existe: " + str(numero))
