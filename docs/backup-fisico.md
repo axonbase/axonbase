@@ -102,6 +102,22 @@ Os `id` de um backup importado são os do motor de origem, e a área `imports/<o
 | 409 | `BUSY` | o restore não conseguiu esvaziar as operações em 60 s; a base ficou como estava. |
 | 500 | `BACKUP_FAILED` | falha do `BackupEngine` ou do sistema de arquivos. |
 
+## Medidas
+
+Medidas no portão `PhysicalBackupGateTest` (opt-in com `-Daxon.gate.physical=true`), num Mac com disco SSD (Solid State Drive), valores incompressíveis de 4 KiB, `AXON_STORAGE_SYNC=off` na carga:
+
+| Medida | Resultado | Meta |
+|---|---|---|
+| Restore de 10 GB (10240 MB, 2,6 milhões de linhas) | 36,1 s (284 MB/s) | menos de 600 s |
+| Backup completo de 10 GB | 47 s | sem meta |
+| Backup incremental com 2% da base alterada | 6 s | sem meta |
+| Terceiro incremental restaurado | checksum SHA-256 de todas as chaves e valores igual ao da origem | igual |
+| Vazão a 5 mil escritas por segundo com backups a cada 5 s (1 GB) | queda de 0,7% (4999 para 4962 por segundo) | no máximo 10% |
+| `kill -9` no meio da troca de base (24 rodadas) | 11 vezes a base antiga inteira, 13 a nova inteira, nenhuma misturada | nenhuma corrompida |
+| `kill -9` no meio de backups (6 rodadas) | base íntegra, todo backup listado verifica, backup novo funciona | idem |
+
+O restore mede só a cópia dos arquivos e a abertura da base restaurada, em disco local. Um restore pelo MinIO soma o tempo de rede do agente do Enterprise.
+
 ## O que ainda não existe
 
 - Backup físico de cluster com várias réplicas (E2 e E3 do plano de escala).
