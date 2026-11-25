@@ -43,7 +43,7 @@ Para guardar os backups fora do servidor (o MinIO do Enterprise), o motor expõe
 ### Listar os arquivos de um backup
 
 ```
-GET /admin/v1/backups/physical/{id}/files
+GET /admin/v1/backups/physical/{id}/files[?source=<origem>]
 ```
 
 ```json
@@ -74,7 +74,7 @@ Devolve o arquivo em `application/octet-stream`, em fluxo. O cabeçalho `X-Axon-
 PUT /admin/v1/backups/physical/files?path=<caminho relativo>&source=<origem>
 ```
 
-Grava o corpo no diretório de importação `<AXON_BACKUP_DIR>/imports/<origem>/` (a origem é obrigatória na gravação, para um backup vindo de fora nunca se misturar com os do próprio motor). Com a chave de cifra definida, o motor decifra e valida o corpo antes de gravar; a gravação é atômica (arquivo temporário e renomeação). Um arquivo de `shared_checksum/` que já existe com o mesmo tamanho é aceito sem regravar. Responde `{path, sizeBytes}`.
+O cabeçalho opcional `X-Axon-Size` declara o tamanho do arquivo original (sem cifra); se vier e o corpo, depois de decifrado, tiver outro tamanho, a gravação é recusada e não deixa nada. Grava o corpo no diretório de importação `<AXON_BACKUP_DIR>/imports/<origem>/` (a origem é obrigatória na gravação, para um backup vindo de fora nunca se misturar com os do próprio motor). Com a chave de cifra definida, o motor decifra e valida o corpo antes de gravar; a gravação é atômica (arquivo temporário e renomeação). Um arquivo de `shared_checksum/` que já existe com o mesmo tamanho é aceito sem regravar. Responde `{path, sizeBytes}`.
 
 ```
 DELETE /admin/v1/backups/physical/imports/{origem}
@@ -85,7 +85,7 @@ Apaga uma área de importação inteira (administrador).
 ### Restaurar um backup vindo de fora
 
 1. O agente baixa do armazenamento de objetos os arquivos do backup escolhido e os grava com `PUT ...files?path=...&source=<origem>`, deixando `meta/<id>` por último.
-2. `POST /physical/{id}/restore?confirm=true&source=<origem>` restaura a partir de `imports/<origem>/` em vez do diretório do próprio motor.
+2. `GET /physical/{id}/files?source=<origem>` confere que o backup chegou inteiro, e `POST /physical/{id}/restore?confirm=true&source=<origem>` restaura a partir de `imports/<origem>/` em vez do diretório do próprio motor.
 3. Se der certo, `DELETE /physical/imports/<origem>` libera o espaço.
 
 Os `id` de um backup importado são os do motor de origem, e a área `imports/<origem>/` é separada do diretório do motor, então nunca colidem com os backups locais.
@@ -94,9 +94,9 @@ Os `id` de um backup importado são os do motor de origem, e a área `imports/<o
 
 | Status | Código | Quando |
 |---|---|---|
-| 400 | `BAD_REQUEST` | `confirm` ausente, caminho fora de `meta/`, `private/` e `shared_checksum/`, `keep < 1`. |
+| 400 | `BAD_REQUEST` | `confirm` ausente, caminho fora de `meta/`, `private/` e `shared_checksum/`, nome de origem inválido, gravação sem `source`, corpo cifrado inválido, tamanho divergente, `keep < 1`. |
 | 403 | | papel insuficiente. |
-| 404 | `NOT_FOUND` | backup inexistente. |
+| 404 | `NOT_FOUND` | backup, arquivo ou origem de importação inexistente. |
 | 409 | `PHYSICAL_UNSUPPORTED` | armazenamento em memória. |
 | 409 | `CONFLICT` | cluster (backup físico só vale em nó único). |
 | 409 | `BUSY` | o restore não conseguiu esvaziar as operações em 60 s; a base ficou como estava. |

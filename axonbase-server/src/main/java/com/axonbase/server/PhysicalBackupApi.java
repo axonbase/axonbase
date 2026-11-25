@@ -1,8 +1,10 @@
 package com.axonbase.server;
 
 import com.axonbase.common.Messages;
+import com.axonbase.core.backup.StreamEncryption;
 import com.axonbase.core.security.Authz;
 import com.axonbase.core.storage.PhysicalBackups;
+import com.axonbase.core.storage.PhysicalFiles;
 import com.axonbase.core.storage.RocksDbBackend;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -50,6 +52,26 @@ final class PhysicalBackupApi {
         if (seg.size() == 2 && method.equals("DELETE")) {
             api.needRoot(c, Authz.Role.ADMIN);
             purge(srv, req, resp);
+            return true;
+        }
+        if (seg.size() == 4 && method.equals("GET") && seg.get(3).equals("files")) {
+            api.needRoot(c, Authz.Role.OPERATOR);
+            files(srv, id(seg.get(2)), req, resp);
+            return true;
+        }
+        if (seg.size() == 3 && seg.get(2).equals("files") && method.equals("GET")) {
+            api.needRoot(c, Authz.Role.OPERATOR);
+            readFile(srv, req, resp);
+            return true;
+        }
+        if (seg.size() == 3 && seg.get(2).equals("files") && method.equals("PUT")) {
+            api.needRoot(c, Authz.Role.ADMIN);
+            writeFile(srv, req, resp);
+            return true;
+        }
+        if (seg.size() == 4 && seg.get(2).equals("imports") && method.equals("DELETE")) {
+            api.needRoot(c, Authz.Role.ADMIN);
+            deleteImport(srv, seg.get(3), resp);
             return true;
         }
         if (seg.size() == 4 && method.equals("POST") && seg.get(3).equals("verify")) {
@@ -171,7 +193,7 @@ final class PhysicalBackupApi {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("admin_restore_confirm"));
         }
         RocksDbBackend rocks = rocks(srv);
-        Path dir = backupDir(rocks);
+        Path dir = sourceDir(rocks, req.getParameter("source"), true);
         Path previous;
         long version;
         synchronized (LOCK) {
@@ -200,6 +222,111 @@ final class PhysicalBackupApi {
         }
         AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true, "id", id, "version", version,
             "previous", previous.getFileName().toString()));
+    }
+
+    // ---- transferência de arquivos ----
+
+    /** O diretório de backup da origem pedida, ou o do próprio motor quando não há origem. */
+    private static Path sourceDir(RocksDbBackend rocks, String source, boolean mustExist) {
+        Path base = backupDir(rocks);
+        try {
+            Path dir = PhysicalFiles.importRoot(base, source);
+            if (source != null && mustExist && !java.nio.file.Files.isDirectory(dir)) {
+                throw new AdminV1Servlet.ApiError(404, "NOT_FOUND", Messages.get("physical_source_not_found", source));
+            }
+            return dir;
+        } catch (IllegalArgumentException e) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", e.getMessage());
+        }
+    }
+
+    private static void files(AxonServer srv, int id, HttpServletRequest req, HttpServletResponse resp)
+            throws IOException {
+        RocksDbBackend rocks = rocks(srv);
+        Path dir = sourceDir(rocks, req.getParameter("source"), true);
+        List<Object> out = new ArrayList<>();
+        long version;
+        synchronized (LOCK) {
+            try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
+                requireExists(pb, id);
+                version = pb.list().stream().filter(i -> i.id() == id).findFirst().orElseThrow().version();
+                for (PhysicalFiles.Entry f : PhysicalFiles.list(dir, id)) {
+                    out.add(AdminJson.obj("path", f.path(), "sizeBytes", f.sizeBytes(), "shared", f.shared()));
+                }
+            } catch (PhysicalBackups.BackupFailedException e) {
+                throw failed(e);
+            }
+        }
+        AdminV1Servlet.write(resp, 200, AdminJson.obj("id", id, "version", version, "files", out));
+    }
+
+    private static void readFile(AxonServer srv, HttpServletRequest req, HttpServletResponse resp)
+            throws IOException {
+        RocksDbBackend rocks = rocks(srv);
+        Path file;
+        try {
+            file = PhysicalFiles.resolve(backupDir(rocks), req.getParameter("source"), req.getParameter("path"));
+        } catch (IllegalArgumentException e) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", e.getMessage());
+        }
+        if (!java.nio.file.Files.isRegularFile(file)) {
+            throw new AdminV1Servlet.ApiError(404, "NOT_FOUND", Messages.get("physical_file_not_found",
+                req.getParameter("path")));
+        }
+        String key = srv.config().s3EncryptKey();
+        boolean encrypt = key != null && !key.isBlank();
+        resp.setStatus(200);
+        resp.setContentType("application/octet-stream");
+        resp.setHeader("Cache-Control", "no-store");
+        resp.setHeader("X-Axon-Size", String.valueOf(java.nio.file.Files.size(file)));
+        try (java.io.OutputStream out = encrypt
+                ? StreamEncryption.encrypting(resp.getOutputStream(), key) : resp.getOutputStream();
+             java.io.InputStream in = java.nio.file.Files.newInputStream(file)) {
+            in.transferTo(out);
+        }
+    }
+
+    private static void writeFile(AxonServer srv, HttpServletRequest req, HttpServletResponse resp)
+            throws IOException {
+        RocksDbBackend rocks = rocks(srv);
+        String source = req.getParameter("source");
+        String path = req.getParameter("path");
+        if (source == null || source.isBlank()) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("physical_source_required"));
+        }
+        long declared = -1;
+        String header = req.getHeader("X-Axon-Size");
+        if (header != null) {
+            try {
+                declared = Long.parseLong(header.trim());
+            } catch (NumberFormatException e) {
+                throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", "X-Axon-Size");
+            }
+        }
+        long written;
+        try (java.io.InputStream plain = BackupStreamApi.openPlain(
+                new java.io.BufferedInputStream(req.getInputStream(), 1 << 16), srv.config().s3EncryptKey())) {
+            written = PhysicalFiles.write(backupDir(rocks), source, path, plain, declared);
+        } catch (IllegalArgumentException e) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", e.getMessage());
+        } catch (IOException | RuntimeException e) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST",
+                Messages.get("admin_backup_stream_invalid", e.getMessage()));
+        }
+        AdminV1Servlet.write(resp, 200, AdminJson.obj("path", path, "sizeBytes", written));
+    }
+
+    private static void deleteImport(AxonServer srv, String source, HttpServletResponse resp) throws IOException {
+        RocksDbBackend rocks = rocks(srv);
+        try {
+            sourceDir(rocks, source, true);
+            synchronized (LOCK) {
+                PhysicalFiles.deleteImport(backupDir(rocks), source);
+            }
+        } catch (IllegalArgumentException e) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", e.getMessage());
+        }
+        AdminV1Servlet.write(resp, 200, AdminJson.obj("deleted", true, "source", source));
     }
 
     private static void requireExists(PhysicalBackups pb, int id) {

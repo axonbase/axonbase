@@ -38,6 +38,10 @@ class PhysicalBackupApiTest {
         final String operator;
 
         Node(Path dir) throws Exception {
+            this(dir, "");
+        }
+
+        Node(Path dir, String encryptKey) throws Exception {
             backend = new RocksDbBackend(dir.toString(), RocksDbBackend.SyncMode.OFF);
             ds = new Datastore(backend);
             ds.createDatabase("app", "main");
@@ -48,7 +52,8 @@ class PhysicalBackupApiTest {
                 free = s.getLocalPort();
             }
             ServerConfig cfg = ServerConfig.load(Path.of("nao-existe.conf"), Map.of(
-                "AXON_PORT", String.valueOf(free), "AXON_ROOT_USER", "root", "AXON_ROOT_PASSWORD", "pw"));
+                "AXON_PORT", String.valueOf(free), "AXON_ROOT_USER", "root", "AXON_ROOT_PASSWORD", "pw",
+                "AXON_S3_ENCRYPT_KEY", encryptKey));
             server = AxonServer.start(ds, "secret-testing", cfg);
             port = server.port();
             root = signin("root");
@@ -67,6 +72,15 @@ class PhysicalBackupApiTest {
                 .uri(URI.create("http://127.0.0.1:" + port + "/admin/v1/backups" + path))
                 .header("Authorization", "Bearer " + token)
                 .method(method, HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+        }
+
+        HttpResponse<byte[]> raw(String method, String path, String token, byte[] body) throws Exception {
+            HttpRequest.Builder b = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + port + "/admin/v1/backups" + path))
+                .header("Authorization", "Bearer " + token);
+            b.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
+                : HttpRequest.BodyPublishers.ofByteArray(body));
+            return HTTP.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
         }
 
         long count() {
@@ -182,6 +196,98 @@ class PhysicalBackupApiTest {
             assertEquals(409, r.statusCode(), r.body());
         } finally {
             server.stop();
+        }
+    }
+
+    private static String q(String value) {
+        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** Copia todos os arquivos do backup {@code id} de {@code from} para {@code to}, pela API, na origem dada. */
+    private static void transfer(Node from, Node to, int id, String source) throws Exception {
+        HttpResponse<byte[]> list = from.raw("GET", "/physical/" + id + "/files", from.operator, null);
+        assertEquals(200, list.statusCode(), new String(list.body()));
+        AxonValue files = AxonJson.parseDocument(new String(list.body(), java.nio.charset.StandardCharsets.UTF_8))
+            .asObject().get("files");
+        assertTrue(files.asArray().size() > 2);
+        String last = files.asArray().get(files.asArray().size() - 1).asObject().get("path").asString();
+        assertEquals("meta/" + id, last, "o manifesto vem por último");
+        for (AxonValue f : files.asArray()) {
+            String path = f.asObject().get("path").asString();
+            HttpResponse<byte[]> got = from.raw("GET", "/physical/files?path=" + q(path), from.operator, null);
+            assertEquals(200, got.statusCode(), path);
+            assertEquals(String.valueOf(f.asObject().get("sizeBytes").asLong()),
+                got.headers().firstValue("X-Axon-Size").orElseThrow());
+            HttpResponse<byte[]> put = to.raw("PUT", "/physical/files?path=" + q(path) + "&source=" + source,
+                to.root, got.body());
+            assertEquals(200, put.statusCode(), path + " " + new String(put.body()));
+        }
+    }
+
+    @Test
+    @DisplayName("copia os arquivos de um motor para outro pela API e restaura a partir da origem")
+    void fileTransferAndRestoreFromSource() throws Exception {
+        try (Node a = new Node(tmp.resolve("a")); Node b = new Node(tmp.resolve("b"))) {
+            a.ds.execute("DEFINE TABLE pessoa SCHEMALESS;", sessionOf(a), null);
+            a.insert(0, 120);
+            int id = (int) body(a.call("POST", "/physical", a.operator)).asObject().get("id").asLong();
+            a.insert(120, 200);
+            b.ds.execute("DEFINE TABLE pessoa SCHEMALESS;", sessionOf(b), null);
+            b.insert(0, 7);
+
+            assertEquals(403, b.raw("PUT", "/physical/files?path=meta/1&source=x", b.operator, new byte[0])
+                .statusCode(), "gravar arquivo exige administrador");
+            transfer(a, b, id, "a1");
+
+            assertEquals(404, b.call("POST", "/physical/" + id + "/restore?confirm=true&source=desconhecida", b.root)
+                .statusCode());
+            HttpResponse<String> restored = b.call("POST", "/physical/" + id + "/restore?confirm=true&source=a1", b.root);
+            assertEquals(200, restored.statusCode(), restored.body());
+            assertEquals(120, b.count(), "o motor B ficou com o estado do backup do motor A");
+
+            assertEquals(200, b.call("DELETE", "/physical/imports/a1", b.root).statusCode());
+            assertEquals(404, b.call("POST", "/physical/" + id + "/restore?confirm=true&source=a1", b.root)
+                .statusCode(), "a importação foi apagada");
+        }
+    }
+
+    @Test
+    @DisplayName("com chave de cifra os arquivos saem cifrados e entram decifrados")
+    void fileTransferEncrypted() throws Exception {
+        String key = "chave-de-teste-123";
+        try (Node a = new Node(tmp.resolve("a"), key); Node b = new Node(tmp.resolve("b"), key)) {
+            a.ds.execute("DEFINE TABLE pessoa SCHEMALESS;", sessionOf(a), null);
+            a.insert(0, 90);
+            int id = (int) body(a.call("POST", "/physical", a.operator)).asObject().get("id").asLong();
+            HttpResponse<byte[]> got = a.raw("GET", "/physical/files?path=meta/" + id, a.operator, null);
+            byte[] onDisk = java.nio.file.Files.readAllBytes(tmp.resolve("a/.physical-backups/meta/" + id));
+            assertTrue(!java.util.Arrays.equals(onDisk, got.body()), "o corpo saiu cifrado");
+            assertEquals(String.valueOf(onDisk.length), got.headers().firstValue("X-Axon-Size").orElseThrow(),
+                "X-Axon-Size é o tamanho do arquivo original");
+            transfer(a, b, id, "cifrada");
+            b.ds.execute("DEFINE TABLE pessoa SCHEMALESS;", sessionOf(b), null);
+            assertEquals(200, b.call("POST", "/physical/" + id + "/restore?confirm=true&source=cifrada", b.root)
+                .statusCode());
+            assertEquals(90, b.count());
+        }
+    }
+
+    @Test
+    @DisplayName("recusa caminhos fora do diretório de backup e gravação sem origem")
+    void fileTransferRejectsBadInput() throws Exception {
+        try (Node a = new Node(tmp.resolve("a"))) {
+            a.ds.execute("DEFINE TABLE pessoa SCHEMALESS;", sessionOf(a), null);
+            a.insert(0, 5);
+            int id = (int) body(a.call("POST", "/physical", a.operator)).asObject().get("id").asLong();
+            for (String bad : new String[] {"../etc/passwd", "meta/../../x", "/etc/passwd", "outro/x", "meta"}) {
+                assertEquals(400, a.raw("GET", "/physical/files?path=" + q(bad), a.operator, null).statusCode(), bad);
+            }
+            assertEquals(404, a.raw("GET", "/physical/files?path=meta/9999", a.operator, null).statusCode());
+            assertEquals(400, a.raw("PUT", "/physical/files?path=meta/" + id, a.root, new byte[] {1}).statusCode(),
+                "gravar exige origem");
+            assertEquals(400, a.raw("PUT", "/physical/files?path=../x&source=s", a.root, new byte[] {1}).statusCode());
+            assertEquals(400, a.raw("PUT", "/physical/files?path=meta/1&source=a/b", a.root, new byte[] {1}).statusCode());
+            assertEquals(404, a.raw("GET", "/physical/9999/files", a.operator, null).statusCode());
         }
     }
 
