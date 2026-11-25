@@ -26,6 +26,9 @@ final class DirectorySwap {
     private static final String REPLACED_PREFIX = ".replaced-";
     private static final String MARKER = ".swap";
 
+    /** Gancho de teste, chamado depois de cada arquivo movido, para os testes de queda alargarem a janela. */
+    static volatile Runnable afterMove;
+
     private DirectorySwap() {
     }
 
@@ -120,6 +123,10 @@ final class DirectorySwap {
             Files.move(from, to, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(from, to);
+        }
+        Runnable hook = afterMove;
+        if (hook != null) {
+            hook.run();
         }
     }
 

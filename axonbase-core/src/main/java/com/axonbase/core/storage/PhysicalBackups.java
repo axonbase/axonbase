@@ -43,6 +43,11 @@ public final class PhysicalBackups implements AutoCloseable {
 
     private static final String META_PREFIX = "axon-version=";
 
+    static {
+        // ferramentas que só restauram (sem abrir um RocksDbBackend antes) precisam da biblioteca nativa carregada
+        org.rocksdb.RocksDB.loadLibrary();
+    }
+
     private final BackupEngineOptions options;
     private final BackupEngine engine;
 
