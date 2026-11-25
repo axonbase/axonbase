@@ -110,6 +110,9 @@ final class AdminV1Servlet extends HttpServlet {
                 sse(req, resp, sink -> AxonLog.buffer().subscribe(e -> sink.accept(e.toJson())));
                 return;
             }
+            if (PhysicalBackupApi.handle(srv, this, method, seg, req, resp, caller)) {
+                return;
+            }
             if (BackupStreamApi.handle(srv, this, method, seg, req, resp, caller)) {
                 return;
             }

@@ -230,6 +230,11 @@ public final class PhysicalBackups implements AutoCloseable {
         return restoring;
     }
 
+    /** Descarta o diretório preparado por {@link #prepareRestore} quando a troca desistiu. */
+    public static void discardPrepared(Path liveDir) {
+        DirectorySwap.deleteTree(DirectorySwap.restoringDir(liveDir));
+    }
+
     /**
      * Se o processo morreu no meio de uma troca, devolve a base anterior ao lugar. Chame antes de abrir a base;
      * {@link RocksDbBackend} já faz isso ao abrir. Devolve {@code true} quando recuperou algo.

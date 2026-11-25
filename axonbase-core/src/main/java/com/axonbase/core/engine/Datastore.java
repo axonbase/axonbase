@@ -1220,6 +1220,24 @@ public final class Datastore {
      * cadeia) sem tocar na base; só então o passo 2 limpa e aplica os segmentos em ordem, e o {@code ctrl}
      * do último segmento prevalece. v1 (legado, sem as proteções) segue o caminho antigo.
      */
+    /** O backend RocksDB, quando o armazenamento é este: só nele existe backup físico. */
+    public java.util.Optional<com.axonbase.core.storage.RocksDbBackend> rocksBackend() {
+        return backend instanceof com.axonbase.core.storage.RocksDbBackend rocks
+            ? java.util.Optional.of(rocks) : java.util.Optional.empty();
+    }
+
+    /**
+     * Refaz o estado em memória (plano de controle, catálogos de bancos e de usuários) a partir do que há no
+     * backend. Chamar depois de trocar a base inteira por um restore físico, como o construtor faz ao abrir.
+     */
+    public void reloadFromBackend() {
+        synchronized (controlLock) {
+            controlState.restore(controlStore.load());
+            replayControl();
+            registerLegacyEdgeKinds();
+        }
+    }
+
     public RestoreResult restoreFile(java.nio.file.Path file) throws java.io.IOException {
         if (!BackupFormat.isV2(file)) {
             try (java.io.BufferedReader reader = java.nio.file.Files.newBufferedReader(file,
