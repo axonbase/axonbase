@@ -38,7 +38,7 @@ public final class IndexBuilder {
         }
     }
 
-    private static final ConcurrentMap<String, Future<?>> RUNNING = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<BuildKey, Future<?>> RUNNING = new ConcurrentHashMap<>();
     private static final ExecutorService POOL = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "axon-index-build");
         t.setDaemon(true);
@@ -66,13 +66,26 @@ public final class IndexBuilder {
         return true;
     }
 
-    private static String key(String ns, String db, String table, String name) {
-        return ns + "|" + db + "|" + table + "|" + name;
+    /** Identidade da construção: inclui o Datastore, pois dois no mesmo processo podem ter o mesmo ns/db/índice. */
+    private record BuildKey(Datastore ds, String path) {
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof BuildKey other && other.ds == ds && other.path.equals(path);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * System.identityHashCode(ds) + path.hashCode();
+        }
+    }
+
+    private static BuildKey key(Datastore ds, String ns, String db, String table, String name) {
+        return new BuildKey(ds, ns + "|" + db + "|" + table + "|" + name);
     }
 
     /** Inicia a construção numa thread própria, a menos que já haja uma para o mesmo índice. */
     static void startAsync(Datastore ds, String ns, String dbName, String table, String name, boolean purgeFirst) {
-        String k = key(ns, dbName, table, name);
+        BuildKey k = key(ds, ns, dbName, table, name);
         java.util.concurrent.CompletableFuture<Void> gate = new java.util.concurrent.CompletableFuture<>();
         if (RUNNING.putIfAbsent(k, gate) != null) {
             return;

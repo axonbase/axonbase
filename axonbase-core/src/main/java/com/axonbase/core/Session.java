@@ -110,6 +110,17 @@ public final class Session {
         this.txControlVersion = version;
     }
 
+    private long txIndexEpoch = -1;
+
+    /** Época de índices do banco quando a transação começou, ou {@code -1} se não se sabe. */
+    public long txIndexEpoch() {
+        return txIndexEpoch;
+    }
+
+    public void txIndexEpoch(long epoch) {
+        this.txIndexEpoch = epoch;
+    }
+
     private Transaction requireTx() {
         if (txt == null || !txt.isOpen()) {
             throw new com.axonbase.common.AxonError(-32000, Messages.get("txn_inactive"));

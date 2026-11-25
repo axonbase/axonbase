@@ -430,4 +430,207 @@ class OnlineIndexBuildTest {
         assertEquals(null, state(ds, "e"));
         assertFalse(allKeys(ds).keySet().stream().anyMatch(k -> k.startsWith("IXB|")));
     }
+
+    // ------------------------------------------------------------------
+    // transação aberta antes do DEFINE INDEX
+    // ------------------------------------------------------------------
+
+    private Datastore storeWithRows(int rows) {
+        Datastore ds = store(new MemoryBackend(), true);
+        ds.execute("DEFINE TABLE t SCHEMALESS", session(), null);
+        load(ds, 0, rows);
+        return ds;
+    }
+
+    private static void defineAndWait(Datastore ds, String define) throws Exception {
+        ds.execute(define, session(), null);
+        assertTrue(IndexBuilder.awaitAll(60_000), "construção não terminou");
+    }
+
+    @Test
+    @DisplayName("transação aberta antes do DEFINE INDEX UNIQUE não commita linha sem entrada de índice")
+    void transactionOpenedBeforeUniqueIndexIsRejected() throws Exception {
+        Datastore ds = storeWithRows(2000);
+        Session a = session();
+        ds.execute("BEGIN", a, null);
+        ds.execute("CREATE t:99999 CONTENT {email: 'late'}", a, null);
+
+        defineAndWait(ds, "DEFINE INDEX e ON TABLE t COLUMNS email UNIQUE");
+
+        com.axonbase.core.storage.VersionConflictException error = assertThrows(
+            com.axonbase.core.storage.VersionConflictException.class, () -> ds.execute("COMMIT", a, null));
+        assertTrue(error.getMessage().contains("índice"), error.getMessage());
+        assertFalse(a.inTransaction());
+        // nada foi escrito e o cliente pode refazer a transação
+        assertEquals(0, rows(ds.execute("SELECT * FROM t WHERE email = 'late'", session(), null)));
+        ds.execute("BEGIN", a, null);
+        ds.execute("CREATE t:99999 CONTENT {email: 'late'}", a, null);
+        ds.execute("COMMIT", a, null);
+        assertEquals(1, rows(ds.execute("SELECT * FROM t WHERE email = 'late'", session(), null)));
+        assertThrows(AxonError.class,
+            () -> ds.execute("CREATE t:100000 CONTENT {email: 'late'}", session(), null));
+    }
+
+    @Test
+    @DisplayName("transação aberta antes de índice COLUMNAR também é recusada, e uma sem escrita passa")
+    void transactionOpenedBeforeColumnarIndex() throws Exception {
+        Datastore ds = storeWithRows(2000);
+        Session writer = session();
+        Session reader = session();
+        ds.execute("BEGIN", writer, null);
+        ds.execute("CREATE t:99999 CONTENT {email: 'late', age: 7}", writer, null);
+        ds.execute("BEGIN", reader, null);
+        ds.execute("SELECT * FROM t WHERE age = 3", reader, null);
+
+        defineAndWait(ds, "DEFINE INDEX a ON TABLE t COLUMNS age COLUMNAR");
+
+        assertThrows(com.axonbase.core.storage.VersionConflictException.class,
+            () -> ds.execute("COMMIT", writer, null));
+        ds.execute("COMMIT", reader, null);
+        assertEquals(0, rows(ds.execute("SELECT * FROM t WHERE id = t:99999", session(), null)));
+    }
+
+    @Test
+    @DisplayName("transação aberta depois do índice pronto commita normalmente e entra no índice")
+    void transactionOpenedAfterIndexCommits() throws Exception {
+        Datastore ds = storeWithRows(2000);
+        defineAndWait(ds, "DEFINE INDEX e ON TABLE t COLUMNS email UNIQUE");
+        Session a = session();
+        ds.execute("BEGIN", a, null);
+        ds.execute("CREATE t:99999 CONTENT {email: 'late'}", a, null);
+        ds.execute("COMMIT", a, null);
+        assertEquals(1, rows(ds.execute("SELECT * FROM t WHERE email = 'late'", session(), null)));
+        assertThrows(AxonError.class,
+            () -> ds.execute("CREATE t:100000 CONTENT {email: 'late'}", session(), null));
+    }
+
+    @Test
+    @DisplayName("DROP INDEX com transação aberta também invalida o commit")
+    void transactionOpenedBeforeDropIndexIsRejected() throws Exception {
+        Datastore ds = storeWithRows(50);
+        defineAndWait(ds, "DEFINE INDEX e ON TABLE t COLUMNS email UNIQUE");
+        Session a = session();
+        ds.execute("BEGIN", a, null);
+        ds.execute("CREATE t:99999 CONTENT {email: 'late'}", a, null);
+        ds.execute("DROP INDEX e", session(), null);
+        assertThrows(com.axonbase.core.storage.VersionConflictException.class,
+            () -> ds.execute("COMMIT", a, null));
+    }
+
+    // ------------------------------------------------------------------
+    // VECTOR (HNSW)
+    // ------------------------------------------------------------------
+
+    private static String vec(int i) {
+        return "{v: [" + ((i % 40) / 39.0) + ", " + ((i / 40 % 40) / 39.0) + "], n: " + i + "}";
+    }
+
+    private static java.util.List<String> nearest(Datastore ds) {
+        AxonValue rows = ds.execute(
+            "SELECT VALUE n FROM t ORDER BY vector::distance::euclidean(v, [0.5, 0.5]) LIMIT 10", session(), null);
+        java.util.List<String> out = new ArrayList<>();
+        for (AxonValue r : rows.asArray()) {
+            out.add(render(r));
+        }
+        return out;
+    }
+
+    @Test
+    @DisplayName("HNSW em segundo plano com escrita concorrente indexa os mesmos vetores do índice criado antes")
+    void vectorEquivalence() throws Exception {
+        String define = "DEFINE INDEX vx ON TABLE t COLUMNS v HNSW DIMENSION 2 DIST euclidean M 12 EFC 64 EFS 256";
+        int n = 1500;
+        // referência: índice antes da carga
+        Datastore before = store(new MemoryBackend(), false);
+        before.execute("DEFINE TABLE t SCHEMALESS", session(), null);
+        before.execute(define, session(), null);
+        Datastore plain = store(new MemoryBackend(), false);
+        plain.execute("DEFINE TABLE t SCHEMALESS", session(), null);
+        for (Datastore d : List.of(before, plain)) {
+            Session s = session();
+            for (int i = 0; i < n; i++) {
+                d.execute("CREATE t:" + i + " CONTENT " + vec(i), s, null);
+            }
+            for (int i = 0; i < 100; i++) {
+                d.execute("CREATE t:" + (n + i) + " CONTENT " + vec(n + 7 * i), s, null);
+                d.execute("DELETE t:" + (i * 3), s, null);
+            }
+        }
+
+        Datastore after = store(new MemoryBackend(), true);
+        after.execute("DEFINE TABLE t SCHEMALESS", session(), null);
+        Session s = session();
+        for (int i = 0; i < n; i++) {
+            after.execute("CREATE t:" + i + " CONTENT " + vec(i), s, null);
+        }
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch go = new CountDownLatch(1);
+        AtomicInteger chunks = new AtomicInteger();
+        IndexBuilder.chunkHook(() -> {
+            started.countDown();
+            if (chunks.incrementAndGet() == 2) {
+                try {
+                    go.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        after.execute(define, session(), null);
+        assertTrue(started.await(30, TimeUnit.SECONDS));
+        for (int i = 0; i < 100; i++) {
+            after.execute("CREATE t:" + (n + i) + " CONTENT " + vec(n + 7 * i), s, null);
+            after.execute("DELETE t:" + (i * 3), s, null);
+        }
+        go.countDown();
+        assertTrue(IndexBuilder.awaitAll(60_000));
+        assertEquals("ready", state(after, "vx"));
+
+        // o mesmo conjunto de nós no grafo (as arestas dependem da ordem de inserção e podem diferir)
+        assertEquals(indexEntries(before, plain).keySet().stream().filter(k -> k.startsWith("VX|")).count(),
+            indexEntries(after, plain).keySet().stream().filter(k -> k.startsWith("VX|")).count());
+        assertFalse(allKeys(after).keySet().stream().anyMatch(k -> k.startsWith("IXB|")));
+        // vizinhos iguais aos do índice criado antes (o grafo pode diferir, o top-10 sobre 2 dimensões não)
+        java.util.List<String> expected = nearest(before);
+        java.util.List<String> got = nearest(after);
+        long hit = got.stream().filter(expected::contains).count();
+        assertTrue(hit >= 9, "recall " + hit + "/10, esperado " + expected + " obtido " + got);
+        // linhas escritas durante a construção são encontradas; as apagadas não aparecem
+        assertEquals(0, rows(after.execute("SELECT * FROM t WHERE id = t:0", session(), null)));
+        assertEquals(1, rows(after.execute("SELECT * FROM t WHERE id = t:" + (n + 50), session(), null)));
+    }
+
+    // ------------------------------------------------------------------
+    // dois Datastore no mesmo processo
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("duas instâncias com mesmo ns/db/tabela/índice constroem sem se bloquear")
+    void twoDatastoresBuildTheSameIndexName() throws Exception {
+        Datastore one = storeWithRows(1500);
+        Datastore two = storeWithRows(1500);
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch go = new CountDownLatch(1);
+        AtomicInteger chunks = new AtomicInteger();
+        IndexBuilder.chunkHook(() -> {
+            if (chunks.incrementAndGet() == 1) {
+                inside.countDown();
+                try {
+                    go.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        one.execute("DEFINE INDEX e ON TABLE t COLUMNS email UNIQUE", session(), null);
+        assertTrue(inside.await(30, TimeUnit.SECONDS));
+        // com a primeira parada no meio, a segunda precisa iniciar a sua própria construção
+        two.execute("DEFINE INDEX e ON TABLE t COLUMNS email UNIQUE", session(), null);
+        assertEquals("building", state(two, "e"));
+        go.countDown();
+        assertTrue(IndexBuilder.awaitAll(60_000));
+        assertEquals("ready", state(one, "e"));
+        assertEquals("ready", state(two, "e"));
+        assertEquals(1, rows(two.execute("SELECT * FROM t WHERE email = 'u1499'", session(), null)));
+    }
 }

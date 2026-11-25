@@ -42,6 +42,20 @@ public final class Database {
         this.auditCatalog = new AiAuditCatalog(backend != null ? backend : new MemoryBackend());
     }
 
+    private final java.util.concurrent.atomic.AtomicLong indexEpoch = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * Contador que avança quando um índice com entradas é registrado ou removido. Uma transação aberta antes
+     * disso montou as escritas sem as entradas do índice novo, então o commit compara este número.
+     */
+    public long indexEpoch() {
+        return indexEpoch.get();
+    }
+
+    public long bumpIndexEpoch() {
+        return indexEpoch.incrementAndGet();
+    }
+
     public java.util.concurrent.locks.ReentrantReadWriteLock indexLock() {
         return indexLock;
     }

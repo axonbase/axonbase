@@ -4099,6 +4099,7 @@ return score;
             records(db).put(marker, new byte[]{1});
             newIndex.markBuilding();
             def.indexes().put(di.name(), newIndex);
+            bumpIndexEpoch(db);
         } finally {
             write.unlock();
         }
@@ -4111,6 +4112,14 @@ return score;
             IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), false);
         }
         return AxonValue.nul();
+    }
+
+    /** Avança a época de índices; o DDL da própria transação aberta não a invalida. */
+    private void bumpIndexEpoch(Database db) {
+        long now = db.bumpIndexEpoch();
+        if (session.inTransaction() && session.txIndexEpoch() == now - 1) {
+            session.txIndexEpoch(now);
+        }
     }
 
     private static String buildMarkerKey(Database db, String table, String index) {
@@ -4938,6 +4947,7 @@ return score;
                 if (removed != null) {
                     purgeIndexEntries(db, def.name(), removed);
                     records(db).delete(buildMarkerKey(db, def.name(), removed.name()));
+                    bumpIndexEpoch(db);
                 }
             } finally {
                 write.unlock();
