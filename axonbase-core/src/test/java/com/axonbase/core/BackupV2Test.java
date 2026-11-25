@@ -222,4 +222,45 @@ class BackupV2Test {
             assertEquals(snapshot(a), snapshot(b));
         }
     }
+
+    @Test
+    @DisplayName("chaves com quebra de linha, tabulação, barra invertida e caracteres de controle fazem a ida e a volta")
+    void keysWithSeparatorsRoundTrip() throws Exception {
+        // chaves de índice columnar carregam bytes de números codificados; alguns são \n ou \t e quebrariam o formato de uma linha
+        String[] keys = {
+            "CI|app|cinco|venda|venda_valor|valor|\u0003@d\npq",
+            "CI|app|cinco|venda|venda_valor|valor|\u0003@n\t",
+            "CI|app|cinco|venda|venda_valor|valor|\u0003@o\r\n",
+            "chave com barra \\ e \\n literal",
+            "plana|sem|nada|especial",
+            "com\u0000nulo\u0001controle\ufffd",
+            "\n", "\t", "\\",
+        };
+        for (java.util.function.Supplier<KvBackend> make : java.util.List.<java.util.function.Supplier<KvBackend>>of(
+                MemoryBackend::new, () -> new RocksDbBackend(dir.resolve("rx" + System.nanoTime()).toString()))) {
+            KvBackend src = make.get();
+            Datastore ds = new Datastore(src);
+            for (int i = 0; i < keys.length; i++) {
+                ds.metaPut(keys[i], ("valor" + i).getBytes(StandardCharsets.UTF_8));
+            }
+            byte[] full = export(ds, 0);
+            KvBackend dst = make.get();
+            Datastore restored = new Datastore(dst);
+            Datastore.RestoreResult r = restored.restoreFile(file(full));
+            assertTrue(r.restoredKeys() >= keys.length, "chaves restauradas: " + r.restoredKeys());
+            Map<String, String> want = snapshot(src);
+            Map<String, String> got = snapshot(dst);
+            assertTrue(want.keySet().stream().anyMatch(k -> k.indexOf('\n') >= 0), "a origem precisa ter chave com quebra de linha");
+            assertTrue(want.keySet().stream().anyMatch(k -> k.indexOf('\t') >= 0), "a origem precisa ter chave com tabulacao");
+            // o restore também grava as chaves do plano de controle: toda chave da origem precisa estar no destino, com o mesmo valor
+            for (Map.Entry<String, String> e : want.entrySet()) {
+                assertEquals(e.getValue(), got.get(e.getKey()), "chave perdida ou alterada no restore: " + cat(e.getKey()));
+            }
+        }
+    }
+
+    /** Torna visíveis os caracteres de controle de uma chave nas mensagens de falha. */
+    private static String cat(String key) {
+        return key.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r").replace("\u0000", "\\0");
+    }
 }

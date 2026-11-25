@@ -27,6 +27,8 @@ ctrl<TAB>base64(...)
 - As linhas `<chave><TAB>base64(valor)` são as gravações. As linhas `!del` (só no incremental) são as chaves apagadas depois de `since`.
 - `!end` traz `{"puts":N,"deletes":M,"sha256":"hex"}`. O SHA-256 (Secure Hash Algorithm de 256 bits) cobre todos os bytes do segmento, do início da linha de cabeçalho até a quebra de linha da última linha de dados, imediatamente antes da linha `!end`.
 
+As chaves das gravações são escritas com escape: `\\` vira `\\\\`, a quebra de linha vira `\\n`, o retorno de carro vira `\\r` e a tabulação vira `\\t`. Isso é necessário porque as chaves do índice columnar carregam bytes de números codificados, e alguns desses bytes são quebra de linha ou tabulação, o que quebraria o formato de uma linha por chave. O restore desfaz o escape. Em um banco real com índice columnar (77 mil chaves), 36 chaves tinham esses caracteres.
+
 A marca d'água é lida antes de o snapshot ser fixado. Por isso o snapshot pode conter algumas gravações com versão acima dela; o incremental seguinte as inclui de novo, o que é inofensivo porque aplicar a mesma gravação duas vezes dá o mesmo resultado. O que não acontece é uma gravação ficar de fora de todos os segmentos.
 
 ## Regras do restore
@@ -52,7 +54,7 @@ Restaurar só um incremental é recusado: um incremental sozinho apagaria a base
 
 ## Formato v1 (legado)
 
-Arquivos com o cabeçalho `--axonbase-backup-v1--` continuam aceitos e são tratados como completos. O risco: não têm manifesto, contagem nem checksum. Um arquivo v1 truncado ou adulterado só é detectado se quebrar a leitura, e um incremental v1 restaurado sozinho apaga a base e deixa o delta (perda silenciosa de dados). Full e incrementais v1 só restauram certo se concatenados na ordem. Prefira o v2.
+Arquivos com o cabeçalho `--axonbase-backup-v1--` continuam aceitos e são tratados como completos. Atenção: o formato v1 não escapava as chaves, e o restore v1 pulava em silêncio qualquer linha sem tabulação, então as entradas de índice columnar cujas chaves continham quebra de linha ou tabulação eram perdidas sem aviso. Prefira sempre backups v2. O risco: não têm manifesto, contagem nem checksum. Um arquivo v1 truncado ou adulterado só é detectado se quebrar a leitura, e um incremental v1 restaurado sozinho apaga a base e deixa o delta (perda silenciosa de dados). Full e incrementais v1 só restauram certo se concatenados na ordem. Prefira o v2.
 
 ## Códigos de erro
 

@@ -70,7 +70,7 @@ public final class BackupFormat {
         }
 
         public void put(String key, byte[] value) throws IOException {
-            line(key + "\t" + b64.encodeToString(value));
+            line(escapeKey(key) + "\t" + b64.encodeToString(value));
             puts++;
         }
 
@@ -279,10 +279,65 @@ public final class BackupFormat {
                 } else if (DEL.equals(key)) {
                     sink.delete(new String(value, StandardCharsets.UTF_8));
                 } else {
-                    sink.put(key, value);
+                    sink.put(unescapeKey(key), value);
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------ chaves
+
+    /**
+     * Escapa a chave para caber numa linha de campos separados por tabulação. Chaves de índice columnar carregam bytes
+     * de números codificados, e alguns desses bytes são quebra de linha, retorno de carro ou tabulação. A barra
+     * invertida também é escapada, então a conversão é reversível e sem ambiguidade.
+     */
+    static String escapeKey(String key) {
+        int i = 0;
+        for (; i < key.length(); i++) {
+            char c = key.charAt(i);
+            if (c == '\\' || c == '\n' || c == '\r' || c == '\t') {
+                break;
+            }
+        }
+        if (i == key.length()) {
+            return key;
+        }
+        StringBuilder sb = new StringBuilder(key.length() + 8).append(key, 0, i);
+        for (; i < key.length(); i++) {
+            char c = key.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    static String unescapeKey(String key) {
+        if (key.indexOf('\\') < 0) {
+            return key;
+        }
+        StringBuilder sb = new StringBuilder(key.length());
+        for (int i = 0; i < key.length(); i++) {
+            char c = key.charAt(i);
+            if (c != '\\' || i + 1 >= key.length()) {
+                sb.append(c);
+                continue;
+            }
+            char n = key.charAt(++i);
+            switch (n) {
+                case 'n' -> sb.append('\n');
+                case 'r' -> sb.append('\r');
+                case 't' -> sb.append('\t');
+                case '\\' -> sb.append('\\');
+                default -> sb.append('\\').append(n);
+            }
+        }
+        return sb.toString();
     }
 
     // ------------------------------------------------------------------ utilitários
