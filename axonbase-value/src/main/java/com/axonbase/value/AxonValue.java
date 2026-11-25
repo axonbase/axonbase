@@ -359,7 +359,8 @@ public final class AxonValue implements Comparable<AxonValue> {
         if (!(o instanceof AxonValue other)) {
             return false;
         }
-        return type == other.type && comparablePayload().equals(other.comparablePayloadTuple());
+        // NULL e NONE não têm valor interno: Objects.equals trata os dois lados nulos como iguais
+        return type == other.type && java.util.Objects.equals(comparablePayload(), other.comparablePayloadTuple());
     }
 
     /** Igualdade de carga útil en forma comparable. */
@@ -409,7 +410,7 @@ public final class AxonValue implements Comparable<AxonValue> {
 
     @Override
     public int hashCode() {
-        return 31 * type.hashCode() + comparablePayload().hashCode();
+        return 31 * type.hashCode() + java.util.Objects.hashCode(comparablePayload());
     }
 
     @Override

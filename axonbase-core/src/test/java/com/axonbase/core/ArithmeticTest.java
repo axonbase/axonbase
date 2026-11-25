@@ -213,4 +213,31 @@ class ArithmeticTest {
         }
         assertEquals(30, grouped.asArray().get(0).asObject().get("s").asLong());
     }
+
+    @Test
+    void comparacaoComNullENoneNaoLancaExcecao() {
+        assertTrue(val("NULL = NULL").asBool());
+        assertTrue(val("NONE = NONE").asBool());
+        assertFalse(val("NULL = 1").asBool());
+        assertFalse(val("1 = NULL").asBool());
+        assertFalse(val("'a' = NULL").asBool());
+        run("CREATE nulos:1 CONTENT {a: NULL}");
+        run("CREATE nulos:2 CONTENT {a: 1}");
+        run("CREATE nulos:3 CONTENT {b: 1}");
+        AxonValue rows = run("SELECT * FROM nulos WHERE a = NULL");
+        assertTrue(rows.asArray().stream().anyMatch(r -> r.asObject().get("id").toString().contains("nulos:1")), rows.toString());
+        assertFalse(rows.asArray().stream().anyMatch(r -> r.asObject().get("id").toString().contains("nulos:2")), rows.toString());
+        // igualdade e ordenação sem índice, com campos nulos e ausentes, também não podem falhar
+        run("SELECT * FROM nulos WHERE a != NULL");
+        run("SELECT * FROM nulos ORDER BY a");
+        run("SELECT * FROM nulos GROUP BY a");
+    }
+
+    @Test
+    void valoresNulosSaoIguaisEEntramEmConjuntos() {
+        assertEquals(AxonValue.nul(), AxonValue.nul());
+        assertEquals(AxonValue.nul().hashCode(), AxonValue.nul().hashCode());
+        assertEquals(AxonValue.none(), AxonValue.none());
+        assertEquals(1, new java.util.HashSet<>(java.util.List.of(AxonValue.nul(), AxonValue.nul())).size());
+    }
 }
