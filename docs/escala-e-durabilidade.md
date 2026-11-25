@@ -107,3 +107,25 @@ O arquivo guarda as métricas brutas e as normalizadas, o número de núcleos e 
 - Os comandos que leem varreduras com leitura fantasma em transações explícitas ou no cluster ainda serializam, como o monitor antigo.
 - Um comando muito grande guarda suas escritas em memória até o fim, proporcionalmente ao tamanho.
 - O ganho multi-nó (grupo de commit no Raft, leituras em seguidores, múltiplos grupos Raft) não faz parte desta versão.
+
+## Índice criado em segundo plano
+
+`DEFINE INDEX` sobre uma tabela que já tem dados não bloqueia as escritas. Tabelas com até
+`AXON_INDEX_INLINE_ROWS` linhas (padrão 10000) constroem o índice no próprio comando, e uma duplicata de
+`UNIQUE` falha ali mesmo. Tabelas maiores constroem em uma thread própria, em blocos de 500 linhas.
+
+- **Estado visível:** `INFO FOR TABLE` mostra `state` (`building` ou `ready`) e `processed` (linhas já
+  varridas) em cada índice. Enquanto está `building`, as escritas já mantêm o índice, mas as consultas não o
+  usam e seguem por varredura, com o mesmo resultado.
+- **Escritas concorrentes:** cada bloco segura por alguns milissegundos o lock de escrita do banco, e cada
+  statement de escrita segura o lock de leitura, então nenhum bloco enxerga um statement pela metade. Uma
+  escrita que chega durante a construção entra no índice uma vez só.
+- **Falha ou aborto:** uma duplicata em `UNIQUE` (inclusive criada por uma escrita concorrente) tira o índice
+  do catálogo e do plano de controle e apaga as entradas parciais. O motivo fica em `index_failures` no
+  `INFO FOR TABLE`. `DROP INDEX` durante a construção também interrompe e limpa.
+- **Reinício:** a chave `IXB|ns|db|tabela|índice` marca a construção em andamento e só some no mesmo lote
+  atômico que grava as chaves de "pronto". Se o motor reinicia com o marcador presente, o índice volta como
+  `building`, as entradas parciais são apagadas e a construção recomeça. Um índice parcial nunca vira pronto.
+- **Limites conhecidos:** statements dentro de uma transação explícita só enxergam o índice depois do commit,
+  e os contadores de frequência do índice `SEARCH` já perdiam atualizações entre escritores simultâneos, o que
+  esta fase não corrige.

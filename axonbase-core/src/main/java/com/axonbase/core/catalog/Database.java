@@ -17,12 +17,42 @@ public final class Database {
     private final AiAuditCatalog auditCatalog;
     private final com.axonbase.core.pl.ProgramCatalog programs = new com.axonbase.core.pl.ProgramCatalog();
 
+    /**
+     * Escritas seguram a parte de leitura durante o statement; a construção de índice segura a de escrita
+     * por um bloco curto de linhas, para que o bloco não veja uma escrita pela metade.
+     */
+    private final java.util.concurrent.locks.ReentrantReadWriteLock indexLock =
+        new java.util.concurrent.locks.ReentrantReadWriteLock();
+    private volatile int indexInlineRows = defaultInlineRows();
+
+    private static int defaultInlineRows() {
+        String env = System.getenv("AXON_INDEX_INLINE_ROWS");
+        try {
+            return env == null || env.isBlank() ? 10_000 : Integer.parseInt(env.trim());
+        } catch (NumberFormatException e) {
+            return 10_000;
+        }
+    }
+
     public Database(String ns, String db, KvBackend backend) {
         this.ns = ns;
         this.db = db;
         this.catalog = new Catalog();
         this.records = backend != null ? backend : new MemoryBackend();
         this.auditCatalog = new AiAuditCatalog(backend != null ? backend : new MemoryBackend());
+    }
+
+    public java.util.concurrent.locks.ReentrantReadWriteLock indexLock() {
+        return indexLock;
+    }
+
+    /** Tabelas com até este número de linhas criam índice no próprio comando; maiores vão para segundo plano. */
+    public int indexInlineRows() {
+        return indexInlineRows;
+    }
+
+    public void indexInlineRows(int rows) {
+        this.indexInlineRows = Math.max(0, rows);
     }
 
     public String ns() {
