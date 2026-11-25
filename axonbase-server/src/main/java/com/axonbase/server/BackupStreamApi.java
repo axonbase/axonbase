@@ -3,13 +3,13 @@ package com.axonbase.server;
 import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.core.backup.S3Encryption;
+import com.axonbase.core.engine.BackupFormatException;
 import com.axonbase.core.backup.StreamEncryption;
 import com.axonbase.core.security.Authz;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.BufferedInputStream;
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -68,22 +68,33 @@ final class BackupStreamApi {
                 throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("admin_invalid_since_version"));
             }
         }
-        // marca d'água lida ANTES do dump: o próximo incremental parte dela
-        long watermark = srv.ds().backupVersion();
         boolean incremental = type.equals("incremental") && srv.ds().incrementalSupported();
         String key = srv.config().s3EncryptKey();
         boolean encrypt = key != null && !key.isBlank();
+        // linhagem diferente (ex.: motor restaurado em base nova): recusa antes de qualquer byte
+        long current = srv.ds().backupVersion();
+        if (incremental && since > current) {
+            throw new AdminV1Servlet.ApiError(409, BackupFormatException.SINCE_AHEAD,
+                Messages.get("backup_since_ahead", since, current));
+        }
+        String nodeId = srv.clusterStatus().status().nodeId();
 
         resp.setStatus(200);
         resp.setContentType("application/octet-stream");
-        resp.setHeader("X-Axon-Backup-Type", incremental ? "incremental" : "full");
-        resp.setHeader("X-Axon-Backup-Version", String.valueOf(watermark));
-        resp.setHeader("Content-Disposition", "attachment; filename=\"axonbase-" + (incremental ? "incremental" : "full")
-            + "-" + watermark + ".axbak\"");
+        resp.setHeader("X-Axon-Backup-Format", "2");
         resp.setHeader("Cache-Control", "no-store");
         OutputStream sink = resp.getOutputStream();
         try (OutputStream out = encrypt ? StreamEncryption.encrypting(sink, key) : new NoCloseOutput(sink)) {
-            srv.ds().backupTo(out, incremental ? since : 0);
+            // a marca d'água do cabeçalho é a mesma gravada no manifesto (lida antes da varredura)
+            srv.ds().backupTo(out, incremental ? since : 0, nodeId, (inc, version) -> {
+                String kind = inc ? "incremental" : "full";
+                resp.setHeader("X-Axon-Backup-Type", kind);
+                resp.setHeader("X-Axon-Backup-Version", String.valueOf(version));
+                resp.setHeader("Content-Disposition",
+                    "attachment; filename=\"axonbase-" + kind + "-" + version + ".axbak\"");
+            });
+        } catch (BackupFormatException e) {
+            throw new AdminV1Servlet.ApiError(e.status(), e.code(), e.getMessage());
         } catch (IOException | RuntimeException e) {
             // o status 200 já saiu: só resta registrar e abortar a conexão
             AxonLog.log("error", "backup_export_failed", e.getMessage() == null ? e.toString() : e.getMessage());
@@ -104,7 +115,7 @@ final class BackupStreamApi {
         }
         BufferedInputStream body = new BufferedInputStream(
             new LimitedInput(req.getInputStream(), MAX_BODY_BYTES), 1 << 16);
-        long restoredKeys;
+        com.axonbase.core.engine.Datastore.RestoreResult result;
         java.nio.file.Path temp = java.nio.file.Files.createTempFile("axonbase-restore-", ".axbak");
         try {
             // 1) grava o corpo decifrado em arquivo temporário: consumir TUDO valida a cadeia AES-GCM
@@ -115,16 +126,12 @@ final class BackupStreamApi {
                 throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST",
                     Messages.get("admin_backup_stream_invalid", e.getMessage()));
             }
-            // 2) valida o cabeçalho ainda sem tocar nos dados
-            try (BufferedReader head = java.nio.file.Files.newBufferedReader(temp, StandardCharsets.UTF_8)) {
-                if (!"--axonbase-backup-v1--".equals(head.readLine())) {
-                    throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("admin_backup_stream_invalid",
-                        Messages.get("stmt_cluster_backup_invalid")));
-                }
-            }
-            // 3) só agora limpa e restaura, lendo do arquivo
-            try (BufferedReader reader = java.nio.file.Files.newBufferedReader(temp, StandardCharsets.UTF_8)) {
-                restoredKeys = srv.ds().restoreCluster(reader);
+            // 2) e 3) v2: valida segmentos, checksums e cadeia SEM tocar na base; só então limpa e aplica.
+            //    v1 (legado) mantém o comportamento antigo, sem essas proteções.
+            try {
+                result = srv.ds().restoreFile(temp);
+            } catch (BackupFormatException e) {
+                throw new AdminV1Servlet.ApiError(e.status(), e.code(), e.getMessage());
             } catch (AxonError | IOException | IllegalArgumentException e) {
                 throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST",
                     Messages.get("admin_backup_stream_invalid", e.getMessage()));
@@ -136,7 +143,8 @@ final class BackupStreamApi {
                 srv.auth().ensureRoot(srv.config().user(), srv.config().password());
             }
         }
-        AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true, "restoredKeys", restoredKeys));
+        AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true, "restoredKeys", result.restoredKeys(),
+            "segments", result.segments(), "version", result.version(), "type", result.type()));
     }
 
     /** Copia validando o tamanho de cada linha; lança IOException se alguma passar do limite. */

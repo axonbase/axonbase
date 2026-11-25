@@ -95,9 +95,10 @@ class BackupStreamApiTest {
             HttpResponse<byte[]> r = a.export("?type=full", a.operator);
             assertEquals(200, r.statusCode());
             assertEquals("full", r.headers().firstValue("X-Axon-Backup-Type").orElse(null));
+            assertEquals("2", r.headers().firstValue("X-Axon-Backup-Format").orElse(null));
             long version = Long.parseLong(r.headers().firstValue("X-Axon-Backup-Version").orElseThrow());
             assertTrue(version > 0);
-            assertTrue(new String(r.body(), StandardCharsets.UTF_8).startsWith("--axonbase-backup-v1--\n"));
+            assertTrue(new String(r.body(), StandardCharsets.UTF_8).startsWith("--axonbase-backup-v2--\n"));
 
             // restore exige papel admin e confirm=true
             assertEquals(403, b.restore("?confirm=true", b.operator, r.body()).statusCode());
@@ -221,6 +222,103 @@ class BackupStreamApiTest {
                 corpo.getBytes(StandardCharsets.US_ASCII));
             assertEquals(400, r.statusCode(), r.body());
             assertTrue(alvo.ds.metaGet("intacto").isPresent());
+        }
+    }
+
+    private static String code(HttpResponse<String> r) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"code\":\"([A-Z_]+)\"").matcher(r.body());
+        return m.find() ? m.group(1) : r.body();
+    }
+
+    private static byte[] concat(byte[]... parts) {
+        java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+        for (byte[] p : parts) {
+            o.writeBytes(p);
+        }
+        return o.toByteArray();
+    }
+
+    private static long version(HttpResponse<byte[]> r) {
+        return Long.parseLong(r.headers().firstValue("X-Axon-Backup-Version").orElseThrow());
+    }
+
+    @Test
+    void cadeiaConcatenadaRestauraEIncrementalIsoladoERecusado() throws Exception {
+        try (Node a = new Node(""); Node alvo = new Node("")) {
+            for (int i = 0; i < 100; i++) {
+                a.ds.metaPut("k" + i, new byte[] {(byte) i});
+            }
+            HttpResponse<byte[]> full = a.export("?type=full", a.root);
+            a.ds.metaPut("k1", new byte[] {42});
+            a.ds.metaDelete("k2");
+            HttpResponse<byte[]> inc1 = a.export("?type=incremental&since=" + version(full), a.root);
+            a.ds.metaPut("novo", new byte[] {7});
+            a.ds.metaDelete("k3");
+            HttpResponse<byte[]> inc2 = a.export("?type=incremental&since=" + version(inc1), a.root);
+            assertTrue(version(inc2) > version(inc1));
+
+            // incremental isolado: 409 e a base do alvo fica como estava
+            alvo.ds.metaPut("intacto", new byte[] {1});
+            HttpResponse<String> solo = alvo.restore("?confirm=true&force=true", alvo.root, inc1.body());
+            assertEquals(409, solo.statusCode(), solo.body());
+            assertEquals("BACKUP_CHAIN_INVALID", code(solo));
+            assertTrue(alvo.ds.metaGet("intacto").isPresent());
+            // cadeia que pula um incremental
+            HttpResponse<String> pulo = alvo.restore("?confirm=true&force=true", alvo.root,
+                concat(full.body(), inc2.body()));
+            assertEquals(409, pulo.statusCode(), pulo.body());
+            assertTrue(alvo.ds.metaGet("intacto").isPresent());
+            // segmento adulterado: 400 BACKUP_CHECKSUM
+            byte[] ruim = concat(full.body(), inc1.body());
+            ruim[ruim.length / 2] ^= 0x01;
+            HttpResponse<String> adulterado = alvo.restore("?confirm=true&force=true", alvo.root, ruim);
+            assertEquals(400, adulterado.statusCode(), adulterado.body());
+            assertTrue(alvo.ds.metaGet("intacto").isPresent());
+
+            HttpResponse<String> ok = alvo.restore("?confirm=true&force=true", alvo.root,
+                concat(full.body(), inc1.body(), inc2.body()));
+            assertEquals(200, ok.statusCode(), ok.body());
+            assertTrue(ok.body().contains("\"segments\":3"), ok.body());
+            assertTrue(ok.body().contains("\"version\":" + version(inc2)), ok.body());
+            assertEquals(a.ds.metaKeys("").size(), alvo.ds.metaKeys("").size());
+            assertArrayEquals(new byte[] {42}, alvo.ds.metaGet("k1").get());
+            assertFalse(alvo.ds.metaGet("k2").isPresent());
+            assertFalse(alvo.ds.metaGet("k3").isPresent());
+            assertTrue(alvo.ds.metaGet("novo").isPresent());
+            assertFalse(alvo.ds.metaGet("intacto").isPresent());
+        }
+    }
+
+    @Test
+    void sinceAdiantadoDa409() throws Exception {
+        try (Node a = new Node("")) {
+            a.ds.metaPut("k", new byte[] {1});
+            long atual = version(a.export("?type=full", a.root));
+            HttpResponse<byte[]> r = a.export("?type=incremental&since=" + (atual + 1000), a.root);
+            assertEquals(409, r.statusCode());
+            assertTrue(new String(r.body(), StandardCharsets.UTF_8).contains("BACKUP_SINCE_AHEAD"));
+        }
+    }
+
+    @Test
+    void cadeiaCifradaEmBlocosV2RestauraPorSegmento() throws Exception {
+        try (Node a = new Node("segredo"); Node b = new Node("segredo")) {
+            a.ds.metaPut("k", new byte[] {1});
+            HttpResponse<byte[]> full = a.export("?type=full", a.root);
+            assertEquals(200, b.restore("?confirm=true", b.root, full.body()).statusCode());
+            assertTrue(b.ds.metaGet("k").isPresent());
+        }
+    }
+
+    @Test
+    void restoreAindaAceitaArquivoV1Legado() throws Exception {
+        try (Node a = new Node(""); Node b = new Node("")) {
+            a.ds.metaPut("k", new byte[] {5});
+            String v1 = a.ds.backupCluster();
+            HttpResponse<String> r = b.restore("?confirm=true", b.root, v1.getBytes(StandardCharsets.UTF_8));
+            assertEquals(200, r.statusCode(), r.body());
+            assertTrue(r.body().contains("\"type\":\"legacy\""), r.body());
+            assertArrayEquals(new byte[] {5}, b.ds.metaGet("k").get());
         }
     }
 }
