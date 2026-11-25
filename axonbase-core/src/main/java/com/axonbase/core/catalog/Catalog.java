@@ -95,6 +95,12 @@ public final class Catalog {
         final ConcurrentMap<String, FieldDef> fields = new ConcurrentHashMap<>();
         final ConcurrentMap<String, IndexDef> indexes = new ConcurrentHashMap<>();
         final ConcurrentMap<String, EventDef> events = new ConcurrentHashMap<>();
+        final ConcurrentMap<String, String> indexFailures = new ConcurrentHashMap<>();
+
+        /** Última falha de construção de cada índice que foi abortado (nome do índice para a mensagem). */
+        public ConcurrentMap<String, String> indexFailures() {
+            return indexFailures;
+        }
 
         public TableDef(String name, boolean schemafull, boolean drop) {
             this.name = name;
@@ -228,6 +234,9 @@ public final class Catalog {
         private final int hnswM;
         private final int hnswEfc;
         private final int hnswEfs;
+        /** Pronto para consulta. Só é falso enquanto o índice é construído em segundo plano. */
+        private volatile boolean ready = true;
+        private final java.util.concurrent.atomic.AtomicLong built = new java.util.concurrent.atomic.AtomicLong();
 
         public IndexDef(String name, List<String> columns, boolean unique, boolean count) {
             this(name, columns, unique, count, null, false, false, null, null);
@@ -272,6 +281,16 @@ public final class Catalog {
         public int hnswM() { return hnswM; }
         public int hnswEfc() { return hnswEfc; }
         public int hnswEfs() { return hnswEfs; }
+
+        /** Índice completo e consultável. */
+        public boolean ready() { return ready; }
+        /** Linhas já processadas pela construção em segundo plano. */
+        public long built() { return built.get(); }
+        public void built(long value) { built.set(value); }
+        public void addBuilt(long delta) { built.addAndGet(delta); }
+        /** Marca o índice como em construção: as escritas o mantêm, as consultas não o usam. */
+        public void markBuilding() { built.set(0); ready = false; }
+        public void markReady() { ready = true; }
     }
 
     /** Definição de uma Data Rule (filtro no nível de linha e coluna). */

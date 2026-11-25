@@ -1356,6 +1356,9 @@ public final class Datastore {
         KvBackend base = session.namespace() == null || session.database() == null
             ? backend : requireDatabase(session).records();
         session.txControlVersion(controlState.version());
+        Database current = session.namespace() == null || session.database() == null ? null
+            : findDatabase(session.namespace(), session.database());
+        session.txIndexEpoch(current == null ? -1 : current.indexEpoch());
         session.tx(new Transaction(base));
     }
 
@@ -1364,6 +1367,33 @@ public final class Datastore {
         if (tx == null || !tx.isOpen()) {
             throw AxonError.internal(Messages.get("txn_inactive"));
         }
+        Database current = session.namespace() == null || session.database() == null ? null
+            : findDatabase(session.namespace(), session.database());
+        if (current == null || session.txIndexEpoch() < 0
+            || (tx.stagedWriteCount() == 0 && tx.stagedDeleteCount() == 0)) {
+            commitLocked(session, tx);
+            return;
+        }
+        // o registro de índice novo toma o lado de escrita; segurar o de leitura até o fim do commit impede
+        // que ele apareça entre a checagem e a gravação
+        java.util.concurrent.locks.Lock read = current.indexLock().readLock();
+        read.lock();
+        try {
+            if (current.indexEpoch() != session.txIndexEpoch()) {
+                // descarta só a transação: o catálogo não mudou por causa dela, então não há o que reconstruir
+                tx.cancel();
+                session.tx(null);
+                session.txControlVersion(-1);
+                session.discardLive();
+                throw new com.axonbase.core.storage.VersionConflictException(Messages.get("txn_index_changed"));
+            }
+            commitLocked(session, tx);
+        } finally {
+            read.unlock();
+        }
+    }
+
+    private void commitLocked(Session session, Transaction tx) {
         CommitCoordinator coordinator = commitCoordinator;
         if (coordinator == null) {
             tx.commit();

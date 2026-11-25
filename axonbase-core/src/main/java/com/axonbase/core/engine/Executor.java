@@ -363,7 +363,22 @@ public final class Executor {
     }
 
     private AxonValue runStatement(Statement s) {
-        return batchable(s) ? runBatched(s) : runStatementUnbatched(s);
+        if (!batchable(s)) {
+            return runStatementUnbatched(s);
+        }
+        // a escrita segura o lado de leitura: um bloco da construção de índice nunca vê um statement pela metade
+        Database locked = session.namespace() == null || session.database() == null ? null
+            : ds.findDatabase(session.namespace(), session.database());
+        if (locked == null) {
+            return runBatched(s);
+        }
+        java.util.concurrent.locks.Lock read = locked.indexLock().readLock();
+        read.lock();
+        try {
+            return runBatched(s);
+        } finally {
+            read.unlock();
+        }
     }
 
     private AxonValue runStatementUnbatched(Statement s) {
@@ -859,6 +874,8 @@ public final class Executor {
             info.put("vector_distance", i.vectorDistance() == null ? AxonValue.nul() : AxonValue.str(i.vectorDistance()));
             info.put("columnar", AxonValue.bool(i.columnar()));
             info.put("kind", AxonValue.str(indexKind(i)));
+            info.put("state", AxonValue.str(i.ready() ? "ready" : "building"));
+            info.put("processed", AxonValue.num(i.built()));
             if (i.vector()) {
                 info.put("hnsw", AxonValue.object(Map.of(
                     "m", AxonValue.num(i.hnswM()),
@@ -878,6 +895,11 @@ public final class Executor {
         out.put("drop", AxonValue.bool(def.drop()));
         out.put("fields", AxonValue.object(fields));
         out.put("indexes", AxonValue.object(indexes));
+        if (!def.indexFailures().isEmpty()) {
+            Map<String, AxonValue> failed = new LinkedHashMap<>();
+            new java.util.TreeMap<>(def.indexFailures()).forEach((k, v) -> failed.put(k, AxonValue.str(v)));
+            out.put("index_failures", AxonValue.object(failed));
+        }
         out.put("events", AxonValue.object(events));
         return AxonValue.object(out);
     }
@@ -1385,7 +1407,7 @@ public final class Executor {
         Expr limit = sel.limit();
         if (orders.isEmpty() && firstField[0] != null && !sel.grouped()
             && sel.fields().stream().noneMatch(this::isAggregateCall)) {
-            String metric = def.indexes().values().stream()
+            String metric = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
                 .filter(i -> i.vector() && i.columns().contains(firstField[0])).map(Catalog.IndexDef::vectorDistance)
                 .findFirst().orElse("cosine");
             String function = "vector::distance::" + ("manhattan".equals(metric) ? "manhattan"
@@ -2121,7 +2143,7 @@ public final class Executor {
         if (def == null) {
             return fallback.get();
         }
-        Catalog.IndexDef index = def.indexes().values().stream()
+        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.vector() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
             return fallback.get();
@@ -2368,7 +2390,7 @@ public final class Executor {
             return fallback.get();
         }
         Catalog.TableDef def = db.catalog().table(table.name());
-        Catalog.IndexDef index = def == null ? null : def.indexes().values().stream()
+        Catalog.IndexDef index = def == null ? null : def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
             return fallback.get();
@@ -2462,7 +2484,7 @@ public final class Executor {
         if (def == null) {
             return fallback.get();
         }
-        Catalog.IndexDef index = def.indexes().values().stream()
+        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
             return fallback.get();
@@ -2607,7 +2629,7 @@ public final class Executor {
         if (def == null) {
             return null;
         }
-        Catalog.IndexDef index = def.indexes().values().stream()
+        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null || !geoHasCoordinates(db, table.name(), index) || geoHasNonPoint(db, table.name(), index)) {
             return null;
@@ -2971,9 +2993,9 @@ return score;
         if (def == null) {
             return null;
         }
-        Catalog.IndexDef searchIndex = def.indexes().values().stream()
+        Catalog.IndexDef searchIndex = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.search() && i.columns().contains(searchField)).findFirst().orElse(null);
-        Catalog.IndexDef vectorIndex = def.indexes().values().stream()
+        Catalog.IndexDef vectorIndex = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.vector() && i.columns().contains(vectorField)).findFirst().orElse(null);
         if (searchIndex == null || vectorIndex == null) {
             return null;
@@ -3111,7 +3133,7 @@ return score;
         if (def == null) {
             return new ArrayList<>();
         }
-        Catalog.IndexDef index = def.indexes().values().stream()
+        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.search() && i.columns().contains(field.name())).findFirst().orElse(null);
         if (index == null) {
             return sourceDocs(db, sel.from());
@@ -3411,7 +3433,7 @@ return score;
         if (def == null) {
             return null;
         }
-        return def.indexes().values().stream()
+        return def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.unique() && i.columns().size() == 1 && i.columns().contains(field.name()))
             .findFirst().orElse(null);
     }
@@ -3428,7 +3450,7 @@ return score;
         if (def == null) {
             return null;
         }
-        return def.indexes().values().stream()
+        return def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.vector() && i.columns().contains(field.name())).findFirst().orElse(null);
     }
 
@@ -3441,7 +3463,7 @@ return score;
             && contains.args().size() == 2 && contains.args().get(1) instanceof Expr.Ident containsField
             && isRowIndependent(contains.args().get(0))) {
             Catalog.TableDef tdef = db.catalog().table(table);
-            return tdef == null ? null : tdef.indexes().values().stream()
+            return tdef == null ? null : tdef.indexes().values().stream().filter(Catalog.IndexDef::ready)
                 .filter(i -> i.geo() && i.columns().contains(containsField.name())).findFirst().orElse(null);
         }
         if (table.isBlank() || !(sel.cond() instanceof Expr.Binary comparison)
@@ -3455,7 +3477,7 @@ return score;
         if (def == null) {
             return null;
         }
-        return def.indexes().values().stream()
+        return def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
     }
 
@@ -3469,7 +3491,7 @@ return score;
         if (def == null) {
             return null;
         }
-        return def.indexes().values().stream()
+        return def.indexes().values().stream().filter(Catalog.IndexDef::ready)
             .filter(i -> i.search() && i.columns().contains(field.name())).findFirst().orElse(null);
     }
 
@@ -4043,34 +4065,227 @@ return score;
         Catalog.IndexDef previous = def.indexes().get(di.name());
         boolean sameUnique = previous != null && previous.unique() && di.unique()
             && previous.columns().equals(di.columns());
-        // Redefinir o mesmo índice é idempotente: só um UNIQUE novo precisa olhar os dados. No replay
-        // do plano de controle as entradas já estão no KV, então não há o que preencher.
-        if (di.unique() && !sameUnique && !ds.isReplaying()) {
-            backfillUniqueIndex(db, di.table(), newIndex);
-        }
-        def.indexes().put(di.name(), newIndex);
-        // índices podem ser criados depois dos registros: indexa o estado atual
-        if (di.searchAnalyzer() != null || di.geo() || di.columnar() || di.vectorDimension() != null) {
-            for (RecordId rid : resolveTargets(new Expr.Ident(di.table()))) {
-                Document doc = loadDoc(db, rid);
-                if (doc != null) {
-                    indexSearch(db, rid, null, doc.current());
-                    indexAdvanced(db, rid, null, doc.current());
-                    indexColumnar(db, rid, null, doc.current());
-                }
+        boolean advanced = di.searchAnalyzer() != null || di.geo() || di.columnar() || di.vectorDimension() != null;
+        String marker = buildMarkerKey(db, di.table(), di.name());
+        def.indexFailures().remove(di.name());
+        String definition = com.axonbase.parser.Render.stmt(di);
+        String controlName = di.table() + ":" + di.name();
+        if (ds.isReplaying()) {
+            // No replay as entradas já estão no KV. Só um marcador de construção (queda no meio) manda refazer.
+            boolean interrupted = records(db).get(marker).isPresent();
+            if (interrupted) {
+                newIndex.markBuilding();
             }
-            if (di.columnar()) {
-                records(db).put(com.axonbase.core.storage.ColumnarIndex.readyKey(db.ns(), db.db(), di.table(), di.name()),
+            def.indexes().put(di.name(), newIndex);
+            control(db, ControlCommand.Kind.INDEX, controlName, definition);
+            if (interrupted) {
+                IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), true);
+            }
+            return AxonValue.nul();
+        }
+        // Redefinir o mesmo UNIQUE é idempotente: só um índice novo precisa olhar os dados.
+        if (!((di.unique() && !sameUnique) || advanced)) {
+            def.indexes().put(di.name(), newIndex);
+            control(db, ControlCommand.Kind.INDEX, controlName, definition);
+            return AxonValue.nul();
+        }
+        java.util.concurrent.locks.Lock write = db.indexLock().writeLock();
+        write.lock();
+        try {
+            if (previous != null && (previous.search() || previous.geo() || previous.columnar() || previous.vector()
+                || (previous.unique() && !sameUnique))) {
+                purgeIndexEntries(db, di.table(), previous);
+            }
+            records(db).put(marker, new byte[]{1});
+            newIndex.markBuilding();
+            def.indexes().put(di.name(), newIndex);
+            bumpIndexEpoch(db);
+        } finally {
+            write.unlock();
+        }
+        if (countRows(db, di.table(), db.indexInlineRows() + 1) <= db.indexInlineRows()) {
+            // tabela pequena: constrói no próprio comando, e uma duplicata falha aqui, sem registrar nada
+            IndexBuilder.build(ds, this, db.ns(), db.db(), di.table(), di.name(), false);
+            control(db, ControlCommand.Kind.INDEX, controlName, definition);
+        } else {
+            control(db, ControlCommand.Kind.INDEX, controlName, definition);
+            IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), false);
+        }
+        return AxonValue.nul();
+    }
+
+    /** Avança a época de índices; o DDL da própria transação aberta não a invalida. */
+    private void bumpIndexEpoch(Database db) {
+        long now = db.bumpIndexEpoch();
+        if (session.inTransaction() && session.txIndexEpoch() == now - 1) {
+            session.txIndexEpoch(now);
+        }
+    }
+
+    private static String buildMarkerKey(Database db, String table, String index) {
+        return "IXB|" + db.ns() + "|" + db.db() + "|" + table + "|" + index;
+    }
+
+    /** Conta registros da tabela, parando em {@code limit}. */
+    private int countRows(Database db, String table, int limit) {
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        int[] n = {0};
+        records(db).scanPrefix(prefix, k -> {
+            if (k.length() > prefix.length() && k.charAt(prefix.length()) != '!') {
+                n[0]++;
+            }
+            return n[0] < limit;
+        });
+        return n[0];
+    }
+
+    // ---- construção de índice em segundo plano (ver IndexBuilder) ----
+
+    /** Prepara este executor para a thread de construção, que não tem sessão de cliente. */
+    Executor forBuild(Session buildSession) {
+        this.session = buildSession;
+        return this;
+    }
+
+    /** Índice que a indexação em curso deve tocar; {@code null} nas escritas normais, que mantêm todos. */
+    private Catalog.IndexDef onlyIndex;
+
+    /** Roda o trabalho num lote atômico quando o backend tem lote; senão, direto. */
+    private void inBatch(Database db, Runnable work) {
+        if (batch != null || !(db.records() instanceof com.axonbase.core.storage.RocksDbBackend rocks)) {
+            work.run();
+            return;
+        }
+        com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
+        batch = mine;
+        try {
+            work.run();
+            batch = null;
+            mine.commit();
+        } finally {
+            batch = null;
+            mine.discard();
+        }
+    }
+
+    /** Indexa um bloco de registros (chaves já sem o prefixo da tabela). Lança em duplicata de UNIQUE. */
+    void buildChunk(Database db, String table, Catalog.IndexDef index, List<String> keyParts) {
+        inBatch(db, () -> {
+            for (String part : keyParts) {
+                indexRow(db, table, index, new RecordId(table, parseKey(part)));
+            }
+        });
+    }
+
+    private void indexRow(Database db, String table, Catalog.IndexDef index, RecordId rid) {
+        Document doc = loadDoc(db, rid);
+        if (doc == null) {
+            return;
+        }
+        AxonValue current = doc.current();
+        if (index.unique()) {
+            String prefix = uniqueIndexPrefix(db, table, index, current);
+            if (prefix != null) {
+                String own = prefix + rid.key().keyString();
+                if (records(db).keysWithPrefix(prefix).stream().anyMatch(k -> !k.equals(own))) {
+                    throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
+                }
+                records(db).put(own, new byte[0]);
+            }
+        }
+        onlyIndex = index;
+        try {
+            // uma escrita concorrente já pode ter indexado a linha: o tamanho do documento marca isso
+            if (index.search() && records(db).get(docLenKey(db, table, index.name(), rid)).isEmpty()) {
+                indexSearch(db, rid, null, current);
+            }
+            if (index.geo() || index.vector()) {
+                indexAdvanced(db, rid, null, current);
+            }
+            if (index.columnar()) {
+                indexColumnar(db, rid, null, current);
+            }
+        } finally {
+            onlyIndex = null;
+        }
+    }
+
+    /** Última etapa: grava as chaves de "pronto" e apaga o marcador no mesmo lote. */
+    void finishIndex(Database db, String table, Catalog.IndexDef index) {
+        inBatch(db, () -> {
+            if (index.columnar()) {
+                records(db).put(com.axonbase.core.storage.ColumnarIndex.readyKey(db.ns(), db.db(), table, index.name()),
                     new byte[]{1});
             }
-            if (di.geo()) {
-                // todas as entradas acabaram de ser gravadas com as coordenadas: a consulta pode filtrar pelo índice
-                records(db).put(GeoEntry.readyKey(db.ns(), db.db(), di.table(), di.name()), new byte[]{1});
+            if (index.geo()) {
+                records(db).put(GeoEntry.readyKey(db.ns(), db.db(), table, index.name()), new byte[]{1});
+            }
+            records(db).delete(buildMarkerKey(db, table, index.name()));
+        });
+    }
+
+    /** Desfaz uma construção que falhou: tira o índice do catálogo e do plano de controle e apaga suas entradas. */
+    void abortIndex(Database db, String table, Catalog.IndexDef index, String message) {
+        Catalog.TableDef def = db.catalog().table(table);
+        if (def != null) {
+            def.indexes().remove(index.name(), index);
+            def.indexFailures().put(index.name(), message);
+        }
+        purgeIndexEntries(db, table, index);
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.INDEX, table + ":" + index.name());
+        records(db).delete(buildMarkerKey(db, table, index.name()));
+    }
+
+    /** Apaga as chaves com o prefixo, em lotes, sem listar tudo na memória. */
+    private void deleteAll(Database db, String prefix) {
+        while (true) {
+            List<String> batchKeys = new ArrayList<>(10_000);
+            records(db).scanPrefix(prefix, k -> {
+                batchKeys.add(k);
+                return batchKeys.size() < 10_000;
+            });
+            if (batchKeys.isEmpty()) {
+                return;
+            }
+            for (String k : batchKeys) {
+                records(db).delete(k);
             }
         }
-        control(db, ControlCommand.Kind.INDEX, di.table() + ":" + di.name(),
-            com.axonbase.parser.Render.stmt(di));
-        return AxonValue.nul();
+    }
+
+    /** Apaga todas as entradas que um índice mantém, qualquer que seja o tipo. */
+    void purgeIndexEntries(Database db, String table, Catalog.IndexDef index) {
+        String name = index.name();
+        String base = "|" + db.ns() + "|" + db.db() + "|" + table + "|" + name + "|";
+        if (index.unique()) {
+            Catalog.TableDef def = db.catalog().table(table);
+            boolean sharedColumn = index.columns().size() == 1 && def != null && def.indexes().values().stream()
+                .anyMatch(o -> o != index && o.unique() && o.columns().equals(index.columns()));
+            if (!sharedColumn) {
+                String head = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000!uidx\u0000";
+                deleteAll(db, head + (index.columns().size() == 1 ? index.columns().get(0) : name) + "\u0000");
+            }
+        }
+        if (index.columnar()) {
+            records(db).delete(com.axonbase.core.storage.ColumnarIndex.readyKey(db.ns(), db.db(), table, name));
+            deleteAll(db, com.axonbase.core.storage.ColumnarIndex.indexPrefix(db.ns(), db.db(), table, name));
+        }
+        if (index.vector()) {
+            records(db).delete(vhTopKey(db, table, name));
+            deleteAll(db, "VX" + base);
+            deleteAll(db, "VH" + base);
+        }
+        if (index.geo()) {
+            records(db).delete(GeoEntry.readyKey(db.ns(), db.db(), table, name));
+            records(db).delete(GeoEntry.nonPointKey(db.ns(), db.db(), table, name));
+            deleteAll(db, geoIndexBase(db, table, name));
+            deleteAll(db, "SPR" + base);
+        }
+        if (index.search()) {
+            deleteAll(db, "FT" + base);
+            deleteAll(db, "FTDF" + base);
+            deleteAll(db, "FTLEN" + base);
+        }
     }
 
     /**
@@ -4724,31 +4939,20 @@ return score;
     private AxonValue runDropIndex(Statement.DropIndex di) {
         Database db = db();
         for (Catalog.TableDef def : db.catalog().tables()) {
-            Catalog.IndexDef removed = def.indexes().remove(di.name());
+            java.util.concurrent.locks.Lock write = db.indexLock().writeLock();
+            write.lock();
+            Catalog.IndexDef removed;
+            try {
+                removed = def.indexes().remove(di.name());
+                if (removed != null) {
+                    purgeIndexEntries(db, def.name(), removed);
+                    records(db).delete(buildMarkerKey(db, def.name(), removed.name()));
+                    bumpIndexEpoch(db);
+                }
+            } finally {
+                write.unlock();
+            }
             if (removed != null) {
-                if (removed.columnar()) {
-                    records(db).delete(com.axonbase.core.storage.ColumnarIndex.readyKey(
-                        db.ns(), db.db(), def.name(), removed.name()));
-                    String prefix = com.axonbase.core.storage.ColumnarIndex.indexPrefix(
-                        db.ns(), db.db(), def.name(), removed.name());
-                    for (String key : records(db).keysWithPrefix(prefix)) {
-                        records(db).delete(key);
-                    }
-                }
-                if (removed.vector()) {
-                    records(db).delete(vhTopKey(db, def.name(), removed.name()));
-                }
-                if (removed.geo()) {
-                    records(db).delete(GeoEntry.readyKey(db.ns(), db.db(), def.name(), removed.name()));
-                    records(db).delete(GeoEntry.nonPointKey(db.ns(), db.db(), def.name(), removed.name()));
-                    for (String key : records(db).keysWithPrefix(geoIndexBase(db, def.name(), removed.name()))) {
-                        records(db).delete(key);
-                    }
-                    String reverse = "SPR|" + db.ns() + "|" + db.db() + "|" + def.name() + "|" + removed.name() + "|";
-                    for (String key : records(db).keysWithPrefix(reverse)) {
-                        records(db).delete(key);
-                    }
-                }
                 control(db, ControlCommand.Kind.INDEX, di.name(),
                     "DROP INDEX " + di.name());
                 return AxonValue.nul();
@@ -6211,14 +6415,15 @@ return score;
             return;
         }
         for (Catalog.IndexDef index : table.indexes().values()) {
-            if (!index.search()) {
+            if (!index.search() || (onlyIndex != null && index != onlyIndex)) {
                 continue;
             }
             Catalog.AnalyzerDef analyzer = db.catalog().analyzer(index.searchAnalyzer());
             if (analyzer == null) {
                 continue;
             }
-            if (before != null) {
+            // em construção, uma linha que a varredura ainda não indexou não tem o que retirar
+            if (before != null && (index.ready() || records(db).get(docLenKey(db, rid.table(), index.name(), rid)).isPresent())) {
                 for (Map.Entry<String, Integer> e : termFrequencies(before, index.columns(), analyzer).entrySet()) {
                     records(db).delete(searchKey(db, rid.table(), index.name(), e.getKey(), rid));
                     decrementCounter(db, docFreqKey(db, rid.table(), index.name(), e.getKey()));
@@ -6316,7 +6521,7 @@ return score;
             return;
         }
         for (Catalog.IndexDef index : table.indexes().values()) {
-            if (!index.geo() && !index.vector()) {
+            if ((!index.geo() && !index.vector()) || (onlyIndex != null && index != onlyIndex)) {
                 continue;
             }
             if (index.geo()) {
@@ -6349,7 +6554,7 @@ return score;
         Catalog.TableDef table = db.catalog().table(rid.table());
         if (table == null) return;
         for (Catalog.IndexDef index : table.indexes().values()) {
-            if (!index.columnar()) continue;
+            if (!index.columnar() || (onlyIndex != null && index != onlyIndex)) continue;
             for (String column : index.columns()) {
                 String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
                     db.ns(), db.db(), rid.table(), index.name(), column);
@@ -6430,7 +6635,7 @@ return score;
         if (!ok || refs.contains("id") || refs.contains("*")) {
             return null;
         }
-        List<Catalog.IndexDef> columnar = def.indexes().values().stream().filter(Catalog.IndexDef::columnar)
+        List<Catalog.IndexDef> columnar = def.indexes().values().stream().filter(Catalog.IndexDef::ready).filter(Catalog.IndexDef::columnar)
             .filter(i -> records(db).get(com.axonbase.core.storage.ColumnarIndex.readyKey(
                 db.ns(), db.db(), t.name(), i.name())).isPresent()).toList();
         if (columnar.isEmpty()) {
