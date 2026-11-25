@@ -99,6 +99,11 @@ class BackupStreamApiTest {
             long version = Long.parseLong(r.headers().firstValue("X-Axon-Backup-Version").orElseThrow());
             assertTrue(version > 0);
             assertTrue(new String(r.body(), StandardCharsets.UTF_8).startsWith("--axonbase-backup-v2--\n"));
+            // o manifesto leva a versão do build do servidor (não o "dev" de quando ninguém a informou)
+            String manifestLine = new String(r.body(), StandardCharsets.UTF_8).split("\n")[1];
+            String manifest = new String(java.util.Base64.getDecoder().decode(manifestLine.substring(manifestLine.indexOf('\t') + 1)),
+                StandardCharsets.UTF_8);
+            assertTrue(manifest.contains("\"engineVersion\":\"" + BuildInfo.version() + "\""), manifest);
 
             // restore exige papel admin e confirm=true
             assertEquals(403, b.restore("?confirm=true", b.operator, r.body()).statusCode());

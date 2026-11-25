@@ -1183,7 +1183,7 @@ public final class Datastore {
         if (start != null) {
             start.started(incremental, mark);
         }
-        String engine = Datastore.class.getPackage().getImplementationVersion();
+        String engine = engineVersion != null ? engineVersion : Datastore.class.getPackage().getImplementationVersion();
         BackupFormat.SegmentWriter w = new BackupFormat.SegmentWriter(out, !incremental, since, mark, nodeId,
             engine == null ? "dev" : engine);
         w.ctrl(com.axonbase.core.control.CatalogCodec.encode(controlState.snapshot())
@@ -1375,6 +1375,13 @@ public final class Datastore {
         backend.flush();
         // As notificações retidas durante a transação só saem agora, depois do quórum.
         session.flushLive();
+    }
+
+    private volatile String engineVersion;
+
+    /** Versão do build que o servidor informa, gravada no manifesto dos backups. */
+    public void engineVersion(String version) {
+        this.engineVersion = version;
     }
 
     public void cancelSession(Session session) {

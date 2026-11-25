@@ -86,6 +86,7 @@ final class BackupStreamApi {
         OutputStream sink = resp.getOutputStream();
         try (OutputStream out = encrypt ? StreamEncryption.encrypting(sink, key) : new NoCloseOutput(sink)) {
             // a marca d'água do cabeçalho é a mesma gravada no manifesto (lida antes da varredura)
+            srv.ds().engineVersion(BuildInfo.version());
             srv.ds().backupTo(out, incremental ? since : 0, nodeId, (inc, version) -> {
                 String kind = inc ? "incremental" : "full";
                 resp.setHeader("X-Axon-Backup-Type", kind);
