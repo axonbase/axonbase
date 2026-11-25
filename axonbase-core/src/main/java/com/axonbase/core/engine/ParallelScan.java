@@ -11,6 +11,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -56,13 +57,23 @@ final class ParallelScan {
      * Percorre as chaves entregues por {@code scan}; {@code consume} soma uma chave num acumulador, {@code merge} funde o segundo no primeiro.
      * {@code head} recebe as primeiras chaves e, no fim, o resultado de tudo.
      */
-    static <A> void run(Consumer<Predicate<String>> scan, A head, Supplier<A> fresh,
-                        BiConsumer<A, String> consume, BiConsumer<A, A> merge) {
+    static <A, I> void run(Consumer<Predicate<I>> scan, A head, Supplier<A> fresh,
+                        BiConsumer<A, I> consume, BiConsumer<A, A> merge) {
+        run(scan, head, fresh, consume, merge, () -> false);
+    }
+
+    /**
+     * Como {@link #run(Consumer, Object, Supplier, BiConsumer, BiConsumer)}, mas para de ler assim que {@code done}
+     * (avaliado sobre o acumulador {@code head}, que já tem tudo o que veio antes) for verdadeiro. Os lotes ainda em
+     * andamento são descartados, então o que sobra em {@code head} é um prefixo da varredura em ordem.
+     */
+    static <A, I> void run(Consumer<Predicate<I>> scan, A head, Supplier<A> fresh,
+                        BiConsumer<A, I> consume, BiConsumer<A, A> merge, BooleanSupplier done) {
         if (degree() < 2) {
             scan.accept(key -> {
                 QueryContext.checkCancelled();
                 consume.accept(head, key);
-                return true;
+                return !done.getAsBoolean();
             });
             return;
         }
@@ -70,16 +81,16 @@ final class ParallelScan {
         ArrayDeque<Future<A>> pending = new ArrayDeque<>();
         int maxInFlight = 2 * degree();
         long[] seen = {0};
-        List<List<String>> current = new ArrayList<>();
+        List<List<I>> current = new ArrayList<>();
         current.add(new ArrayList<>(BATCH));
         try {
             scan.accept(key -> {
                 QueryContext.checkCancelled();
                 if (seen[0]++ < SEQUENTIAL_HEAD) {
                     consume.accept(head, key);
-                    return true;
+                    return !done.getAsBoolean();
                 }
-                List<String> batch = current.get(0);
+                List<I> batch = current.get(0);
                 batch.add(key);
                 if (batch.size() >= BATCH) {
                     pending.add(submit(batch, handle, fresh, consume));
@@ -87,14 +98,26 @@ final class ParallelScan {
                     while (pending.size() >= maxInFlight) {
                         merge.accept(head, await(pending.poll()));
                     }
+                    // com muitos lotes já fundidos, só vale continuar se a janela ainda não fechou
+                    while (!pending.isEmpty() && pending.peek().isDone()) {
+                        merge.accept(head, await(pending.poll()));
+                    }
                 }
-                return true;
+                return !done.getAsBoolean();
             });
+            if (done.getAsBoolean()) {
+                pending.forEach(f -> f.cancel(true));
+                return;
+            }
             if (!current.get(0).isEmpty()) {
                 pending.add(submit(current.get(0), handle, fresh, consume));
             }
             while (!pending.isEmpty()) {
                 merge.accept(head, await(pending.poll()));
+                if (done.getAsBoolean()) {
+                    pending.forEach(f -> f.cancel(true));
+                    return;
+                }
             }
         } catch (RuntimeException | Error e) {
             pending.forEach(f -> f.cancel(true));
@@ -102,14 +125,14 @@ final class ParallelScan {
         }
     }
 
-    private static <A> Future<A> submit(List<String> keys, QueryContext.Handle handle, Supplier<A> fresh,
-                                        BiConsumer<A, String> consume) {
+    private static <A, I> Future<A> submit(List<I> keys, QueryContext.Handle handle, Supplier<A> fresh,
+                                           BiConsumer<A, I> consume) {
         BATCHES.incrementAndGet();
         return Pool.INSTANCE.submit(() -> {
             QueryContext.Handle previous = QueryContext.attach(handle);
             try {
                 A acc = fresh.get();
-                for (String key : keys) {
+                for (I key : keys) {
                     consume.accept(acc, key);
                 }
                 QueryContext.checkCancelled();

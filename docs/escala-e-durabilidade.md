@@ -73,6 +73,35 @@ mvn -pl axonbase-core -am -Daxon.bench=true -Daxon.bench.rows=200000 -Dtest=Scal
 
 As linhas de resultado começam com `BASE`.
 
+## Teste de portão de escala
+
+O `ScaleGateTest` roda os cenários essenciais do benchmark e reprova quando uma meta é quebrada. Ele só roda com `-Daxon.gate=true`, então os testes normais não o executam. No CI (Continuous Integration, integração contínua), o workflow `.github/workflows/scale-gate.yml` o roda em pull requests que mexem no motor ou no servidor, em cada push na `main` e toda noite, e publica as linhas `BASE` como artefato.
+
+As metas são razões e comparações normalizadas, para resistir ao ruído de executores compartilhados:
+
+- ingestão com 8 threads pelo menos 2,0 vezes a de 1 thread;
+- `SELECT * FROM t LIMIT 10` (segunda execução) abaixo de 50 ms;
+- busca dos 20 mais próximos (índice GEO) com p99 abaixo de 100 ms;
+- `ORDER BY valor DESC LIMIT 10` e `WHERE` sem casamento com `LIMIT 10`, sem índice, abaixo de 500 ms em 200 mil linhas;
+- nenhuma métrica pode piorar mais de 25% frente à linha de base em `axonbase-core/src/test/resources/scale-baseline.json`. Cada métrica é dividida por um micro-benchmark de calibração de CPU (uma thread para as métricas de uma thread, todos os núcleos para as paralelas) medido na mesma execução. A razão de ingestão só é comparada com a linha de base quando o número de núcleos é o mesmo.
+
+Quando uma meta falha, o teste repete a medição uma vez antes de reprovar.
+
+Para rodar localmente:
+
+```bash
+mvn -pl axonbase-core -am -Daxon.gate=true -Dtest=ScaleGateTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+Para atualizar a linha de base depois de uma mudança intencional de desempenho (ou de trocar a classe de máquina do CI), gere o arquivo em Linux, que é o ambiente do CI, e versione o resultado:
+
+```bash
+docker run --rm -v "$PWD":/repo -w /repo maven:3.9-eclipse-temurin-21 \
+  mvn -B -pl axonbase-core -am -Daxon.gate=true -Daxon.gate.update=true -Dtest=ScaleGateTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+O arquivo guarda as métricas brutas e as normalizadas, o número de núcleos e as calibrações. Quando o executor do CI tiver um número de núcleos diferente do da linha de base, regrave-a em uma máquina com o mesmo número de núcleos (por exemplo, limitando o container com `--cpus`) para a comparação de razão voltar a valer.
+
 ## Limites conhecidos
 
 - Os comandos que leem varreduras com leitura fantasma em transações explícitas ou no cluster ainda serializam, como o monitor antigo.
