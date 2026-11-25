@@ -59,9 +59,10 @@ class ScaleGateEvaluationTest {
     @Test
     @DisplayName("razão de ingestão só é comparada com a linha de base com o mesmo número de núcleos")
     void ratioNeedsSameCpus() {
+        Run fast = run(3.2, 2, 60, 200, 150, 50, 200, 4);
         Run other = run(2.05, 2, 60, 200, 150, 50, 200, 16);
-        assertTrue(ScaleGateTest.evaluate(other, BASE).isEmpty());
+        assertTrue(ScaleGateTest.evaluate(other, fast).isEmpty());
         Run same = run(2.05, 2, 60, 200, 150, 50, 200, 4);
-        assertEquals(1, ScaleGateTest.evaluate(same, BASE).size());
+        assertEquals(1, ScaleGateTest.evaluate(same, fast).size());
     }
 }
