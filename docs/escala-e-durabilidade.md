@@ -129,3 +129,22 @@ O arquivo guarda as métricas brutas e as normalizadas, o número de núcleos e 
 - **Limites conhecidos:** statements dentro de uma transação explícita só enxergam o índice depois do commit,
   e os contadores de frequência do índice `SEARCH` já perdiam atualizações entre escritores simultâneos, o que
   esta fase não corrige.
+- **Transação aberta antes do índice:** se um índice com entradas é criado ou removido depois do `BEGIN`, o
+  `COMMIT` recusa a transação com conflito de versão, sem escrever nada, e o cliente a refaz. A checagem é por
+  banco, então vale também para transações que escrevem em outra tabela do mesmo banco.
+
+### Medição em 5 milhões de linhas
+
+Medido de verdade em 5 milhões de linhas por tabela (duas tabelas, uma com o índice criado antes da carga e
+outra depois), com `OnlineIndexScaleGateTest` em RocksDB, quatro escritores concorrentes durante a construção
+e as mesmas mexidas reaplicadas na referência. Dois runs, ambos verdes:
+
+| Medida | Resultado |
+|---|---|
+| Construção do índice `UNIQUE` | 532 a 800 s |
+| Escritas concorrentes durante a construção | 97 a 114 mil |
+| Latência de escrita p99 | 175 a 227 ms |
+| Latência de escrita máxima | 0,8 a 1,9 s |
+
+O número de entradas e as 2000 sondas ficaram idênticos aos do índice criado antes da carga, e a duplicata
+em `UNIQUE` abortou sem deixar entradas nem marcador. Para repetir: `-Daxon.gate.index=true`.
