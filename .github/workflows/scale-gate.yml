@@ -1,0 +1,46 @@
+name: Scale Gate
+
+on:
+  pull_request:
+    paths:
+      - 'axonbase-core/**'
+      - 'axonbase-server/**'
+      - 'pom.xml'
+      - '.github/workflows/scale-gate.yml'
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Scale gate (200k rows)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Run ScaleGateTest
+        run: |
+          set -o pipefail
+          mvn -B -pl axonbase-core -am test -Dtest=ScaleGateTest -Dsurefire.failIfNoSpecifiedTests=false \
+            -Daxon.gate=true -Dgpg.skip=true -Dmaven.javadoc.skip=true 2>&1 | tee gate.log
+      - name: Collect BASE lines
+        if: always()
+        run: grep -h '^BASE ' gate.log axonbase-core/target/surefire-reports/*ScaleGateTest*-output.txt 2>/dev/null | sort -u > scale-gate-report.txt || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scale-gate-report
+          path: |
+            scale-gate-report.txt
+            gate.log
+            axonbase-core/target/surefire-reports/*ScaleGateTest*

@@ -1668,6 +1668,27 @@ public final class Executor {
         }
     }
 
+    /** Um registro lido do armazenamento: a chave completa e os bytes do valor, numa passada só do iterador. */
+    private record RawRecord(String key, byte[] value) {
+    }
+
+    /** Como {@link #scanRecordKeys}, mas já com o valor de cada registro, sem uma segunda leitura por chave. */
+    private static void scanRecordEntries(KvBackend kv, String prefix, java.util.function.Predicate<RawRecord> visitor) {
+        boolean[] stopped = {false};
+        for (String lead : RECORD_KEY_LEADS) {
+            kv.scanEntries(prefix + lead, (key, value) -> {
+                if (!visitor.test(new RawRecord(key, value))) {
+                    stopped[0] = true;
+                    return false;
+                }
+                return true;
+            });
+            if (stopped[0]) {
+                return;
+            }
+        }
+    }
+
     private static final String[] RECORD_KEY_LEADS = {"n", "s", "x"};
 
     private GroupAggregation streamAggregate(Database db, Statement.Select sel) {
@@ -1711,6 +1732,12 @@ public final class Executor {
             return true;
         });
         return aggregation;
+    }
+
+    private boolean canScanInParallel(Database db, Statement.Select sel, String table) {
+        List<Expr> rules = dataRulePredicates();
+        Expr combinedRules = rules.isEmpty() ? null : rules.size() == 1 ? rules.get(0) : Expr.and(rules);
+        return canScanInParallel(sel, combinedRules, db.catalog().table(table));
     }
 
     /**
@@ -1847,17 +1874,28 @@ public final class Executor {
             return out;
         }
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
-        scanRecordKeys(records(db), prefix, key -> {
-            Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
-            if (doc == null) {
-                return true;
+        java.util.function.BiConsumer<List<Document>, RawRecord> consume = (acc, raw) -> {
+            if (acc.size() >= window.wanted()) {
+                return;
             }
-            if (!window.accepts().test(doc)) {
-                return true;
+            Document doc = docOf(table, prefix, raw);
+            if (doc != null && window.accepts().test(doc)) {
+                acc.add(doc);
             }
-            out.add(doc);
-            return out.size() < window.wanted();
-        });
+        };
+        if (canScanInParallel(db, sel, table)) {
+            // tabela grande: lotes avaliados em paralelo e juntados na ordem; para quando a janela fecha
+            ParallelScan.run(visitor -> scanRecordEntries(records(db), prefix, visitor), out, ArrayList::new, consume,
+                List::addAll, () -> out.size() >= window.wanted());
+            if (out.size() > window.wanted()) {
+                out.subList(window.wanted(), out.size()).clear();
+            }
+        } else {
+            scanRecordEntries(records(db), prefix, key -> {
+                consume.accept(out, key);
+                return out.size() < window.wanted();
+            });
+        }
         return out;
     }
 
@@ -1888,15 +1926,25 @@ public final class Executor {
         }
         List<OrderTerm> orders = ordersByAlias(sel);
         Comparator<AxonValue[]> keyCmp = keyedComparator(orders);
-        TopK<Keyed> top = new TopK<>(window.wanted(), (a, b) -> keyCmp.compare(a.keys(), b.keys()));
+        Comparator<Keyed> keyedCmp = (a, b) -> keyCmp.compare(a.keys(), b.keys());
+        TopK<Keyed> top = new TopK<>(window.wanted(), keyedCmp);
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
-        scanRecordKeys(records(db), prefix, key -> {
-            Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
+        java.util.function.BiConsumer<TopK<Keyed>, RawRecord> consume = (acc, raw) -> {
+            Document doc = docOf(table, prefix, raw);
             if (doc != null && window.accepts().test(doc)) {
-                top.offer(new Keyed(doc, sortKeys(orders, doc)));
+                acc.offer(new Keyed(doc, sortKeys(orders, doc)));
             }
-            return true;
-        });
+        };
+        if (canScanInParallel(db, sel, table)) {
+            // cada lote vira um heap próprio e os heaps são fundidos na ordem dos lotes (o desempate segue a ordem de leitura)
+            ParallelScan.run(visitor -> scanRecordEntries(records(db), prefix, visitor), top,
+                () -> new TopK<>(window.wanted(), keyedCmp), consume, TopK::merge);
+        } else {
+            scanRecordEntries(records(db), prefix, key -> {
+                consume.accept(top, key);
+                return true;
+            });
+        }
         for (Keyed k : top.sorted()) {
             out.add(k.doc());
         }
@@ -6071,6 +6119,13 @@ return score;
             return AxonValue.str(k.substring(1));
         }
         return AxonValue.str(k.startsWith("x") ? k.substring(1) : k);
+    }
+
+    private Document docOf(String table, String prefix, RawRecord raw) {
+        if (raw.value().length == 0) {
+            return null;
+        }
+        return new Document(new RecordId(table, parseKey(raw.key().substring(prefix.length()))), decode(raw.value()));
     }
 
     private Document loadDoc(Database db, RecordId rid) {
