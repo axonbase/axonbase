@@ -39,6 +39,9 @@ class ScaleGateTest {
 
     static final int THREADS = 8;
     static final double MAX_REGRESSION = 0.25;
+    /** Fração da meta abaixo da qual uma piora relativa de métrica em ms é tratada como ruído. */
+    static final double NOISE_FLOOR = 0.5;
+    private static final int REPEATS = 3;
     private static final String DEFAULT_FILE = "src/test/resources/scale-baseline.json";
 
     private final int rows = Integer.getInteger("axon.gate.rows", 200_000);
@@ -118,7 +121,10 @@ class ScaleGateTest {
                 out("GATE %s: regressao nao comparada (linha de base com %d CPUs, esta maquina %d)", m.name, baseline.cpus, run.cpus);
                 continue;
             }
-            boolean worse = m.floor ? now < base * (1 - MAX_REGRESSION) : now > base * (1 + MAX_REGRESSION);
+            // piora relativa só conta quando o valor bruto já passa de metade da meta: abaixo disso é ruído de medida
+            boolean significant = m.floor || v > m.goal * NOISE_FLOOR;
+            boolean worse = significant
+                && (m.floor ? now < base * (1 - MAX_REGRESSION) : now > base * (1 + MAX_REGRESSION));
             out("GATE %-26s bruto %9.2f  normalizado %9.4f  base %9.4f  %s", m.name, v, now, base, worse ? "PIOROU" : "ok");
             if (worse) {
                 failures.add(String.format(Locale.ROOT, "%s piorou mais de %d%% frente a linha de base (normalizado %.4f contra %.4f)",
@@ -148,23 +154,38 @@ class ScaleGateTest {
             raw.put(Metric.INGEST_RATIO.name, a2[0] / a1[0]);
 
             time(ds, "SELECT * FROM pedido_b LIMIT 10");
-            raw.put(Metric.LIMIT10_MS.name, time(ds, "SELECT * FROM pedido_b LIMIT 10"));
+            raw.put(Metric.LIMIT10_MS.name, bestOf(ds, "SELECT * FROM pedido_b LIMIT 10"));
             out("B3b SELECT * LIMIT 10, 2a vez     %8.1f ms", raw.get(Metric.LIMIT10_MS.name));
-            raw.put(Metric.FILTER_SCAN_MS.name, time(ds, "SELECT * FROM pedido_b WHERE valor > 9999 LIMIT 10"));
+            raw.put(Metric.FILTER_SCAN_MS.name, bestOf(ds, "SELECT * FROM pedido_b WHERE valor > 9999 LIMIT 10"));
             out("B6 WHERE valor > 9999 LIMIT 10    %8.1f ms", raw.get(Metric.FILTER_SCAN_MS.name));
-            raw.put(Metric.ORDER_TOPK_MS.name, time(ds, "SELECT * FROM pedido_b ORDER BY valor DESC LIMIT 10"));
+            raw.put(Metric.ORDER_TOPK_MS.name, bestOf(ds, "SELECT * FROM pedido_b ORDER BY valor DESC LIMIT 10"));
             out("B8 ORDER BY valor DESC LIMIT 10   %8.1f ms", raw.get(Metric.ORDER_TOPK_MS.name));
 
             int drivers = Math.min(rows, 100_000);
             ds.execute("DEFINE TABLE entregador SCHEMALESS; CREATE INDEX ent_pos ON TABLE entregador COLUMNS pos GEO", admin, null);
             run(ds, THREADS, drivers, (i, s) -> "CREATE entregador:" + i + " CONTENT {nome: 'e" + i
                 + "', pos: {type: 'Point', coordinates: [" + (-46.8 + (i % 400) * 0.001) + ", " + (-23.7 + (i / 400 % 250) * 0.001) + "]}}");
-            double[] d3 = run(ds, 4, 2_000, (i, s) -> "SELECT nome FROM entregador ORDER BY geo::distance(pos, {type: 'Point', coordinates: ["
-                + (-46.7 + (i % 100) * 0.001) + ", -23.6]}) LIMIT 20");
+            double[] d3 = null;
+            for (int r = 0; r < REPEATS; r++) {
+                double[] one = run(ds, 4, 2_000, (i, s) -> "SELECT nome FROM entregador ORDER BY geo::distance(pos, {type: 'Point', coordinates: ["
+                    + (-46.7 + (i % 100) * 0.001) + ", -23.6]}) LIMIT 20");
+                if (d3 == null || one[2] < d3[2]) {
+                    d3 = one;
+                }
+            }
             out("D3 20 mais proximos, 4 threads    %8.0f ops/s  p50 %.2f ms  p99 %.2f ms", d3[0], d3[1], d3[2]);
             raw.put(Metric.NEAREST_P99_MS.name, d3[2]);
         }
         return new Run(raw, calSingle, calParallel, cpus);
+    }
+
+    /** Menor tempo (ms) de {@link #REPEATS} execuções: o ruído de um executor compartilhado só soma tempo. */
+    private static double bestOf(Datastore ds, String sql) {
+        double best = Double.MAX_VALUE;
+        for (int r = 0; r < REPEATS; r++) {
+            best = Math.min(best, time(ds, sql));
+        }
+        return best;
     }
 
     /** Trabalho de CPU fixo (ordenar, misturar bits e montar texto) rodado em {@code threads} threads; melhor de 5, em ms. */

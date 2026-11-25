@@ -83,7 +83,7 @@ As metas são razões e comparações normalizadas, para resistir ao ruído de e
 - `SELECT * FROM t LIMIT 10` (segunda execução) abaixo de 50 ms;
 - busca dos 20 mais próximos (índice GEO) com p99 abaixo de 100 ms;
 - `ORDER BY valor DESC LIMIT 10` e `WHERE` sem casamento com `LIMIT 10`, sem índice, abaixo de 500 ms em 200 mil linhas;
-- nenhuma métrica pode piorar mais de 25% frente à linha de base em `axonbase-core/src/test/resources/scale-baseline.json`. Cada métrica é dividida por um micro-benchmark de calibração de CPU (uma thread para as métricas de uma thread, todos os núcleos para as paralelas) medido na mesma execução. A razão de ingestão só é comparada com a linha de base quando o número de núcleos é o mesmo.
+- nenhuma métrica pode piorar mais de 25% frente à linha de base em `axonbase-core/src/test/resources/scale-baseline.json`. Cada métrica é dividida por um micro-benchmark de calibração de CPU (uma thread para as métricas de uma thread, todos os núcleos para as paralelas) medido na mesma execução. A razão de ingestão só é comparada com a linha de base quando o número de núcleos é o mesmo. As métricas em milissegundos são o melhor de 3 execuções, e uma piora relativa só reprova quando o valor bruto já passa de metade da meta, porque abaixo disso a variação é ruído de medida.
 
 Quando uma meta falha, o teste repete a medição uma vez antes de reprovar.
 
