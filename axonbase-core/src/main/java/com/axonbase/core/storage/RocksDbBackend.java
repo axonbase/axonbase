@@ -134,7 +134,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         this.writeOptions = new WriteOptions().setSync(syncMode == SyncMode.ALWAYS);
         try {
             Path dir = Path.of(directory);
-            boolean exists = Files.exists(dir.resolve("IDENTITY"));
+            // IDENTITY nem sempre existe (um diretório restaurado pelo BackupEngine só traz CURRENT, MANIFEST e OPTIONS)
+            boolean exists = Files.exists(dir.resolve("IDENTITY")) || Files.exists(dir.resolve("CURRENT"));
             if (!exists) {
                 Files.createDirectories(dir);
             }
@@ -552,6 +553,11 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             held.add(lock);
         }
         return held;
+    }
+
+    /** Acesso ao RocksDB para o {@link PhysicalBackups}, que precisa do banco aberto para copiá-lo. */
+    RocksDB rocksDb() {
+        return db;
     }
 
     // ---- VersionedKvBackend ----
