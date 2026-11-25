@@ -40,6 +40,13 @@ final class TopK<T> {
         }
     }
 
+    /** Soma ao heap os elementos guardados por {@code other}, na ordem dele; vale como se tivessem chegado agora. */
+    void merge(TopK<T> other) {
+        for (T item : other.sorted()) {
+            offer(item);
+        }
+    }
+
     /** Os elementos guardados do melhor para o pior. */
     List<T> sorted() {
         List<Slot<T>> all = new ArrayList<>(heap);

@@ -307,6 +307,40 @@ public final class WalBackend implements VersionedKvBackend {
     @Override public synchronized long currentVersion() { return clock; }
 
     @Override
+    public long snapshotScan(long since, EntryVisitor entries, KeyVisitor deleted) throws java.io.IOException {
+        long mark;
+        List<Object[]> puts = new ArrayList<>();
+        List<String> gone = new ArrayList<>();
+        synchronized (this) {
+            mark = clock;
+            for (var e : data.entrySet()) {
+                long v = versions.getOrDefault(e.getKey(), 0L);
+                if (since <= 0 || v > since) {
+                    puts.add(new Object[] {e.getKey(), e.getValue().clone(), v});
+                }
+            }
+            if (since > 0 && deleted != null) {
+                versions.forEach((k, v) -> {
+                    if (v > since && !data.containsKey(k)) {
+                        gone.add(k);
+                    }
+                });
+            }
+        }
+        for (Object[] p : puts) {
+            if (!entries.visit((String) p[0], (byte[]) p[1], (Long) p[2])) {
+                return mark;
+            }
+        }
+        for (String k : gone) {
+            if (!deleted.visit(k)) {
+                break;
+            }
+        }
+        return mark;
+    }
+
+    @Override
     public void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
         List<String> deleted = new ArrayList<>();
         synchronized (this) {

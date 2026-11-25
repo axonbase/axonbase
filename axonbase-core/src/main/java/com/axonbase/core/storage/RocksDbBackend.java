@@ -564,6 +564,55 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         }
     }
 
+    /**
+     * Varredura de ponto no tempo: a marca d'água é lida antes de fixar UM snapshot do RocksDB, que vale para
+     * as duas column families. Chave e valor vêm do mesmo iterador e a versão do iterador de versões do mesmo
+     * snapshot (sem {@code get} por chave), então um lote atômico (registro e índices) nunca aparece pela
+     * metade. As deleções também saem do snapshot. O snapshot é liberado ao fim.
+     */
+    @Override
+    public long snapshotScan(long since, EntryVisitor entries, KeyVisitor deleted) throws java.io.IOException {
+        long mark = currentVersion();
+        Snapshot snapshot = db.getSnapshot();
+        try (ReadOptions ro = new ReadOptions().setSnapshot(snapshot).setFillCache(false);
+             RocksIterator data = db.newIterator(dataHandle, ro);
+             RocksIterator vers = db.newIterator(versionsHandle, ro)) {
+            data.seekToFirst();
+            vers.seekToFirst();
+            boolean go = true;
+            while (go && data.isValid()) {
+                byte[] key = data.key();
+                while (vers.isValid() && java.util.Arrays.compareUnsigned(vers.key(), key) < 0) {
+                    vers.next();
+                }
+                long version = vers.isValid() && java.util.Arrays.equals(vers.key(), key)
+                    ? bytesToLong(vers.value()) : 0L;
+                if (since <= 0 || version > since) {
+                    go = entries.visit(new String(key, StandardCharsets.UTF_8), data.value(), version);
+                }
+                data.next();
+            }
+            if (go && since > 0 && deleted != null) {
+                try (RocksIterator dels = db.newIterator(versionsHandle, ro)) {
+                    dels.seekToFirst();
+                    while (dels.isValid()) {
+                        if (bytesToLong(dels.value()) > since && db.get(dataHandle, ro, dels.key()) == null
+                            && !deleted.visit(new String(dels.key(), StandardCharsets.UTF_8))) {
+                            break;
+                        }
+                        dels.next();
+                    }
+                }
+            }
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        } finally {
+            db.releaseSnapshot(snapshot);
+            snapshot.close();
+        }
+        return mark;
+    }
+
     /** Varre a column family de versões: chave com versão maior que {@code since} e sem dado é uma deleção. */
     @Override
     public void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {

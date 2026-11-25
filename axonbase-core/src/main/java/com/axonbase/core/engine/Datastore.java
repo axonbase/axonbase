@@ -1109,18 +1109,7 @@ public final class Datastore {
         if (!"--axonbase-backup-v1--".equals(header)) {
             throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
         }
-        // limpa em lotes para não listar todas as chaves de uma vez
-        List<String> batch = new ArrayList<>();
-        do {
-            batch.clear();
-            backend.scanPrefix("", key -> {
-                batch.add(key);
-                return batch.size() < 10_000;
-            });
-            for (String key : batch) {
-                backend.delete(key);
-            }
-        } while (!batch.isEmpty());
+        clearAll();
         java.util.Base64.Decoder b64 = java.util.Base64.getDecoder();
         boolean restoredControl = false;
         long applied = 0;
@@ -1155,55 +1144,63 @@ public final class Datastore {
         return applied;
     }
 
+    /** Resultado de {@link #restoreFile}: chaves aplicadas, segmentos e marca d'água final. */
+    public record RestoreResult(long restoredKeys, int segments, long version, String type) {
+    }
+
+    /** Chamado por {@link #backupTo} depois de definir tipo e marca d'água e antes do primeiro byte. */
+    @FunctionalInterface
+    public interface BackupStart {
+        void started(boolean incremental, long version);
+    }
+
+    /** Escreve um backup v2 sem identificação de nó (testes e uso embutido). */
+    public boolean backupTo(java.io.OutputStream out, long since) throws java.io.IOException {
+        return backupTo(out, since, "local", null);
+    }
+
     /**
-     * Escreve o backup em streaming no formato {@code .axbak} (texto, uma linha por chave, valores em
-     * Base64), varrendo o backend com {@link KvBackend#scanPrefix}: a memória não cresce com o tamanho.
+     * Escreve o backup em streaming no formato {@code .axbak} v2 (um segmento com manifesto, contagens e
+     * SHA-256), com memória constante. Num backend {@link VersionedKvBackend} a varredura vem de
+     * {@link VersionedKvBackend#snapshotScan}: um único ponto no tempo, valores lidos do próprio iterador.
+     * A marca d'água gravada no manifesto é lida ANTES da varredura, então o próximo incremental
+     * ({@code since} igual a ela) nunca perde um lote.
      *
      * @param since versão a partir da qual incluir chaves alteradas ({@code <= 0} faz backup completo);
-     *              backends sem versão sempre fazem backup completo. Deleções posteriores a {@code since}
-     *              saem como linhas {@code !del} quando o backend as reporta.
+     *              backends sem versão sempre fazem backup completo
      * @return {@code true} se o backup escrito é incremental
+     * @throws BackupFormatException {@code BACKUP_SINCE_AHEAD} (409) se {@code since} passa da marca atual
      */
-    public boolean backupTo(java.io.OutputStream out, long since) throws java.io.IOException {
+    public boolean backupTo(java.io.OutputStream out, long since, String nodeId, BackupStart start)
+        throws java.io.IOException {
         VersionedKvBackend versioned = backend instanceof VersionedKvBackend v ? v : null;
         boolean incremental = since > 0 && versioned != null;
-        java.io.Writer w = new java.io.BufferedWriter(
-            new java.io.OutputStreamWriter(out, java.nio.charset.StandardCharsets.UTF_8), 1 << 16);
-        java.util.Base64.Encoder b64 = java.util.Base64.getEncoder();
-        w.write("--axonbase-backup-v1--\n");
-        w.write("ctrl\t");
-        w.write(b64.encodeToString(com.axonbase.core.control.CatalogCodec.encode(controlState.snapshot())
-            .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-        w.write('\n');
-        java.io.IOException[] failure = new java.io.IOException[1];
-        backend.scanPrefix("", key -> {
-            try {
-                if (incremental && versioned.versionOf(key) <= since) {
-                    return true;
-                }
-                java.util.Optional<byte[]> raw = backend.get(key);
-                if (raw.isPresent()) {
-                    w.write(key);
-                    w.write('\t');
-                    w.write(b64.encodeToString(raw.get()));
-                    w.write('\n');
-                }
-                return true;
-            } catch (java.io.IOException e) {
-                failure[0] = e;
-                return false;
-            }
-        });
-        if (failure[0] != null) {
-            throw failure[0];
+        long mark = versioned == null ? 0L : versioned.currentVersion();
+        if (incremental && since > mark) {
+            throw new BackupFormatException(BackupFormatException.SINCE_AHEAD, 409,
+                Messages.get("backup_since_ahead", since, mark));
         }
-        if (incremental) {
-            versioned.scanDeletedSince(since, key -> {
+        if (start != null) {
+            start.started(incremental, mark);
+        }
+        String engine = engineVersion != null ? engineVersion : Datastore.class.getPackage().getImplementationVersion();
+        BackupFormat.SegmentWriter w = new BackupFormat.SegmentWriter(out, !incremental, since, mark, nodeId,
+            engine == null ? "dev" : engine);
+        w.ctrl(com.axonbase.core.control.CatalogCodec.encode(controlState.snapshot())
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        if (versioned != null) {
+            versioned.snapshotScan(incremental ? since : 0, (key, value, version) -> {
+                w.put(key, value);
+                return true;
+            }, incremental ? key -> {
+                w.delete(key);
+                return true;
+            } : null);
+        } else {
+            java.io.IOException[] failure = new java.io.IOException[1];
+            backend.scanEntries("", (key, value) -> {
                 try {
-                    w.write(DELETE_MARK);
-                    w.write('\t');
-                    w.write(b64.encodeToString(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-                    w.write('\n');
+                    w.put(key, value);
                     return true;
                 } catch (java.io.IOException e) {
                     failure[0] = e;
@@ -1214,8 +1211,68 @@ public final class Datastore {
                 throw failure[0];
             }
         }
-        w.flush();
+        w.finish();
         return incremental;
+    }
+
+    /**
+     * Restaura um arquivo de backup já gravado em disco. v2: passo 1 valida tudo (segmentos, checksums,
+     * cadeia) sem tocar na base; só então o passo 2 limpa e aplica os segmentos em ordem, e o {@code ctrl}
+     * do último segmento prevalece. v1 (legado, sem as proteções) segue o caminho antigo.
+     */
+    public RestoreResult restoreFile(java.nio.file.Path file) throws java.io.IOException {
+        if (!BackupFormat.isV2(file)) {
+            try (java.io.BufferedReader reader = java.nio.file.Files.newBufferedReader(file,
+                java.nio.charset.StandardCharsets.UTF_8)) {
+                return new RestoreResult(restoreCluster(reader), 1, 0L, "legacy");
+            }
+        }
+        List<BackupFormat.Segment> segments = BackupFormat.validate(file);
+        clearAll();
+        byte[][] lastCtrl = new byte[1][];
+        long[] applied = new long[1];
+        BackupFormat.apply(file, new BackupFormat.LineSink() {
+            @Override
+            public void ctrl(byte[] snapshot) {
+                lastCtrl[0] = snapshot;
+            }
+
+            @Override
+            public void put(String key, byte[] value) {
+                backend.put(key, value);
+                applied[0]++;
+            }
+
+            @Override
+            public void delete(String key) {
+                backend.delete(key);
+                applied[0]++;
+            }
+        });
+        if (lastCtrl[0] != null) {
+            controlState.restore(com.axonbase.core.control.CatalogCodec.decode(
+                new String(lastCtrl[0], java.nio.charset.StandardCharsets.UTF_8)));
+            replayControl();
+            controlStore.save(controlState, backend);
+        }
+        backend.flush();
+        BackupFormat.Segment last = segments.get(segments.size() - 1);
+        return new RestoreResult(applied[0], segments.size(), last.version(),
+            segments.size() == 1 && last.full() ? "full" : "chain");
+    }
+
+    private void clearAll() {
+        List<String> batch = new ArrayList<>();
+        do {
+            batch.clear();
+            backend.scanPrefix("", key -> {
+                batch.add(key);
+                return batch.size() < 10_000;
+            });
+            for (String key : batch) {
+                backend.delete(key);
+            }
+        } while (!batch.isEmpty());
     }
 
     /**
@@ -1318,6 +1375,13 @@ public final class Datastore {
         backend.flush();
         // As notificações retidas durante a transação só saem agora, depois do quórum.
         session.flushLive();
+    }
+
+    private volatile String engineVersion;
+
+    /** Versão do build que o servidor informa, gravada no manifesto dos backups. */
+    public void engineVersion(String version) {
+        this.engineVersion = version;
     }
 
     public void cancelSession(Session session) {

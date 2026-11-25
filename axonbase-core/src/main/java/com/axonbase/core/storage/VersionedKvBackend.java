@@ -26,6 +26,59 @@ public interface VersionedKvBackend extends KvBackend {
     default void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
     }
 
+    /** Visitante de entradas de {@link #snapshotScan}: devolve {@code false} para parar. */
+    @FunctionalInterface
+    interface EntryVisitor {
+        boolean visit(String key, byte[] value, long version) throws java.io.IOException;
+    }
+
+    /** Visitante de chaves apagadas de {@link #snapshotScan}: devolve {@code false} para parar. */
+    @FunctionalInterface
+    interface KeyVisitor {
+        boolean visit(String key) throws java.io.IOException;
+    }
+
+    /**
+     * Varredura de ponto no tempo para backup. Lê a marca d'água ({@link #currentVersion()}) ANTES de fixar
+     * a visão, e então percorre as entradas (chave, valor e versão) dessa visão única, de modo que um commit
+     * atômico aparece inteiro ou não aparece. Com {@code since > 0} só entram entradas de versão maior que
+     * {@code since}, e as chaves apagadas depois dele vão para {@code deleted} (pode ser {@code null}).
+     *
+     * <p>Esta implementação padrão NÃO é de ponto no tempo (lê chave a chave); backends reais a sobrescrevem.</p>
+     *
+     * @return a marca d'água lida antes da varredura
+     */
+    default long snapshotScan(long since, EntryVisitor entries, KeyVisitor deleted) throws java.io.IOException {
+        long mark = currentVersion();
+        java.io.IOException[] failure = new java.io.IOException[1];
+        scanEntries("", (key, value) -> {
+            try {
+                long v = versionOf(key);
+                return since > 0 && v <= since || entries.visit(key, value, v);
+            } catch (java.io.IOException e) {
+                failure[0] = e;
+                return false;
+            }
+        });
+        if (failure[0] != null) {
+            throw failure[0];
+        }
+        if (since > 0 && deleted != null) {
+            scanDeletedSince(since, key -> {
+                try {
+                    return deleted.visit(key);
+                } catch (java.io.IOException e) {
+                    failure[0] = e;
+                    return false;
+                }
+            });
+            if (failure[0] != null) {
+                throw failure[0];
+            }
+        }
+        return mark;
+    }
+
     default Optional<VersionedValue> getVersioned(String key) {
         return get(key).map(value -> new VersionedValue(value, versionOf(key)));
     }

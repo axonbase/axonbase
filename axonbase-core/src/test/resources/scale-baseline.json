@@ -1,0 +1,20 @@
+{
+  "rows": 200000,
+  "cpus": 4,
+  "os": "Linux amd64",
+  "calibration": {"single_ms": 68.07, "parallel_ms": 110.77},
+  "raw": {
+    "ingest_ratio_8x1": 0.9320,
+    "select_limit10_ms": 14.9458,
+    "nearest20_p99_ms": 9.4531,
+    "order_by_limit10_ms": 407.7816,
+    "where_nomatch_limit10_ms": 448.4866
+  },
+  "normalized": {
+    "ingest_ratio_8x1": 0.9320,
+    "select_limit10_ms": 0.2196,
+    "nearest20_p99_ms": 0.1389,
+    "order_by_limit10_ms": 3.6812,
+    "where_nomatch_limit10_ms": 4.0487
+  }
+}
