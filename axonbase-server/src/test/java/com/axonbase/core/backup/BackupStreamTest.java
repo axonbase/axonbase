@@ -35,8 +35,13 @@ class BackupStreamTest {
     }
 
     private static void restore(Datastore ds, byte[] data) throws IOException {
-        ds.restoreCluster(new BufferedReader(new InputStreamReader(new ByteArrayInputStream(data),
-            StandardCharsets.UTF_8)));
+        java.nio.file.Path f = java.nio.file.Files.createTempFile("bk", ".axbak");
+        try {
+            java.nio.file.Files.write(f, data);
+            ds.restoreFile(f);
+        } finally {
+            java.nio.file.Files.deleteIfExists(f);
+        }
     }
 
     @Test
@@ -73,9 +78,8 @@ class BackupStreamTest {
         assertTrue(text.contains("!del\t"));
         assertFalse(text.contains("!meta|k6\t"), "chave inalterada não entra no incremental");
 
-        // full + incremental mesclados (como o restore em S3 faz) reproduzem o estado atual
-        String merged = new String(full, StandardCharsets.UTF_8)
-            + text.substring(text.indexOf('\n') + 1);
+        // full + incremental mesclados (cadeia v2: o restore valida a continuidade) reproduzem o estado atual
+        String merged = new String(full, StandardCharsets.UTF_8) + text;
         Datastore b = novo();
         restore(b, merged.getBytes(StandardCharsets.UTF_8));
         assertEquals(100, b.metaKeys("").stream().filter(k -> !k.startsWith("backup")).count());
