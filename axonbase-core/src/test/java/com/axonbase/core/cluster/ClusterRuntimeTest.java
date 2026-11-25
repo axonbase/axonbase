@@ -29,18 +29,31 @@ class ClusterRuntimeTest {
      * <p>Pedir e fechar uma porta por vez deixa o sistema devolver a mesma porta na
      * chamada seguinte, e o segundo nó falha ao subir com "address already in use".</p>
      */
+    /** Portas já entregues por esta JVM: duas chamadas nunca devolvem a mesma. */
+    private static final java.util.Set<Integer> HANDED_OUT = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Escolhe portas livres numa faixa abaixo da faixa efêmera do sistema (32768 e acima no Linux, 49152 no
+     * macOS). Reservar uma porta efêmera e fechá-la antes de o nó abri-la deixava outro processo pegá-la no
+     * intervalo ("Address already in use"); fora da faixa efêmera isso não acontece.
+     */
     private static List<Integer> reservePorts(int count) throws Exception {
-        List<ServerSocket> held = new ArrayList<>();
+        java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
         List<Integer> ports = new ArrayList<>();
-        try {
-            for (int i = 0; i < count; i++) {
-                ServerSocket socket = new ServerSocket(0);
-                held.add(socket);
-                ports.add(socket.getLocalPort());
+        int attempts = 0;
+        while (ports.size() < count) {
+            if (++attempts > 2000) {
+                throw new IllegalStateException("sem portas livres na faixa 20000 a 32000");
             }
-        } finally {
-            for (ServerSocket socket : held) {
-                socket.close();
+            int candidate = random.nextInt(20_000, 32_000);
+            if (!HANDED_OUT.add(candidate)) {
+                continue;
+            }
+            try (ServerSocket socket = new ServerSocket(candidate)) {
+                socket.setReuseAddress(true);
+                ports.add(candidate);
+            } catch (java.io.IOException busy) {
+                // ocupada: tenta outra
             }
         }
         return ports;
