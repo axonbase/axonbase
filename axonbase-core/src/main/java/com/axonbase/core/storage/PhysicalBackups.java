@@ -8,11 +8,8 @@ import org.rocksdb.RestoreOptions;
 import org.rocksdb.RocksDBException;
 
 import java.io.IOException;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -77,7 +74,7 @@ public final class PhysicalBackups implements AutoCloseable {
     public Info create(RocksDbBackend backend) {
         long version = backend.currentVersion();
         try {
-            engine.createNewBackupWithMetadata(backend.rocksDb(), META_PREFIX + version, true);
+            backend.createPhysicalBackup(engine, META_PREFIX + version);
         } catch (RocksDBException e) {
             throw new BackupFailedException("falha ao criar o backup físico", e);
         }
@@ -196,63 +193,50 @@ public final class PhysicalBackups implements AutoCloseable {
     }
 
     /**
-     * Restaura o backup {@code id} no lugar da base {@code liveDir}, que não pode estar aberta. Restaura num
-     * diretório vizinho ({@code .restoring}), abre o resultado para provar que está legível e só então troca por
-     * renomeação. A base anterior fica ao lado ({@code .replaced-<instante>}) e o caminho dela é devolvido; uma
-     * falha em qualquer ponto deixa a base original como estava.
+     * Restaura o backup {@code id} no lugar da base {@code liveDir}, que não pode estar aberta. Restaura em
+     * {@code liveDir/.restoring}, abre o resultado para provar que está legível e só então troca o conteúdo (veja
+     * {@link DirectorySwap}). A base anterior fica em {@code .replaced-<instante>} e o caminho dela é devolvido;
+     * uma falha em qualquer ponto deixa a base original como estava.
      */
     public static Path restoreInPlace(Path backupDir, int id, Path liveDir) {
-        Path restoring = sibling(liveDir, ".restoring");
-        deleteQuietly(restoring);
+        Path restoring = prepareRestore(backupDir, id, liveDir);
+        try {
+            return DirectorySwap.swap(liveDir, restoring);
+        } catch (IOException e) {
+            try {
+                DirectorySwap.recover(liveDir);
+            } catch (IOException recoverFailed) {
+                e.addSuppressed(recoverFailed);
+            }
+            throw new BackupFailedException("falha ao trocar a base restaurada pela original", e);
+        }
+    }
+
+    /**
+     * Restaura o backup {@code id} em {@code liveDir/.restoring} e abre o resultado para provar que está
+     * legível. Não toca na base ativa, que pode continuar em uso; a troca vem depois
+     * ({@link RocksDbBackend#replaceWith}). Em falha, o diretório temporário é removido.
+     */
+    public static Path prepareRestore(Path backupDir, int id, Path liveDir) {
+        Path restoring = DirectorySwap.restoringDir(liveDir);
+        DirectorySwap.deleteTree(restoring);
         try {
             restoreFromDir(backupDir, id, restoring);
             validateOpens(restoring);
         } catch (RuntimeException e) {
-            deleteQuietly(restoring);
+            DirectorySwap.deleteTree(restoring);
             throw e;
         }
-        Path replaced = sibling(liveDir, ".replaced-" + System.currentTimeMillis());
-        try {
-            if (Files.exists(liveDir)) {
-                move(liveDir, replaced);
-            }
-            try {
-                move(restoring, liveDir);
-            } catch (IOException second) {
-                if (Files.exists(replaced)) {
-                    move(replaced, liveDir);
-                }
-                throw second;
-            }
-        } catch (IOException e) {
-            throw new BackupFailedException("falha ao trocar a base restaurada pela original", e);
-        }
-        return replaced;
+        return restoring;
     }
 
     /**
-     * Se o processo morreu entre os dois renomes da troca, a base ativa não existe e a anterior ficou como
-     * {@code .replaced-*}: devolve a anterior ao lugar. Devolve {@code true} quando recuperou algo.
+     * Se o processo morreu no meio de uma troca, devolve a base anterior ao lugar. Chame antes de abrir a base;
+     * {@link RocksDbBackend} já faz isso ao abrir. Devolve {@code true} quando recuperou algo.
      */
     public static boolean recoverInterruptedSwap(Path liveDir) {
-        if (Files.exists(liveDir)) {
-            return false;
-        }
-        Path parent = liveDir.toAbsolutePath().getParent();
-        String prefix = liveDir.getFileName() + ".replaced-";
-        Path newest = null;
-        try (DirectoryStream<Path> ds = Files.newDirectoryStream(parent, prefix + "*")) {
-            for (Path p : ds) {
-                if (newest == null || p.getFileName().toString().compareTo(newest.getFileName().toString()) > 0) {
-                    newest = p;
-                }
-            }
-            if (newest == null) {
-                return false;
-            }
-            move(newest, liveDir);
-            deleteQuietly(sibling(liveDir, ".restoring"));
-            return true;
+        try {
+            return DirectorySwap.recover(liveDir);
         } catch (IOException e) {
             throw new BackupFailedException("falha ao recuperar a troca interrompida de " + liveDir, e);
         }
@@ -277,18 +261,6 @@ public final class PhysicalBackups implements AutoCloseable {
             }
         }
         return 0L;
-    }
-
-    private static Path sibling(Path dir, String suffix) {
-        return dir.toAbsolutePath().resolveSibling(dir.getFileName() + suffix);
-    }
-
-    private static void move(Path from, Path to) throws IOException {
-        try {
-            Files.move(from, to, StandardCopyOption.ATOMIC_MOVE);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(from, to);
-        }
     }
 
     private static void deleteQuietly(Path dir) {

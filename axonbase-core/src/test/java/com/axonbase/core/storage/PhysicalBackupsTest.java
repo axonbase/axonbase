@@ -210,7 +210,7 @@ class PhysicalBackupsTest {
         try (RocksDbBackend old = new RocksDbBackend(previous.toString())) {
             assertTrue(dump(old).containsKey("depois0"), "a base anterior está intacta");
         }
-        assertFalse(Files.exists(Path.of(live + ".restoring")), "sem diretório temporário sobrando");
+        assertFalse(Files.exists(live.resolve(".restoring")), "sem diretório temporário sobrando");
     }
 
     @Test
@@ -237,24 +237,73 @@ class PhysicalBackupsTest {
         try (RocksDbBackend r = new RocksDbBackend(live.toString())) {
             assertEquals(before, dump(r));
         }
-        assertFalse(Files.exists(Path.of(live + ".restoring")), "o temporário do restore falho é removido");
+        assertFalse(Files.exists(live.resolve(".restoring")), "o temporário do restore falho é removido");
     }
 
     @Test
-    @DisplayName("recuperação de uma troca interrompida entre os dois renames")
-    void recoverInterruptedSwap() throws IOException {
+    @DisplayName("troca interrompida na fase 2 (restaurada pela metade) volta para a base anterior ao abrir")
+    void interruptedSwapInPhaseTwoRollsBack() throws IOException {
         Path live = tmp.resolve("live");
-        Path replaced = tmp.resolve("live.replaced-1");
-        try (RocksDbBackend b = new RocksDbBackend(replaced.toString())) {
+        try (RocksDbBackend b = new RocksDbBackend(live.toString())) {
             fill(b, "a", 0, 10);
         }
-        // simulação: a base ativa não existe e só sobrou a anterior guardada
-        assertFalse(Files.exists(live));
+        // simulação: a anterior inteira foi guardada, a restaurada foi movida só em parte
+        Path replaced = live.resolve(".replaced-1");
+        Files.createDirectories(replaced);
+        try (Stream<Path> s = Files.list(live)) {
+            for (Path p : (Iterable<Path>) s.filter(x -> !x.getFileName().toString().startsWith("."))::iterator) {
+                Files.move(p, replaced.resolve(p.getFileName()));
+            }
+        }
+        Files.writeString(live.resolve("000099.sst"), "pedaco-da-restaurada");
+        Files.writeString(live.resolve(".swap"), "2:.replaced-1");
+        Files.createDirectories(live.resolve(".restoring"));
+
+        try (RocksDbBackend r = new RocksDbBackend(live.toString())) {
+            assertEquals(10, dump(r).size(), "a base anterior voltou inteira");
+        }
+        assertFalse(Files.exists(live.resolve("000099.sst")), "o pedaço da restaurada foi descartado");
+        assertFalse(Files.exists(live.resolve(".swap")));
+        assertFalse(Files.exists(live.resolve(".restoring")));
+        assertFalse(Files.exists(replaced));
+    }
+
+    @Test
+    @DisplayName("troca interrompida na fase 1 (anterior movida em parte) volta para a base anterior")
+    void interruptedSwapInPhaseOneRollsBack() throws IOException {
+        Path live = tmp.resolve("live");
+        try (RocksDbBackend b = new RocksDbBackend(live.toString())) {
+            fill(b, "a", 0, 10);
+        }
+        Path replaced = live.resolve(".replaced-1");
+        Files.createDirectories(replaced);
+        try (Stream<Path> s = Files.list(live)) {
+            Path one = s.filter(x -> x.getFileName().toString().endsWith(".log")).findFirst().orElseThrow();
+            Files.move(one, replaced.resolve(one.getFileName())); // só um arquivo saiu
+        }
+        Files.writeString(live.resolve(".swap"), "1:.replaced-1");
         assertTrue(PhysicalBackups.recoverInterruptedSwap(live));
         try (RocksDbBackend r = new RocksDbBackend(live.toString())) {
             assertEquals(10, dump(r).size());
         }
-        assertFalse(PhysicalBackups.recoverInterruptedSwap(live), "nada a recuperar quando a base existe");
+        assertFalse(PhysicalBackups.recoverInterruptedSwap(live), "nada a recuperar sem marcador");
+    }
+
+    @Test
+    @DisplayName("o diretório de dados em si nunca é renomeado (raiz de volume montado)")
+    void swapNeverRenamesTheDataDirectory() throws IOException {
+        Path store = tmp.resolve("bk");
+        Path live = tmp.resolve("live");
+        int id;
+        try (RocksDbBackend b = new RocksDbBackend(live.toString());
+             PhysicalBackups pb = PhysicalBackups.open(store)) {
+            fill(b, "a", 0, 20);
+            id = pb.create(b).id();
+        }
+        Object before = Files.readAttributes(live, java.nio.file.attribute.BasicFileAttributes.class).fileKey();
+        PhysicalBackups.restoreInPlace(store, id, live);
+        Object after = Files.readAttributes(live, java.nio.file.attribute.BasicFileAttributes.class).fileKey();
+        assertEquals(before, after, "é o mesmo diretório (mesmo inode), só o conteúdo mudou");
     }
 
     private static long bytesUnder(Path dir) throws IOException {
