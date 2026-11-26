@@ -72,12 +72,12 @@ Se algo falhar no prazo, o líder solta as escritas e continua no cargo. O alvo 
 Antes de atualizar um nó, confira que:
 
 - a versão nova não é menor que a de nenhum membro (não há volta para versão antiga no mesmo diretório);
-- nenhum membro é anterior à 0.10.1;
+- nenhum membro é da linha 0.10.x ou anterior (dessas versões não há troca nó a nó);
 - o cluster não passa a ter três versões diferentes.
 
 `GET /admin/v1/cluster/upgrade-check?target=<versão>&members=<versões>` aplica essas regras.
 
-Essas regras dizem quem consegue conversar, não que a troca seja segura. **A partir da 0.10.x, use a [parada total](#falha-de-versões-mistas)**, mesmo que a verificação responda que a atualização é permitida.
+**A partir da 0.10.x, use a [parada total](#falha-de-versões-mistas).** Com um membro 0.10.x, a verificação recusa a troca e manda parar os três nós. Ela decide só pelo número da versão: uma compilação desta linha de desenvolvimento que ainda se declare 0.10.x também é recusada, até a versão do projeto mudar.
 
 ### Roteiro
 
@@ -243,7 +243,7 @@ Os portões são opt-in e rodam em máquinas separadas, com `scripts/resilience-
 
 ## Decisões que dependem do dono
 
-Cada uma segue a recomendação até resposta em contrário. Já decidido: a atualização a partir da 0.10.x é com parada total. A verificação de atualização (`upgrade-check`) ainda não aplica essa regra.
+Cada uma segue a recomendação até resposta em contrário. Já decidido: a atualização a partir da 0.10.x é com parada total. A verificação de atualização (`upgrade-check`) aplica essa regra.
 
 | Decisão | Recomendação adotada |
 |---|---|

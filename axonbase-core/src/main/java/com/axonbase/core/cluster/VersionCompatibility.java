@@ -12,6 +12,9 @@ import java.util.regex.Pattern;
 /**
  * As regras para atualizar um nó de cada vez: não há volta para uma versão anterior no mesmo diretório, nenhum
  * membro pode ser mais antigo que {@link #MINIMUM_PEER} e o cluster não pode passar a ter três versões.
+ *
+ * <p>Com um membro 0.10.x não há atualização nó a nó: enquanto ele participa do quórum, os defeitos dele podem perder
+ * escritas confirmadas. A troca é com os três nós parados.</p>
  */
 public final class VersionCompatibility {
 
@@ -25,6 +28,10 @@ public final class VersionCompatibility {
     }
 
     private record Version(int major, int minor, int patch) implements Comparable<Version> {
+        boolean needsFullStop() {
+            return major == 0 && minor == 10;
+        }
+
         @Override
         public int compareTo(Version other) {
             if (major != other.major) {
@@ -66,8 +73,11 @@ public final class VersionCompatibility {
         });
         if (wanted != null) {
             Version minimum = parse(MINIMUM_PEER);
+            List<String> fullStop = new ArrayList<>();
             current.forEach((node, version) -> {
-                if (version.compareTo(minimum) < 0) {
+                if (version.needsFullStop()) {
+                    fullStop.add(node + " na " + version);
+                } else if (version.compareTo(minimum) < 0) {
                     problems.add("o membro " + node + " está na " + version + ", anterior à mínima " + MINIMUM_PEER);
                 }
                 if (wanted.compareTo(version) < 0) {
@@ -75,6 +85,11 @@ public final class VersionCompatibility {
                         + ": não há volta para versão antiga no mesmo diretório");
                 }
             });
+            if (!fullStop.isEmpty()) {
+                problems.add("não há atualização nó a nó a partir da 0.10.x (" + String.join(", ", fullStop)
+                    + "): pare os três nós, atualize todos para a mesma versão e só então suba o cluster (veja "
+                    + "docs/operacao-e-resiliencia.md)");
+            }
             Set<Version> after = new LinkedHashSet<>(current.values());
             after.add(wanted);
             if (after.size() > 2) {
