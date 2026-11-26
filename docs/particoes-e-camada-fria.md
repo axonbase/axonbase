@@ -103,7 +103,15 @@ O custo é constante no número de linhas: o lote tem poucas chaves. O espaço e
 - A mudança de estado ou a remoção de uma partição pega o lado de escrita da trava de índices do banco durante o commit. Os statements e os commits de escrita seguram o lado de leitura, então nunca há uma escrita pela metade.
 - Uma transação anota as partições em que escreveu. No `COMMIT`, se alguma sumiu ou deixou de ser `HOT`, ela falha com conflito e nada é gravado.
 - Criar uma partição dentro de uma transação não gera conflito entre transações que criam a mesma.
-- `DROP PARTITION` dentro de uma transação explícita vale no `COMMIT`. Depois dele, a própria transação já não vê as linhas.
+- `DROP PARTITION` dentro de uma transação explícita vale no `COMMIT`. Depois dele, a própria transação já não vê as linhas, e o que ela tinha gravado naquela faixa antes do comando também sai. Pode regravar na mesma faixa.
+- Como o id não diz a partição, duas escritas avulsas sobre a mesma linha particionada não são mais "a última vence" às cegas: o commit confere que os lugares olhados continuam iguais e, se não, refaz o comando (até 100 vezes). Isso impede que mover e editar a mesma linha, ou criar o mesmo id em dias diferentes, deixe duas cópias.
+- Numa transação, o mesmo id ou o mesmo valor único gravado por outra numa partição que não existia quando a primeira procurou faz o segundo `COMMIT` falhar. Um commit que cria partição corre sozinho.
+- `DEFINE PARTITION` dentro de transação (em cluster, sempre) só vale no `COMMIT`: até lá as outras sessões recebem conflito ao escrever na tabela, e o commit confere que ela continua vazia.
+
+Dois limites conhecidos:
+
+- Uma leitura por id feita no exato instante em que a linha muda de partição pode não encontrá-la.
+- Dois comandos avulsos simultâneos que gravam o mesmo valor único com ids diferentes podem passar os dois, como já acontece numa tabela comum. Dentro de transação isso é recusado.
 
 ## Segundo plano
 
@@ -116,7 +124,7 @@ Uma thread de manutenção (`PartitionMaintenance`) roda a cada 10 segundos (`AX
 
 Na escrita, o TTL custa um `put` pequeno a mais no mesmo lote, sem leitura extra.
 
-Cada lote do TTL é uma transação: se outra escrita mudar uma das linhas no meio, o lote inteiro é desfeito e tentado na rodada seguinte. O commit do lote não confere leitura fantasma, para não parar as demais escritas. Por isso um `RELATE` criado no mesmo instante em que a linha vence pode deixar uma aresta apontando para a linha removida, como já acontece com um `DELETE` avulso concorrente.
+Cada lote do TTL é uma transação: se ele falhar (outra escrita mudou uma das linhas, ou um evento recusou a remoção), é refeito linha a linha, e só as linhas que falharem ficam para depois. O commit do lote não confere leitura fantasma, para não parar as demais escritas. Por isso um `RELATE` criado no mesmo instante em que a linha vence pode deixar uma aresta apontando para a linha removida, como já acontece com um `DELETE` avulso concorrente.
 
 Linhas de partição fria não vencem pelo TTL: ficam na fila até a partição voltar. Para descartar dados frios, use `RETENTION`.
 
@@ -136,9 +144,11 @@ Um objeto por partição, **imutável**, de nome único: `parts/<ns>/<db>/<tabel
 2. **Enviar:** lê os registros, grava o objeto, baixa de volta e confere o SHA-256. Sem trava: o resto do banco continua gravando.
 3. **Trocar:** um único lote com a remoção por faixa dos registros, o descritor `COLD` e o filtro de Bloom.
 
+Cada tentativa usa um nome de objeto novo, e quem envia nunca apaga objeto: outro nó, ou uma base restaurada, pode estar usando o mesmo armazenamento. Uma tentativa que sobra vira órfã e sai pela coleta de lixo. Toda troca de estado confere que o descritor não mudou desde que foi lido.
+
 Uma queda entre os passos deixa a partição em `FREEZING`, com os dados locais intactos; a rodada seguinte recomeça. A volta (`THAWING`) grava os registros e o estado `HOT` num lote só.
 
-Um objeto vai até 2 GB sem compressão. Uma partição maior que isso não é movida (a manutenção registra a falha e ela fica em `FREEZING` até um `TO HOT`): use um `INTERVAL` menor. A volta da camada fria monta um lote com a partição inteira em memória.
+Um objeto vai até 2 GB sem compressão. Uma partição maior que isso não é movida (a manutenção registra a falha e ela fica em `FREEZING` até um `TO HOT`): use um `INTERVAL` menor. A volta da camada fria monta um lote com a partição inteira em memória (em cluster, uma única entrada do log Raft), então partições grandes pedem memória na mesma proporção.
 
 ### Cache
 
