@@ -179,6 +179,71 @@ Restaurar a um instante `T`, igual ou posterior ao corte do manifesto:
 
 O resultado é consistente para tudo que é causalmente relacionado. Uma saga não é atômica entre shards, então o corte pode cair no meio dela.
 
+## Operação
+
+### Nós de shard
+
+Cada shard é um cluster comum (veja [cluster-raft.md](cluster-raft.md)). O gateway usa a rota interna `/shard/v1/` dos nós, servida por HTTP (HyperText Transfer Protocol) com a mesma autenticação do `/sql`. Para o backup do cluster, ligue o journal em cada nó:
+
+| Variável | Padrão | O que faz |
+|---|---|---|
+| `AXON_PITR` | desligado | `on` liga o journal de shard num nó de cluster com RocksDB |
+| `AXON_PITR_DIR` | `<dados>/.pitr-journal` | onde ficam os segmentos |
+| `AXON_SHARD_BACKUP_DIR` | `<dados>/.shard-backups` | onde ficam os backups físicos pedidos pelo coordenador |
+
+### Gateway
+
+```bash
+AXON_GATEWAY_SHARDS='s0=http://a1:8000,http://a2:8000,http://a3:8000;s1=http://b1:8000,http://b2:8000,http://b3:8000' AXON_GATEWAY_SHARD_USER=root AXON_GATEWAY_SHARD_PASS=<senha> AXON_GATEWAY_ADMIN_TOKEN=<segredo> axonbase gateway
+```
+
+| Variável | Padrão | O que faz |
+|---|---|---|
+| `AXON_GATEWAY_SHARDS` | vazio | shards para criar o mapa na primeira subida. Depois disso vale o mapa gravado |
+| `AXON_GATEWAY_META` | nós do primeiro shard | nós do grupo de metadados |
+| `AXON_GATEWAY_SHARD_USER` e `AXON_GATEWAY_SHARD_PASS` | vazios | credencial do próprio gateway, usada no plano de controle, na movimentação e no backup, nunca em requisições de clientes |
+| `AXON_GATEWAY_ADMIN_TOKEN` | vazio | credencial das rotas de administração. Vazia, elas ficam desligadas |
+| `AXON_GATEWAY_BIND` e `AXON_GATEWAY_PORT` | `127.0.0.1` e 8080 | onde o gateway escuta |
+| `AXON_GATEWAY_MAP_TTL_MS` | 2000 | validade da cópia do mapa |
+| `AXON_GATEWAY_DEADLINE_MS` | 15000 | tempo máximo de uma requisição a um shard |
+| `AXON_GATEWAY_EXPLICIT_IDS` | `refuse` | `check` aceita record id escolhido em tabela dividida por outro campo |
+
+O gateway não tem TLS (Transport Layer Security) próprio: ponha-o atrás de um balanceador que termine a conexão cifrada, ou numa rede privada. Rode **uma** instância das rotas de administração por vez.
+
+O cliente usa `POST /sql` com os cabeçalhos `Axon-Ns`, `Axon-Db` e `Authorization`, como num nó. A resposta traz `Axon-HLC`; devolva-o na próxima requisição para preservar a ordem entre gateways.
+
+### Rotas de administração
+
+Todas são `POST`, com `Authorization: Bearer <AXON_GATEWAY_ADMIN_TOKEN>`.
+
+| Rota | Corpo | O que faz |
+|---|---|---|
+| `/admin/shard/add` | `{"id":"s3","endpoints":["http://..."]}` | copia as definições para um shard vazio e o põe no mapa, sem slots |
+| `/admin/shard/move` | `{"slots":"0-511","target":"s3"}` | move slots de um mesmo dono |
+| `/admin/shard/resume` | vazio | retoma uma movimentação interrompida |
+| `/admin/shard/abort` | vazio | desiste antes da troca de dono |
+| `/admin/backup/create` | vazio | faz o backup do cluster e devolve o manifesto: guarde-o |
+| `/admin/backup/barrier` | vazio | grava uma barreira em todos os shards e devolve o instante |
+| `/admin/backup/seal` | o manifesto | fecha os journals que o manifesto usa |
+
+`GET /shard/v1/map` devolve o mapa.
+
+Para a restauração a um instante alcançar o presente, agende a barreira (por exemplo a cada minuto). Os segmentos fecham sozinhos em até 30 segundos. Copie os diretórios de backup e de journal para fora das máquinas: o manifesto só anota os caminhos em cada nó. Um nó que caiu ou recebeu o estado inteiro pela rede deixa um buraco no journal, então tire um backup novo depois desses eventos. A retenção dos backups de shard é manual.
+
+### Restaurar
+
+Junte numa máquina os diretórios de backup e de journal anotados no manifesto e rode:
+
+```bash
+axonbase restore-shards manifesto.json /dados/restaurados --at 2026-11-26T14:32:10Z --source s0=/copias/s0/backup,/copias/s0/journal --source s1=/copias/s1/backup,/copias/s1/journal
+```
+
+`--at` usa o formato ISO (International Organization for Standardization) 8601 e, sem ele, vale o corte do manifesto. Sem `--source`, valem os caminhos do manifesto. O comando cria um diretório por shard. Suba cada membro do shard com uma cópia dele e o diretório do Raft vazio, e depois o gateway: o mapa volta junto com o grupo de metadados, desde que os endereços sejam os mesmos.
+
+### Portão de carga
+
+O roteiro opt-in em [scripts/shard-gates/run.sh](../scripts/shard-gates/run.sh) mede a ingestão com um shard e com três, em máquinas separadas, e aprova quando a razão é de pelo menos 2,4.
+
 ## Compatibilidade
 
 | Instalação | Efeito |
@@ -191,10 +256,13 @@ Transformar um cluster existente em vários shards não redistribui dados de tab
 
 ## Limites conhecidos
 
-- O gateway atende só `/sql`, por HTTP (HyperText Transfer Protocol). Os SDKs (Software Development Kits) que usam RPC (Remote Procedure Call) sobre WebSocket, o `/table`, o `/graphql` e o `/mcp` ainda não passam por ele.
+- O gateway atende só `/sql`, por HTTP. Os SDKs (Software Development Kits) que usam RPC (Remote Procedure Call) sobre WebSocket, o `/table`, o `/graphql` e o `/mcp` ainda não passam por ele.
 - O tráfego do gateway chega a cada nó por um endereço só: deixe `AXON_RATE_LIMIT` desligado nos shards, ou alto.
 - Funções AxonPL chamadas sem o prefixo `fn::` rodam em cada shard contra os dados dele.
 - A movimentação copia os registros de cada tabela de uma vez, em memória, e depende do prazo de validade do mapa em vez de uma trava no shard.
+- O mapa guarda os endereços dos shards: não há rota para trocá-los num conjunto já criado.
+- O backup cobre o grupo de metadados só quando ele é um dos shards (o padrão).
+- As escritas de um `INSERT` em vários shards vão uma de cada vez.
 - O gateway não divide nem junta shards sozinho: a movimentação é pedida pelo operador.
 - Uma consulta espalhada traz até `START + LIMIT` linhas de cada shard.
 - Sem `LIMIT`, o resultado inteiro de cada shard passa pela memória do gateway.
