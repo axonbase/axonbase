@@ -26,6 +26,9 @@ public final class MemoryBackend implements VersionedKvBackend {
 
     @Override
     public synchronized void put(String key, byte[] value) {
+        if (RangeDelete.isMarker(key)) {
+            deleteRange(RangeDelete.parse(key, value));
+        }
         data.put(key, value.clone());
         versions.put(key, ++clock);
     }
@@ -37,6 +40,12 @@ public final class MemoryBackend implements VersionedKvBackend {
         }
         put(key, value);
         return true;
+    }
+
+    /** Como no RocksDB, some o dado e a versão de cada chave da faixa. */
+    private void deleteRange(RangeDelete.Range range) {
+        data.subMap(range.from(), true, range.to(), false).clear();
+        versions.subMap(range.from(), true, range.to(), false).clear();
     }
 
     @Override
@@ -145,6 +154,7 @@ public final class MemoryBackend implements VersionedKvBackend {
                 throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
             }
         }
+        RangeDelete.in(puts).forEach(this::deleteRange);
         for (String key : deletes) {
             if (data.remove(key) != null) {
                 versions.put(key, ++clock);

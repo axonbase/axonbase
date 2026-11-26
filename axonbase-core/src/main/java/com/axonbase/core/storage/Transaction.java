@@ -33,6 +33,8 @@ public final class Transaction implements KvBackend {
     private final java.util.ArrayDeque<SavepointSnapshot> savepoints = new java.util.ArrayDeque<>();
     private boolean open = true;
     private final long openedAtMs = System.currentTimeMillis();
+    /** Condições conferidas (e travas tomadas) no commit, uma por identificador. */
+    private final java.util.Map<String, CommitGuard> guards = new java.util.LinkedHashMap<>();
 
     public Transaction(KvBackend base) {
         this.base = base;
@@ -86,6 +88,78 @@ public final class Transaction implements KvBackend {
         }
         staged.put(key, value.clone());
         deleted.remove(key);
+    }
+
+    /**
+     * Lê como {@link #get}, mas sem registrar a leitura: outra transação que mude a chave não conflita com esta.
+     * Serve para metadados cuja validade é conferida por uma {@link CommitGuard}.
+     */
+    public Optional<byte[]> peek(String key) {
+        ensureOpen();
+        if (deleted.contains(key)) {
+            return Optional.empty();
+        }
+        byte[] v = staged.get(key);
+        return v != null ? Optional.of(v.clone()) : base.get(key);
+    }
+
+    /** Lista as chaves do prefixo como {@link #keysWithPrefix}, sem registrar a faixa nem as leituras. */
+    public List<String> peekKeys(String prefix) {
+        ensureOpen();
+        java.util.TreeSet<String> keys = new java.util.TreeSet<>(base.keysWithPrefix(prefix));
+        for (String k : staged.keySet()) {
+            if (k.startsWith(prefix)) {
+                keys.add(k);
+            }
+        }
+        keys.removeAll(deleted);
+        return List.copyOf(keys);
+    }
+
+    /** Grava sem exigir que a chave esteja igual no commit: a última gravação vence. */
+    public void putBlind(String key, byte[] value) {
+        ensureOpen();
+        staged.put(key, value.clone());
+        deleted.remove(key);
+    }
+
+    /** Condição do commit: pega o que precisar, confere e devolve o que soltar depois de gravar. */
+    public interface CommitGuard {
+        /** Condições exclusivas entram primeiro: quem já tem a escrita pode pegar a leitura, o contrário trava. */
+        boolean exclusive();
+
+        /** @throws VersionConflictException quando a condição não vale mais */
+        Held enter();
+    }
+
+    /** O que soltar depois do commit. */
+    public interface Held extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /** Registra uma condição; um identificador repetido vale uma vez. */
+    public void guard(String id, CommitGuard guard) {
+        ensureOpen();
+        guards.putIfAbsent(id, guard);
+    }
+
+    /** Entra em todas as condições. Se uma falhar, solta as anteriores e relança. */
+    public Held enterGuards() {
+        java.util.Deque<Held> held = new java.util.ArrayDeque<>();
+        try {
+            for (boolean exclusive : new boolean[] {true, false}) {
+                for (CommitGuard guard : guards.values()) {
+                    if (guard.exclusive() == exclusive) {
+                        held.push(guard.enter());
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            held.forEach(Held::close);
+            throw e;
+        }
+        return () -> held.forEach(Held::close);
     }
 
     @Override
@@ -292,6 +366,7 @@ public final class Transaction implements KvBackend {
         readVersions.clear();
         readRanges.clear();
         savepoints.clear();
+        guards.clear();
     }
 
     /** Descarta o estado en tocar o base. */

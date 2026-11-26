@@ -26,7 +26,9 @@ public record ControlCommand(Kind kind, String namespace, String database, Strin
         PACKAGE, FUNCTION, PROCEDURE,
         ACCESS, USER, AUDIT,
         /** Truststore enviado pela API: guarda só nome e caminho do arquivo, nunca a senha. */
-        JKS
+        JKS,
+        /** Partição por tempo e prazo de validade de uma tabela (o nome é a tabela). Reexecutados depois dela. */
+        PARTITIONING, TTL
     }
 
     public ControlCommand {

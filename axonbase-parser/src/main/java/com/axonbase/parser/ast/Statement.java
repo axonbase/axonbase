@@ -94,6 +94,10 @@ public sealed interface Statement {
     record Unrelate(Expr from, Expr kind, Expr to) implements Statement {
     }
 
+    /** Comandos de partição por tempo e de TTL (E4); os detalhes ficam em {@link PartitionCommand}. */
+    record Partition(PartitionCommand command) implements Statement {
+    }
+
     record DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions)
             implements Statement {
     }

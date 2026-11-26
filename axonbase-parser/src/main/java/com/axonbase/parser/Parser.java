@@ -377,6 +377,9 @@ public final class Parser {
 
     private Statement parseShow() {
         pos++; // show
+        if (matchTarget("partitions")) {
+            return PartitionParser.show(partitionTokens());
+        }
         if (matchKeyword("saga")) {
             expectText("transaction");
             String name = expectIdentOrString();
@@ -1102,6 +1105,12 @@ public final class Parser {
 
     private Statement parseDefine() {
         pos++;
+        if (matchTarget("partition")) {
+            return PartitionParser.define(partitionTokens());
+        }
+        if (matchTarget("ttl")) {
+            return PartitionParser.defineTtl(partitionTokens());
+        }
         if (matchKeyword("analyzer")) {
             String name = expectIdent();
             boolean lowercase = false;
@@ -1691,6 +1700,9 @@ public final class Parser {
 
     private Statement parseAlter() {
         pos++;
+        if (matchTarget("partition")) {
+            return PartitionParser.alter(partitionTokens());
+        }
         if (matchKeyword("table")) {
             String name = expectIdentOrString();
             List<Statement.AlterOp> ops = new ArrayList<>();
@@ -1864,6 +1876,12 @@ public final class Parser {
 
     private Statement parseDrop() {
         pos++;
+        if (matchTarget("partition")) {
+            return PartitionParser.drop(partitionTokens());
+        }
+        if (matchTarget("ttl")) {
+            return PartitionParser.dropTtl(partitionTokens());
+        }
         if (matchKeyword("ai")) {
             expectKeyword("audit");
             String name = expectIdent();
@@ -2691,6 +2709,53 @@ public final class Parser {
         }
         expect(RPAREN);
         return new Query(stmts);
+    }
+
+    /** Consome {@code word} quando vem seguida de {@code ON}: o começo de um comando de partição ou TTL. */
+    private boolean matchTarget(String word) {
+        if (atWord(word) && peekIsWord(1, "on")) {
+            pos++;
+            return true;
+        }
+        return false;
+    }
+
+    private PartitionParser.Tokens partitionTokens() {
+        return new PartitionParser.Tokens() {
+            @Override
+            public boolean word(String word) {
+                return matchWord(word);
+            }
+
+            @Override
+            public void require(String word) {
+                expectWord(word);
+            }
+
+            @Override
+            public String name() {
+                return expectIdentOrString();
+            }
+
+            @Override
+            public long duration() {
+                long millis = (Long) expect(DURATION).literal();
+                while (at(DURATION)) {
+                    millis += (Long) take().literal();
+                }
+                return millis;
+            }
+
+            @Override
+            public Expr expression() {
+                return parseExpr();
+            }
+
+            @Override
+            public RuntimeException unexpected(String expected) {
+                return error(Messages.get("parser_expected_keyword", expected, peek().start()));
+            }
+        };
     }
 
     private Expr parseDuration() {

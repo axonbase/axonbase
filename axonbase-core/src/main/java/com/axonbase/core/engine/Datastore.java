@@ -64,6 +64,7 @@ public final class Datastore {
         new com.axonbase.core.embedding.EmbeddingClient();
     private final ControlStore controlStore;
     private final Object controlLock = new Object();
+    private volatile com.axonbase.core.partition.ColdTier coldTier = com.axonbase.core.partition.ColdTier.NONE;
     private volatile CommitCoordinator commitCoordinator;
     private volatile String clusterNodeId;
     private volatile JksRegistrar jksRegistrar;
@@ -606,6 +607,11 @@ public final class Datastore {
         }
     }
 
+    /** A camada fria das partições. */
+    public com.axonbase.core.partition.ColdTier coldTier() {
+        return coldTier;
+    }
+
     /** Cliente dos provedores de embedding (um por servidor: cache, limite de concorrência e métricas). */
     public com.axonbase.core.embedding.EmbeddingClient embeddings() {
         return embeddingClient;
@@ -642,6 +648,8 @@ public final class Datastore {
     private static String tableOfControl(ControlCommand c) {
         switch (c.kind()) {
             case TABLE:
+            case PARTITIONING:
+            case TTL:
                 return c.name();
             case FIELD: {
                 int colon = c.name().indexOf(':');
@@ -868,7 +876,11 @@ public final class Datastore {
 
         static RecordRef parse(String key) {
             String[] parts = key.split("\u0000", -1);
-            if (parts.length != 4 || parts[0].isEmpty() || parts[1].isEmpty() || parts[2].isEmpty()) {
+            // registro de tabela particionada: ns, banco, tabela, "!p", início da partição, chave
+            boolean partitioned = parts.length == 6 && parts[3].equals("!p")
+                && com.axonbase.core.partition.PartitionKeys.isRecordTail(parts[5]);
+            if (parts.length != 4 && !partitioned
+                || parts[0].isEmpty() || parts[1].isEmpty() || parts[2].isEmpty()) {
                 return null;
             }
             return new RecordRef(parts[0], parts[1], parts[2]);
@@ -962,6 +974,9 @@ public final class Datastore {
 
     /** Instrução que só lê (classificação por AST), usada no roteamento e na imposição de somente leitura. */
     public static boolean isReadOnly(Statement statement) {
+        if (statement instanceof Statement.Partition partition) {
+            return partition.command().readOnly();
+        }
         return statement instanceof Statement.Select
             || statement instanceof Statement.Explain
             || statement instanceof Statement.Info
@@ -1033,6 +1048,7 @@ public final class Datastore {
                 }
                 sb.append(";\n");
             }
+            appendTimeData(sb, database, def);
         }
         for (com.axonbase.core.pl.ProgramDef program : database.programs().all()) {
             if (!program.broken()) {
@@ -1043,30 +1059,64 @@ public final class Datastore {
         }
         String prefix = ns + "\u0000" + db + "\u0000";
         for (String key : database.records().keysWithPrefix(prefix)) {
-            Optional<byte[]> raw = database.records().get(key);
-            if (raw.isEmpty()) {
-                continue;
+            // registros de tabelas comuns e de partições locais; índices e demais chaves ficam de fora
+            com.axonbase.core.partition.PartitionKeys.StoredRecord stored =
+                com.axonbase.core.partition.PartitionKeys.record(key.substring(prefix.length()));
+            if (stored != null) {
+                database.records().get(key).ifPresent(raw -> appendCreate(sb, stored.table(), stored.recordKey(), raw));
             }
-            AxonValue record = AxonJson.decode(raw.get());
-            if (!record.isObject() || !record.asObject().containsKey("id")) {
-                continue;
-            }
-            // A chave física termina em \0<tabela>\0<chaveString>; extrai tabela e chave
-            String body = key.substring(prefix.length());
-            int last = body.lastIndexOf('\u0000');
-            if (last < 0) {
-                continue;
-            }
-            String table = body.substring(0, last);
-            String keyStr = body.substring(last + 1);
-            // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>
-            Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
-            m.remove("id");
-            String content = AxonJson.write(AxonValue.object(m));
-            sb.append("CREATE ").append(table).append(":").append(literalKey(keyStr))
-                .append(" CONTENT ").append(content).append(";\n");
         }
+        exportColdRecords(sb, database);
         return sb.toString();
+    }
+
+    /** As linhas das partições que estão na camada fria entram no dump lidas do objeto. */
+    private void exportColdRecords(StringBuilder sb, Database database) {
+        for (String table : database.catalog().partitionedTables().keySet()) {
+            for (var partition : com.axonbase.core.partition.PartitionStore.list(database, database.records(), table)) {
+                if (partition.coldData()) {
+                    coldTier.records().scan(database, table, partition, "", (recordKey, raw) -> {
+                        appendCreate(sb, table, recordKey, raw);
+                        return true;
+                    });
+                }
+            }
+        }
+    }
+
+    private void appendCreate(StringBuilder sb, String table, String keyStr, byte[] raw) {
+        AxonValue record = AxonJson.decode(raw);
+        if (!record.isObject() || !record.asObject().containsKey("id")) {
+            return;
+        }
+        // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>
+        Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
+        m.remove("id");
+        String content = AxonJson.write(AxonValue.object(m));
+        sb.append("CREATE ").append(table).append(":").append(literalKey(keyStr))
+            .append(" CONTENT ").append(content).append(";\n");
+    }
+
+    /** A definição de partição e de TTL da tabela, depois dos campos e índices dela e antes dos dados. */
+    private static void appendTimeData(StringBuilder sb, Database database, Catalog.TableDef def) {
+        var partition = database.catalog().partitioning(def.name());
+        if (partition != null) {
+            if (!def.fields().containsKey(partition.field())) {
+                // o dump escreve datas como texto: o tipo no campo as converte de volta na importação
+                sb.append("DEFINE FIELD ").append(partition.field()).append(" ON TABLE ").append(def.name())
+                    .append(" TYPE datetime;\n");
+            }
+            sb.append(com.axonbase.parser.Render.stmt(new Statement.Partition(
+                new com.axonbase.parser.ast.PartitionCommand.Define(def.name(), partition.field(),
+                    partition.intervalMillis(), partition.retentionMillis(), partition.coldAfterMillis()))))
+                .append(";\n");
+        }
+        var ttl = database.catalog().ttl(def.name());
+        if (ttl != null) {
+            sb.append(com.axonbase.parser.Render.stmt(new Statement.Partition(
+                new com.axonbase.parser.ast.PartitionCommand.DefineTtl(def.name(), ttl.field(), ttl.afterMillis()))))
+                .append(";\n");
+        }
     }
 
     /** Converte a keyString de storage ('n1', 'sAna') em literal AxonQL. */
@@ -1399,6 +1449,27 @@ public final class Datastore {
         if (tx == null || !tx.isOpen()) {
             throw AxonError.internal(Messages.get("txn_inactive"));
         }
+        Transaction.Held guards;
+        try {
+            guards = tx.enterGuards();
+        } catch (VersionConflictException changed) {
+            cancelSession(session); // a transação pode ter definido partições: o catálogo volta junto
+            throw changed;
+        }
+        try (guards) {
+            commitGuarded(session, tx);
+        }
+    }
+
+    /** Descarta só a transação: o catálogo não mudou por causa dela, então não há o que reconstruir. */
+    private void discardConflicted(Session session, Transaction tx) {
+        tx.cancel();
+        session.tx(null);
+        session.txControlVersion(-1);
+        session.discardLive();
+    }
+
+    private void commitGuarded(Session session, Transaction tx) {
         Database current = session.namespace() == null || session.database() == null ? null
             : findDatabase(session.namespace(), session.database());
         if (current == null || session.txIndexEpoch() < 0
@@ -1412,11 +1483,7 @@ public final class Datastore {
         read.lock();
         try {
             if (current.indexEpoch() != session.txIndexEpoch()) {
-                // descarta só a transação: o catálogo não mudou por causa dela, então não há o que reconstruir
-                tx.cancel();
-                session.tx(null);
-                session.txControlVersion(-1);
-                session.discardLive();
+                discardConflicted(session, tx);
                 throw new com.axonbase.core.storage.VersionConflictException(Messages.get("txn_index_changed"));
             }
             commitLocked(session, tx);

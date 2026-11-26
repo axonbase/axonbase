@@ -256,6 +256,10 @@ public final class WalBackend implements VersionedKvBackend {
 
     @Override
     public synchronized void put(String key, byte[] value) {
+        if (RangeDelete.isMarker(key)) {
+            commit(java.util.Map.of(), java.util.Map.of(key, value), java.util.Set.of());
+            return;
+        }
         data.put(key, value.clone());
         long ver = ++clock;
         history.record(key, value, ver, System.currentTimeMillis());
@@ -387,6 +391,13 @@ public final class WalBackend implements VersionedKvBackend {
                 }
                 throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
             }
+        }
+        List<RangeDelete.Range> ranges = RangeDelete.in(puts);
+        if (!ranges.isEmpty()) {
+            // sem remoção por faixa nativa: o log grava cada chave apagada
+            java.util.Set<String> all = new java.util.HashSet<>(deletes);
+            RangeDelete.expand(ranges, data.keySet(), puts, all);
+            deletes = all;
         }
         try { appendBatch(puts, deletes); } catch (IOException e) { throw new UncheckedIOException(e); }
         long now = System.currentTimeMillis();
