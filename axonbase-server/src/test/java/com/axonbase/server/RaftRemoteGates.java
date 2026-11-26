@@ -40,6 +40,7 @@ public final class RaftRemoteGates {
     private static final double GATE2_MINIMUM_RATIO = 2.5;
     private static final double GATE3_MAXIMUM_SECONDS = 15 * 60;
     private static final double GATE3_MAXIMUM_GAP_MILLIS = 1_000;
+    private static final int LOAD_ATTEMPTS = 10;
 
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final String token;
@@ -117,10 +118,12 @@ public final class RaftRemoteGates {
         int rounds = option("rounds", 3);
         int warmup = option("warmup", 10);
         Map<String, List<Double>> results = new LinkedHashMap<>();
+        long elections = 0;
         for (int round = 1; round <= rounds; round++) {
             for (String mode : List.of("always", "batch")) {
                 System.out.println("GATE1 round=" + round + " mode=" + mode);
                 startCluster(nodes, mode, "");
+                long before = elections(nodes);
                 for (int count : writers) {
                     for (String scenario : List.of("raw", "sql")) {
                         String line = call(awaitLeader(nodes), "/write?writers=" + count + "&seconds=" + seconds
@@ -130,9 +133,13 @@ public final class RaftRemoteGates {
                             .add(field(line, "ops_s"));
                     }
                 }
+                long during = elections(nodes) - before;
+                System.out.println("GATE1 round=" + round + " mode=" + mode + " elections=" + during);
+                elections += during;
                 stopAll(nodes);
             }
         }
+        electionVerdict("GATE1", elections);
         for (String scenario : List.of("raw", "sql")) {
             for (int count : writers) {
                 double always = median(results.get(scenario + " " + count + " always"));
@@ -165,14 +172,19 @@ public final class RaftRemoteGates {
         call(solo, "/stop", 120);
 
         startCluster(nodes, "batch", "");
+        long before = elections(nodes);
         List<String> urls = nodes.stream().map(Node::sql).toList();
-        RaftReadGateBenchmark.load(urls, rows);
         Map<String, List<RaftReadGateBenchmark.Measure>> clustered = new LinkedHashMap<>();
-        for (int round = 0; round < rounds; round++) {
-            for (String consistency : new String[] {null, "max-lag=1000", "linearizable"}) {
-                clustered.computeIfAbsent(consistency == null ? "padrao" : consistency, k -> new ArrayList<>())
-                    .add(RaftReadGateBenchmark.read(urls, rows, connections, clients, seconds, consistency));
+        try {
+            RaftReadGateBenchmark.load(urls, rows);
+            for (int round = 0; round < rounds; round++) {
+                for (String consistency : new String[] {null, "max-lag=1000", "linearizable"}) {
+                    clustered.computeIfAbsent(consistency == null ? "padrao" : consistency, k -> new ArrayList<>())
+                        .add(RaftReadGateBenchmark.read(urls, rows, connections, clients, seconds, consistency));
+                }
             }
+        } finally {
+            checkElections("GATE2", nodes, before);
         }
         double base = medianOps(single);
         long soloErrors = errors(single);
@@ -199,15 +211,42 @@ public final class RaftRemoteGates {
 
     private void gate3(List<Node> nodes, Node added) throws Exception {
         double gigabytes = Double.parseDouble(options.getOrDefault("gb", "10"));
-        int rate = option("rate", 1_000);
-        int baseline = option("baseline", 60);
         String mode = options.getOrDefault("mode", "batch");
-        long rows = (long) (gigabytes * (1L << 30) / 4_096);
 
         quietly(added, "/stop");
         startCluster(nodes, mode, added.raft());
-        System.out.println(call(awaitLeader(nodes), "/load?gb=" + gigabytes, 3_600));
-        awaitCaughtUp(nodes, awaitLeader(nodes), 0, 1_800);
+        long before = elections(nodes);
+        try {
+            loadBase(nodes, gigabytes);
+            awaitCaughtUp(nodes, awaitLeader(nodes), 0, 1_800);
+            joinNewNode(nodes, added, mode, gigabytes);
+        } finally {
+            checkElections("GATE3", nodes, before);
+        }
+    }
+
+    /** Carrega a base, retomando no líder da vez; uma troca de líder no meio é contada e reprova o portão. */
+    private void loadBase(List<Node> nodes, double gigabytes) throws Exception {
+        for (int attempt = 1; attempt <= LOAD_ATTEMPTS; attempt++) {
+            Node leader = awaitLeader(nodes);
+            try {
+                String line = call(leader, "/load?gb=" + gigabytes, 3_600);
+                System.out.println(line);
+                if (line.contains(" complete=true")) {
+                    return;
+                }
+            } catch (IllegalStateException refused) {
+                // o nó deixou de ser o líder entre a consulta e o pedido
+                System.out.println("GATE3 load attempt=" + attempt + " " + refused.getMessage());
+            }
+        }
+        throw new IllegalStateException("carga incompleta depois de " + LOAD_ATTEMPTS + " tentativas");
+    }
+
+    private void joinNewNode(List<Node> nodes, Node added, String mode, double gigabytes) throws Exception {
+        int rate = option("rate", 1_000);
+        int baseline = option("baseline", 60);
+        long rows = (long) (gigabytes * (1L << 30) / 4_096);
 
         Node leader = awaitLeader(nodes);
         Node source = options.getOrDefault("source", "follower").equals("leader") ? leader
@@ -239,6 +278,34 @@ public final class RaftRemoteGates {
         System.out.printf("GATE3 RESULT gigabytes=%.2f total_seconds=%.1f target=%.0f max_gap_ms=%.0f "
                 + "target_ms=%.0f same_data=%s source=%s %s%n", gigabytes, total, GATE3_MAXIMUM_SECONDS, gap,
             GATE3_MAXIMUM_GAP_MILLIS, same, source == leader ? "leader" : "follower", verdict(passed));
+    }
+
+    // ---- eleições ----
+
+    /** Eleições abertas pelos nós desde que subiram. */
+    private long elections(List<Node> nodes) throws Exception {
+        long total = 0;
+        for (Node node : nodes) {
+            total += (long) field(call(node, "/status", 60), "elections");
+        }
+        return total;
+    }
+
+    /** Os portões não injetam falha: qualquer eleição durante a medida reprova. */
+    private void electionVerdict(String gate, long elections) {
+        System.out.printf("%s RESULT elections=%d %s%n", gate, elections, verdict(elections == 0));
+    }
+
+    /** Como {@link #electionVerdict}, sem esconder a falha que interrompeu o portão se um nó não responder. */
+    private void checkElections(String gate, List<Node> nodes, long before) {
+        try {
+            electionVerdict(gate, elections(nodes) - before);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (Exception unreachable) {
+            System.out.printf("%s RESULT elections=desconhecido %s (%s)%n", gate, verdict(false),
+                unreachable.getMessage());
+        }
     }
 
     // ---- comando dos nós ----

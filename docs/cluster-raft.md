@@ -128,7 +128,7 @@ Atualize um nó de cada vez. Um líder novo percebe um membro antigo e fala com 
 ## Limites conhecidos
 
 - A troca de membros continua sendo a das versões anteriores (uma mudança por vez, sem consenso conjunto), e a lista de membros gravada pelos seguidores não é recarregada em execução.
-- Não há pré-voto: um nó que fica mais de 350 ms sem notícia do líder (máquina muito carregada, pausa longa) abre eleição, e o líder antigo deixa o cargo. As escritas pendentes nesse instante ficam sem desfecho.
+- Não há pré-voto: um nó que fica de 350 a 850 ms sem notícia do líder abre eleição, e o líder antigo deixa o cargo. As escritas pendentes nesse instante ficam sem desfecho. Disco lento no líder não basta para isso por até 10 segundos (os batimentos saem por uma conexão própria quando o envio das entradas para; depois desse prazo eles cessam e o cluster elege outro líder), nem um seguidor ainda recebendo requisições. Uma pausa longa da máquina virtual ou falta de CPU ainda bastam; o log do nó registra o atraso (`relógio interno atrasado`, `sem envio há`, `abre eleição`).
 - O snapshot enviado pela rede monta o estado inteiro em memória.
 - A porta do Raft não tem autenticação nem cifra, como nas versões anteriores: exponha-a só numa rede privada.
 - Um learner não é guardado no log: depois de uma troca de líder ele se apresenta ao novo líder sozinho.

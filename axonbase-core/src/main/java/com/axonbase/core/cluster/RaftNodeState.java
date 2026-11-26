@@ -20,7 +20,7 @@ import java.util.Properties;
 public final class RaftNodeState {
     private final Path file;
     private final Path appliedFile;
-    private long term;
+    private volatile long term;
     private String votedFor = "";
     private long appliedIndex;
     private long appliedTerm;
@@ -38,6 +38,11 @@ public final class RaftNodeState {
     }
 
     public synchronized long term() {
+        return term;
+    }
+
+    /** Leitura sem trava, para quem não pode esperar uma gravação do estado em curso. */
+    long currentTerm() {
         return term;
     }
 

@@ -22,10 +22,24 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p>As entradas pendentes vão agrupadas num AppendEntries, e várias requisições ficam em voo na mesma
  * conexão (pipeline), sem esperar a resposta da anterior. Uma rejeição derruba a conexão e recomeça do ponto
  * que o seguidor indicar. Sem entradas, a mesma requisição vazia serve de batimento.</p>
+ *
+ * <p>Quem envia as entradas lê o log, e o log fica preso enquanto o disco atende o fsync de um segmento. Para um
+ * votante há por isso uma segunda thread, que não toca no log nem nas travas do líder: quando o envio principal
+ * cala, ela bate numa conexão própria, para o seguidor não tomar o líder por morto.</p>
  */
 final class PeerReplicator {
 
     static final long HEARTBEAT_NANOS = TimeUnit.MILLISECONDS.toNanos(75);
+    /** Silêncio do envio principal a partir do qual os batimentos saem por fora. */
+    private static final long QUIET_NANOS = 2 * HEARTBEAT_NANOS;
+    /** Silêncio que, sem os batimentos por fora, bastaria para um seguidor abrir eleição: vai para o log. */
+    private static final long STALL_WARNING_NANOS = TimeUnit.MILLISECONDS.toNanos(350);
+    private static final int BEAT_TIMEOUT_MILLIS = 1_000;
+    /**
+     * Maior silêncio que os batimentos por fora cobrem, fora de um snapshot. Um disco travado de vez não pode
+     * prender a liderança: passado isto, eles param e o cluster elege outro líder.
+     */
+    private static final long MAX_COVERED_NANOS = TimeUnit.SECONDS.toNanos(10);
     private static final int CONNECT_TIMEOUT_MILLIS = 250;
     /** Um seguidor que passa disso sem responder (disco travado, rede partida) é reconectado. */
     private static final int RPC_TIMEOUT_MILLIS = 10_000;
@@ -52,6 +66,9 @@ final class PeerReplicator {
         /** O índice conferido ou o último contato deste peer mudou. */
         void acknowledged(PeerReplicator peer);
 
+        /** Um batimento por fora foi respondido; não pode esperar trava que o disco possa segurar. */
+        void heartbeatAnswered();
+
         void higherTerm(long term);
 
         void snapshotSent(long bytes);
@@ -66,6 +83,10 @@ final class PeerReplicator {
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition signal = lock.newCondition();
     private final Thread thread;
+    private final Thread keepalive;
+    /** Momento em que o envio principal mandou a última requisição. */
+    private volatile long lastWriteNanos;
+    private volatile boolean sendingSnapshot;
     private volatile boolean running = true;
     private volatile Socket socket;
     private volatile long next;
@@ -89,10 +110,16 @@ final class PeerReplicator {
         this.leader = leader;
         this.thread = new Thread(this::run, "raft-repl-" + address.getPort());
         this.thread.setDaemon(true);
+        this.keepalive = new Thread(this::keepAlive, thread.getName() + "-beat");
+        this.keepalive.setDaemon(true);
     }
 
     void start() {
+        lastWriteNanos = System.nanoTime();
         thread.start();
+        if (voter) {
+            keepalive.start(); // um learner não abre eleição
+        }
     }
 
     InetSocketAddress address() {
@@ -155,17 +182,66 @@ final class PeerReplicator {
 
     void stop() {
         running = false;
+        keepalive.interrupt();
         closeQuietly(socket);
         wake();
     }
 
-    /** Espera a thread terminar depois de {@link #stop()}. */
+    /** Espera as threads terminarem depois de {@link #stop()}. */
     void join(long millis) throws InterruptedException {
         thread.join(millis);
+        keepalive.join(millis);
     }
 
     boolean finished() {
-        return thread.getState() == Thread.State.TERMINATED;
+        return thread.getState() == Thread.State.TERMINATED && !keepalive.isAlive();
+    }
+
+    // ---- batimento por fora ----
+
+    private void keepAlive() {
+        boolean warned = false;
+        while (running) {
+            try {
+                TimeUnit.NANOSECONDS.sleep(HEARTBEAT_NANOS);
+            } catch (InterruptedException stopped) {
+                return;
+            }
+            long quiet = System.nanoTime() - lastWriteNanos;
+            if (quiet < QUIET_NANOS) {
+                warned = false;
+                continue;
+            }
+            if (!warned && quiet >= STALL_WARNING_NANOS) {
+                warned = true;
+                System.getLogger(PeerReplicator.class.getName()).log(System.Logger.Level.WARNING,
+                    "replicação para " + address + " sem envio há " + TimeUnit.NANOSECONDS.toMillis(quiet)
+                        + " ms (disco do líder ou membro lento); batimentos saindo por fora");
+            }
+            if (running && (sendingSnapshot || quiet < MAX_COVERED_NANOS)) {
+                beat();
+            }
+        }
+    }
+
+    /** Batimento sem commit, entendido por nós novos e antigos. */
+    private void beat() {
+        long sent = System.nanoTime();
+        try {
+            RaftWire.Response response = RaftWire.call(address, request(RaftWire.APPEND, 0, 0, new byte[0]),
+                BEAT_TIMEOUT_MILLIS);
+            if (running && !superseded(response)) {
+                heard(sent);
+                leader.heartbeatAnswered();
+            }
+        } catch (IOException unreachable) {
+            // o envio principal reconecta
+        } catch (RuntimeException failure) {
+            if (running) {
+                System.getLogger(PeerReplicator.class.getName()).log(System.Logger.Level.WARNING,
+                    "batimento para " + address + " falhou", failure);
+            }
+        }
     }
 
     private void run() {
@@ -219,6 +295,7 @@ final class PeerReplicator {
             long sent = System.nanoTime();
             RaftWire.write(out, request(RaftWire.HELLO, 0, leader.commitIndex(), new byte[0]));
             out.flush();
+            lastWriteNanos = sent;
             RaftWire.Response hello = RaftWire.readResponse(in);
             if (superseded(hello)) {
                 return false;
@@ -243,12 +320,17 @@ final class PeerReplicator {
     }
 
     private void answered(long sentNanos) {
+        heard(sentNanos);
+        leader.acknowledged(this);
+    }
+
+    /** O peer respondeu à requisição enviada em {@code sentNanos}. Chamada pelas duas threads. */
+    private synchronized void heard(long sentNanos) {
         contacted();
         if (!acked || sentNanos - lastAckedSendNanos > 0) {
             lastAckedSendNanos = sentNanos;
         }
         acked = true;
-        leader.acknowledged(this);
     }
 
     private RaftWire.Request request(byte type, long index, long commit, byte[] payload) {
@@ -323,6 +405,7 @@ final class PeerReplicator {
                 sentCommit = commit;
                 RaftWire.write(out, request);
                 out.flush();
+                lastWriteNanos = System.nanoTime();
             }
         } finally {
             lock.lock();
@@ -438,10 +521,8 @@ final class PeerReplicator {
             pause(MAX_BACKOFF_MILLIS);
             return;
         }
-        // Montar e transferir o estado demora; sem batimentos o membro abriria uma eleição no meio.
-        Thread beats = new Thread(this::beatWhileSendingSnapshot, thread.getName() + "-beat");
-        beats.setDaemon(true);
-        beats.start();
+        // Montar e transferir o estado demora; os batimentos por fora cobrem esse silêncio.
+        sendingSnapshot = true;
         try {
             RaftNode.Image image = leader.node().image();
             byte[] payload = RaftPayload.encode(image.batch());
@@ -462,29 +543,7 @@ final class PeerReplicator {
                 pause(MAX_BACKOFF_MILLIS);
             }
         } finally {
-            beats.interrupt();
-        }
-    }
-
-    /** Batimento sem commit, entendido por nós novos e antigos. */
-    private void beatWhileSendingSnapshot() {
-        while (running && !Thread.currentThread().isInterrupted()) {
-            try {
-                long sent = System.nanoTime();
-                RaftWire.Response response = RaftWire.call(address,
-                    request(RaftWire.APPEND, 0, 0, new byte[0]), RPC_TIMEOUT_MILLIS);
-                if (superseded(response)) {
-                    return;
-                }
-                answered(sent);
-            } catch (IOException unreachable) {
-                // o envio do snapshot descobre e tenta de novo
-            }
-            try {
-                TimeUnit.NANOSECONDS.sleep(HEARTBEAT_NANOS);
-            } catch (InterruptedException done) {
-                return;
-            }
+            sendingSnapshot = false;
         }
     }
 
@@ -515,6 +574,7 @@ final class PeerReplicator {
                 long previousTerm = storedByLegacy.getOrDefault(index - 1, node.lastTermAt(index - 1));
                 byte[] payload = index == unframedIndex ? RaftPayload.encode(entry.batch())
                     : RaftPayload.append(index - 1, previousTerm, entry.batch());
+                lastWriteNanos = System.nanoTime();
                 RaftWire.Response response = RaftWire.call(address,
                     new RaftWire.Request(RaftWire.APPEND, leader.group(), leader.term(), leader.nodeId(),
                         leader.advertise(), index, Math.min(leader.commitIndex(), match), payload),
@@ -535,6 +595,7 @@ final class PeerReplicator {
                 }
                 answered(sent);
             } else if (sent - lastSend >= HEARTBEAT_NANOS) {
+                lastWriteNanos = sent;
                 RaftWire.Response response = RaftWire.call(address,
                     request(RaftWire.APPEND, 0, Math.min(leader.commitIndex(), match), new byte[0]),
                     RPC_TIMEOUT_MILLIS);

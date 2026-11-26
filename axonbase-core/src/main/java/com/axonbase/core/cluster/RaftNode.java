@@ -652,6 +652,11 @@ public final class RaftNode implements AutoCloseable {
         return state.term();
     }
 
+    /** O mandato sem esperar o monitor do nó, que um fsync do log pode segurar. */
+    long currentTerm() {
+        return state.currentTerm();
+    }
+
     public long lastIndex() {
         return log.lastIndex();
     }

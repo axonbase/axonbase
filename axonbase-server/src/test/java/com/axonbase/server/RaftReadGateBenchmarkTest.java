@@ -15,7 +15,8 @@ import org.junit.jupiter.api.Test;
 class RaftReadGateBenchmarkTest {
 
     private static final String NOTE = "x".repeat(200);
-    private static final String ROW = "[{\"id\":\"item:i7\",\"n\":7,\"nota\":\"" + NOTE + "\"}]";
+    /** A forma que o servidor devolve para um {@code SELECT} por id: o objeto, sem lista em volta. */
+    private static final String ROW = "{\"n\":7,\"nota\":\"" + NOTE + "\",\"id\":\"item:i7\"}";
 
     private static RaftReadGateBenchmark.Answer answer(String body) {
         return RaftReadGateBenchmark.answer(body, 7);
@@ -25,7 +26,10 @@ class RaftReadGateBenchmarkTest {
     @DisplayName("só a linha pedida, com o conteúdo gravado, conta como leitura")
     void onlyTheRequestedRowCounts() {
         assertEquals(RaftReadGateBenchmark.Answer.ROW, answer(ROW));
+        assertEquals(RaftReadGateBenchmark.Answer.ROW, answer("[" + ROW + "]"));
         assertEquals(RaftReadGateBenchmark.Answer.EMPTY, answer("[]"));
+        assertEquals(RaftReadGateBenchmark.Answer.WRONG, answer("[" + ROW + "," + ROW + "]"));
+        assertEquals(RaftReadGateBenchmark.Answer.WRONG, answer("null"));
         assertEquals(RaftReadGateBenchmark.Answer.WRONG, answer(ROW.replace("\"n\":7", "\"n\":71")));
         assertEquals(RaftReadGateBenchmark.Answer.WRONG, answer(ROW.replace(NOTE, "x")));
         assertEquals(RaftReadGateBenchmark.Answer.WRONG, answer("{\"status\":\"ERR\",\"detail\":\"falhou\"}"));

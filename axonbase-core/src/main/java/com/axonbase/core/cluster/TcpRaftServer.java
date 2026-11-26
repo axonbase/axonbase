@@ -22,10 +22,13 @@ import java.util.concurrent.TimeUnit;
  * Listener TCP isolado do Jetty; permite nós Raft em processos JVM distintos.
  *
  * <p>Uma conexão serve várias requisições, na ordem. As que já chegaram juntas (pipeline) são entregues de
- * uma vez ao {@link Handler#handleAll}, que pode sincronizar o disco uma só vez para todas.</p>
+ * uma vez ao {@link Handler#handleAll}, que pode sincronizar o disco uma só vez para todas. Cada uma é avisada a
+ * {@link Handler#arrived} assim que chega, antes de esperar as outras.</p>
  */
 public final class TcpRaftServer implements AutoCloseable {
     private static final int MAX_BATCH = 64;
+    /** Ao passar disto em lotes, o que chegou é atendido: um líder que não para de enviar não adia a resposta. */
+    private static final long MAX_BATCH_BYTES = 16L << 20;
     /** Uma conexão de replicação bate a cada 75 ms: calada por tanto tempo, o outro lado sumiu. */
     private static final int IDLE_TIMEOUT_MILLIS = 60_000;
 
@@ -77,9 +80,9 @@ public final class TcpRaftServer implements AutoCloseable {
             socket.setSoTimeout(IDLE_TIMEOUT_MILLIS);
             while (open) {
                 List<RaftWire.Request> requests = new ArrayList<>();
-                requests.add(RaftWire.readRequest(in));
-                while (requests.size() < MAX_BATCH && in.available() > 0) {
-                    requests.add(RaftWire.readRequest(in));
+                long bytes = receive(in, requests);
+                while (requests.size() < MAX_BATCH && bytes < MAX_BATCH_BYTES && in.available() > 0) {
+                    bytes += receive(in, requests);
                 }
                 for (RaftWire.Response response : handler.handleAll(requests)) {
                     RaftWire.write(out, response);
@@ -98,6 +101,14 @@ public final class TcpRaftServer implements AutoCloseable {
         } finally {
             connections.remove(socket);
         }
+    }
+
+    /** Lê uma requisição, avisa que ela chegou e devolve o tamanho do lote que ela traz. */
+    private long receive(DataInputStream in, List<RaftWire.Request> requests) throws IOException {
+        RaftWire.Request request = RaftWire.readRequest(in);
+        handler.arrived(request);
+        requests.add(request);
+        return request.payload().length;
     }
 
     @Override
@@ -122,6 +133,10 @@ public final class TcpRaftServer implements AutoCloseable {
     @FunctionalInterface
     public interface Handler {
         RaftWire.Response handle(RaftWire.Request request);
+
+        /** Uma requisição acabou de chegar e ainda vai ser atendida; não pode bloquear. */
+        default void arrived(RaftWire.Request request) {
+        }
 
         /** Atende requisições que chegaram juntas; as respostas saem na mesma ordem. */
         default List<RaftWire.Response> handleAll(List<RaftWire.Request> requests) {
