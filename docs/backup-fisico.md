@@ -116,7 +116,23 @@ Medidas no portão `PhysicalBackupGateTest` (opt-in com `-Daxon.gate.physical=tr
 | `kill -9` no meio da troca de base (24 rodadas) | 11 vezes a base antiga inteira, 13 a nova inteira, nenhuma misturada | nenhuma corrompida |
 | `kill -9` no meio de backups (6 rodadas) | base íntegra, todo backup listado verifica, backup novo funciona | idem |
 
-O restore mede só a cópia dos arquivos e a abertura da base restaurada, em disco local. Um restore pelo MinIO soma o tempo de rede do agente do Enterprise.
+O restore do portão mede só a cópia dos arquivos e a abertura da base restaurada, em disco local. Um restore pelo MinIO soma o tempo de rede do agente do Enterprise.
+
+### Ponta a ponta, pelo Enterprise
+
+Medido com a pilha real em Docker (motor, agente, API do Enterprise, Postgres e MinIO), numa base de 500 mil registros de cerca de 4 KiB (1,5 GB de backup, 35 arquivos):
+
+| Etapa | Resultado |
+|---|---|
+| Backup completo, do disparo até o último arquivo conferido no MinIO | 52 s |
+| Backup incremental após restaurar (arquivos novos: 6 de 14) | 1 a 3 s |
+| Restore completo (baixar do MinIO, gravar no motor, trocar a base e reabrir) | 58 s, dos quais 8 a 11 s na troca e reabertura |
+| Linhas gravadas depois do backup | desaparecem no restore, e as 500 mil linhas voltam íntegras |
+| Restore pedido durante um `DEFINE INDEX` | esperou e concluiu, sem `409 BUSY` (a definição do índice foi desfeita, como o resto da base) |
+
+Extrapolando de forma linear, o restore de 10 GB pelo Enterprise leva por volta de 7 minutos, dentro da meta de 10 minutos. Essa extrapolação não foi medida com 10 GB pelo MinIO, só o restore local de 10 GB (36 s) foi.
+
+Um restore enquanto uma varredura ou construção de índice segura as operações por mais de 60 s responde `409 BUSY` e a base fica como estava; é só repetir quando a operação longa terminar.
 
 ## O que ainda não existe
 
