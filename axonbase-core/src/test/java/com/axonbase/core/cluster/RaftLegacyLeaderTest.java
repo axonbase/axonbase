@@ -164,6 +164,24 @@ class RaftLegacyLeaderTest {
     }
 
     @Test
+    @DisplayName("uma entrada reenviada não confirma o que vem depois dela sem conferir")
+    void resentEntryDoesNotCommitWhatFollows() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            assertTrue(append(follower, 3, 1, 0, 0, batch("a")).accepted());
+            assertTrue(append(follower, 3, 2, 3, 0, batch("b")).accepted());
+            assertTrue(append(follower, 3, 3, 3, 0, batch("sem-quorum")).accepted());
+
+            // o líder reenvia a entrada 2 já com o índice 3 confirmado, mas o 3 dele é outro
+            assertTrue(append(follower, 3, 2, 3, 3, batch("b")).accepted());
+
+            assertEquals(2, follower.commitIndex());
+            assertTrue(append(follower, 3, 3, 3, 3, batch("certa")).accepted());
+            assertTrue(follower.stateMachine().get("certa").isPresent());
+            assertTrue(follower.stateMachine().get("sem-quorum").isEmpty());
+        }
+    }
+
+    @Test
     @DisplayName("entrada que o líder antigo reescreveu no mesmo mandato é trocada")
     void rewrittenEntryReplacesTheStoredOne() throws Exception {
         try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
