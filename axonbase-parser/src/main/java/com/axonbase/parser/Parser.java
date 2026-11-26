@@ -1195,11 +1195,18 @@ public final class Parser {
             } else {
                 matchKeyword("schemaless");
             }
+            String shardBy = null;
+            // "shard" não é palavra reservada: vale só aqui, depois do esquema
+            if (atWord("shard")) {
+                pos++;
+                expectKeyword("by");
+                shardBy = expectIdent();
+            }
             Statement.Permissions perms = Statement.Permissions.none();
             if (matchKeyword("permissions")) {
                 perms = parsePermissions();
             }
-            return new Statement.DefineTable(name, schemafull, drop, perms);
+            return new Statement.DefineTable(name, schemafull, drop, perms, shardBy);
         }
         if (matchKeyword("field")) {
             String name = parseFieldPath();

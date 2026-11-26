@@ -60,6 +60,9 @@ public final class Functions {
      */
     public static AxonValue call(String name, List<AxonValue> args) {
         return switch (name) {
+            // o registro mora num dos slots dados: filtro das consultas e da cópia durante uma movimentação
+            case "shard::owned" -> AxonValue.bool(com.axonbase.core.shard.SlotFilter.owns(
+                arg(args, 0), str(arg(args, 1)), str(arg(args, 2)), str(arg(args, 3))));
             // ----------------------------------------------------------
             // string
             // ----------------------------------------------------------
@@ -780,7 +783,8 @@ public final class Functions {
         "crypto::md5", "crypto::sha1", "crypto::sha256", "crypto::sha512",
         "encoding::base64::encode", "encoding::base64::decode",
         "kv::get", "kv::set", "kv::del", "kv::scan",
-        "value::coalesce", "value::default");
+        "value::coalesce", "value::default",
+        "shard::owned");
 
     /** Lista ordenada dos nomes, usada pelo {@code INFO FOR ROOT}. */
     public static List<String> names() {

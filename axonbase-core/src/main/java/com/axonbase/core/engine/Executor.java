@@ -145,6 +145,35 @@ public final class Executor {
         return ds.requireDatabase(session);
     }
 
+    /** O próximo SELECT executado é a parte de um shard numa consulta espalhada (veja {@link ShardPartial}). */
+    private boolean partialRequested;
+
+    /** Executa um SELECT em modo parcial, com as mesmas permissões e Data Rules de um SELECT comum. */
+    public AxonValue executePartial(Statement.Select select, Session scope, Map<String, AxonValue> webVars) {
+        this.session = scope;
+        if (webVars != null) {
+            webVars.forEach(scope.vars()::set);
+        }
+        partialRequested = true;
+        try {
+            return runStatement(select);
+        } finally {
+            partialRequested = false;
+        }
+    }
+
+    /** Uma agregação vazia deste SELECT, onde o gateway funde os grupos exportados pelos shards. */
+    GroupAggregation partialAggregation(Statement.Select select, Session scope) {
+        this.session = scope;
+        return new GroupAggregation(select, groupRowEval(), this::fieldName);
+    }
+
+    /** Avalia uma expressão fora de um statement: o gateway de shards calcula assim chaves e dados de escrita. */
+    public AxonValue evaluate(com.axonbase.parser.ast.Expr expr, Session scope) {
+        this.session = scope;
+        return eval(expr);
+    }
+
     /**
      * Publica uma mudança que o consenso já confirmou nas live queries deste nó.
      *
@@ -916,6 +945,9 @@ public final class Executor {
         out.put("name", AxonValue.str(def.name()));
         out.put("schema", AxonValue.str(def.schemafull() ? "SCHEMAFULL" : "SCHEMALESS"));
         out.put("drop", AxonValue.bool(def.drop()));
+        if (def.shardBy() != null) {
+            out.put("shard_by", AxonValue.str(def.shardBy()));
+        }
         out.put("fields", AxonValue.object(fields));
         out.put("indexes", AxonValue.object(indexes));
         if (!def.indexFailures().isEmpty()) {
@@ -1410,10 +1442,13 @@ public final class Executor {
     // ------------------------------------------------------------------
 
     private AxonValue runSelect(Statement.Select sel) {
+        // lido e apagado aqui para as subqueries desta consulta rodarem inteiras
+        boolean partial = partialRequested;
+        partialRequested = false;
         Statement.Select resolved = rewriteEmbeddingMatches(sel);
         // com junção o WHERE fala de mais de uma tabela: lê todas as partições
         try (var scope = prunePartitions(resolved.from(), resolved.joins().isEmpty() ? resolved.cond() : null)) {
-            return runSelectResolved(resolved);
+            return runSelectResolved(resolved, partial);
         }
     }
 
@@ -1534,7 +1569,7 @@ public final class Executor {
         return new Expr.Binary(Expr.BinaryOp.MATCH, b.left(), new Expr.Literal(vector));
     }
 
-    private AxonValue runSelectResolved(Statement.Select sel) {
+    private AxonValue runSelectResolved(Statement.Select sel, boolean partial) {
         // Check if FROM is AUDIT_CASES virtual table
         if (sel.from() instanceof Expr.Ident id) {
             String tableName = id.name();
@@ -1646,6 +1681,9 @@ public final class Executor {
                 docs.sort(cmp);
             }
         }
+        if (partial) {
+            return partialResult(sel, docs, orders, aggregating, streamedAggregation);
+        }
         int start = sel.start() != null ? (int) eval(sel.start()).asLong() : 0;
         int limit = sel.limit() != null ? (int) eval(sel.limit()).asLong() : docs.size();
         int stop = Math.min(docs.size(), start + limit);
@@ -1703,6 +1741,60 @@ public final class Executor {
             }
         }
         return AxonValue.array(out);
+    }
+
+    /**
+     * A parte de um shard numa consulta espalhada: grupos com os acumuladores, ou as primeiras {@code START + LIMIT}
+     * linhas, cada uma com os valores do ORDER BY e a chave do registro, para o gateway intercalar.
+     */
+    private AxonValue partialResult(Statement.Select sel, List<Document> docs, List<OrderTerm> orders,
+                                    boolean aggregating, GroupAggregation streamed) {
+        if (ds.auditSelect() && sel.from() != null) {
+            ds.auditLog(session, "SELECT", tableName(sel.from()), null, null, null);
+        }
+        if (aggregating) {
+            if (masksColumns()) {
+                // o mascaramento depende do catálogo do shard e valeria só depois de fundir: recusar não vaza nada
+                throw errorStmt(ShardPartial.maskedAggregation());
+            }
+            GroupAggregation aggregation = streamed;
+            if (aggregation == null) {
+                aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
+                for (Document d : docs) {
+                    aggregation.accept(d);
+                }
+            }
+            return ShardPartial.groups(aggregation);
+        }
+        long window = docs.size();
+        if (sel.limit() != null) {
+            long start = sel.start() != null ? eval(sel.start()).asLong() : 0;
+            window = Math.min(window, Math.max(0, start) + Math.max(0, eval(sel.limit()).asLong()));
+        }
+        List<AxonValue> rows = new ArrayList<>();
+        for (int i = 0; i < window; i++) {
+            Document d = docs.get(i);
+            AxonValue row = project(sel, d);
+            if (!sel.only() && !sel.valueOnly()) {
+                row = applyDataRuleMask(row);
+            }
+            rows.add(ShardPartial.row(d.id().key().keyString(), sortKeys(orders, d), row));
+        }
+        return ShardPartial.rows(rows);
+    }
+
+    private boolean masksColumns() {
+        AxonValue auth = session.auth();
+        if (auth == null || !auth.isObject()) {
+            return false;
+        }
+        for (String ruleName : dataRuleNames(auth)) {
+            Catalog.DataRuleDef def = db().catalog().dataRule(ruleName);
+            if (def != null && !def.maskPatterns().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -3761,6 +3853,7 @@ return score;
             def.events().putAll(previous.events());
         }
         def.permissions(dt.permissions());
+        def.shardBy(dt.shardBy());
         db.catalog().defineTable(def);
         control(db, ControlCommand.Kind.TABLE, dt.name(), com.axonbase.parser.Render.stmt(dt));
         return AxonValue.nul();
@@ -3774,6 +3867,7 @@ return score;
         Catalog.TableDef previous = db.catalog().table(ct.name());
         Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), false);
         if (previous != null) {
+            def.shardBy(previous.shardBy());
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());
             def.events().putAll(previous.events());

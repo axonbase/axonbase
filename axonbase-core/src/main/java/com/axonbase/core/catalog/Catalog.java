@@ -147,6 +147,7 @@ public final class Catalog {
         private final boolean schemafull;
         private final boolean drop;
         private volatile com.axonbase.parser.ast.Statement.Permissions permissions;
+        private volatile String shardBy;
         final ConcurrentMap<String, FieldDef> fields = new ConcurrentHashMap<>();
         final ConcurrentMap<String, IndexDef> indexes = new ConcurrentHashMap<>();
         final ConcurrentMap<String, EventDef> events = new ConcurrentHashMap<>();
@@ -162,6 +163,15 @@ public final class Catalog {
             this.schemafull = schemafull;
             this.drop = drop;
         }
+        /** Campo de {@code SHARD BY}, ou {@code null}. Num nó único é só catálogo; quem divide é o gateway. */
+        public String shardBy() {
+            return shardBy;
+        }
+
+        public void shardBy(String field) {
+            this.shardBy = field;
+        }
+
         public void permissions(com.axonbase.parser.ast.Statement.Permissions p) {
             this.permissions = p;
         }

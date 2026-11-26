@@ -98,8 +98,14 @@ public sealed interface Statement {
     record Partition(PartitionCommand command) implements Statement {
     }
 
-    record DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions)
+    /** {@code shardBy} é o campo da cláusula {@code SHARD BY} ({@code id} ou um campo), ou {@code null}. */
+    record DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions, String shardBy)
             implements Statement {
+
+        /** DEFINE TABLE sem a cláusula SHARD BY. */
+        public DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions) {
+            this(name, schemafull, drop, permissions, null);
+        }
     }
 
     record ColumnDef(String name, String type, boolean primaryKey, boolean notNull,
