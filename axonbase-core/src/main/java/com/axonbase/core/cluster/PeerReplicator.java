@@ -376,11 +376,14 @@ final class PeerReplicator {
                     if (flight == null) {
                         break;
                     }
+                    // Uma recusa também é conversa normal: reconecta sem aumentar a espera.
+                    pipeline.progressed = true;
                     if (response.accepted()) {
                         match = Math.max(match, response.matchIndex());
-                        pipeline.progressed = true;
                     } else {
-                        pipeline.rewindTo = Math.max(1, Math.min(flight.previous(), response.matchIndex() + 1));
+                        // O seguidor diz até onde pode seguir: antes do anterior quando os logs divergem, ou
+                        // logo antes da entrada que ele recusou (um carimbo adiantado, por exemplo).
+                        pipeline.rewindTo = response.matchIndex() + 1;
                         pipeline.broken = true;
                     }
                     signal.signalAll();

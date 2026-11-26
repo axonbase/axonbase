@@ -167,9 +167,13 @@ public final class RaftNode implements AutoCloseable {
         drainNotifications();
     }
 
-    /** Instala os pontos de extensão da replicação. */
-    public void hooks(ReplicationHooks hooks) {
+    /** Instala os pontos de extensão da replicação e mostra a eles a entrada mais recente do log. */
+    public synchronized void hooks(ReplicationHooks hooks) {
         this.hooks = hooks == null ? ReplicationHooks.NONE : hooks;
+        FileRaftLog.Entry tail = log.entry(log.lastIndex());
+        if (tail != null) {
+            this.hooks.recovered(tail.batch());
+        }
     }
 
     /** Um learner não vota. */
@@ -212,8 +216,10 @@ public final class RaftNode implements AutoCloseable {
         synchronized (this) {
             for (Received one : received) {
                 boolean accepted = one.accepted && (synced || one.durableIndex == 0);
+                long match = one.matchIndex < 0 ? log.lastIndex() : one.matchIndex;
+                // Truncada durante o fsync: só o que já foi aplicado é certo.
                 responses.add(new RaftWire.Response(state.term(), accepted,
-                    one.matchIndex < 0 ? log.lastIndex() : one.matchIndex));
+                    accepted || !one.accepted ? match : applied));
             }
         }
         return responses;

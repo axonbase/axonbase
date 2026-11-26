@@ -11,6 +11,10 @@ public interface ReplicationHooks {
     ReplicationHooks NONE = new ReplicationHooks() {
     };
 
+    /** Ao instalar os ganchos num nó que já tem log: a entrada mais recente dele, confirmada ou não. */
+    default void recovered(CommittedBatch batch) {
+    }
+
     /** No líder, sob a trava que atribui o índice: a ordem das chamadas é a ordem do log. */
     default CommittedBatch stamp(CommittedBatch batch) {
         return batch;
