@@ -25,6 +25,7 @@ final class DirectorySwap {
     static final String RESTORING = ".restoring";
     private static final String REPLACED_PREFIX = ".replaced-";
     private static final String MARKER = ".swap";
+    private static final String MARKER_TMP = ".swap.tmp";
 
     /** Gancho de teste, chamado depois de cada arquivo movido, para os testes de queda alargarem a janela. */
     static volatile Runnable afterMove;
@@ -44,11 +45,11 @@ final class DirectorySwap {
     static Path swap(Path dir, Path prepared) throws IOException {
         Path replaced = dir.resolve(REPLACED_PREFIX + System.currentTimeMillis());
         Files.createDirectories(replaced);
-        Files.writeString(dir.resolve(MARKER), "1:" + replaced.getFileName());
+        writeMarker(dir, "1:" + replaced.getFileName());
         for (Path p : dataEntries(dir)) {
             move(p, replaced.resolve(p.getFileName()));
         }
-        Files.writeString(dir.resolve(MARKER), "2:" + replaced.getFileName());
+        writeMarker(dir, "2:" + replaced.getFileName());
         for (Path p : entries(prepared)) {
             move(p, dir.resolve(p.getFileName()));
         }
@@ -71,19 +72,27 @@ final class DirectorySwap {
         if (!Files.exists(marker)) {
             return false;
         }
+        Files.deleteIfExists(dir.resolve(MARKER_TMP));
         String[] parts = Files.readString(marker).trim().split(":", 2);
-        Path replaced = dir.resolve(parts.length > 1 ? parts[1] : "");
-        if (parts.length > 1 && Files.isDirectory(replaced)) {
-            if ("2".equals(parts[0])) {
+        boolean valid = parts.length > 1 && !parts[1].isEmpty() && Files.isDirectory(dir.resolve(parts[1]));
+        Path replaced = valid ? dir.resolve(parts[1]) : newestReplaced(dir);
+        if (replaced != null) {
+            if (valid && "2".equals(parts[0])) {
                 // fase 2: o que está em dir é a restaurada pela metade; a anterior inteira está em replaced
                 for (Path p : dataEntries(dir)) {
                     deleteTree(p);
                 }
             }
+            // marcador ilegível: não se sabe a fase, então só se devolve o que falta, sem apagar nada
             for (Path p : entries(replaced)) {
-                move(p, dir.resolve(p.getFileName()));
+                Path target = dir.resolve(p.getFileName());
+                if (valid || !Files.exists(target)) {
+                    move(p, target);
+                }
             }
-            deleteTree(replaced);
+            if (valid) {
+                deleteTree(replaced);
+            }
         }
         deleteTree(restoringDir(dir));
         Files.deleteIfExists(marker);
@@ -91,6 +100,21 @@ final class DirectorySwap {
     }
 
     // ---- utilidades ----
+
+    /** Grava o marcador de forma atômica: um kill no meio nunca deixa o marcador vazio ou pela metade. */
+    private static void writeMarker(Path dir, String content) throws IOException {
+        Path tmp = dir.resolve(MARKER_TMP);
+        Files.writeString(tmp, content);
+        try {
+            Files.move(tmp, dir.resolve(MARKER), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tmp, dir.resolve(MARKER), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static Path newestReplaced(Path dir) throws IOException {
+        return replacedDirs(dir).stream().max(Comparator.comparing(p -> p.getFileName().toString())).orElse(null);
+    }
 
     private static List<Path> dataEntries(Path dir) throws IOException {
         List<Path> out = new ArrayList<>();
