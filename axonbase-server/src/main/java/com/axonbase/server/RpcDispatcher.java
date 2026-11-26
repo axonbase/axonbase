@@ -2,6 +2,7 @@ package com.axonbase.server;
 
 import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterStatusProvider;
+import com.axonbase.core.cluster.CommitOutcomeUnknownException;
 import com.axonbase.core.cluster.NotLeaderException;
 import com.axonbase.core.cluster.QuorumUnavailableException;
 import com.axonbase.core.cluster.ReadConsistency;
@@ -39,6 +40,8 @@ public final class RpcDispatcher {
     public static final int NOT_LEADER = -32010;
     /** Código JSON-RPC de "sem maioria para confirmar a escrita". */
     public static final int NO_QUORUM = -32011;
+    /** A escrita pode ou não ter sido confirmada: consultar antes de repetir. Diferente de uma falha. */
+    public static final int OUTCOME_UNKNOWN = -32013;
     /** Este nó não atende a leitura com a consistência pedida. */
     public static final int STALE_READ = -32012;
     /** Métodos que leem dados e por isso passam pela barreira de leitura num cluster. */
@@ -180,6 +183,11 @@ public final class RpcDispatcher {
             + ",\"message\":\"" + esc(detail) + "\",\"kind\":\"NOT_LEADER\",\"leader\":\""
             + esc(leader == null ? "" : leader) + "\",\"leader_address\":\""
             + esc(address == null ? "" : address) + "\"}}";
+    }
+
+    private static String outcomeUnknownError(AxonValue id, String detail) {
+        return "{\"id\":" + idJson(id) + ",\"error\":{\"code\":" + OUTCOME_UNKNOWN + ",\"message\":\""
+            + esc(detail) + "\",\"kind\":\"OUTCOME_UNKNOWN\"}}";
     }
 
     private boolean authRequired() {
@@ -350,6 +358,8 @@ public final class RpcDispatcher {
             return ds.execute(sql, session, Map.of());
         } catch (NotLeaderException moved) {
             throw new WriteRedirect(notLeaderError(id, moved.leader(), moved.leaderAddress()));
+        } catch (CommitOutcomeUnknownException unknown) {
+            throw new WriteRedirect(outcomeUnknownError(id, unknown.getMessage()));
         } catch (QuorumUnavailableException noQuorum) {
             throw new WriteRedirect(rpcError(id, NO_QUORUM, noQuorum.getMessage()));
         }
@@ -551,6 +561,9 @@ public final class RpcDispatcher {
                 } catch (NotLeaderException moved) {
                     failed = true;
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (CommitOutcomeUnknownException unknown) {
+                    failed = true;
+                    return outcomeUnknownError(id, unknown.getMessage());
                 } catch (QuorumUnavailableException noQuorum) {
                     failed = true;
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());
@@ -765,6 +778,9 @@ public final class RpcDispatcher {
                 } catch (NotLeaderException moved) {
                     ds.cancelSession(session);
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (CommitOutcomeUnknownException unknown) {
+                    ds.cancelSession(session);
+                    return outcomeUnknownError(id, unknown.getMessage());
                 } catch (QuorumUnavailableException noQuorum) {
                     ds.cancelSession(session);
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());

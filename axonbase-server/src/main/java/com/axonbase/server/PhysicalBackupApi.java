@@ -1,6 +1,7 @@
 package com.axonbase.server;
 
 import com.axonbase.common.Messages;
+import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.backup.StreamEncryption;
 import com.axonbase.core.security.Authz;
 import com.axonbase.core.storage.PhysicalBackups;
@@ -18,7 +19,8 @@ import java.util.Map;
 /**
  * Backup físico pela API administrativa ({@code /admin/v1/backups/physical}), sobre o {@code BackupEngine} do
  * RocksDB: criar, listar, verificar, aplicar retenção e restaurar. O restore troca a base dentro do processo,
- * sem reiniciar o servidor. Só vale em nó único com armazenamento RocksDB.
+ * sem reiniciar o servidor. Exige armazenamento RocksDB. Em cluster, o backup é criado num seguidor ou learner
+ * (listar, verificar, baixar e aplicar retenção valem em qualquer nó); restaurar e importar só em nó único.
  *
  * <p>O diretório de backup é {@code AXON_BACKUP_DIR} (ou a propriedade {@code axon.backup.dir}); sem isso, fica
  * em {@code <dados>/.physical-backups}, dentro do mesmo volume e ignorado pelo RocksDB.</p>
@@ -99,10 +101,26 @@ final class PhysicalBackupApi {
         RocksDbBackend rocks = srv.ds().rocksBackend()
             .orElseThrow(() -> new AdminV1Servlet.ApiError(409, "PHYSICAL_UNSUPPORTED",
                 Messages.get("physical_unsupported")));
-        if (!"local".equals(srv.clusterStatus().status().clusterId())) {
+        return rocks;
+    }
+
+    private static boolean clustered(AxonServer srv) {
+        return !"local".equals(srv.clusterStatus().status().clusterId());
+    }
+
+    /** Restaurar ou importar mexeria na base de um membro por fora do consenso. */
+    private static void requireStandalone(AxonServer srv) {
+        if (clustered(srv)) {
+            throw new AdminV1Servlet.ApiError(409, "CONFLICT", Messages.get("physical_cluster_restore"));
+        }
+    }
+
+    /** Criar o backup pesa no disco: em cluster fica com uma réplica, para não atrasar as escritas do líder. */
+    private static void requireBackupSource(AxonServer srv) {
+        var role = srv.clusterStatus().status().role();
+        if (clustered(srv) && role != ClusterRole.FOLLOWER && role != ClusterRole.LEARNER) {
             throw new AdminV1Servlet.ApiError(409, "CONFLICT", Messages.get("physical_cluster"));
         }
-        return rocks;
     }
 
     static Path backupDir(RocksDbBackend rocks) {
@@ -139,6 +157,7 @@ final class PhysicalBackupApi {
 
     private static void create(AxonServer srv, HttpServletResponse resp) throws IOException {
         RocksDbBackend rocks = rocks(srv);
+        requireBackupSource(srv);
         PhysicalBackups.Info info;
         synchronized (LOCK) {
             try (PhysicalBackups pb = PhysicalBackups.open(backupDir(rocks))) {
@@ -189,6 +208,7 @@ final class PhysicalBackupApi {
 
     private static void restore(AxonServer srv, int id, HttpServletRequest req, HttpServletResponse resp)
             throws IOException {
+        requireStandalone(srv);
         if (!"true".equals(req.getParameter("confirm"))) {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("admin_restore_confirm"));
         }
@@ -288,6 +308,7 @@ final class PhysicalBackupApi {
 
     private static void writeFile(AxonServer srv, HttpServletRequest req, HttpServletResponse resp)
             throws IOException {
+        requireStandalone(srv);
         RocksDbBackend rocks = rocks(srv);
         String source = req.getParameter("source");
         String path = req.getParameter("path");
@@ -317,6 +338,7 @@ final class PhysicalBackupApi {
     }
 
     private static void deleteImport(AxonServer srv, String source, HttpServletResponse resp) throws IOException {
+        requireStandalone(srv);
         RocksDbBackend rocks = rocks(srv);
         try {
             sourceDir(rocks, source, true);

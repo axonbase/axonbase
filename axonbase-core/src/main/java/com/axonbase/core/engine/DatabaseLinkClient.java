@@ -41,6 +41,8 @@ public class DatabaseLinkClient {
      */
     public List<AxonValue> query(Datastore.DatabaseLinkDef def, String axonql) {
         HttpClient client = httpClient(def);
+        // Antes de pedir o token: a própria autenticação já é uma chamada para fora.
+        ExternalCalls.record();
         try {
             String baseUrl = httpBaseUrl(def.url());
             HttpRequest.Builder request = HttpRequest.newBuilder()

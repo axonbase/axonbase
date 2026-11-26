@@ -421,7 +421,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             // As escritas pendentes podem ou não ser confirmadas pelo próximo líder: o desfecho é
             // desconhecido. Antes de soltar a trava, para o próximo líder não sobrescrever uma ainda "pendente".
             pendingWrites.values().forEach(pending -> pending.applied()
-                .completeExceptionally(new QuorumUnavailableException(config.clusterId())));
+                .completeExceptionally(new CommitOutcomeUnknownException(config.clusterId())));
             pendingWrites.clear();
         }
         stopping.forEach(PeerReplicator::stop);
@@ -625,7 +625,8 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             node.awaitDurable(index);
         } catch (RuntimeException diskFailure) {
             stepDown();
-            throw diskFailure;
+            // Os seguidores podem já ter a entrada.
+            throw new CommitOutcomeUnknownException(config.clusterId(), diskFailure);
         }
         advanceCommit();
         awaitCommit(index, applied);
@@ -678,7 +679,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             validationEpoch++;
         }
         quorumUnavailable.incrementAndGet();
-        throw new QuorumUnavailableException(config.clusterId());
+        throw new CommitOutcomeUnknownException(config.clusterId());
     }
 
     private boolean quorumReachable() {

@@ -14,6 +14,8 @@ O log de escrita antecipada (WAL, Write-Ahead Log) do RocksDB fica sempre ligado
 
 Uma queda apenas do processo do banco não perde nada em nenhum dos três modos, porque o WAL é gravado antes da confirmação.
 
+Em cluster, o log do consenso tem configuração própria, `AXON_RAFT_LOG_SYNC` (`always` por padrão, ou `batch`), descrita em [cluster-raft.md](cluster-raft.md).
+
 No macOS o fsync completo (`F_FULLFSYNC`) custa cerca de 19 ms. Por isso `always` mede 50 operações por segundo com uma thread e 192 com oito. Em Linux o custo costuma ser bem menor, mas a medida ainda não foi feita. Escolha `always` quando a janela zero de perda for obrigatória e a vazão de escrita for baixa.
 
 ## O que mudou no caminho de escrita e de leitura
@@ -183,11 +185,13 @@ AXON_GATE_TOKEN=troque-por-um-segredo axon-gates/run.sh gate3 --nodes 10.0.0.2,1
 
 | Portão | Meta | Parâmetros (padrão) | Linha do veredito |
 |---|---|---|---|
-| 1, escrita em grupo | com 64 escritores, `always` com pelo menos 60% da vazão do `batch` | `--writers 8,64,256`, `--seconds 30`, `--rounds 3`, `--warmup 10` | `GATE1 RESULT` (`PASS` ou `FAIL` só para 64; os demais saem como `INFO`) |
+| 1, escrita em grupo | com 64 escritores, o caso `always` com pelo menos 60% da vazão do caso `batch` | `--writers 8,64,256`, `--seconds 30`, `--rounds 3`, `--warmup 10` | `GATE1 RESULT` (`PASS` ou `FAIL` só para 64; os demais saem como `INFO`) |
 | 2, leitura em seguidores | 3 nós com pelo menos 2,5 vezes a vazão de leitura de 1 nó | `--rows 100000`, `--connections 192`, `--seconds 30`, `--rounds 3` | `GATE2 RESULT` (o veredito usa a leitura sem consistência pedida) |
 | 3, nó novo | entrar num cluster de 10 GB em menos de 15 minutos sem pausar as escritas por mais de 1 segundo | `--gb 10`, `--rate 1000` escritas por segundo, `--baseline 60`, `--source follower` ou `leader`, `--mode batch` | `GATE3 RESULT` |
 
 Todas as linhas de resultado começam com `GATE1`, `GATE2` ou `GATE3`, então `grep '^GATE'` filtra a saída. O comando sai com 1 quando um portão reprova.
+
+No portão 1 o modo vale explicitamente para o armazenamento **e** para o log Raft de cada nó: o caso `always` sincroniza os dois a cada escrita, e o caso `batch`, nenhum. As variáveis `AXON_STORAGE_SYNC` e `AXON_RAFT_LOG_SYNC` no ambiente dos agentes não mudam a comparação, e cada linha `GATE1` informa `storage=` e `raft_log=`.
 
 O portão 1 escreve de dentro do processo do líder, em dois cenários: `raw` confirma lotes direto no consenso, e `sql` faz `CREATE` pelo motor. O portão 2 usa o `/sql` por HTTP. O portão 3 tira o backup físico num seguidor, o nó novo baixa os arquivos pelo agente, restaura, entra como learner e compara uma amostra de 5000 linhas por SHA-256 (Secure Hash Algorithm 256). O tempo total inclui backup, transferência, restauração e o alcance do log.
 

@@ -4,13 +4,16 @@ import com.axonbase.core.storage.RocksDbBackend.SyncMode;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Ajustes do consenso. Nada é obrigatório: {@link #defaults()} lê {@code AXON_STORAGE_SYNC},
+ * Ajustes do consenso. Nada é obrigatório: {@link #defaults()} lê {@code AXON_RAFT_LOG_SYNC},
  * {@code AXON_RAFT_RETAIN_ENTRIES}, {@code AXON_RAFT_RETAIN_MINUTES}, {@code AXON_RAFT_MAX_READ_LAG_MS} e {@code AXON_RAFT_LEARNERS}.
  *
- * @param sync                  quando o log Raft vai ao disco; o mesmo significado do armazenamento
+ * @param sync                  quando o log Raft vai ao disco. Padrão {@code ALWAYS} (um fsync confirma todas as
+ *                              escritas que o esperam), independente de {@code AXON_STORAGE_SYNC};
+ *                              {@code AXON_RAFT_LOG_SYNC=batch} troca a garantia de cada nó pela do quórum
  * @param segmentBytes          tamanho em que um segmento do log é fechado
  * @param retainEntries         entradas já aplicadas mantidas no log, para seguidores e learners atrasados
  * @param commitTimeoutMillis   espera máxima pelo quórum antes de desistir de uma escrita
@@ -39,12 +42,27 @@ public record RaftOptions(SyncMode sync, long segmentBytes, long retainEntries, 
     private static final long DEFAULT_RETAIN_MINUTES = 30;
 
     public static RaftOptions defaults() {
-        return new RaftOptions(SyncMode.fromEnvironment(), FileRaftLog.DEFAULT_SEGMENT_BYTES,
+        return new RaftOptions(logSync(), FileRaftLog.DEFAULT_SEGMENT_BYTES,
             fromEnvironment("AXON_RAFT_RETAIN_ENTRIES", DEFAULT_RETAIN_ENTRIES), DEFAULT_COMMIT_TIMEOUT_MILLIS,
             DEFAULT_ENTRIES_PER_REQUEST, DEFAULT_BYTES_PER_REQUEST, DEFAULT_INFLIGHT,
             fromEnvironment("AXON_RAFT_MAX_READ_LAG_MS", 0),
             TimeUnit.MINUTES.toMillis(fromEnvironment("AXON_RAFT_RETAIN_MINUTES", DEFAULT_RETAIN_MINUTES)),
             addresses(System.getenv("AXON_RAFT_LEARNERS")));
+    }
+
+    private static SyncMode logSync() {
+        String raw = System.getenv("AXON_RAFT_LOG_SYNC");
+        if (raw == null || raw.isBlank()) {
+            raw = System.getProperty("axon.raft.log.sync");
+        }
+        if (raw == null || raw.isBlank()) {
+            return SyncMode.ALWAYS;
+        }
+        return switch (raw.trim().toLowerCase(Locale.ROOT)) {
+            case "always" -> SyncMode.ALWAYS;
+            case "batch" -> SyncMode.BATCH;
+            default -> throw new IllegalArgumentException("AXON_RAFT_LOG_SYNC precisa ser always ou batch: " + raw);
+        };
     }
 
     private static List<String> addresses(String raw) {

@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 
+import com.axonbase.core.storage.RocksDbBackend.SyncMode;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -9,12 +10,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Portão 1 da E2, opcional ({@code -Daxon.gate.raft=true}): com 64 escritores simultâneos num cluster de três
- * nós, {@code always} precisa render pelo menos 60% do modo {@code batch}. Pensado para Linux numa máquina
+ * nós, o caso {@code always} (armazenamento e log Raft em {@code always}) precisa render pelo menos 60% do caso
+ * {@code batch} (os dois em {@code batch}). Pensado para Linux numa máquina
  * dedicada; em máquina carregada ou em disco virtualizado o número não vale como veredito.
  *
  * <p>Propriedades: {@code axon.gate.raft.writers} (padrão {@code 8,64,256}; o veredito usa 64),
@@ -40,23 +41,9 @@ class RaftWriteGateTest {
         String chosen = System.getProperty("axon.gate.raft.dir");
         Path dir = chosen == null ? temporary : Path.of(chosen);
         List<RaftWriteGateBenchmark.Result> results = new ArrayList<>();
-        String previous = System.getProperty("axon.storage.sync");
-        try {
-            for (int round = 0; round < rounds; round++) {
-                for (String mode : List.of("always", "batch")) {
-                    System.setProperty("axon.storage.sync", mode);
-                    List<RaftWriteGateBenchmark.Result> run = RaftWriteGateBenchmark.run(dir, writers, seconds);
-                    // AXON_STORAGE_SYNC no ambiente teria precedência e invalidaria a comparação.
-                    assertEquals(mode.toUpperCase(java.util.Locale.ROOT), run.getFirst().mode(),
-                        "rode sem a variável AXON_STORAGE_SYNC");
-                    results.addAll(run);
-                }
-            }
-        } finally {
-            if (previous == null) {
-                System.clearProperty("axon.storage.sync");
-            } else {
-                System.setProperty("axon.storage.sync", previous);
+        for (int round = 0; round < rounds; round++) {
+            for (SyncMode mode : List.of(SyncMode.ALWAYS, SyncMode.BATCH)) {
+                results.addAll(RaftWriteGateBenchmark.run(dir, mode, writers, seconds));
             }
         }
         List<String> failures = new ArrayList<>();

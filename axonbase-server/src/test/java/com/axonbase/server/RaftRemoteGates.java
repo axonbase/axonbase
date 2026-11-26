@@ -25,6 +25,10 @@ import java.util.stream.Collectors;
  * RaftRemoteGates gate3 --nodes ip1,ip2,ip3 --new ip4 [--gb 10] [--rate 1000] [--baseline 60] [--source follower]
  * </pre>
  *
+ * <p>No portão 1 o modo vale para o armazenamento e para o log Raft de cada nó, explicitamente: o caso
+ * {@code always} sincroniza os dois a cada escrita e o caso {@code batch}, nenhum. {@code AXON_STORAGE_SYNC} e
+ * {@code AXON_RAFT_LOG_SYNC} no ambiente dos agentes não mudam a comparação.</p>
+ *
  * <p>Um endereço pode levar um deslocamento de portas ({@code 127.0.0.1+10}), para ensaiar tudo numa máquina.
  * Cada linha de resultado começa com {@code GATE1}, {@code GATE2} ou {@code GATE3}; o veredito vem nas linhas
  * {@code GATEn RESULT}. O processo sai com 1 quando um portão reprova.</p>

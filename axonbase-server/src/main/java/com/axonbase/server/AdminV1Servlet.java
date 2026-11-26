@@ -126,6 +126,8 @@ final class AdminV1Servlet extends HttpServlet {
             writeError(resp, e);
         } catch (NotLeaderException e) {
             writeError(resp, notLeader());
+        } catch (com.axonbase.core.cluster.CommitOutcomeUnknownException e) {
+            writeError(resp, new ApiError(504, "OUTCOME_UNKNOWN", e.getMessage()));
         } catch (AxonError e) {
             writeError(resp, mapEngine(e));
         } catch (IllegalArgumentException e) {

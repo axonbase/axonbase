@@ -88,6 +88,7 @@ public final class AiProviderClient {
                 .header("anthropic-version", "2023-06-01")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
+            com.axonbase.core.engine.ExternalCalls.record();
             AxonValue response = parseResponse(http.send(req, HttpResponse.BodyHandlers.ofString()));
             return field(arrayItem(field(response, "content")), "text").asString();
         } catch (Exception e) {
@@ -109,6 +110,7 @@ public final class AiProviderClient {
                 .header("Authorization", "Bearer " + apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
+            com.axonbase.core.engine.ExternalCalls.record();
             AxonValue response = parseResponse(http.send(req, HttpResponse.BodyHandlers.ofString()));
             return field(field(arrayItem(field(response, "choices")), "message"), "content").asString();
         } catch (Exception e) {
@@ -126,6 +128,7 @@ public final class AiProviderClient {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
+            com.axonbase.core.engine.ExternalCalls.record();
             AxonValue response = parseResponse(http.send(req, HttpResponse.BodyHandlers.ofString()));
             AxonValue candidate = arrayItem(field(response, "candidates"));
             AxonValue content = field(candidate, "content");
@@ -145,6 +148,7 @@ public final class AiProviderClient {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
+            com.axonbase.core.engine.ExternalCalls.record();
             AxonValue response = parseResponse(http.send(req, HttpResponse.BodyHandlers.ofString()));
             return field(response, "response").asString();
         } catch (Exception e) {

@@ -16,11 +16,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Portão 1 da E2: vazão de escrita de um cluster de três nós, no modo de {@code AXON_STORAGE_SYNC} (ou da
- * propriedade {@code axon.storage.sync}).
+ * Portão 1 da E2: vazão de escrita de um cluster de três nós. O modo vale explicitamente para o armazenamento e
+ * para o log Raft: o caso {@code always} sincroniza os dois a cada escrita, e o caso {@code batch}, nenhum.
  *
  * <p>Os três nós ficam no mesmo processo e no mesmo disco, então os fsyncs dos três disputam o dispositivo. Uso:
- * {@code RaftWriteGateBenchmark <diretório> [escritores] [segundos]}, com {@code escritores} separados por
+ * {@code RaftWriteGateBenchmark <diretório> <always|batch> [escritores] [segundos]}, com {@code escritores} separados por
  * vírgula (padrão {@code 8,64,256}). Imprime uma linha {@code GATE1} por cenário e quantidade de escritores:
  * {@code raw} confirma lotes direto no consenso; {@code sql} faz {@code CREATE} pelo datastore.</p>
  */
@@ -41,15 +41,17 @@ public final class RaftWriteGateBenchmark {
                   double p99Millis, long failed) {
         @Override
         public String toString() {
-            return String.format("GATE1 mode=%s scenario=%s writers=%d ops_s=%.0f p50_ms=%.2f p99_ms=%.2f failed=%d",
-                mode, scenario, writers, opsPerSecond, p50Millis, p99Millis, failed);
+            return String.format(
+                "GATE1 mode=%s storage=%s raft_log=%s scenario=%s writers=%d ops_s=%.0f p50_ms=%.2f p99_ms=%.2f failed=%d",
+                mode, mode, mode, scenario, writers, opsPerSecond, p50Millis, p99Millis, failed);
         }
     }
 
     public static void main(String[] args) throws Exception {
-        int[] writers = args.length > 1 ? parseWriters(args[1]) : new int[] {8, 64, 256};
-        int seconds = args.length > 2 ? Integer.parseInt(args[2]) : 20;
-        run(Path.of(args[0]), writers, seconds);
+        RocksDbBackend.SyncMode mode = RocksDbBackend.SyncMode.valueOf(args[1].toUpperCase(java.util.Locale.ROOT));
+        int[] writers = args.length > 2 ? parseWriters(args[2]) : new int[] {8, 64, 256};
+        int seconds = args.length > 3 ? Integer.parseInt(args[3]) : 20;
+        run(Path.of(args[0]), mode, writers, seconds);
         System.exit(0);
     }
 
@@ -58,8 +60,8 @@ public final class RaftWriteGateBenchmark {
     }
 
     /** Sobe um cluster de três nós em {@code root} e mede cada quantidade de escritores, imprimindo as linhas. */
-    static List<Result> run(Path root, int[] writers, int seconds) throws Exception {
-        String mode = RocksDbBackend.SyncMode.fromEnvironment().name();
+    static List<Result> run(Path root, RocksDbBackend.SyncMode sync, int[] writers, int seconds) throws Exception {
+        String mode = sync.name();
         Path dir = Files.createTempDirectory(Files.createDirectories(root), "gate1-");
         List<ClusterRuntime> nodes = new ArrayList<>();
         List<RocksDbBackend> backends = new ArrayList<>();
@@ -69,10 +71,11 @@ public final class RaftWriteGateBenchmark {
         try {
             for (int i = 0; i < 3; i++) {
                 InetSocketAddress self = addresses.get(i);
-                RocksDbBackend backend = new RocksDbBackend(dir.resolve("db" + i).toString());
+                RocksDbBackend backend = new RocksDbBackend(dir.resolve("db" + i).toString(), sync);
                 backends.add(backend);
                 nodes.add(new ClusterRuntime(new ClusterConfig("n" + i, "g", self,
-                    addresses.stream().filter(a -> a != self).toList()), dir.resolve("raft" + i), backend));
+                    addresses.stream().filter(a -> a != self).toList()), dir.resolve("raft" + i), backend,
+                    RaftOptions.defaults().withSync(sync)));
             }
             List<Datastore> datastores = new ArrayList<>();
             for (int i = 0; i < 3; i++) {

@@ -167,7 +167,8 @@ public final class RaftGateNode {
         stop();
         run = Files.createDirectories(data.resolve("run-" + System.currentTimeMillis() + "-" + ++runs));
         boot(query, query.getOrDefault("role", "voter"));
-        return "GATE node=" + id + " started mode=" + backendMode(query) + " dir=" + run;
+        return "GATE node=" + id + " started storage=" + backendMode(query) + " raft_log=" + backendMode(query)
+            + " dir=" + run;
     }
 
     private static RocksDbBackend.SyncMode backendMode(Map<String, String> query) {
@@ -330,8 +331,9 @@ public final class RaftGateNode {
             thread.join(60_000);
         }
         long[] all = latencies.stream().flatMap(List::stream).mapToLong(Long::longValue).sorted().toArray();
-        return String.format("GATE1 mode=%s scenario=%s writers=%d ops_s=%.0f p50_ms=%.2f p99_ms=%.2f failed=%d",
-            currentMode, scenario, writers,
+        return String.format(
+            "GATE1 mode=%s storage=%s raft_log=%s scenario=%s writers=%d ops_s=%.0f p50_ms=%.2f p99_ms=%.2f failed=%d",
+            currentMode, currentMode, currentMode, scenario, writers,
             all.length / elapsed, percentile(all, 0.50), percentile(all, 0.99), failed.get());
     }
 

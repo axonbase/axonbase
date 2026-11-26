@@ -606,6 +606,11 @@ public final class AxonServer {
         }
     }
 
+    /** A escrita pode ter acontecido: nem 2xx nem a resposta de erro comum, para o cliente não repetir às cegas. */
+    private void outcomeUnknown(HttpServletResponse resp, String detail) throws IOException {
+        json(resp, 504, "{\"status\":\"UNKNOWN\",\"kind\":\"OUTCOME_UNKNOWN\",\"detail\":\"" + esc(detail) + "\"}");
+    }
+
     private boolean requireAuthenticated(Session session, HttpServletResponse resp) throws IOException {
         if (!requireAuth || session.auth() != null) {
             return false;
@@ -1122,6 +1127,7 @@ public final class AxonServer {
             }
             AxonValue result = null;
             String error = null;
+            boolean outcomeUnknown = false;
             long startedNanos = System.nanoTime();
             ActivityRegistry.Running run = activity.begin(ActivityRegistry.userOf(s), s.namespace(), s.database(), body,
                 "http", req.getRemoteAddr(), null, s);
@@ -1136,17 +1142,21 @@ public final class AxonServer {
                     error = Messages.get("query_timeout");
                 } catch (Exception e) {
                     error = e.getCause() instanceof RuntimeException re ? re.getMessage() : e.getMessage();
+                    outcomeUnknown = e.getCause() instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
             } else {
                 try {
                     result = executeTracked(run, body, s);
                 } catch (RuntimeException e) {
                     error = e.getMessage();
+                    outcomeUnknown = e instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
             }
             activity.end(run, error != null, run.handle().cancelled());
             metrics.query(System.nanoTime() - startedNanos, error != null);
-            if (error != null) {
+            if (outcomeUnknown) {
+                outcomeUnknown(resp, error);
+            } else if (error != null) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(error) + "\"}");
             } else {
                 json(resp, 200, AxonJson.write(result));
@@ -1188,8 +1198,11 @@ public final class AxonServer {
             }
             AxonValue data = AxonJson.parseDocument(readBody(req));
             String sql = "CREATE " + table + " CONTENT " + AxonJson.write(data);
-            AxonValue out = ds.execute(sql, s, null);
-            json(resp, 200, AxonJson.write(out));
+            try {
+                json(resp, 200, AxonJson.write(ds.execute(sql, s, null)));
+            } catch (com.axonbase.core.cluster.CommitOutcomeUnknownException unknown) {
+                outcomeUnknown(resp, unknown.getMessage());
+            }
         }
     }
 

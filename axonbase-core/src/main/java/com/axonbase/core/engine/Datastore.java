@@ -909,12 +909,14 @@ public final class Datastore {
     /**
      * Executa um comando avulso numa transação implícita de cluster. Um conflito na confirmação não é um erro do
      * cliente: nada foi gravado, então o comando é refeito sobre o estado novo, como no nó único, onde ele não
-     * enxergaria conflito. Transações explícitas devolvem o conflito para quem as abriu.
+     * enxergaria conflito. Transações explícitas devolvem o conflito para quem as abriu, e também o comando que
+     * fez uma chamada para fora do banco ({@link ExternalCalls}).
      */
     private <T> T autocommit(Session session, java.util.function.Supplier<T> work) {
         for (int attempt = 1; ; attempt++) {
             beginSession(session);
             boolean committing = false;
+            long outbound = ExternalCalls.count();
             try {
                 T result = work.get();
                 committing = true;
@@ -924,7 +926,8 @@ public final class Datastore {
                 if (session.inTransaction()) {
                     cancelSession(session);
                 }
-                if (!committing || attempt >= AUTOCOMMIT_ATTEMPTS) {
+                // Um comando que chamou para fora não é refeito: a chamada aconteceria de novo.
+                if (!committing || attempt >= AUTOCOMMIT_ATTEMPTS || ExternalCalls.count() != outbound) {
                     throw conflict;
                 }
                 // Espera curta e sorteada para os concorrentes não voltarem todos juntos.
