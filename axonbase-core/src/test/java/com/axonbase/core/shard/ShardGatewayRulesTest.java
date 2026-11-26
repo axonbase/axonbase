@@ -121,7 +121,7 @@ class ShardGatewayRulesTest {
             String ana = fixture.keyOn(0);
             String bia = fixture.keyOn(1);
             fixture.sql("BEGIN SAGA s WITH CORRELATION 'c'; CREATE pedido SET cliente = '" + ana
-                + "'; CREATE pedido SET cliente = '" + bia + "'; LEAVE SAGA");
+                + "'; CREATE pedido SET cliente = '" + bia + "'");
 
             AxonValue shown = fixture.sql("SHOW SAGA TRANSACTION s 'c'");
             assertEquals(2, shown.asObject().get("steps").asArray().size());
@@ -143,7 +143,7 @@ class ShardGatewayRulesTest {
     @Test
     void sessaoGuardaBancoEVariaveis() {
         try (GatewayFixture fixture = orders()) {
-            fixture.sql("USE NS n DB d; LET $c = 'ana'; CREATE pedido SET cliente = $c");
+            fixture.sql("USE n d; LET $c = 'ana'; CREATE pedido SET cliente = $c");
             assertEquals(1, fixture.sql("SELECT * FROM pedido WHERE cliente = $c").asArray().size());
             fixture.sql("CREATE cidade:1 SET nome = 'recife'");
 
@@ -151,7 +151,7 @@ class ShardGatewayRulesTest {
             assertEquals(List.of(AxonValue.str("recife")), fixture.session().vars().get("nomes").asArray());
             refused(fixture, "LET $x = (SELECT * FROM pedido)");
 
-            fixture.sql("USE NS n DB outro");
+            fixture.sql("USE n outro");
             assertEquals("outro", fixture.session().database());
         }
     }

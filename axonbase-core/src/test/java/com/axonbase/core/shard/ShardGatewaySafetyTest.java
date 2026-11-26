@@ -200,7 +200,7 @@ class ShardGatewaySafetyTest {
     void sagaAbertaNaOrigemImpedeMoverECancelarEsperaAMovimentacao() {
         try (GatewayFixture fixture = orders()) {
             fixture.sql("BEGIN SAGA s WITH CORRELATION 'c'; CREATE pedido SET cliente = '" + fixture.keyOn(0)
-                + "'; LEAVE SAGA");
+                + "'");
 
             ShardException open = assertThrows(ShardException.class,
                 () -> mover(fixture).move(FIRST_SLOTS, "s2"));
