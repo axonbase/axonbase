@@ -21,6 +21,7 @@ final class CommitSequencer {
     private final HybridClock clock;
     private final TreeMap<Long, HlcTimestamp> inFlight = new TreeMap<>();
     private long lastIndex;
+    private long timeline;
 
     CommitSequencer(HybridClock clock) {
         this.clock = clock;
@@ -39,10 +40,14 @@ final class CommitSequencer {
 
     synchronized CommitWatermark watermark() {
         if (inFlight.isEmpty()) {
-            return new CommitWatermark(clock.now(), lastIndex);
+            return new CommitWatermark(clock.now(), lastIndex, timeline);
         }
         var oldest = inFlight.firstEntry();
-        return new CommitWatermark(oldest.getValue().predecessor(), oldest.getKey() - 1);
+        return new CommitWatermark(oldest.getValue().predecessor(), oldest.getKey() - 1, timeline);
+    }
+
+    synchronized void timeline(long id) {
+        timeline = id;
     }
 
     synchronized long lastIndex() {

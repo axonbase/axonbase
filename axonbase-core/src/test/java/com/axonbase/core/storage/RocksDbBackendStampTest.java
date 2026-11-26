@@ -296,6 +296,118 @@ class RocksDbBackendStampTest {
         assertEquals(3L, sink.got.get(0).index());
     }
 
+    /** Copia a base com o processo "vivo": é o que um kill -9 deixaria em disco. */
+    private static void snapshot(Path from, Path to) throws Exception {
+        try (var files = java.nio.file.Files.walk(from)) {
+            for (Path p : files.toList()) {
+                Path target = to.resolve(from.relativize(p));
+                if (java.nio.file.Files.isDirectory(p)) {
+                    java.nio.file.Files.createDirectories(target);
+                } else {
+                    java.nio.file.Files.copy(p, target);
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("fechamento limpo mantém a linha do tempo; queda abre outra")
+    void aCrashStartsANewTimelineAndACleanRestartDoesNot() throws Exception {
+        long timeline;
+        try (RocksDbBackend b = open("a")) {
+            b.put("a", bytes("1"));
+            timeline = b.watermark().timeline();
+        }
+        assertTrue(timeline != 0);
+        try (RocksDbBackend b = open("a")) {
+            assertEquals(timeline, b.watermark().timeline());
+            b.put("b", bytes("2"));
+            b.syncWal();
+            snapshot(tmp.resolve("a"), tmp.resolve("crashed"));
+        }
+        try (RocksDbBackend crashed = open("crashed")) {
+            assertTrue(crashed.watermark().timeline() != timeline);
+            assertTrue(crashed.persistedPosition().index() >= 3, "além disso o índice pula");
+        }
+    }
+
+    @Test
+    @DisplayName("markClean sem fechar vale como fechamento limpo, até a próxima escrita")
+    void markCleanKeepsTheTimelineUntilTheNextWrite() throws Exception {
+        long timeline;
+        try (RocksDbBackend b = open("a")) {
+            b.put("a", bytes("1"));
+            timeline = b.watermark().timeline();
+            b.markClean();
+            snapshot(tmp.resolve("a"), tmp.resolve("clean"));
+            b.put("b", bytes("2"));
+            b.syncWal();
+            snapshot(tmp.resolve("a"), tmp.resolve("dirty"));
+        }
+        try (RocksDbBackend clean = open("clean")) {
+            assertEquals(timeline, clean.watermark().timeline());
+        }
+        try (RocksDbBackend dirty = open("dirty")) {
+            assertTrue(dirty.watermark().timeline() != timeline);
+        }
+    }
+
+    @Test
+    @DisplayName("queda seguida de escrita por versão sem carimbo não passa por continuidade")
+    void crashThenOlderBinaryIsNotContinuity() throws Exception {
+        long timeline;
+        try (RocksDbBackend b = open("a")) {
+            b.put("a", bytes("1"));
+            timeline = b.watermark().timeline();
+            b.syncWal();
+            snapshot(tmp.resolve("a"), tmp.resolve("crashed"));
+        }
+        writeAsOlderBinary(tmp.resolve("crashed"));
+        try (RocksDbBackend b = open("crashed")) {
+            assertTrue(b.watermark().timeline() != timeline);
+        }
+    }
+
+    @Test
+    @DisplayName("trocar a base abre outra linha do tempo e avisa o destino antes")
+    void replacingTheDatabaseStartsANewTimeline() {
+        Path live = tmp.resolve("a");
+        Path store = tmp.resolve("bk");
+        List<String> events = new ArrayList<>();
+        try (RocksDbBackend b = open("a"); PhysicalBackups pb = PhysicalBackups.open(store)) {
+            b.put("a", bytes("1"));
+            int id = pb.create(b).id();
+            long before = b.watermark().timeline();
+            b.commitSink(new BatchSink() {
+                @Override
+                public void offer(long index, CommittedBatch batch) {
+                    events.add("lote");
+                }
+
+                @Override
+                public void historyBreaking() {
+                    events.add("quebra na linha " + (b.watermark().timeline() == before ? "antiga" : "nova"));
+                }
+            });
+            b.replaceWith(PhysicalBackups.prepareRestore(store, id, live), 10_000);
+            assertTrue(b.watermark().timeline() != before);
+            assertEquals(List.of("quebra na linha antiga"), events);
+        }
+    }
+
+    @Test
+    @DisplayName("reaplicar fora da ordem de índice nunca faz a posição gravada recuar")
+    void applyArchivedNeverMovesThePositionBack() {
+        HlcTimestamp later = new HlcTimestamp(wall.get() + 20, 0);
+        HlcTimestamp earlier = new HlcTimestamp(wall.get() + 10, 0);
+        try (RocksDbBackend b = open("a")) {
+            b.applyArchived(11L, new CommittedBatch("", Map.of("x", bytes("1")), Set.of()).withStamp(later));
+            b.applyArchived(10L, new CommittedBatch("", Map.of("y", bytes("2")), Set.of()).withStamp(earlier));
+            assertEquals(11L, b.persistedPosition().index());
+            assertEquals(later, b.persistedPosition().stamp());
+        }
+    }
+
     /** Uma gravação direta na column family de dados, sem a chave {@code !hlc}, como faz a 0.10.1. */
     private static void writeAsOlderBinary(Path dir) throws Exception {
         List<byte[]> names;

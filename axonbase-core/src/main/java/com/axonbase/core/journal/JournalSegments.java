@@ -1,6 +1,7 @@
 package com.axonbase.core.journal;
 
 import com.axonbase.core.hlc.HlcTimestamp;
+import com.axonbase.core.storage.CommitWatermark;
 
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
@@ -118,6 +119,7 @@ public final class JournalSegments {
                 throw new IOException("segmento incompleto: " + file.getFileName());
             }
             checkHeader(raw.readInt(), raw.readShort(), file);
+            long timeline = raw.readLong();
             raw.seek(size - SegmentFormat.FOOTER_BYTES);
             int length = raw.readInt();
             if (raw.readInt() != SegmentFormat.FOOTER || length < 9
@@ -131,13 +133,16 @@ public final class JournalSegments {
             if (typeAndBody == null || typeAndBody[0] != SegmentFormat.TRAILER) {
                 throw new IOException("rodapé inválido: " + file.getFileName());
             }
-            return toInfo(file.getFileName().toString(), size, SegmentFormat.decodeTrailer(body(typeAndBody)));
+            return toInfo(file.getFileName().toString(), size, timeline,
+                SegmentFormat.decodeTrailer(body(typeAndBody)));
         }
     }
 
-    static SegmentInfo toInfo(String name, long size, SegmentFormat.Trailer t) {
+    static SegmentInfo toInfo(String name, long size, long timeline, SegmentFormat.Trailer t) {
+        // a marca d'água do rodapé é da linha do tempo do segmento
+        CommitWatermark complete = new CommitWatermark(t.complete().stamp(), t.complete().index(), timeline);
         return new SegmentInfo(name, size, t.batches(), t.firstStamp(), t.lastStamp(), t.firstIndex(), t.lastIndex(),
-            t.complete(), t.holes(), t.recovered());
+            complete, t.holes(), t.recovered(), timeline);
     }
 
     /**
@@ -147,6 +152,7 @@ public final class JournalSegments {
     public static void read(Path file, Predicate<JournalRecord> visitor) throws IOException {
         try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(file), 1 << 16))) {
             checkHeader(in.readInt(), in.readShort(), file);
+            in.readLong();
             while (true) {
                 byte[] typeAndBody = checkRecord(in, file);
                 if (typeAndBody == null) {
@@ -190,9 +196,9 @@ public final class JournalSegments {
             }
             SegmentInfo info = validate(tmp);
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            return toInfo(name, info.sizeBytes(), new SegmentFormat.Trailer(info.complete(), info.firstStamp(),
-                info.lastStamp(), info.firstIndex(), info.lastIndex(), info.batches(), info.holes(),
-                info.recovered()));
+            return toInfo(name, info.sizeBytes(), info.timeline(), new SegmentFormat.Trailer(info.complete(),
+                info.firstStamp(), info.lastStamp(), info.firstIndex(), info.lastIndex(), info.batches(),
+                info.holes(), info.recovered()));
         } finally {
             Files.deleteIfExists(tmp);
         }
@@ -236,14 +242,15 @@ public final class JournalSegments {
                 continue;
             }
             SegmentWriter.Stats stats = new SegmentWriter.Stats();
-            long end = validPrefix(file, stats);
+            long[] timeline = new long[1];
+            long end = validPrefix(file, stats, timeline);
             if (stats.count() == 0) {
                 Files.delete(file);
                 continue;
             }
             var previous = list(directory).stream().filter(i -> i.name().compareTo(name) < 0)
                 .reduce((a, b) -> b).map(SegmentInfo::complete)
-                .orElse(com.axonbase.core.storage.CommitWatermark.NONE);
+                .orElse(CommitWatermark.NONE);
             SegmentFormat.Trailer trailer = stats.trailer(previous, true);
             byte[] tail = SegmentFormat.trailerAndFooter(trailer);
             try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
@@ -255,15 +262,16 @@ public final class JournalSegments {
                 }
                 channel.force(true);
             }
-            SegmentWriter.publish(directory, file, name, end + tail.length, trailer);
+            SegmentWriter.publish(directory, file, name, end + tail.length, timeline[0], trailer);
         }
     }
 
     /** Onde termina o último lote inteiro do arquivo aberto, contando os lotes em {@code stats}. */
-    private static long validPrefix(Path file, SegmentWriter.Stats stats) throws IOException {
+    private static long validPrefix(Path file, SegmentWriter.Stats stats, long[] timeline) throws IOException {
         long end = 0;
         try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(file), 1 << 16))) {
             checkHeader(in.readInt(), in.readShort(), file);
+            timeline[0] = in.readLong();
             end = SegmentFormat.HEADER_BYTES;
             while (true) {
                 byte[] typeAndBody = checkRecord(in, file);

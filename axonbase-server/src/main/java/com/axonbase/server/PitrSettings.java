@@ -50,9 +50,24 @@ record PitrSettings(boolean enabled, Path directory, JournalOptions options) {
             defaults.withRetention(Duration.ofDays(days)).withMaxSegmentAge(Duration.ofSeconds(seconds)));
     }
 
-    /** O diretório do journal para este armazenamento. */
+    /**
+     * O diretório do journal para este armazenamento.
+     *
+     * @throws IllegalArgumentException quando o diretório configurado fica dentro dos dados sem começar com ponto: a
+     *                                  troca de base de um restore o moveria embora
+     */
     Path directoryFor(RocksDbBackend rocks) {
-        return directory != null ? directory : rocks.directory().resolve(".pitr-journal");
+        if (directory == null) {
+            return rocks.directory().resolve(".pitr-journal");
+        }
+        Path data = rocks.directory().toAbsolutePath().normalize();
+        Path chosen = directory.toAbsolutePath().normalize();
+        if (chosen.startsWith(data)
+            && (chosen.equals(data) || !data.relativize(chosen).getName(0).toString().startsWith("."))) {
+            throw new IllegalArgumentException("AXON_PITR_DIR dentro do diretório de dados precisa começar com ponto"
+                + " (por exemplo " + data.resolve(".pitr-journal") + "): " + chosen);
+        }
+        return chosen;
     }
 
     private static int clamped(String raw, int fallback, int max) {

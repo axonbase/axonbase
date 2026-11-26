@@ -175,7 +175,9 @@ class PitrGateTest {
                 base = backups.list().get(0).watermark();
             }
             try (RocksDbBackend db = new RocksDbBackend(live.toString(), RocksDbBackend.SyncMode.OFF)) {
-                committed = db.persistedPosition();
+                // a abertura depois da queda grava um índice pulado: o último lote real é o anterior
+                CommitWatermark opened = db.persistedPosition();
+                committed = new CommitWatermark(opened.stamp(), opened.index() - 1);
                 try (PitrJournal journal = PitrJournal.open(journalDir, JournalOptions.defaults(), db::watermark)) {
                     window = PitrCoverage.window(journalDir, journal.segments(), base);
                     archived = new CommitWatermark(window.to(), window.contiguousIndex());

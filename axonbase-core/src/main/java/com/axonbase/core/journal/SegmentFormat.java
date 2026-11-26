@@ -23,7 +23,7 @@ import java.util.zip.CRC32C;
  * Formato de um segmento do journal (versão 1). O mesmo serve ao nó único e ao cluster.
  *
  * <pre>
- * cabeçalho  int MAGIC ("AXJ1"), short VERSION
+ * cabeçalho  int MAGIC ("AXJ1"), short VERSION, long linha do tempo
  * registro   int tamanho (do tipo mais o corpo), byte tipo, corpo, int CRC32C do tipo mais o corpo
  *   lote     long índice, long físico, int contador, int nPuts, (int, chave, int, valor)*, int nDels, (int, chave)*
  *   rodapé   marca d'água, faixa de carimbos e índices, contagem, buracos, indicador de recuperado
@@ -37,7 +37,7 @@ final class SegmentFormat {
     static final int MAGIC = 0x41584A31;
     static final int FOOTER = 0x41584A45;
     static final short VERSION = 1;
-    static final int HEADER_BYTES = 6;
+    static final int HEADER_BYTES = 14;
     static final int FOOTER_BYTES = 8;
     static final byte BATCH = 1;
     static final byte TRAILER = 2;
@@ -52,8 +52,8 @@ final class SegmentFormat {
     private SegmentFormat() {
     }
 
-    static byte[] header() {
-        return ByteBuffer.allocate(HEADER_BYTES).putInt(MAGIC).putShort(VERSION).array();
+    static byte[] header(long timeline) {
+        return ByteBuffer.allocate(HEADER_BYTES).putInt(MAGIC).putShort(VERSION).putLong(timeline).array();
     }
 
     /** O registro completo (tamanho, tipo, corpo e CRC). */

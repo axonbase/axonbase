@@ -193,6 +193,7 @@ class PitrApiTest {
 
             assertEquals(400, n.call("POST", "/physical/" + id + "/restore?at=" + beforeBackup).statusCode());
             assertEquals(400, n.call("POST", path + "ontem").statusCode());
+            assertEquals(400, n.call("POST", path + "%2B1000000000-01-01T00:00:00Z").statusCode(), "ano absurdo");
             assertEquals(403, n.call("POST", path + beforeBackup, n.operator).statusCode());
             assertEquals(404, n.call("POST", "/physical/999/restore?confirm=true&at=" + beforeBackup).statusCode());
 
@@ -357,6 +358,24 @@ class PitrApiTest {
             assertEquals(200, n.call("DELETE", "/journal/segments/" + name).statusCode());
             assertEquals(404, n.call("DELETE", "/journal/segments/" + name).statusCode());
             assertEquals(404, n.call("DELETE", "/journal/imports/nao-existe").statusCode());
+        }
+    }
+
+    @Test
+    @DisplayName("um diretório de journal dentro dos dados precisa começar com ponto, senão o restore o levaria")
+    void journalDirectoryInsideTheDataMustBeHidden() throws Exception {
+        try (RocksDbBackend rocks = new RocksDbBackend(tmp.resolve("dados").toString(),
+                RocksDbBackend.SyncMode.OFF)) {
+            Path data = rocks.directory();
+            for (Path bad : List.of(data, data.resolve("journal"), data.resolve("x").resolve(".journal"))) {
+                PitrSettings settings = PitrSettings.from(Map.of("AXON_PITR_DIR", bad.toString())::get);
+                org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> settings.directoryFor(rocks), bad.toString());
+            }
+            for (Path good : List.of(data.resolve(".journal"), tmp.resolve("fora"))) {
+                PitrSettings settings = PitrSettings.from(Map.of("AXON_PITR_DIR", good.toString())::get);
+                assertEquals(good.toAbsolutePath(), settings.directoryFor(rocks).toAbsolutePath());
+            }
         }
     }
 

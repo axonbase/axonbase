@@ -624,6 +624,8 @@ public final class AxonServer {
         if (journal != null) {
             journal.close(); // depois das requisições: tudo o que foi confirmado fica num segmento fechado
         }
+        // marca o desligamento limpo: sem ela a próxima subida abre outra linha do tempo e o PITR pede backup novo
+        ds.rocksBackend().ifPresent(com.axonbase.core.storage.RocksDbBackend::markClean);
     }
 
     // ------------------------------------------------------------------

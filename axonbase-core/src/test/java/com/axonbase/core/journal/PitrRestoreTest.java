@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -383,6 +384,94 @@ class PitrRestoreTest {
                 node.restoreTo(fresh, wall.get()));
             // e o passado anterior ao restore continua disponível com o backup antigo
             assertTrue(early < now);
+        }
+    }
+
+    private static void copyTree(Path from, Path to) throws Exception {
+        try (var files = Files.walk(from)) {
+            for (Path p : files.toList()) {
+                Path target = to.resolve(from.relativize(p));
+                if (Files.isDirectory(p)) {
+                    Files.createDirectories(target);
+                } else {
+                    Files.copy(p, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+        }
+    }
+
+    /**
+     * A base volta a uma foto tirada num fechamento limpo, escreve com o journal desligado e ganha um backup novo:
+     * os segmentos da história abandonada reusam os mesmos índices e não podem ser reaplicados sobre ele.
+     */
+    @Test
+    @DisplayName("segmentos de uma história abandonada nunca são aplicados sobre um backup da história nova")
+    void abandonedSegmentsAreNeverAppliedToANewHistory() throws Exception {
+        Path live = tmp.resolve("rewind").resolve("live");
+        Path photo = tmp.resolve("rewind").resolve("photo");
+        Path backups = tmp.resolve("rewind").resolve("backups");
+        Path journalDir = tmp.resolve("rewind").resolve("journal");
+        Supplier<RocksDbBackend> opener = () -> new RocksDbBackend(live.toString(), RocksDbBackend.SyncMode.OFF,
+            new HybridClock(wall::get, 500L, e -> { }));
+        try (RocksDbBackend db = opener.get()) {
+            db.put("a", bytes("1"));
+        }
+        copyTree(live, photo);
+        try (RocksDbBackend db = opener.get(); PitrJournal journal = PitrJournal.attach(db, journalDir, options())) {
+            for (int i = 0; i < 20; i++) {
+                wall.incrementAndGet();
+                db.put("abandonado" + i, bytes("x"));
+            }
+        }
+        // a foto volta por cima (reversão de volume) e a base segue sem journal
+        com.axonbase.core.storage.TestTrees.delete(live);
+        copyTree(photo, live);
+        long instant;
+        int id;
+        try (RocksDbBackend db = opener.get(); PhysicalBackups engine = PhysicalBackups.open(backups)) {
+            wall.addAndGet(100);
+            db.put("novo", bytes("n"));
+            wall.addAndGet(10);
+            instant = wall.get();
+            wall.addAndGet(10);
+            id = engine.create(db).id();
+        }
+        int backup = id;
+        long target = instant;
+
+        // ou recusa, ou entrega exatamente o estado daquele instante; nunca com os lotes abandonados
+        try {
+            PitrRestore.Prepared prepared = PitrRestore.prepare(backups, backup, journalDir, live,
+                HlcTimestamp.endOfMillisecond(target));
+            try (RocksDbBackend restored = new RocksDbBackend(prepared.directory().toString(),
+                    RocksDbBackend.SyncMode.OFF)) {
+                assertEquals(Map.of("a", "1", "novo", "n"), dump(restored));
+            }
+        } catch (PitrException refused) {
+            assertTrue(refused.reason() == PitrException.Reason.UNREACHABLE
+                || refused.reason() == PitrException.Reason.BASE_TOO_NEW, refused.reason().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("segmentos de outra linha do tempo não contam na cobertura")
+    void segmentsOfAnotherTimelineDoNotCount() {
+        try (Node node = new Node("lines")) {
+            node.db.put("a", bytes("1"));
+            int base = node.backup();
+            wall.addAndGet(10);
+            node.db.put("b", bytes("2"));
+            wall.addAndGet(10);
+            node.journal.seal();
+            var watermark = node.engine.list().get(0).watermark();
+            var foreign = new com.axonbase.core.storage.CommitWatermark(watermark.stamp(), watermark.index(),
+                watermark.timeline() + 1);
+
+            assertTrue(PitrCoverage.window(node.journalDir, node.journal.segments(), watermark).contiguousIndex()
+                > watermark.index());
+            assertEquals(watermark.index(),
+                PitrCoverage.window(node.journalDir, node.journal.segments(), foreign).contiguousIndex());
+            assertTrue(base > 0);
         }
     }
 

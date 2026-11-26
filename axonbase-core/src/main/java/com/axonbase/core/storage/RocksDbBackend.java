@@ -54,6 +54,10 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * {@code !hlc/<faixa>} (uma por faixa de trava, para que escritas concorrentes nunca regravem um valor maior com um
  * menor). No reinício valem o maior carimbo e o maior índice entre elas. Veja {@link BatchSink}.</p>
  *
+ * <p>Linha do tempo: continua a mesma só quando a abertura prova que nada foi gravado depois de um fechamento limpo
+ * ({@link #markClean}). Numa queda, numa troca de base ou depois de escritas de uma versão sem carimbo, nasce outra e
+ * o índice pula um número, para o journal de uma história nunca ser aplicado sobre outra.</p>
+ *
  * <p>Durabilidade: o WAL (write-ahead log) fica sempre ligado. {@link SyncMode} escolhe quando ele é
  * sincronizado em disco; veja a variável opcional {@code AXON_STORAGE_SYNC}.</p>
  */
@@ -94,8 +98,10 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     private static final int STRIPES = 1024;
     private static final long BATCH_SYNC_INTERVAL_MS = 1000L;
     private static final String HLC_PREFIX = "!hlc/";
-    /** Sequência do RocksDB no fechamento limpo: se mudou até a próxima abertura, alguém gravou sem carimbar. */
+    /** Sequência do RocksDB no fechamento limpo: ausente ou diferente na abertura, a história não é contínua. */
     private static final byte[] CLEAN_KEY = "!hlc-clean".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] TIMELINE_KEY = "!hlc-timeline".getBytes(StandardCharsets.UTF_8);
+    private static final long MARK_CLEAN_TIMEOUT_MS = 5_000L;
 
     private volatile RocksDB db;
     private volatile ColumnFamilyHandle dataHandle;
@@ -124,6 +130,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     private final CommitSequencer sequencer;
     private final byte[][] hlcSlots = new byte[STRIPES][];
     private volatile BatchSink sink;
+    /** Maior posição reaplicada do journal; só usada numa base preparada, sob a trava exclusiva. */
+    private CommitWatermark replayed;
 
     private final AtomicBoolean dirty = new AtomicBoolean();
     private volatile boolean closed;
@@ -701,7 +709,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         try {
             hlc.observe(archivedStamp);
             if (archivedIndex > sequencer.lastIndex()) {
-                breakTimeline(archivedIndex);
+                startTimeline(archivedIndex, hlc.now(), true);
             }
         } finally {
             gate.exit();
@@ -731,7 +739,11 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                         writes.put(dataHandle, raw, entry.getValue());
                         writes.put(versionsHandle, raw, longToBytes(version++));
                     }
-                    writes.put(hlcSlots[0], CommitSequencer.encode(batch.stamp(), index));
+                    // a ordem do journal não é a do índice: grava sempre o maior já visto
+                    CommitWatermark before = replayed != null ? replayed : readPosition();
+                    replayed = new CommitWatermark(HlcTimestamp.max(before.stamp(), batch.stamp()),
+                        Math.max(before.index(), index));
+                    writes.put(hlcSlots[0], CommitSequencer.encode(replayed.stamp(), replayed.index()));
                     write(writes);
                     hlc.observe(batch.stamp());
                     sequencer.advanceTo(index);
@@ -753,24 +765,61 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         CommitWatermark persisted = readPosition();
         hlc.restore(persisted.stamp());
         sequencer.advanceTo(persisted.index());
+        byte[] timeline = db.get(TIMELINE_KEY);
         byte[] clean = db.get(CLEAN_KEY);
-        if (clean != null) {
-            boolean writtenByAnother = bytesToLong(clean) != db.getLatestSequenceNumber();
-            db.delete(CLEAN_KEY);
-            if (writtenByAnother) {
-                breakTimeline(persisted.index());
-            }
+        if (timeline != null && clean != null && bytesToLong(clean) == db.getLatestSequenceNumber()) {
+            sequencer.timeline(bytesToLong(timeline));
+            db.delete(CLEAN_KEY); // daqui em diante, só um novo fechamento limpo prova a continuidade
+        } else {
+            startTimeline(persisted.index(), persisted.stamp(), persisted.index() > 0);
         }
     }
 
-    /** Abre um buraco no índice e o grava. Só chamar sem escritas concorrentes. */
-    private void breakTimeline(long atLeast) {
-        long skipped = sequencer.skipIndex(atLeast);
+    /**
+     * Começa uma linha do tempo nova e, havendo história anterior, pula um índice. Só chamar sem escritas
+     * concorrentes. A memória muda antes do disco: se a gravação falhar, a próxima abertura não prova continuidade.
+     */
+    private void startTimeline(long atLeast, HlcTimestamp stamp, boolean skip) {
+        long index = atLeast;
+        if (skip) {
+            index = sequencer.skipIndex(atLeast);
+        }
+        long timeline = 0;
+        while (timeline == 0) {
+            timeline = java.util.concurrent.ThreadLocalRandom.current().nextLong();
+        }
+        sequencer.timeline(timeline);
         try (WriteBatch batch = new WriteBatch()) {
-            batch.put(hlcSlots[0], CommitSequencer.encode(hlc.now(), skipped));
+            batch.put(TIMELINE_KEY, longToBytes(timeline));
+            batch.put(hlcSlots[0], CommitSequencer.encode(stamp, index));
+            batch.delete(CLEAN_KEY);
             write(batch);
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Registra que, até aqui, tudo foi gravado com carimbo: a próxima abertura continua a mesma linha do tempo se
+     * nada mais for escrito. Chamado no desligamento do servidor; {@link #close()} também o faz.
+     */
+    public void markClean() {
+        if (closed || !gate.quiesce(MARK_CLEAN_TIMEOUT_MS)) {
+            return; // com operações em curso não dá para provar nada: a próxima abertura abre outra linha do tempo
+        }
+        try {
+            writeCleanMarker();
+        } finally {
+            gate.resume();
+        }
+    }
+
+    private void writeCleanMarker() {
+        try {
+            db.put(writeOptions, CLEAN_KEY, longToBytes(db.getLatestSequenceNumber() + 1));
+            db.syncWal();
+        } catch (RocksDBException ignored) {
+            // sem a marca, a próxima abertura só deixa de continuar a linha do tempo
         }
     }
 
@@ -882,6 +931,10 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         long clockBefore = versionClock.get();
         long indexBefore = sequencer.lastIndex();
         try {
+            BatchSink target = sink;
+            if (target != null) {
+                target.historyBreaking(); // o que já foi entregue é da linha do tempo que vai acabar
+            }
             try {
                 db.syncWal();
             } catch (RocksDBException ignored) {
@@ -909,12 +962,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             // a história mudou: o relógio segue em frente e o índice ganha um buraco antes do próximo lote
             CommitWatermark restored = readPosition();
             hlc.observe(restored.stamp());
-            try {
-                db.delete(CLEAN_KEY); // marca do fechamento que validou a base preparada
-            } catch (RocksDBException e) {
-                throw new RuntimeException(e);
-            }
-            breakTimeline(Math.max(indexBefore, restored.index()));
+            startTimeline(Math.max(indexBefore, restored.index()), hlc.now(), true);
             return replaced;
         } finally {
             gate.resume();
@@ -1088,12 +1136,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 syncThread.interrupt();
                 syncThread.join(1000);
             }
-            try {
-                db.put(writeOptions, CLEAN_KEY, longToBytes(db.getLatestSequenceNumber() + 1));
-                db.syncWal();
-            } catch (RocksDBException ignored) {
-                // o fechamento segue; o WAL já está no sistema operacional
-            }
+            writeCleanMarker();
             if (dataHandle != null) dataHandle.close();
             if (versionsHandle != null) versionsHandle.close();
             if (db != null) db.close();

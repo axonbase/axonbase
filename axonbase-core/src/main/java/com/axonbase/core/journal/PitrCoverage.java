@@ -43,7 +43,20 @@ public final class PitrCoverage {
     private PitrCoverage() {
     }
 
-    public static Window window(Path directory, List<SegmentInfo> segments, CommitWatermark base) {
+    /**
+     * Os segmentos que podem continuar a história do backup: mesma linha do tempo e, nos índices posteriores a ele,
+     * carimbos também posteriores (numa história contínua o índice e o carimbo crescem juntos).
+     */
+    static List<SegmentInfo> continuing(List<SegmentInfo> segments, CommitWatermark base) {
+        return segments.stream()
+            .filter(s -> s.timeline() == base.timeline())
+            .filter(s -> s.batches() == 0 || s.lastIndex() <= base.index()
+                || s.lastStamp().compareTo(base.stamp()) > 0)
+            .toList();
+    }
+
+    public static Window window(Path directory, List<SegmentInfo> all, CommitWatermark base) {
+        List<SegmentInfo> segments = continuing(all, base);
         List<IndexRange> present = new ArrayList<>();
         for (SegmentInfo s : segments) {
             if (s.batches() == 0) {

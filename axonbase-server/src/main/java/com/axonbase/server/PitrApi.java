@@ -91,9 +91,11 @@ final class PitrApi {
     static PitrRestore.Prepared prepare(AxonServer srv, RocksDbBackend rocks, Path backupDir, int id, String source,
                                         String at) {
         Instant instant;
+        long millis;
         try {
             instant = Instant.parse(at.trim());
-        } catch (DateTimeParseException e) {
+            millis = instant.toEpochMilli();
+        } catch (DateTimeParseException | ArithmeticException e) {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("pitr_invalid_instant", at));
         }
         Path journalDir;
@@ -106,7 +108,7 @@ final class PitrApi {
         }
         try {
             return PitrRestore.prepare(backupDir, id, journalDir, rocks.directory(),
-                HlcTimestamp.endOfMillisecond(instant.toEpochMilli()));
+                HlcTimestamp.endOfMillisecond(millis));
         } catch (PitrException e) {
             throw toApiError(e, id, instant);
         }
@@ -208,20 +210,30 @@ final class PitrApi {
             throws IOException {
         RocksDbBackend rocks = PhysicalBackupApi.rocks(srv);
         Path file = segmentFile(srv, rocks, req.getParameter("source"), name);
-        if (!Files.isRegularFile(file)) {
-            throw new AdminV1Servlet.ApiError(404, "NOT_FOUND", Messages.get("pitr_segment_not_found", name));
-        }
         String key = srv.config().s3EncryptKey();
         boolean encrypt = key != null && !key.isBlank();
-        resp.setStatus(200);
-        resp.setContentType("application/octet-stream");
-        resp.setHeader("Cache-Control", "no-store");
-        resp.setHeader("X-Axon-Size", String.valueOf(Files.size(file)));
-        try (java.io.OutputStream out = encrypt
-                ? StreamEncryption.encrypting(resp.getOutputStream(), key) : resp.getOutputStream();
-             java.io.InputStream in = Files.newInputStream(file)) {
-            in.transferTo(out);
+        // abre antes de responder: se a retenção apagar o arquivo, a resposta é 404 e não um corpo vazio
+        try (java.nio.channels.FileChannel channel = open(file, name)) {
+            resp.setStatus(200);
+            resp.setContentType("application/octet-stream");
+            resp.setHeader("Cache-Control", "no-store");
+            resp.setHeader("X-Axon-Size", String.valueOf(channel.size()));
+            try (java.io.OutputStream out = encrypt
+                    ? StreamEncryption.encrypting(resp.getOutputStream(), key) : resp.getOutputStream()) {
+                java.nio.channels.Channels.newInputStream(channel).transferTo(out);
+            }
         }
+    }
+
+    private static java.nio.channels.FileChannel open(Path file, String name) throws IOException {
+        try {
+            if (Files.isRegularFile(file)) {
+                return java.nio.channels.FileChannel.open(file, java.nio.file.StandardOpenOption.READ);
+            }
+        } catch (java.nio.file.NoSuchFileException removed) {
+            // apagado entre a checagem e a abertura
+        }
+        throw new AdminV1Servlet.ApiError(404, "NOT_FOUND", Messages.get("pitr_segment_not_found", name));
     }
 
     private static void writeSegment(AxonServer srv, String name, HttpServletRequest req, HttpServletResponse resp)

@@ -60,7 +60,8 @@ public final class PitrRestore {
                 throw new PitrException(PitrException.Reason.BASE_TOO_NEW,
                     "o backup " + backupId + " já contém escritas posteriores ao instante pedido");
             }
-            long applied = replay(db, journalDir, segments, base.index(), window.contiguousIndex(), target);
+            long applied = replay(db, journalDir, PitrCoverage.continuing(segments, base), base,
+                window.contiguousIndex(), target);
             db.syncWal();
             CommitWatermark position = db.persistedPosition();
             done = true;
@@ -88,8 +89,9 @@ public final class PitrRestore {
         }
     }
 
-    private static long replay(RocksDbBackend db, Path journalDir, List<SegmentInfo> segments, long after, long upTo,
-                               HlcTimestamp target) throws IOException {
+    private static long replay(RocksDbBackend db, Path journalDir, List<SegmentInfo> segments, CommitWatermark base,
+                               long upTo, HlcTimestamp target) throws IOException {
+        long after = base.index();
         long[] applied = new long[1];
         int end = firstCovering(segments, target);
         for (int i = 0; i < segments.size() && i <= end; i++) {
@@ -98,6 +100,11 @@ public final class PitrRestore {
                 continue;
             }
             JournalSegments.read(journalDir.resolve(segment.name()), record -> {
+                if (record.index() > after && record.batch().stamp().compareTo(base.stamp()) <= 0) {
+                    throw new PitrException(PitrException.Reason.BAD_JOURNAL,
+                        "o segmento " + segment.name() + " mistura outra história: o lote " + record.index()
+                            + " é anterior ao backup");
+                }
                 if (record.index() > after && record.index() <= upTo
                     && record.batch().stamp().compareTo(target) <= 0) {
                     db.applyArchived(record.index(), record.batch());

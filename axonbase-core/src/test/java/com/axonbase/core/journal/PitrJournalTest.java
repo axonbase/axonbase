@@ -206,6 +206,34 @@ class PitrJournalTest {
     }
 
     @Test
+    @DisplayName("depois de uma falha de disco o journal volta a aceitar lotes e conta o que perdeu")
+    void aWriteFailureDoesNotLeaveTheQueueFullForever() throws Exception {
+        Path dir = tmp.resolve("j");
+        try (PitrJournal journal = PitrJournal.open(dir, options().withQueueLimits(100, 4_000), watermark)) {
+            Files.delete(dir);
+            Files.write(dir, new byte[] {1}); // o diretório virou um arquivo: nenhum segmento abre
+            for (int i = 0; i < 8; i++) {
+                offer(journal, "perdido" + i, "v".repeat(300));
+            }
+            await("a falha aparecer", () -> journal.writeErrors() > 0 && journal.pendingBatches() == 0);
+            await("os perdidos serem contados", () -> journal.droppedBatches() == 8);
+            Files.delete(dir);
+            Files.createDirectories(dir);
+
+            for (int round = 0; round < 3; round++) {
+                for (int i = 0; i < 6; i++) {
+                    offer(journal, "ok" + round + "-" + i, "v".repeat(300));
+                }
+                await("a fila esvaziar", () -> journal.pendingBatches() == 0);
+            }
+            journal.seal();
+
+            assertEquals(8L, journal.droppedBatches(), "nada mais é descartado depois que o disco volta");
+            assertEquals(18L, journal.segments().stream().mapToLong(SegmentInfo::batches).sum());
+        }
+    }
+
+    @Test
     @DisplayName("um lote maior que o limite de bytes ainda entra quando a fila está vazia")
     void anOversizedBatchStillEntersAnEmptyQueue() throws Exception {
         try (PitrJournal journal = PitrJournal.open(tmp.resolve("j"), options().withQueueLimits(100, 10),

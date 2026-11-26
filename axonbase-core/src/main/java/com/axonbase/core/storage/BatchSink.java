@@ -17,4 +17,11 @@ public interface BatchSink {
      * @param batch escritas e remoções confirmadas, com o carimbo
      */
     void offer(long index, CommittedBatch batch);
+
+    /**
+     * A linha do tempo vai mudar (a base será trocada). Chamado sem escritas em curso e antes da mudança: o destino
+     * precisa terminar o que já recebeu, que pertence à linha do tempo antiga.
+     */
+    default void historyBreaking() {
+    }
 }

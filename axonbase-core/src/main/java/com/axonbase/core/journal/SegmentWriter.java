@@ -23,6 +23,7 @@ final class SegmentWriter implements AutoCloseable {
     private final Path directory;
     private final String name;
     private final Path openPath;
+    private final long timeline;
     private final FileChannel channel;
     private final Stats stats = new Stats();
     private final java.io.ByteArrayOutputStream buffered = new java.io.ByteArrayOutputStream(1 << 16);
@@ -66,13 +67,21 @@ final class SegmentWriter implements AutoCloseable {
         }
     }
 
-    SegmentWriter(Path directory, String name) throws IOException {
+    SegmentWriter(Path directory, String name, long timeline) throws IOException {
         this.directory = directory;
         this.name = name;
+        this.timeline = timeline;
         this.openPath = directory.resolve(JournalSegments.openName(name));
         this.channel = FileChannel.open(openPath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
-        write(SegmentFormat.header());
-        flush();
+        try {
+            write(SegmentFormat.header(timeline));
+            flush();
+        } catch (IOException e) {
+            // disco cheio, por exemplo: sem isto o descritor e o arquivo vazio ficariam para trás
+            channel.close();
+            Files.deleteIfExists(openPath);
+            throw e;
+        }
     }
 
     /** Acrescenta um lote. Ele só chega ao disco no próximo {@link #flush()}. */
@@ -95,15 +104,15 @@ final class SegmentWriter implements AutoCloseable {
         flush();
         channel.force(true);
         channel.close();
-        return publish(directory, openPath, name, size, trailer);
+        return publish(directory, openPath, name, size, timeline, trailer);
     }
 
     /** Renomeia o arquivo fechado para o nome final e devolve o índice dele. */
-    static SegmentInfo publish(Path directory, Path openPath, String name, long size, SegmentFormat.Trailer t)
-            throws IOException {
+    static SegmentInfo publish(Path directory, Path openPath, String name, long size, long timeline,
+                               SegmentFormat.Trailer t) throws IOException {
         Files.move(openPath, directory.resolve(name), StandardCopyOption.ATOMIC_MOVE);
         syncDirectory(directory);
-        return JournalSegments.toInfo(name, size, t);
+        return JournalSegments.toInfo(name, size, timeline, t);
     }
 
     private static void syncDirectory(Path directory) {

@@ -51,6 +51,7 @@ public final class PhysicalBackups implements AutoCloseable {
     private static final String META_PREFIX = "axon-version=";
     private static final String META_STAMP = "axon-hlc=";
     private static final String META_INDEX = "axon-idx=";
+    private static final String META_TIMELINE = "axon-tl=";
 
     static {
         // ferramentas que só restauram (sem abrir um RocksDbBackend antes) precisam da biblioteca nativa carregada
@@ -90,7 +91,7 @@ public final class PhysicalBackups implements AutoCloseable {
         // antes de copiar: o backup contém tudo até esta marca
         CommitWatermark mark = backend.watermark();
         String metadata = META_PREFIX + version + ";" + META_STAMP + mark.stamp().physical() + "."
-            + mark.stamp().logical() + ";" + META_INDEX + mark.index();
+            + mark.stamp().logical() + ";" + META_INDEX + mark.index() + ";" + META_TIMELINE + mark.timeline();
         try {
             backend.createPhysicalBackup(engine, metadata);
         } catch (RocksDBException e) {
@@ -291,7 +292,7 @@ public final class PhysicalBackups implements AutoCloseable {
                 return CommitWatermark.NONE;
             }
             return new CommitWatermark(new HlcTimestamp(Long.parseLong(stamp[0]), Integer.parseInt(stamp[1])),
-                Long.parseLong(field(meta, META_INDEX)));
+                Long.parseLong(field(meta, META_INDEX)), Long.parseLong(field(meta, META_TIMELINE)));
         } catch (NumberFormatException ignored) {
             return CommitWatermark.NONE;
         }
