@@ -85,7 +85,7 @@ class RocksDbBackendStampTest {
             b.delete("inexistente");
             b.putIfAbsent("a", bytes("2"));
             b.commit(Map.of(), Map.of(), Set.of());
-            assertEquals(1L, b.persistedPosition().index());
+            assertEquals(1L, b.watermark().index());
         }
         assertTrue(sink.got.isEmpty());
     }
@@ -93,17 +93,18 @@ class RocksDbBackendStampTest {
     @Test
     @DisplayName("reinício: o primeiro carimbo novo é maior que o persistido, mesmo com o relógio atrasado")
     void restartContinuesAboveThePersistedStamp() {
-        HlcTimestamp last;
+        Sink before = new Sink();
         try (RocksDbBackend b = open("a")) {
+            b.commitSink(before);
             b.put("a", bytes("1"));
             b.put("b", bytes("2"));
-            last = b.persistedPosition().stamp();
         }
+        HlcTimestamp last = before.got.get(1).batch().stamp();
         wall.addAndGet(-3_600_000L);
         Sink sink = new Sink();
         try (RocksDbBackend b = open("a")) {
-            assertEquals(2L, b.persistedPosition().index());
-            assertEquals(last, b.persistedPosition().stamp());
+            assertEquals(2L, b.recordedPosition().index());
+            assertEquals(last, b.recordedPosition().stamp());
             b.commitSink(sink);
             b.put("c", bytes("3"));
         }
@@ -175,10 +176,10 @@ class RocksDbBackendStampTest {
                     new String(b.get(entry.getKey()).orElseThrow(), StandardCharsets.UTF_8),
                     "replay na ordem de entrega diverge em " + entry.getKey());
             }
-            assertEquals(4000L, b.persistedPosition().index());
+            assertEquals(4000L, b.watermark().index());
         }
         try (RocksDbBackend reopened = open("a")) {
-            assertEquals(4000L, reopened.persistedPosition().index());
+            assertEquals(4000L, reopened.recordedPosition().index());
         }
     }
 
@@ -226,8 +227,8 @@ class RocksDbBackendStampTest {
             assertEquals("v", new String(b.get("k").orElseThrow(), StandardCharsets.UTF_8));
             assertTrue(b.get("some").isEmpty());
             assertTrue(b.versionOf("k") > 0);
-            assertEquals(77L, b.persistedPosition().index());
-            assertEquals(stamp, b.persistedPosition().stamp());
+            assertEquals(77L, b.recordedPosition().index());
+            assertEquals(stamp, b.recordedPosition().stamp());
         }
         assertTrue(sink.got.isEmpty());
     }
@@ -242,7 +243,7 @@ class RocksDbBackendStampTest {
             b.put("a", bytes("1"));
             int id = pb.create(b).id();
             b.put("b", bytes("2"));
-            HlcTimestamp before = b.persistedPosition().stamp();
+            HlcTimestamp before = b.watermark().stamp();
 
             b.replaceWith(PhysicalBackups.prepareRestore(store, id, live), 10_000);
 
@@ -274,7 +275,7 @@ class RocksDbBackendStampTest {
         Sink sink = new Sink();
         try (RocksDbBackend b = open("a")) {
             b.put("a", bytes("1"));
-            b.resumeAfter(1L, b.persistedPosition().stamp());
+            b.resumeAfter(1L, b.watermark().stamp());
             b.commitSink(sink);
             b.put("b", bytes("2"));
         }
@@ -327,7 +328,7 @@ class RocksDbBackendStampTest {
         }
         try (RocksDbBackend crashed = open("crashed")) {
             assertTrue(crashed.watermark().timeline() != timeline);
-            assertTrue(crashed.persistedPosition().index() >= 3, "além disso o índice pula");
+            assertTrue(crashed.recordedPosition().index() >= 3, "além disso o índice pula");
         }
     }
 
@@ -403,12 +404,12 @@ class RocksDbBackendStampTest {
         try (RocksDbBackend b = open("a")) {
             b.applyArchived(11L, new CommittedBatch("", Map.of("x", bytes("1")), Set.of()).withStamp(later));
             b.applyArchived(10L, new CommittedBatch("", Map.of("y", bytes("2")), Set.of()).withStamp(earlier));
-            assertEquals(11L, b.persistedPosition().index());
-            assertEquals(later, b.persistedPosition().stamp());
+            assertEquals(11L, b.recordedPosition().index());
+            assertEquals(later, b.recordedPosition().stamp());
         }
     }
 
-    /** Uma gravação direta na column family de dados, sem a chave {@code !hlc}, como faz a 0.10.1. */
+    /** Uma gravação direta na column family de dados, sem teto nem marca, como faz a 0.10.1. */
     private static void writeAsOlderBinary(Path dir) throws Exception {
         List<byte[]> names;
         try (org.rocksdb.Options options = new org.rocksdb.Options()) {

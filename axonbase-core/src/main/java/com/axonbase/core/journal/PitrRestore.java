@@ -56,14 +56,14 @@ public final class PitrRestore {
         Path prepared = PhysicalBackups.prepareRestore(backupDir, backupId, liveDir);
         boolean done = false;
         try (RocksDbBackend db = new RocksDbBackend(prepared.toString(), RocksDbBackend.SyncMode.OFF)) {
-            if (db.persistedPosition().stamp().compareTo(target) > 0) {
+            if (db.recordedPosition().stamp().compareTo(target) > 0) {
                 throw new PitrException(PitrException.Reason.BASE_TOO_NEW,
                     "o backup " + backupId + " já contém escritas posteriores ao instante pedido");
             }
             long applied = replay(db, journalDir, PitrCoverage.continuing(segments, base), base,
                 window.contiguousIndex(), target);
             db.syncWal();
-            CommitWatermark position = db.persistedPosition();
+            CommitWatermark position = db.recordedPosition();
             done = true;
             return new Prepared(prepared, base, applied, position);
         } catch (IOException e) {

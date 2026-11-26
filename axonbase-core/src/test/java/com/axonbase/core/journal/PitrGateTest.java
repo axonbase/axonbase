@@ -31,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Portões da E2 que custam minutos, ligados com {@code -Daxon.gate.pitr=true}: um milhão de commits com o relógio
- * saltando e {@code kill -9} sob carga com PITR depois da queda.
+ * saltando e {@code kill -9} sob carga com PITR depois da queda. {@code -Daxon.gate.pitr.commits} e
+ * {@code -Daxon.gate.pitr.rounds} reduzem os dois para uma conferência rápida.
  */
 @DisplayName("Portões do PITR: 1 milhão de commits e kill -9")
 @EnabledIfSystemProperty(named = "axon.gate.pitr", matches = "true")
@@ -51,7 +52,7 @@ class PitrGateTest {
     @Test
     @DisplayName("1 milhão de commits com o relógio saltando: carimbos estritamente crescentes na ordem dos índices")
     void aMillionCommitsWithAJumpingClock() throws Exception {
-        int total = 1_000_000;
+        int total = Integer.getInteger("axon.gate.pitr.commits", 1_000_000);
         int threads = 8;
         AtomicLong wall = new AtomicLong(1_790_000_000_000L);
         AtomicLongArray physical = new AtomicLongArray(total + 1);
@@ -84,7 +85,7 @@ class PitrGateTest {
             for (Thread w : workers) {
                 w.join();
             }
-            assertEquals(total, db.persistedPosition().index());
+            assertEquals(total, db.watermark().index());
         }
         for (int i = 2; i <= total; i++) {
             boolean grows = physical.get(i) > physical.get(i - 1)
@@ -123,8 +124,10 @@ class PitrGateTest {
             System.out.println("READY");
             System.out.flush();
             for (long i = 0; ; i++) {
-                // um commit atômico: o registro i e o ponteiro para o último. Um corte consistente vê um prefixo.
-                db.commit(Map.of(), Map.of("item-" + i, bytes("x" + i), "seq", bytes(String.valueOf(i))), Set.of());
+                // um commit atômico: o registro i, o ponteiro para o último e a hora dele. Um corte consistente vê um
+                // prefixo, e a hora diz quanto tempo de escritas ficou fora do journal.
+                db.commit(Map.of(), Map.of("item-" + i, bytes("x" + i), "seq", bytes(String.valueOf(i)),
+                    "quando", bytes(String.valueOf(System.currentTimeMillis()))), Set.of());
             }
         }
     }
@@ -144,7 +147,7 @@ class PitrGateTest {
         org.rocksdb.RocksDB.loadLibrary();
         Random random = new Random(11);
         long worstLossMs = 0;
-        long worstLostBatches = 0;
+        long worstLostItems = 0;
         int rounds = Integer.getInteger("axon.gate.pitr.rounds", 8);
         for (int round = 0; round < rounds; round++) {
             Path live = tmp.resolve("live" + round);
@@ -167,27 +170,21 @@ class PitrGateTest {
             }
 
             Path journalDir = live.resolve(".pitr-journal");
-            CommitWatermark archived;
-            CommitWatermark committed;
             PitrCoverage.Window window;
             CommitWatermark base;
+            long committedItem;
+            long committedAt;
             try (PhysicalBackups backups = PhysicalBackups.open(store)) {
                 base = backups.list().get(0).watermark();
             }
             try (RocksDbBackend db = new RocksDbBackend(live.toString(), RocksDbBackend.SyncMode.OFF)) {
-                // a abertura depois da queda grava um índice pulado: o último lote real é o anterior
-                CommitWatermark opened = db.persistedPosition();
-                committed = new CommitWatermark(opened.stamp(), opened.index() - 1);
+                // o que a base viva tem é o que estava confirmado quando o processo morreu
+                committedItem = Long.parseLong(text(db, "seq"));
+                committedAt = Long.parseLong(text(db, "quando"));
                 try (PitrJournal journal = PitrJournal.open(journalDir, JournalOptions.defaults(), db::watermark)) {
                     window = PitrCoverage.window(journalDir, journal.segments(), base);
-                    archived = new CommitWatermark(window.to(), window.contiguousIndex());
                 }
             }
-            long lossMs = Math.max(0, committed.stamp().physical() - archived.stamp().physical());
-            long lostBatches = Math.max(0, committed.index() - archived.index());
-            worstLossMs = Math.max(worstLossMs, lossMs);
-            worstLostBatches = Math.max(worstLostBatches, lostBatches);
-            assertTrue(lossMs <= 60_000, "rodada " + round + ": perdeu " + lossMs + " ms");
 
             // restaurar ao último instante alcançável dá um corte consistente: um prefixo dos commits do item
             HlcTimestamp target = window.to();
@@ -199,12 +196,17 @@ class PitrGateTest {
                     assertEquals("x" + i, text(restored, "item-" + i), "rodada " + round + ": buraco no item " + i);
                 }
                 assertEquals(null, text(restored, "item-" + (last + 1)), "rodada " + round + ": lote pela metade");
-                System.out.println("GATE KILL rodada " + round + " (segmento " + segmentSeconds + " s): "
-                    + committed.index() + " lotes gravados, " + lostBatches + " fora do journal (" + lossMs
-                    + " ms), " + prepared.appliedBatches() + " reaplicados, item restaurado até " + last);
+                long lossMs = Math.max(0, committedAt - Long.parseLong(text(restored, "quando")));
+                long lostItems = Math.max(0, committedItem - last);
+                worstLossMs = Math.max(worstLossMs, lossMs);
+                worstLostItems = Math.max(worstLostItems, lostItems);
+                assertTrue(lossMs <= 60_000, "rodada " + round + ": perdeu " + lossMs + " ms");
+                System.out.println("GATE KILL rodada " + round + " (segmento " + segmentSeconds + " s): item "
+                    + committedItem + " confirmado, " + lostItems + " fora do journal (" + lossMs + " ms), "
+                    + prepared.appliedBatches() + " lotes reaplicados, item restaurado até " + last);
             }
         }
-        System.out.println("GATE KILL: pior perda " + worstLossMs + " ms e " + worstLostBatches + " lotes em "
+        System.out.println("GATE KILL: pior perda " + worstLossMs + " ms e " + worstLostItems + " itens em "
             + rounds + " rodadas");
     }
 

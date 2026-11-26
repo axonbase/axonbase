@@ -178,6 +178,78 @@ class HybridClockTest {
         assertTrue(behind.now().compareTo(stamp) > 0);
     }
 
+    /** Teto em memória que anota cada pedido; {@code fail} imita um disco que não grava. */
+    private static final class FakeCeiling implements HybridClock.Ceiling {
+        long durable;
+        boolean fail;
+        final List<Long> raised = new ArrayList<>();
+
+        @Override
+        public long durableMillis() {
+            return durable;
+        }
+
+        @Override
+        public void raise(long atLeastMillis) {
+            if (fail) {
+                throw new IllegalStateException("disco cheio");
+            }
+            raised.add(atLeastMillis);
+            durable = atLeastMillis + 100;
+        }
+    }
+
+    @Test
+    void sobeOTetoAntesDeEmitirUmCarimboAcimaDeleESoNessaHora() {
+        FakeCeiling ceiling = new FakeCeiling();
+        clock.guard(ceiling);
+
+        clock.now();
+        wall.addAndGet(100);
+        clock.now();
+        assertEquals(List.of(1_000_000L), ceiling.raised, "dentro do teto nada é gravado");
+
+        wall.addAndGet(1);
+        HlcTimestamp above = clock.now();
+        assertEquals(List.of(1_000_000L, 1_000_101L), ceiling.raised);
+        assertTrue(ceiling.durable >= above.physical());
+    }
+
+    @Test
+    void semConseguirGravarOTetoNenhumCarimboSai() {
+        FakeCeiling ceiling = new FakeCeiling();
+        clock.guard(ceiling);
+        HlcTimestamp before = clock.now();
+        ceiling.fail = true;
+        wall.addAndGet(1_000);
+
+        assertThrows(IllegalStateException.class, clock::now);
+        assertEquals(before, clock.last(), "o carimbo recusado não pode ficar valendo");
+    }
+
+    @Test
+    void carimboObservadoAcimaDoTetoSoSaiDepoisDeOTetoSubir() {
+        FakeCeiling ceiling = new FakeCeiling();
+        clock.guard(ceiling);
+        clock.now();
+        clock.observe(new HlcTimestamp(5_000_000L, 3));
+
+        assertEquals(new HlcTimestamp(5_000_000L, 4), clock.now());
+        assertEquals(5_000_000L, ceiling.raised.get(ceiling.raised.size() - 1));
+    }
+
+    @Test
+    void emRepousoEntregaOUltimoFisicoSemDeixarEmitirNoMeio() {
+        clock.now();
+        wall.addAndGet(7);
+        clock.now();
+        long[] seen = new long[1];
+
+        clock.settle(physical -> seen[0] = physical);
+
+        assertEquals(1_000_007L, seen[0]);
+    }
+
     @Test
     void comparaFisicoAntesDoContadorEOInstanteIncluiTodosOsContadores() {
         assertTrue(new HlcTimestamp(2, 0).compareTo(new HlcTimestamp(1, 99)) > 0);

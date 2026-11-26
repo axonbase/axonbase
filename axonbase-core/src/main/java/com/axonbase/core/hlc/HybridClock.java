@@ -2,6 +2,7 @@ package com.axonbase.core.hlc;
 
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
 
 /**
@@ -13,6 +14,8 @@ import java.util.function.LongSupplier;
  * <li><b>Recepção</b> ({@link #receive}): o relógio vira o {@code max} entre o próprio valor e o recebido. Um
  *     carimbo cujo físico passe do relógio local mais o desvio máximo é rejeitado e gera alerta.</li>
  * <li><b>Reinício</b> ({@link #restore}): {@code max(relógio, persistido + 1)}.</li>
+ * <li><b>Teto</b> ({@link #guard}): nenhum carimbo é emitido acima do teto durável sem antes subi-lo, então o que
+ *     precisa ir para o disco é só o teto, de tempos em tempos, e não cada carimbo.</li>
  * </ul>
  */
 public final class HybridClock {
@@ -24,6 +27,18 @@ public final class HybridClock {
     public record DriftEvent(HlcTimestamp received, long wallMillis, long driftMs) {
     }
 
+    /** Teto de carimbos que sobrevive a uma queda. */
+    public interface Ceiling {
+        /** Até que milissegundo físico já está garantido em disco. Chamado a cada emissão: precisa ser barato. */
+        long durableMillis();
+
+        /**
+         * Grava um teto que cubra {@code atLeastMillis} e só volta quando ele estiver em disco. Uma falha precisa
+         * virar exceção: o carimbo que pediu não é emitido.
+         */
+        void raise(long atLeastMillis);
+    }
+
     private final LongSupplier wall;
     private final long maxDriftMs;
     private final Consumer<DriftEvent> alert;
@@ -31,6 +46,7 @@ public final class HybridClock {
     private final AtomicLong maxObservedDrift = new AtomicLong();
     private long physical;
     private int logical;
+    private Ceiling ceiling;
 
     public HybridClock(LongSupplier wall, long maxDriftMs, Consumer<DriftEvent> alert) {
         this.wall = wall;
@@ -63,16 +79,21 @@ public final class HybridClock {
     /** Emite um carimbo novo, estritamente maior que todos os já emitidos ou observados. */
     public synchronized HlcTimestamp now() {
         long clock = wall.getAsLong();
+        long nextPhysical = physical;
+        int nextLogical = 0;
         if (clock > physical) {
-            physical = clock;
-            logical = 0;
+            nextPhysical = clock;
         } else if (logical == Integer.MAX_VALUE) {
-            physical++;
-            logical = 0;
+            nextPhysical++;
         } else {
-            logical++;
+            nextLogical = logical + 1;
         }
-        return new HlcTimestamp(physical, logical);
+        if (ceiling != null && nextPhysical > ceiling.durableMillis()) {
+            ceiling.raise(nextPhysical);
+        }
+        physical = nextPhysical;
+        logical = nextLogical;
+        return new HlcTimestamp(nextPhysical, nextLogical);
     }
 
     /** O maior carimbo emitido ou observado. */
@@ -116,6 +137,22 @@ public final class HybridClock {
         if (!persisted.isNone()) {
             observe(new HlcTimestamp(persisted.physical() + 1, 0));
         }
+    }
+
+    /**
+     * Daqui em diante nenhum carimbo é emitido acima do teto. Um relógio guarda um teto só (o da última chamada):
+     * não o compartilhe entre bases abertas ao mesmo tempo.
+     */
+    public synchronized void guard(Ceiling newCeiling) {
+        this.ceiling = newCeiling;
+    }
+
+    /**
+     * Roda {@code atRest} com o físico do último carimbo emitido ou observado, sem deixar emitir nenhum outro
+     * enquanto isso. Serve para apertar o teto no desligamento.
+     */
+    public synchronized void settle(LongConsumer atRest) {
+        atRest.accept(physical);
     }
 
     public long maxDriftMs() {
