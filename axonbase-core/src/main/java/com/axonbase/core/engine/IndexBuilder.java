@@ -31,6 +31,9 @@ public final class IndexBuilder {
     /** Linhas por bloco: segura o lock de escrita por alguns milissegundos. */
     static final int CHUNK = 500;
 
+    /** Espera antes de refazer uma construção invalidada por escritas no formato antigo. */
+    private static final long RETRY_PAUSE_MS = 500;
+
     /** Simula a queda do processo no meio da construção: a thread morre sem limpar nada. Só para testes. */
     public static final class Crash extends RuntimeException {
         public Crash() {
@@ -114,25 +117,43 @@ public final class IndexBuilder {
                       boolean purgeFirst) {
         try {
             if (purgeFirst) {
-                Database db = ds.findDatabase(ns, dbName);
-                Catalog.IndexDef index = lookup(db, table, name);
-                if (index != null && !index.ready()) {
-                    Lock w = db.indexLock().writeLock();
-                    w.lock();
-                    try {
-                        ex.purgeIndexEntries(db, table, index);
-                    } finally {
-                        w.unlock();
-                    }
-                }
+                purge(ds, ex, ns, dbName, table, name);
             }
             scan(ds, ex, ns, dbName, table, name);
-            finish(ds, ex, ns, dbName, table, name);
+            while (!finish(ds, ex, ns, dbName, table, name)) {
+                // chegaram escritas no formato antigo (cluster com versões misturadas): refaz do zero
+                pause();
+                purge(ds, ex, ns, dbName, table, name);
+                scan(ds, ex, ns, dbName, table, name);
+            }
         } catch (Crash crash) {
             throw crash;
         } catch (RuntimeException e) {
             abort(ds, ex, ns, dbName, table, name, e);
             throw e;
+        }
+    }
+
+    private static void purge(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
+        Database db = ds.findDatabase(ns, dbName);
+        Catalog.IndexDef index = lookup(db, table, name);
+        if (index != null && !index.ready()) {
+            Lock w = db.indexLock().writeLock();
+            w.lock();
+            try {
+                ex.purgeForRebuild(db, table, index);
+            } finally {
+                w.unlock();
+            }
+        }
+    }
+
+    private static void pause() {
+        try {
+            Thread.sleep(RETRY_PAUSE_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw AxonError.internal(e.toString());
         }
     }
 
@@ -198,19 +219,23 @@ public final class IndexBuilder {
         }
     }
 
-    private static void finish(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
+    /** @return {@code false} quando a construção precisa ser refeita */
+    private static boolean finish(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
         Database db = ds.findDatabase(ns, dbName);
         if (db == null) {
-            return;
+            return true;
         }
         Lock w = db.indexLock().writeLock();
         w.lock();
         try {
             Catalog.IndexDef index = lookup(db, table, name);
             if (index != null && !index.ready()) {
-                ex.finishIndex(db, table, index);
+                if (!ex.finishIndex(db, table, index)) {
+                    return false;
+                }
                 index.markReady();
             }
+            return true;
         } finally {
             w.unlock();
         }

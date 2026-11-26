@@ -221,7 +221,9 @@ class OnlineIndexBuildTest {
             assertEquals(render(before.execute(probe, session(), null)),
                 render(after.execute(probe, session(), null)), probe);
         }
-        assertFalse(allKeys(after).keySet().stream().anyMatch(k -> k.startsWith("IXB|")), "marcador sobrou");
+        // o índice GEO mantém o marcador de propósito: o binário antigo o refaz depois de um downgrade
+        assertEquals(define.endsWith(" GEO"), allKeys(after).keySet().stream().anyMatch(k -> k.startsWith("IXB|")),
+            "marcador de construção");
     }
 
     @Test

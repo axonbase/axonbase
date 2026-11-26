@@ -31,35 +31,49 @@ final class H3Cells {
     private H3Cells() {
     }
 
-    /** Biblioteca nativa carregada na primeira vez que é usada. */
-    private static final class Holder {
-        private static final H3Core CORE = load();
-        private static final double[] REACH = reach(CORE);
-        private static final List<Long> BASE = List.copyOf(CORE.getRes0Cells());
+    /** O que só existe depois de carregar a biblioteca nativa. */
+    private record Loaded(H3Core core, double[] reach, List<Long> baseCells) {
+    }
 
-        private static H3Core load() {
-            try {
-                return H3Core.newInstance();
-            } catch (IOException | UnsatisfiedLinkError e) {
-                throw AxonError.internal(Messages.get("geo_h3_unavailable", e.getMessage()));
+    private static volatile Loaded loaded;
+
+    /**
+     * Carrega na primeira vez que é usada. A falha vira um erro claro e é tentada de novo na chamada seguinte (um
+     * inicializador estático esconderia a causa).
+     */
+    private static Loaded h3() {
+        Loaded now = loaded;
+        if (now == null) {
+            synchronized (H3Cells.class) {
+                if (loaded == null) {
+                    loaded = load();
+                }
+                now = loaded;
             }
         }
+        return now;
+    }
 
-        private static double[] reach(H3Core core) {
-            double[] out = new double[16];
-            for (int r = 0; r < out.length; r++) {
-                out[r] = REACH_FACTOR * core.getHexagonEdgeLengthAvg(r, LengthUnit.m);
-            }
-            return out;
+    private static Loaded load() {
+        H3Core core;
+        try {
+            core = H3Core.newInstance();
+        } catch (IOException | UnsatisfiedLinkError e) {
+            throw AxonError.internal(Messages.get("geo_h3_unavailable", e.getMessage()));
         }
+        double[] reach = new double[16];
+        for (int r = 0; r < reach.length; r++) {
+            reach[r] = REACH_FACTOR * core.getHexagonEdgeLengthAvg(r, LengthUnit.m);
+        }
+        return new Loaded(core, reach, List.copyOf(core.getRes0Cells()));
     }
 
     static H3Core core() {
-        return Holder.CORE;
+        return h3().core();
     }
 
     static List<Long> baseCells() {
-        return Holder.BASE;
+        return h3().baseCells();
     }
 
     static List<Long> children(long cell) {
@@ -110,6 +124,6 @@ final class H3Cells {
 
     /** Distância máxima, em metros, do centro de uma célula desta resolução a qualquer ponto indexado sob ela. */
     static double reachMeters(int resolution) {
-        return Holder.REACH[resolution];
+        return h3().reach()[resolution];
     }
 }
