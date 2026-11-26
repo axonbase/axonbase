@@ -89,6 +89,26 @@ class RaftLegacyLeaderTest {
     }
 
     @Test
+    @DisplayName("líder antigo que guarda a entrada com outro termo também progride")
+    void leaderThatTaggedTheEntryDifferentlyMakesProgress() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            assertTrue(append(follower, 1, 1, 0, 0, batch("a")).accepted());
+            // Este seguidor tem a entrada 2 com o termo verdadeiro (1); o líder antigo a recebeu num reenvio do
+            // mandato 2 e a guarda com esse termo.
+            assertTrue(append(follower, 1, 2, 1, 1, batch("b")).accepted());
+
+            boolean done = replicate(follower, 3, List.of(1L, 2L, 3L),
+                List.of(batch("a"), batch("b"), batch("c")), 3, 1);
+
+            assertTrue(done, "o líder antigo ficou em laço: último índice do seguidor " + follower.lastIndex());
+            heartbeat(follower, 3, 3);
+            assertEquals(3, follower.commitIndex());
+            assertEquals(2, follower.lastTermAt(2), "o log precisa espelhar o do líder");
+            assertTrue(follower.stateMachine().get("c").isPresent());
+        }
+    }
+
+    @Test
     @DisplayName("entrada gravada por outro mandato continua sendo recusada quando o termo não confere")
     void entryFromAnotherLeaderIsStillRejected() throws Exception {
         try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
