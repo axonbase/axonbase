@@ -1,6 +1,7 @@
 package com.axonbase.server;
 
 import com.axonbase.core.Session;
+import com.axonbase.core.cluster.ClockHooks;
 import com.axonbase.core.cluster.ClusterConfig;
 import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.cluster.ClusterRuntime;
@@ -190,6 +191,8 @@ public final class RaftGateNode {
                 new InetSocketAddress(advertise, RAFT_PORT + offset), peers, role.equals("learner"));
             cluster = new ClusterRuntime(config, run.resolve("raft"), backend,
                 RaftOptions.defaults().withSync(mode).withAllowedLearners(learners));
+            // como o servidor de verdade: os portões medem a replicação com o carimbo de tempo ligado
+            cluster.hooks(new ClockHooks(backend.clock()));
             cluster.appliedBatchListener(datastore.appliedBatchListener());
             datastore.commitCoordinator(cluster, id);
         }

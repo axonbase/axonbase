@@ -1,6 +1,7 @@
 package com.axonbase.server;
 
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.hlc.HybridClock;
 import com.axonbase.core.journal.PitrJournal;
 import com.axonbase.common.Messages;
 import com.axonbase.core.storage.KvBackend;
@@ -8,6 +9,7 @@ import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.core.storage.WalBackend;
 import com.axonbase.core.storage.VersionedKvBackend;
+import com.axonbase.core.cluster.ClockHooks;
 import com.axonbase.core.cluster.ClusterConfig;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.TcpRaftCommitCoordinator;
@@ -153,6 +155,8 @@ public final class Main {
             }
             cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
                 (VersionedKvBackend) backend);
+            // logo depois de construir: o relógio precisa ver a cauda do log antes de carimbar qualquer lote
+            cluster.hooks(new ClockHooks(clockFor(backend)));
         }
         if (cluster != null) {
             cluster.appliedBatchListener(ds.appliedBatchListener());
@@ -211,6 +215,11 @@ public final class Main {
         }
         // quem fecha é o desligamento do servidor, depois de atender as requisições em curso
         return PitrJournal.attach(rocks, settings.directoryFor(rocks), settings.options());
+    }
+
+    /** O relógio do armazenamento já guarda em disco um teto do que emite; sem RocksDB, o do sistema basta. */
+    static HybridClock clockFor(KvBackend backend) {
+        return backend instanceof RocksDbBackend rocks ? rocks.clock() : HybridClock.system();
     }
 
     private static String envOr(String key, String def) {
