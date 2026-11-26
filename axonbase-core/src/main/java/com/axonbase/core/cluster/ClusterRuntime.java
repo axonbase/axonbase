@@ -43,6 +43,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvider, CommitCoordinator {
 
     private static final long TICK_MILLIS = 25;
+    /** Atraso do relógio interno que já alcança o menor prazo de eleição. */
+    private static final long STALL_WARNING_MILLIS = 300;
     /** Um peer conta como ativo no status se respondeu dentro desta janela. */
     private static final long LIVENESS_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
     /** Sem resposta da maioria por este tempo, uma escrita nova é recusada e a pendente desiste. */
@@ -89,7 +91,11 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     private volatile ClusterRole role;
     private volatile String leader = "";
     private volatile long lastContact = System.nanoTime();
+    /** Mandato do último líder cujas requisições este nó aceitou; 0 antes do primeiro. */
+    private volatile long followedTerm;
     private volatile long electionTimeoutMillis;
+    /** Último giro do relógio interno: um giro atrasado é sinal de pausa da máquina virtual ou de falta de CPU. */
+    private long lastTickNanos = System.nanoTime();
     private volatile boolean closed;
     /** Mandato em que este nó lidera; 0 fora dele. */
     private volatile long leaderTerm;
@@ -139,9 +145,16 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             public List<RaftWire.Response> handleAll(List<RaftWire.Request> requests) {
                 return ClusterRuntime.this.handleAll(requests);
             }
+
+            @Override
+            public void arrived(RaftWire.Request request) {
+                ClusterRuntime.this.arrived(request);
+            }
         });
         this.applier = daemon("raft-apply").newThread(this::applyLoop);
         applier.start();
+        // a recuperação do log não é atraso do relógio
+        lastTickNanos = System.nanoTime();
         scheduler.scheduleWithFixedDelay(this::tick, TICK_MILLIS, TICK_MILLIS, TimeUnit.MILLISECONDS);
         if (options.sync() == SyncMode.BATCH) {
             scheduler.scheduleWithFixedDelay(this::syncLog, BATCH_SYNC_MILLIS, BATCH_SYNC_MILLIS,
@@ -228,6 +241,19 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         return type == RaftWire.APPEND || type == RaftWire.APPEND_STREAM || type == RaftWire.SNAPSHOT;
     }
 
+    /**
+     * Uma requisição do líder já seguido conta como contato assim que chega: o servidor junta várias antes de
+     * atender, e esse tempo não é silêncio do líder. Sem travas, para não esperar o disco.
+     */
+    private void arrived(RaftWire.Request request) {
+        long followed = followedTerm;
+        if (followed != 0 && request.term() == followed && node.currentTerm() == followed
+            && role != ClusterRole.LEADER && isReplication(request.type())
+            && config.clusterId().equals(request.group())) {
+            lastContact = System.nanoTime();
+        }
+    }
+
     private void acceptLeader(RaftWire.Request request) {
         synchronized (stateLock) {
             if (role == ClusterRole.LEADER) {
@@ -238,6 +264,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             }
             role = config.learner() ? ClusterRole.LEARNER : ClusterRole.FOLLOWER;
             leader = request.leaderOrCandidate();
+            followedTerm = request.term();
             lastContact = System.nanoTime();
         }
         // O líder anuncia o próprio endereço: sem isto o seguidor sabe redirecionar
@@ -260,6 +287,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     private void tick() {
         try {
             long now = System.nanoTime();
+            warnIfStalled(now);
             if (role == ClusterRole.LEADER) {
                 expireLearners(now);
             } else if (role == ClusterRole.LEARNER) {
@@ -286,6 +314,16 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         }
     }
 
+    private void warnIfStalled(long now) {
+        long late = TimeUnit.NANOSECONDS.toMillis(now - lastTickNanos) - TICK_MILLIS;
+        lastTickNanos = now;
+        if (late >= STALL_WARNING_MILLIS) {
+            System.getLogger(ClusterRuntime.class.getName()).log(System.Logger.Level.WARNING,
+                "nó " + config.nodeId() + ": relógio interno atrasado em " + late
+                    + " ms (pausa da máquina virtual ou falta de CPU)");
+        }
+    }
+
     private void syncLog() {
         try {
             node.periodicSync();
@@ -300,11 +338,13 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         long term;
         long lastIndex;
         long lastTerm;
+        long silent;
         synchronized (stateLock) {
             if (closed || role == ClusterRole.LEADER || role == ClusterRole.LEARNER || node.diskFailed()) {
                 return;
             }
             electionsStarted.incrementAndGet();
+            silent = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastContact);
             role = ClusterRole.CANDIDATE;
             leader = "";
             electionTimeoutMillis = nextElectionTimeout();
@@ -313,6 +353,9 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             lastIndex = node.lastIndex();
             lastTerm = node.lastTerm();
         }
+        System.getLogger(ClusterRuntime.class.getName()).log(System.Logger.Level.INFO,
+            "nó " + config.nodeId() + " abre eleição no termo " + term + " depois de " + silent
+                + " ms sem notícia do líder");
         List<InetSocketAddress> voters = List.copyOf(peers);
         int needed = (voters.size() + 1) / 2 + 1;
         List<InetSocketAddress> granted = new ArrayList<>();
@@ -476,6 +519,14 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 }
                 if (from.voter() && from.matchIndex() > commit) {
                     advanceCommit();
+                }
+            }
+
+            @Override
+            public void heartbeatAnswered() {
+                // Só acorda quem espera confirmação de liderança: avançar o commit leria o log, que pode estar preso.
+                synchronized (ackSignal) {
+                    ackSignal.notifyAll();
                 }
             }
 
