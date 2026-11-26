@@ -903,6 +903,11 @@ public final class Datastore {
         return result;
     }
 
+    /** A parte deste nó numa consulta espalhada entre shards (veja {@link ShardPartial}). */
+    public AxonValue executePartial(Statement.Select select, Session session, Map<String, AxonValue> vars) {
+        return new Executor(this).executePartial(select, session, vars);
+    }
+
     /** Tentativas de um comando avulso no cluster quando outro confirma antes sobre as mesmas chaves. */
     private static final int AUTOCOMMIT_ATTEMPTS = 100;
 

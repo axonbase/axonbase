@@ -71,6 +71,11 @@ final class GatewayContext {
     }
 
     AxonValue evaluate(Expr expr, GatewaySession session) {
+        return new Executor(scratch).evaluate(expr, scope(session));
+    }
+
+    /** Uma sessão local com o banco e as variáveis do cliente, para avaliar expressões no gateway. */
+    Session scope(GatewaySession session) {
         Session scope = Session.create();
         if (session.namespace() != null) {
             scope.namespace(session.namespace());
@@ -79,6 +84,6 @@ final class GatewayContext {
             scope.database(session.database());
         }
         session.vars().forEach(scope.vars()::set);
-        return new Executor(scratch).evaluate(expr, scope);
+        return scope;
     }
 }

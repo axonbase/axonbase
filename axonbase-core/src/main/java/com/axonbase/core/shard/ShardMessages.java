@@ -144,9 +144,9 @@ final class ShardMessages {
         entry("txn_multi_shard",
             "o bloco BEGIN precisa cair num shard só; entre shards use uma saga",
             "a BEGIN block must reach a single shard; use a saga across shards"),
-        entry("scatter_unsupported",
-            "%s: consulta em vários shards ainda não suportada",
-            "%s: cross-shard queries not supported yet"));
+        entry("partial_select",
+            "o modo parcial aceita exatamente um SELECT",
+            "partial mode takes exactly one SELECT"));
 
     private ShardMessages() {
     }

@@ -1,5 +1,6 @@
 package com.axonbase.core.shard;
 
+import com.axonbase.core.engine.ShardPartial;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonValue;
@@ -121,8 +122,20 @@ final class ReadPlanner {
         GatewayRules.requireHomeOnly(map, session, select);
     }
 
+    /**
+     * A consulta vai inteira a cada shard, que a executa em modo parcial; o gateway funde as partes. Durante uma
+     * movimentação, a origem e o destino recebem também os slots que lhes pertencem.
+     */
     private Plan scatter(ShardMap map, GatewaySession session, ScriptStatements.Piece piece,
                          Statement.Select select, Route route) {
-        throw ShardException.refused("scatter_unsupported", route.table());
+        List<Plan.Part> parts = new ArrayList<>(route.shards().size());
+        for (String shard : route.shards()) {
+            boolean moving = map.migration()
+                .map(m -> m.source().equals(shard) || m.target().equals(shard)).orElse(false);
+            SlotFilter filter = moving ? new SlotFilter(route.table(), route.field(), map.slotsOf(shard)) : null;
+            parts.add(new Plan.Part(shard, piece.text(), Map.of(), true, filter));
+        }
+        return new Plan(parts,
+            replies -> ShardPartial.merge(context.scratch, select, context.scope(session), replies), false);
     }
 }

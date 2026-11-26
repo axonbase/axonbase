@@ -52,7 +52,9 @@ final class GroupAggregation {
     }
 
     private static final class Group {
-        final Document representative;
+        Document representative;
+        /** Chave do primeiro registro, quando o grupo veio de outro shard. */
+        String origin;
         final State[] states;
 
         Group(Document representative, List<Spec> specs) {
@@ -186,6 +188,56 @@ final class GroupAggregation {
         }
     }
 
+    /** Os grupos com o primeiro documento e os acumuladores, para o gateway fundir (consulta entre shards). */
+    AxonValue exportPartial() {
+        List<AxonValue> out = new ArrayList<>(groups.size());
+        for (Map.Entry<String, Group> e : groups.entrySet()) {
+            Group group = e.getValue();
+            Map<String, AxonValue> item = new LinkedHashMap<>();
+            item.put("key", AxonValue.str(e.getKey()));
+            item.put("at", AxonValue.str(group.representative.id().key().keyString()));
+            item.put("table", AxonValue.str(group.representative.id().table()));
+            item.put("row", group.representative.current());
+            item.put("states", AxonValue.array(java.util.Arrays.stream(group.states).map(State::export).toList()));
+            out.add(AxonValue.object(item));
+        }
+        return AxonValue.array(out);
+    }
+
+    /** Funde os grupos exportados por um shard. O documento do grupo é o de menor chave entre todos os shards. */
+    void absorbPartial(AxonValue exported) {
+        for (AxonValue value : exported.asArray()) {
+            Map<String, AxonValue> item = value.asObject();
+            String key = item.get("key").asString();
+            String at = item.get("at").asString();
+            Document representative = new Document(
+                new RecordId(item.get("table").asString(), AxonValue.str(at)), item.get("row"));
+            Group group = groups.get(key);
+            if (group == null) {
+                group = new Group(representative, specs);
+                group.origin = at;
+                groups.put(key, group);
+            } else if (at.compareTo(group.origin) < 0) {
+                group.representative = representative;
+                group.origin = at;
+            }
+            List<AxonValue> states = item.get("states").asArray();
+            for (int i = 0; i < group.states.length; i++) {
+                group.states[i].absorb(states.get(i));
+            }
+        }
+    }
+
+    /** Põe os grupos fundidos na ordem de chegada de um nó só: a da chave do primeiro registro de cada um. */
+    void orderByOrigin() {
+        List<Map.Entry<String, Group>> ordered = new ArrayList<>(groups.entrySet());
+        ordered.sort(Comparator.comparing((Map.Entry<String, Group> e) -> e.getValue().origin));
+        Map<String, Group> next = new LinkedHashMap<>();
+        ordered.forEach(e -> next.put(e.getKey(), e.getValue()));
+        groups.clear();
+        groups.putAll(next);
+    }
+
     private String groupKey(Document doc) {
         if (groupExprs.isEmpty()) {
             return "";
@@ -286,6 +338,12 @@ final class GroupAggregation {
         /** Soma o acumulador de outro lote (mesmo tipo) a este. */
         void merge(State other);
 
+        /** O acumulador como valor, para atravessar a rede. */
+        AxonValue export();
+
+        /** Soma um acumulador exportado (mesmo tipo) a este. */
+        void absorb(AxonValue exported);
+
         AxonValue result();
 
         static State of(String name) {
@@ -315,6 +373,16 @@ final class GroupAggregation {
         }
 
         @Override
+        public AxonValue export() {
+            return AxonValue.num(n);
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            n += exported.asLong();
+        }
+
+        @Override
         public AxonValue result() {
             return AxonValue.num(n);
         }
@@ -337,6 +405,16 @@ final class GroupAggregation {
         }
 
         @Override
+        public AxonValue export() {
+            return AxonValue.array(seen.stream().map(AxonValue::str).toList());
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            exported.asArray().forEach(item -> seen.add(item.asString()));
+        }
+
+        @Override
         public AxonValue result() {
             return AxonValue.num(seen.size());
         }
@@ -353,6 +431,16 @@ final class GroupAggregation {
         @Override
         public void merge(State other) {
             sum.merge(((Sum) other).sum);
+        }
+
+        @Override
+        public AxonValue export() {
+            return sum.result();
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            sum.add(exported);
         }
 
         @Override
@@ -377,6 +465,20 @@ final class GroupAggregation {
         public void merge(State other) {
             sum = sum.add(((Avg) other).sum);
             count += ((Avg) other).count;
+        }
+
+        @Override
+        public AxonValue export() {
+            Map<String, AxonValue> out = new LinkedHashMap<>();
+            out.put("sum", AxonValue.num(sum));
+            out.put("count", AxonValue.num(count));
+            return AxonValue.object(out);
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            sum = sum.add(exported.asObject().get("sum").asDecimal());
+            count += exported.asObject().get("count").asLong();
         }
 
         @Override
@@ -407,6 +509,16 @@ final class GroupAggregation {
         @Override
         public void merge(State other) {
             add(((Extreme) other).best);
+        }
+
+        @Override
+        public AxonValue export() {
+            return AxonValue.array(best == null ? List.of() : List.of(best));
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            exported.asArray().forEach(this::add);
         }
 
         @Override

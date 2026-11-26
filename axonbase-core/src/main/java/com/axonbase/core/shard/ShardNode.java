@@ -6,9 +6,13 @@ import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.ReadConsistency;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HybridClock;
+import com.axonbase.parser.AxonQl;
+import com.axonbase.parser.ast.Expr;
+import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonValue;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 
 /**
  * Executa as mensagens do gateway num nó de shard. Só o líder atende, e leituras são linearizáveis, então o gateway lê
@@ -56,7 +60,29 @@ public final class ShardNode implements ShardMember {
     }
 
     private AxonValue run(ShardRequest request, Session session) {
+        if (request.partial()) {
+            return datastore.executePartial(select(request), session, new LinkedHashMap<>(request.vars()));
+        }
         return datastore.execute(request.sql(), session, new LinkedHashMap<>(request.vars()));
+    }
+
+    /** O SELECT de uma requisição parcial, restrito aos slots do shard quando há uma movimentação. */
+    private static Statement.Select select(ShardRequest request) {
+        List<Statement> statements = AxonQl.parse(request.sql()).statements();
+        if (statements.size() != 1 || !(statements.get(0) instanceof Statement.Select select)) {
+            throw ShardException.refused("partial_select");
+        }
+        SlotFilter filter = request.filter();
+        if (filter == null) {
+            return select;
+        }
+        Expr owned = new Expr.Call("shard::owned", List.of(new Expr.Ident(filter.field()),
+            new Expr.Literal(AxonValue.str(filter.table())), new Expr.Literal(AxonValue.str(filter.field())),
+            new Expr.Literal(AxonValue.str(SlotRange.format(filter.ranges())))));
+        Expr condition = select.cond() == null ? owned : new Expr.Binary(Expr.BinaryOp.AND, select.cond(), owned);
+        return new Statement.Select(select.fields(), select.valueOnly(), select.only(), select.from(), condition,
+            select.orders(), select.group(), select.limit(), select.start(), select.fetch(), select.joins(),
+            select.timeTravel(), select.having(), select.groupAll());
     }
 
     /**
