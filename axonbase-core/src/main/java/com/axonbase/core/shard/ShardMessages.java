@@ -8,7 +8,7 @@ import java.util.Map;
  * Mensagens do roteamento entre shards, nos dois idiomas do {@link Messages}. Ficam aqui para o pacote não crescer o
  * catálogo comum; o idioma é o mesmo dele.
  */
-final class ShardMessages {
+public final class ShardMessages {
 
     private static final Map<String, String[]> TEXTS = Map.ofEntries(
         entry("shard_key_missing", "chave de shard ausente", "missing shard key"),
@@ -148,6 +148,14 @@ final class ShardMessages {
         entry("move_verification",
             "a cópia de %s não confere: %s registros na origem e %s no destino",
             "the copy of %s does not match: %s records on the source and %s on the target"),
+        entry("backup_no_leader", "o shard %s não tem líder para a barreira", "shard %s has no leader for the barrier"),
+        entry("backup_lagging", "o nó %s não alcançou o índice %s a tempo", "node %s did not reach index %s in time"),
+        entry("backup_map_changed", "o mapa dos shards mudou durante o backup: repita",
+            "the shard map changed during the backup: retry"),
+        entry("backup_no_journal", "o nó %s não arquiva o journal: ligue AXON_PITR no shard",
+            "node %s is not archiving the journal: enable AXON_PITR on the shard"),
+        entry("backup_no_member", "nenhum nó do shard %s atendeu o backup: %s",
+            "no node of shard %s served the backup: %s"),
         entry("partial_select",
             "o modo parcial aceita exatamente um SELECT",
             "partial mode takes exactly one SELECT"));
@@ -159,7 +167,7 @@ final class ShardMessages {
         return Map.entry(key, new String[] {portuguese, english});
     }
 
-    static String get(String key, Object... args) {
+    public static String get(String key, Object... args) {
         String[] texts = TEXTS.get(key);
         if (texts == null) {
             return key;

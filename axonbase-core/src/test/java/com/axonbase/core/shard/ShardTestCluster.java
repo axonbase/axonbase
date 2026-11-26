@@ -7,6 +7,10 @@ import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.RaftOptions;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HybridClock;
+import com.axonbase.core.journal.JournalOptions;
+import com.axonbase.core.shard.backup.BackupMember;
+import com.axonbase.core.shard.backup.ShardBackupNode;
+import com.axonbase.core.shard.backup.ShardJournalHooks;
 import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.core.storage.VersionedKvBackend;
@@ -29,13 +33,17 @@ import java.util.function.BooleanSupplier;
  * Vários grupos Raft reais, sobre TCP (Transmission Control Protocol), no mesmo processo: o "conjunto de shards" dos
  * testes. Cada nó tem o próprio armazenamento, relógio, runtime de consenso e datastore.
  */
-final class ShardTestCluster implements AutoCloseable {
+public final class ShardTestCluster implements AutoCloseable {
 
     private static final Set<Integer> HANDED_OUT = ConcurrentHashMap.newKeySet();
 
-    /** Um nó de pé. */
-    record Node(String shard, String id, VersionedKvBackend backend, HybridClock clock, ClusterRuntime runtime,
-                Datastore datastore, ShardNode endpoint) {
+    /**
+     * Um nó de pé.
+     *
+     * @param journal o journal de PITR do nó, só com armazenamento em disco
+     */
+    public record Node(String shard, String id, VersionedKvBackend backend, HybridClock clock, ClusterRuntime runtime,
+                       Datastore datastore, ShardNode endpoint, ShardJournalHooks journal) {
     }
 
     private final Path root;
@@ -57,8 +65,45 @@ final class ShardTestCluster implements AutoCloseable {
     }
 
     /** Como {@link #memory}, com RocksDB em disco (backup físico e journal). */
-    static ShardTestCluster rocks(Path root, int shards, int members) {
+    public static ShardTestCluster rocks(Path root, int shards, int members) {
         return new ShardTestCluster(root, true, members).start(shards);
+    }
+
+    /**
+     * Um conjunto novo sobre bases já preparadas (uma por shard): cada membro recebe a própria cópia e começa com o
+     * diretório do Raft vazio, como na restauração de um cluster.
+     */
+    public static ShardTestCluster restored(Path root, Map<String, Path> data, int members) {
+        ShardTestCluster cluster = new ShardTestCluster(root, true, members);
+        data.forEach((shard, source) -> {
+            for (int m = 0; m < members; m++) {
+                copy(source, cluster.dir(shard, shard + "-n" + m).resolve("db"));
+            }
+            cluster.addShard(shard);
+        });
+        return cluster;
+    }
+
+    private static void copy(Path source, Path target) {
+        try (java.util.stream.Stream<Path> files = java.nio.file.Files.walk(source)) {
+            for (Path file : files.toList()) {
+                Path destination = target.resolve(source.relativize(file));
+                if (java.nio.file.Files.isDirectory(file)) {
+                    java.nio.file.Files.createDirectories(destination);
+                } else {
+                    java.nio.file.Files.copy(file, destination);
+                }
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** Os membros de um shard para o coordenador do backup. */
+    public List<BackupMember> backupMembers(String shard) {
+        return nodes(shard).stream().map(node -> (BackupMember) new ShardBackupNode(node.runtime(),
+            (RocksDbBackend) node.backend(), node.journal(), dir(shard, node.id()).resolve("backups"),
+            java.time.Duration.ofSeconds(30))).toList();
     }
 
     private ShardTestCluster start(int shards) {
@@ -113,12 +158,14 @@ final class ShardTestCluster implements AutoCloseable {
             ClusterRuntime runtime = new ClusterRuntime(
                 new ClusterConfig(id, shard, address(id), peers), dir(shard, id).resolve("raft"), backend,
                 RaftOptions.defaults().withAllowedLearners(List.of("*")));
-            runtime.hooks(new ClockHooks(clock));
+            ShardJournalHooks journal = backend instanceof RocksDbBackend
+                ? ShardJournalHooks.open(clock, dir(shard, id).resolve("journal"), JournalOptions.defaults()) : null;
+            runtime.hooks(journal != null ? journal : new ClockHooks(clock));
             Datastore datastore = new Datastore(backend);
             runtime.appliedBatchListener(datastore.appliedBatchListener());
             datastore.commitCoordinator(runtime, id);
             Node node = new Node(shard, id, backend, clock, runtime, datastore,
-                new ShardNode(datastore, runtime, clock));
+                new ShardNode(datastore, runtime, clock), journal);
             synchronized (groups) {
                 groups.get(shard).put(id, node);
             }
@@ -135,7 +182,7 @@ final class ShardTestCluster implements AutoCloseable {
         return List.copyOf(shardIds);
     }
 
-    List<ShardInfo> shardInfos() {
+    public List<ShardInfo> shardInfos() {
         return shardIds.stream().map(id -> new ShardInfo(id, List.of())).toList();
     }
 
@@ -146,7 +193,7 @@ final class ShardTestCluster implements AutoCloseable {
     }
 
     /** O cliente de um shard: enxerga os membros de pé a cada chamada. */
-    ShardClient client(String shard) {
+    public ShardClient client(String shard) {
         return new GroupShardClient(shard, () -> nodes(shard).stream().map(Node::endpoint).map(ShardMember.class::cast)
             .toList(), java.time.Duration.ofSeconds(30));
     }
@@ -157,7 +204,7 @@ final class ShardTestCluster implements AutoCloseable {
         return out;
     }
 
-    Node awaitLeader(String shard) {
+    public Node awaitLeader(String shard) {
         Node[] found = new Node[1];
         await("shard " + shard + " sem líder", () -> {
             for (Node node : nodes(shard)) {
@@ -172,7 +219,7 @@ final class ShardTestCluster implements AutoCloseable {
     }
 
     /** Derruba um nó (o armazenamento em memória se perde). */
-    void stop(String shard, String id) {
+    public void stop(String shard, String id) {
         Node node;
         synchronized (groups) {
             node = groups.get(shard).remove(id);
@@ -185,6 +232,9 @@ final class ShardTestCluster implements AutoCloseable {
     private static void close(Node node) {
         try {
             node.runtime().close();
+            if (node.journal() != null) {
+                node.journal().close();
+            }
             if (node.backend() instanceof RocksDbBackend disk) {
                 disk.close();
             }
@@ -193,7 +243,7 @@ final class ShardTestCluster implements AutoCloseable {
         }
     }
 
-    static void await(String message, BooleanSupplier condition) {
+    public static void await(String message, BooleanSupplier condition) {
         long deadline = System.nanoTime() + 30_000_000_000L;
         while (!condition.getAsBoolean()) {
             if (System.nanoTime() > deadline) {
