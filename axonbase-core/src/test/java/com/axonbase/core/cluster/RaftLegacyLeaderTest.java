@@ -108,6 +108,43 @@ class RaftLegacyLeaderTest {
         }
     }
 
+    /** O snapshot da 0.10.1: o estado aplicado, com o índice do fim do log do líder. */
+    private static RaftWire.Response snapshot(RaftNode follower, long index, Map<String, byte[]> state) {
+        return follower.handle(new RaftWire.Request(RaftWire.SNAPSHOT, "g", 3, "antigo", index, 2,
+            RaftPayload.encode(new CommittedBatch("snapshot-" + index, state, Set.of(), true))));
+    }
+
+    @Test
+    @DisplayName("snapshot antigo que não traz tudo até o índice dele não passa por cima de um nó com dados")
+    void legacySnapshotCannotSkipEntries() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            assertTrue(append(follower, 3, 1, 0, 0, batch("a")).accepted());
+            assertTrue(append(follower, 3, 2, 3, 1, batch("b")).accepted());
+            Map<String, byte[]> applied = Map.of("a", "a".getBytes(StandardCharsets.UTF_8));
+            Map<String, byte[]> staleMarker = Map.of("a", "a".getBytes(StandardCharsets.UTF_8),
+                RaftApplier.APPLIED_KEY, RaftApplier.marker(1, 1));
+
+            assertFalse(snapshot(follower, 4, applied).accepted());
+            assertFalse(snapshot(follower, 4, staleMarker).accepted());
+            assertEquals(1, follower.commitIndex());
+
+            assertTrue(append(follower, 3, 3, 3, 2, batch("c")).accepted());
+            assertTrue(append(follower, 3, 4, 3, 2, batch("d")).accepted());
+            heartbeat(follower, 3, 4);
+            assertTrue(follower.stateMachine().get("c").isPresent());
+            assertTrue(follower.stateMachine().get("d").isPresent());
+        }
+    }
+
+    @Test
+    @DisplayName("um nó vazio ainda aceita o snapshot antigo, sem o qual não entraria")
+    void emptyNodeAcceptsLegacySnapshot() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            assertTrue(snapshot(follower, 4, Map.of("a", "a".getBytes(StandardCharsets.UTF_8))).accepted());
+            assertEquals(4, follower.commitIndex());
+        }
+    }
+
     @Test
     @DisplayName("entrada que o líder antigo reescreveu no mesmo mandato é trocada")
     void rewrittenEntryReplacesTheStoredOne() throws Exception {
