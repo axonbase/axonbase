@@ -206,5 +206,9 @@ class DrainHttpTest {
             "/admin/v1/cluster/upgrade-check?target=0.10.0&members=n1=0.10.1,n2=0.10.1", null);
         assertEquals(200, check.statusCode(), check.body());
         assertEquals(false, json(check).get("allowed").asBool());
+        HttpResponse<String> fromOldLine = send(first, "GET",
+            "/admin/v1/cluster/upgrade-check?target=1.0.0&members=n1=0.10.1,n2=0.10.1", null);
+        assertEquals(false, json(fromOldLine).get("allowed").asBool(), fromOldLine.body());
+        assertTrue(fromOldLine.body().contains("pare os três nós"), fromOldLine.body());
     }
 }
