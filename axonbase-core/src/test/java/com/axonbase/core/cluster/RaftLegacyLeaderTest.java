@@ -71,7 +71,7 @@ class RaftLegacyLeaderTest {
             assertEquals(3, follower.commitIndex());
             assertTrue(follower.stateMachine().get("b").isPresent());
             assertTrue(follower.stateMachine().get("c").isPresent());
-            assertEquals(2, follower.lastTermAt(2), "a entrada 2 precisa ficar com o termo verdadeiro");
+            assertEquals(3, follower.lastTermAt(2), "o termo gravado nunca pode ser rebaixado");
         }
     }
 
@@ -103,8 +103,24 @@ class RaftLegacyLeaderTest {
             assertTrue(done, "o líder antigo ficou em laço: último índice do seguidor " + follower.lastIndex());
             heartbeat(follower, 3, 3);
             assertEquals(3, follower.commitIndex());
-            assertEquals(2, follower.lastTermAt(2), "o log precisa espelhar o do líder");
+            assertEquals(3, follower.lastTermAt(2), "o termo gravado nunca pode ser rebaixado");
             assertTrue(follower.stateMachine().get("c").isPresent());
+        }
+    }
+
+    @Test
+    @DisplayName("entrada que o líder antigo reescreveu no mesmo mandato é trocada")
+    void rewrittenEntryReplacesTheStoredOne() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            assertTrue(append(follower, 3, 1, 0, 0, batch("a")).accepted());
+            assertTrue(append(follower, 3, 2, 3, 1, batch("sem-quorum")).accepted());
+
+            // o líder apagou a escrita que não confirmou e gravou outra no mesmo índice
+            assertTrue(append(follower, 3, 2, 3, 1, batch("confirmada")).accepted());
+
+            heartbeat(follower, 3, 2);
+            assertTrue(follower.stateMachine().get("confirmada").isPresent());
+            assertTrue(follower.stateMachine().get("sem-quorum").isEmpty());
         }
     }
 

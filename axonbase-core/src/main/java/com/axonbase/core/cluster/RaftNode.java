@@ -50,8 +50,6 @@ public final class RaftNode implements AutoCloseable {
     /** Só usado sob {@code notifyLock}. */
     private final ArrayDeque<AppliedBatchListener.AppliedBatch> pending = new ArrayDeque<>();
     private volatile AppliedBatchListener listener = AppliedBatchListener.none();
-    /** Só sob o monitor do nó. */
-    private final LegacyAppendRepair legacyRepair = new LegacyAppendRepair();
     private volatile ReplicationHooks hooks = ReplicationHooks.NONE;
     private volatile LongSupplier retentionFloor = () -> Long.MAX_VALUE;
     private volatile boolean learner;
@@ -364,14 +362,14 @@ public final class RaftNode implements AutoCloseable {
         }
         long previous = append.previousIndex();
         if (previous != 0 && previous > applied && log.termAt(previous) != append.previousTerm()
-            && !legacyRepair.retag(log, groupSync, previous, append.previousTerm(), request.term())) {
+            && !storedFromThisLeader(previous, append.previousTerm(), request.term())) {
             return Received.rejected();
         }
         long index = request.index();
         if (index > applied) {
-            if (index <= log.lastIndex() && log.termAt(index) != request.term()
-                && !legacyRepair.alreadyStored(log, index, append.batch())) {
-                legacyRepair.forgetFrom(index);
+            // O líder antigo apaga uma escrita sem quórum e grava outra no mesmo índice e mandato: vale o conteúdo.
+            if (index <= log.lastIndex()
+                && (log.termAt(index) != request.term() || !sameContent(index, append.batch()))) {
                 truncate(index);
             }
             if (index > log.lastIndex()) {
@@ -385,10 +383,35 @@ public final class RaftNode implements AutoCloseable {
                 log.append(new FileRaftLog.Entry(index, request.term(), append.batch()));
             }
         }
-        // Só se aplica até a entrada que este pedido conferiu: o que vem depois dela ainda não foi comparado.
-        long checked = Math.min(index, log.lastIndex());
-        legacyRepair.delivered(checked, request.term());
-        return new Received(true, -1, checked, Math.min(request.commitIndex(), checked));
+        return new Received(true, -1, Math.min(index, log.lastIndex()),
+            Math.min(request.commitIndex(), log.lastIndex()));
+    }
+
+    /**
+     * O protocolo antigo grava cada entrada com o termo do pedido. Uma entrada reenviada de um mandato anterior fica
+     * aqui com o termo do líder atual, e ele, na entrada seguinte, informa o termo verdadeiro: sem esta exceção a
+     * conferência falharia para sempre. Só um líder há por mandato, então uma entrada gravada com o termo dele veio
+     * dele; e ele nunca reescreve uma entrada de mandato anterior.
+     *
+     * <p>O termo gravado não muda: rebaixá-lo faria este nó parecer mais atrasado que os membros antigos e entregar
+     * a eleição a um deles com menos dados.</p>
+     */
+    private boolean storedFromThisLeader(long index, long claimed, long leaderTerm) {
+        return claimed < leaderTerm && index <= log.lastIndex() && log.termAt(index) == leaderTerm;
+    }
+
+    /** O lote no índice é o mesmo do pedido, sem olhar o carimbo, que um nó antigo no caminho não repassa. */
+    private boolean sameContent(long index, CommittedBatch incoming) {
+        FileRaftLog.Entry stored = log.entry(index);
+        if (stored == null) {
+            return true;
+        }
+        CommittedBatch batch = stored.batch();
+        return batch.transactionId().equals(incoming.transactionId())
+            && batch.fullSnapshot() == incoming.fullSnapshot() && batch.deletes().equals(incoming.deletes())
+            && batch.puts().keySet().equals(incoming.puts().keySet())
+            && batch.puts().entrySet().stream()
+                .allMatch(put -> java.util.Arrays.equals(put.getValue(), incoming.puts().get(put.getKey())));
     }
 
     private Received snapshot(RaftWire.Request request) {
