@@ -3904,7 +3904,7 @@ return score;
      *     durante a varredura
      */
     boolean finishIndex(Database db, String table, Catalog.IndexDef index) {
-        if (index.geo() && geoIndex(db, table, index).hasLegacyEntries(records(db))) {
+        if (hasLegacyGeoEntries(db, table, index)) {
             return false;
         }
         inBatch(db, () -> {
@@ -3919,6 +3919,11 @@ return score;
             }
         });
         return true;
+    }
+
+    /** Há escrita de um binário antigo no índice GEO. */
+    boolean hasLegacyGeoEntries(Database db, String table, Catalog.IndexDef index) {
+        return index.geo() && geoIndex(db, table, index).hasLegacyEntries(records(db));
     }
 
     /** Desfaz uma construção que falhou: tira o índice do catálogo e do plano de controle e apaga suas entradas. */

@@ -44,7 +44,7 @@ Casos tratados de forma conservadora:
 | `SHV\|ns\|db\|tabela\|índice` | versão do formato, gravada quando a construção termina |
 | `IXB\|ns\|db\|tabela\|índice` | marcador de construção, mantido de propósito (ver downgrade) |
 
-- **Caminho hierárquico.** O identificador de 64 bits do H3 não serve de prefixo. A chave usa a célula base com três dígitos seguida de um dígito por resolução, até a resolução 12 (arestas de cerca de 10 metros). Assim o caminho de uma célula grande é prefixo do caminho de todas as células dentro dela.
+- **Caminho hierárquico.** O identificador de 64 bits do H3 não serve de prefixo. A chave usa a célula base com três dígitos seguida de um dígito por resolução, até a resolução 10 (arestas de cerca de 75 metros). Assim o caminho de uma célula grande é prefixo do caminho de todas as células dentro dela.
 - **Cobertura.** Para um raio ou uma caixa, o motor desce a hierarquia a partir das 122 células base: descarta o que está fora, usa como prefixo único o que está inteiro dentro e divide o resto, até cerca de 200 prefixos. Como um filho no H3 não cabe exatamente dentro do pai, a decisão usa um círculo de folga em volta de cada célula (duas arestas médias da resolução).
 - **Filtro exato.** A entrada traz as coordenadas, então quem está fora do raio é descartado sem carregar o documento.
 - **Vizinhos mais próximos.** Busca do melhor primeiro na hierarquia: uma célula só é aberta quando ainda pode conter um ponto mais próximo que o melhor candidato em mãos. O custo acompanha o número de resultados pedidos, e não o tamanho da tabela. Um `WHERE` muito seletivo junto do `ORDER BY` faz a busca andar mais longe.

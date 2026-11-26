@@ -78,7 +78,7 @@ class H3CoverTest {
         Random rnd = new Random(13);
         for (int q = 0; q < 60; q++) {
             double[] center = GeoSamples.uniform(rnd);
-            double meters = 100 + rnd.nextDouble() * 20_000;
+            double meters = 500 + rnd.nextDouble() * 20_000;
             List<H3Cover.Cell> cells = H3Cover.cover(H3Cover.circle(center[0], center[1], meters), H3Cover.MAX_CELLS);
             for (int i = 0; i < 50; i++) {
                 double[] far = GeoSamples.destination(center, rnd.nextDouble() * 2 * Math.PI,

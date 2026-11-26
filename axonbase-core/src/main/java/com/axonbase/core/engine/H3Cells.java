@@ -21,8 +21,12 @@ import java.util.List;
  */
 final class H3Cells {
 
-    /** Resolução das entradas do índice: arestas de cerca de 10 metros. */
-    static final int STORAGE_RESOLUTION = 12;
+    /**
+     * Resolução das entradas do índice: arestas de cerca de 75 metros. Mais fino que isso, cada movimento de poucos
+     * metros trocaria a chave da entrada (uma remoção a mais por escrita) sem ganho na consulta, porque o filtro
+     * exato usa as coordenadas gravadas na própria entrada.
+     */
+    static final int STORAGE_RESOLUTION = 10;
     static final int PATH_LENGTH = 3 + STORAGE_RESOLUTION;
 
     /** Quantas arestas médias da resolução cobrem, com folga, o ponto descendente mais distante do centro. */

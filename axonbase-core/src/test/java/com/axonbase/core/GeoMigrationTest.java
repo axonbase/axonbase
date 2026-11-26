@@ -178,6 +178,33 @@ class GeoMigrationTest {
     }
 
     @Test
+    @DisplayName("escrita antiga que chega durante a reconstrução faz refazer antes de ficar pronto")
+    void legacyWriteDuringRebuildIsCaught() throws InterruptedException {
+        MemoryBackend backend = loaded(700);
+        toLegacy(backend);
+        java.util.concurrent.atomic.AtomicInteger chunks = new java.util.concurrent.atomic.AtomicInteger();
+        CountDownLatch paused = new CountDownLatch(1);
+        CountDownLatch go = new CountDownLatch(1);
+        IndexBuilder.chunkHook(() -> {
+            if (chunks.incrementAndGet() == 2) {
+                paused.countDown();
+                try {
+                    go.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        Datastore ds = new Datastore(backend);
+        assertTrue(paused.await(30, TimeUnit.SECONDS));
+        backend.put("SP|test|dev|g|g_pos|6gyf4b|n5", new byte[0]);
+        go.countDown();
+        assertTrue(IndexBuilder.awaitAll(60_000));
+        assertTrue(chunks.get() >= 4, "uma passada só: " + chunks.get() + " blocos");
+        assertCurrent(ds);
+    }
+
+    @Test
     @DisplayName("índice em dia não é reconstruído ao reabrir")
     void currentIndexIsKept() {
         MemoryBackend backend = loaded(50);

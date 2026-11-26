@@ -6,7 +6,6 @@ import com.axonbase.core.catalog.Database;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.locks.Lock;
 
 /**
  * Passagem do índice geohash para o H3. Nenhum índice antigo ou atrasado atende consulta: ele volta ao estado "em
@@ -51,17 +50,12 @@ final class GeoMigration {
         if (index == null || !index.geo()) {
             return;
         }
-        Lock write = db.indexLock().writeLock();
-        write.lock();
-        try {
-            if (!index.ready()) {
-                return; // a construção em andamento percebe as entradas antigas antes de ficar pronta
-            }
-            index.markBuilding();
-            db.bumpIndexEpoch();
-        } finally {
-            write.unlock();
+        // sem trava: esta é a thread do consenso, e um commit pode segurar o indexLock esperando por ela
+        if (!index.ready()) {
+            return; // a construção em andamento confere as entradas antigas depois de marcar o índice pronto
         }
-        IndexBuilder.startAsync(ds, ns, dbName, table, name, true);
+        index.markBuilding();
+        db.bumpIndexEpoch();
+        IndexBuilder.restartAsync(ds, ns, dbName, table, name);
     }
 }

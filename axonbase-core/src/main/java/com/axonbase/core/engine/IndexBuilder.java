@@ -108,6 +108,16 @@ public final class IndexBuilder {
         });
     }
 
+    /** Como {@link #startAsync}, mas se a thread anterior ainda está saindo, começa outra quando ela terminar. */
+    static void restartAsync(Datastore ds, String ns, String dbName, String table, String name) {
+        Future<?> leaving = RUNNING.get(key(ds, ns, dbName, table, name));
+        if (leaving instanceof java.util.concurrent.CompletableFuture<?> running) {
+            running.thenRun(() -> startAsync(ds, ns, dbName, table, name, true));
+        } else {
+            startAsync(ds, ns, dbName, table, name, true);
+        }
+    }
+
     /**
      * Roda a construção na thread atual. Em falha, aborta o índice (limpa tudo) e relança o erro.
      *
@@ -234,6 +244,12 @@ public final class IndexBuilder {
                     return false;
                 }
                 index.markReady();
+                // um lote replicado pode ter chegado entre a conferência e a marca; ele só olha índices prontos,
+                // então um dos dois lados sempre o vê
+                if (ex.hasLegacyGeoEntries(db, table, index)) {
+                    index.markBuilding();
+                    return false;
+                }
             }
             return true;
         } finally {
