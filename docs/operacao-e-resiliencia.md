@@ -95,6 +95,24 @@ O redirecionamento `307` de escrita aponta, por padrão, para o endereço do Raf
 
 **Extensão para a E3:** a drenagem passa a percorrer os grupos em que o nó é líder.
 
+## Defeito na 0.10.1 e anteriores: escrita confirmada sem gravar
+
+**Situação:** achado pela leitura do código. A prova automática (`scripts/raft-gates/LegacyQuorumLoss.java`) ainda não tem resultado no ambiente de testes. Não é um problema de atualização: acontece num cluster só com a versão antiga. O mesmo caminho existe na 0.4.0, na 0.8.0, na 0.9.2, na 0.10.0 e na 0.10.1.
+
+**O que acontece.** Quando uma escrita falha por falta de quórum (basta os seguidores não responderem a tempo), o líder descarta a entrada do arquivo do log, mas não da memória. Na escrita seguinte ele encontra a entrada velha no índice, não grava a nova e confirma ao cliente. O log deixa de crescer e **todas** as escritas seguintes desse líder são confirmadas e perdidas, até o processo reiniciar.
+
+**Mitigação para quem roda essas versões.** Reinicie o nó que respondeu falta de quórum, antes de ele voltar a receber escritas. As escritas já perdidas não são recuperadas.
+
+**Esta versão** usa outro log e não herda o caminho. A prova, compilada contra ela, deve sair com `PROVA RESULT OK`.
+
+```bash
+javac -cp "$CLASSPATH_DA_VERSAO" -d out scripts/raft-gates/LegacyQuorumLoss.java
+```
+
+```bash
+java -cp "$CLASSPATH_DA_VERSAO:out" LegacyQuorumLoss "$(mktemp -d)"
+```
+
 ## Falha de versões mistas
 
 O roteiro `scripts/raft-gates/mixed_versions.py` falhou uma vez: com dois nós novos e o líder derrubado, o líder 0.10.1 não confirmava escritas ao seguidor novo.
@@ -112,6 +130,11 @@ O roteiro `scripts/raft-gates/mixed_versions.py` falhou uma vez: com dois nós n
 | o batimento do líder informa um índice de commit sem dizer de que entrada fala | o seguidor só confirma entradas gravadas com o mandato desse líder |
 | o reenvio de uma entrada antiga carrega o commit atual | o seguidor só confirma até o índice conferido naquele pedido |
 | o seguidor responde que aceitou uma entrada que não gravou | o líder novo não conta essa resposta para o quórum e abre um mandato novo |
+| um nó que apagou o log num snapshot se candidata com menos do que já foi confirmado | o nó novo não vota nele |
+| esse nó, como líder, manda outra entrada ou um snapshot em cima do confirmado | o nó novo recusa e, se a entrada for de outro mandato, sobe o mandato para tirá-lo do cargo |
+| um nó antigo aplica entradas além do marcador recebido e depois é atualizado | na partida, o nó novo usa o índice do estado salvo pela versão antiga |
+
+Essas três últimas defesas ainda não têm resultado no ambiente de testes. Elas só valem quando o nó novo participa: com um nó novo e dois antigos, os antigos formam maioria sozinhos.
 
 O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível: se acontecer durante a atualização, reinicie o líder antigo travado.
 
@@ -121,9 +144,12 @@ O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível
 |---|---|
 | `12f5c46`, base sem correção | 30 rodadas, 15 falhas (as examinadas são o cluster parado) |
 | `0ee8798`, só o laço e a troca da entrada | 30 rodadas: 27 boas, 2 com uma escrita perdida num nó, 1 parada |
-| com as quatro últimas linhas da tabela acima | ainda sem resultado |
+| `b56cf07`, com as cinco primeiras defesas | 60 rodadas: 57 boas, 3 com 435 a 447 escritas perdidas nos três nós |
+| `b1d915f`, mesmo código de consenso | 60 rodadas: 58 boas, 2 com 221 e 232 escritas perdidas |
 
-A perda de uma linha em `0ee8798` é explicada pelo snapshot, e a parada pela resposta de entrada não gravada. As duas explicações só ficam confirmadas quando as rodadas novas passarem.
+As perdas grandes são compatíveis com o [defeito da versão antiga](#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar): numa rodada com diagnóstico, as 427 escritas perdidas foram confirmadas por um líder antigo com o log vazio. A prova determinística ainda precisa rodar.
+
+**Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Ainda sem resultado.
 
 **Risco que continua na atualização a partir da 0.10.x.** O protocolo antigo não carrega o termo das entradas, e a escolha do líder depende dele. Um cluster que mistura as duas versões herda as falhas de segurança do protocolo antigo, que nenhum nó novo consegue corrigir sozinho. Enquanto as rodadas do cluster misto não passarem sem perda, trate a atualização a partir da 0.10.x como **parada programada**: pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova.
 
