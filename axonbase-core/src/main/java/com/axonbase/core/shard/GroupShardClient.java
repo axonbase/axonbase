@@ -39,15 +39,16 @@ public final class GroupShardClient implements ShardClient {
         while (true) {
             List<ShardMember> current = members.get();
             for (int attempt = 0; attempt < current.size(); attempt++) {
-                int index = Math.floorMod(preferred.get(), current.size());
+                // a troca compara o contador, não a posição: a lista muda de tamanho quando um nó cai
+                int turn = preferred.get();
                 try {
-                    return current.get(index).handle(request);
+                    return current.get(Math.floorMod(turn, current.size())).handle(request);
                 } catch (CommitOutcomeUnknownException unknown) {
                     throw unknown;
                 } catch (NotLeaderException | ShardUnreachableException | QuorumUnavailableException
                          | StaleReadException retry) {
                     last = retry;
-                    preferred.compareAndSet(index, index + 1);
+                    preferred.compareAndSet(turn, turn + 1);
                 }
             }
             if (System.nanoTime() - limit >= 0) {

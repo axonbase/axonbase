@@ -102,6 +102,24 @@ class GroupShardClientTest {
     }
 
     @Test
+    void continuaAlternandoDepoisQueAListaDeMembrosEncolhe() {
+        ShardReply answer = new ShardReply(AxonValue.nul(), HlcTimestamp.NONE);
+        ShardMember follower = request -> {
+            throw new NotLeaderException("outro");
+        };
+        ShardMember leader = request -> answer;
+        java.util.concurrent.atomic.AtomicReference<List<ShardMember>> members =
+            new java.util.concurrent.atomic.AtomicReference<>(List.of(follower, follower, leader));
+        ShardClient client = new GroupShardClient("s0", members::get, Duration.ofSeconds(2));
+        client.execute(sql("SELECT * FROM t"));
+
+        // o líder preferido era o terceiro; um nó cai e o novo líder é o segundo dos dois que sobram
+        members.set(List.of(follower, leader));
+
+        assertEquals(answer, client.execute(sql("SELECT * FROM t")));
+    }
+
+    @Test
     void grupoSemNenhumNoDePeFalhaDentroDoPrazo() {
         ShardClient client = new GroupShardClient("s9", List::of, Duration.ofMillis(300));
 
