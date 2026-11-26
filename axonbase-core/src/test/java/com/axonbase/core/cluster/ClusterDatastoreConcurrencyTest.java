@@ -100,6 +100,42 @@ class ClusterDatastoreConcurrencyTest {
     }
 
     @Test
+    @DisplayName("comandos avulsos concorrentes não devolvem conflito ao cliente, nem ao criar a tabela")
+    void autocommitStatementsDoNotSurfaceConflicts() throws Exception {
+        try (ClusterHarness cluster = ClusterHarness.rocks(dir, RaftOptions.defaults(), "n1", "n2", "n3")
+                .startAll()) {
+            ClusterRuntime leaderNode = cluster.awaitLeader();
+            Datastore leader = datastores(cluster).get(leaderNode.config().nodeId());
+
+            // A tabela não existe: cada primeira inserção também grava o catálogo.
+            concurrently(16, 5, (worker, i) -> {
+                leader.execute("CREATE nova:n" + worker + "x" + i + " CONTENT { v: 1 }", session(), null);
+                return 0;
+            });
+            leader.execute("CREATE c:1 CONTENT { n: 0 }", session(), null);
+            concurrently(8, 10, (worker, i) -> {
+                leader.execute("UPDATE c:1 SET n = n + 1", session(), null);
+                return 0;
+            });
+            concurrently(8, 5, (worker, i) -> {
+                leader.kvSet(kv(), "n", "d", "contador", AxonValue.num(i), null);
+                return 0;
+            });
+
+            assertEquals(80, leader.execute("SELECT * FROM nova", session(), null).asArray().size());
+            assertEquals(80, leader.execute("SELECT * FROM c", session(), null).asArray().getFirst()
+                .asObject().get("n").asLong());
+            cluster.awaitConverged();
+            Map<String, String> expected = ClusterHarness.data(leaderNode);
+            cluster.nodes().forEach(n -> assertEquals(expected, ClusterHarness.data(n), n.config().nodeId()));
+        }
+    }
+
+    private static Session kv() {
+        return session();
+    }
+
+    @Test
     @DisplayName("inserções concorrentes de registros diferentes não conflitam entre si")
     void concurrentInsertsDoNotConflict() throws Exception {
         try (ClusterHarness cluster = ClusterHarness.rocks(dir, RaftOptions.defaults(), "n1", "n2", "n3")

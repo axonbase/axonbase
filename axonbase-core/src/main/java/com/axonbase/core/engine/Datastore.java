@@ -884,29 +884,58 @@ public final class Datastore {
     // ------------------------------------------------------------------
 
     public AxonValue execute(String sql, Session session, Map<String, AxonValue> vars) {
-        boolean implicitClusterTransaction = commitCoordinator != null && !session.inTransaction()
-            && isMutation(sql);
-        if (implicitClusterTransaction) {
-            beginSession(session);
+        if (commitCoordinator != null && !session.inTransaction() && isMutation(sql)) {
+            return autocommit(session, () -> {
+                var exec = new Executor(this);
+                exec.rawSql = sql;
+                return exec.execute(AxonQl.parse(sql), session, vars);
+            });
         }
-        try {
-            Query query = AxonQl.parse(sql);
-            var exec = new Executor(this);
-            exec.rawSql = sql;
-            AxonValue result = exec.execute(query, session, vars);
-            if (implicitClusterTransaction) {
+        Query query = AxonQl.parse(sql);
+        var exec = new Executor(this);
+        exec.rawSql = sql;
+        AxonValue result = exec.execute(query, session, vars);
+        if (!query.statements().stream().allMatch(st -> st instanceof Statement.Select
+            || st instanceof Statement.Explain || st instanceof Statement.Info)) {
+            // só escrita precisa ir ao disco; um SELECT não pode pagar o flush do RocksDB (a escrita já está no WAL)
+            backend.flush();
+        }
+        return result;
+    }
+
+    /** Tentativas de um comando avulso no cluster quando outro confirma antes sobre as mesmas chaves. */
+    private static final int AUTOCOMMIT_ATTEMPTS = 100;
+
+    /**
+     * Executa um comando avulso numa transação implícita de cluster. Um conflito na confirmação não é um erro do
+     * cliente: nada foi gravado, então o comando é refeito sobre o estado novo, como no nó único, onde ele não
+     * enxergaria conflito. Transações explícitas devolvem o conflito para quem as abriu.
+     */
+    private <T> T autocommit(Session session, java.util.function.Supplier<T> work) {
+        for (int attempt = 1; ; attempt++) {
+            beginSession(session);
+            boolean committing = false;
+            try {
+                T result = work.get();
+                committing = true;
                 commitSession(session);
-            } else if (!query.statements().stream().allMatch(st -> st instanceof Statement.Select
-                || st instanceof Statement.Explain || st instanceof Statement.Info)) {
-                // só escrita precisa ir ao disco; um SELECT não pode pagar o flush do RocksDB (a escrita já está no WAL)
-                backend.flush();
+                return result;
+            } catch (VersionConflictException conflict) {
+                if (session.inTransaction()) {
+                    cancelSession(session);
+                }
+                if (!committing || attempt >= AUTOCOMMIT_ATTEMPTS) {
+                    throw conflict;
+                }
+                // Espera curta e sorteada para os concorrentes não voltarem todos juntos.
+                java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
+                    .nextLong(1_000_000L * Math.min(attempt, 10)));
+            } catch (RuntimeException e) {
+                if (session.inTransaction()) {
+                    cancelSession(session);
+                }
+                throw e;
             }
-            return result;
-        } catch (RuntimeException e) {
-            if (implicitClusterTransaction && session.inTransaction()) {
-                cancelSession(session);
-            }
-            throw e;
         }
     }
 
@@ -1593,24 +1622,12 @@ public final class Datastore {
      * nun nó con consenso, para que o write viaxe no log replicado.
      */
     private <T> T withKvWrite(Session session, java.util.function.Supplier<T> work) {
-        boolean implicit = commitCoordinator != null && !session.inTransaction();
-        if (implicit) {
-            beginSession(session);
+        if (commitCoordinator != null && !session.inTransaction()) {
+            return autocommit(session, work);
         }
-        try {
-            T result = work.get();
-            if (implicit) {
-                commitSession(session);
-            } else {
-                backend.flush();
-            }
-            return result;
-        } catch (RuntimeException e) {
-            if (implicit && session.inTransaction()) {
-                cancelSession(session);
-            }
-            throw e;
-        }
+        T result = work.get();
+        backend.flush();
+        return result;
     }
 
     private static void requireWritable(Session s) {
