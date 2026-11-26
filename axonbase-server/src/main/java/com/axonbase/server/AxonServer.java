@@ -70,6 +70,12 @@ public final class AxonServer {
     private volatile com.axonbase.core.backup.S3SyncManager backups;
     private volatile com.axonbase.core.journal.PitrJournal pitr;
     private volatile com.axonbase.core.qos.WorkloadGovernor workload;
+    private static final long DEFAULT_DRAIN_GRACE_MS = 5_000;
+    private static final long DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
+    private volatile NodeDrain drain = newDrain(DEFAULT_DRAIN_GRACE_MS, DEFAULT_DRAIN_TIMEOUT_MS);
+    private volatile boolean drainOnShutdown;
+    private volatile LeaderRedirect leaderRedirect = LeaderRedirect.NONE;
+    private volatile AdmissionControl admission;
     private final EventBus events = new EventBus();
     private final java.util.concurrent.ScheduledExecutorService ticker =
         Executors.newSingleThreadScheduledExecutor(r -> {
@@ -369,8 +375,8 @@ public final class AxonServer {
         ctx.addFilter(asyncFilter(new LoggingFilter(auth)), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
         // Mantém threads livres para /health, /ready e /admin mesmo com consultas lentas em andamento.
-        ctx.addFilter(asyncFilter(new AdmissionFilter(
-            new AdmissionControl(AdmissionControl.limitFor(config.httpThreads())))),
+        admission = new AdmissionControl(AdmissionControl.limitFor(config.httpThreads()));
+        ctx.addFilter(asyncFilter(new AdmissionFilter(admission)),
             "/*", EnumSet.of(DispatcherType.REQUEST));
 
         return ctx;
@@ -502,6 +508,62 @@ public final class AxonServer {
         return workload;
     }
 
+    /**
+     * Configura a operação do nó em cluster: {@code AXON_CLUSTER_HTTP_PEERS} (redirecionamento para o líder),
+     * {@code AXON_DRAIN_GRACE_MS}, {@code AXON_DRAIN_TIMEOUT_MS} e {@code AXON_DRAIN_ON_SHUTDOWN}.
+     */
+    public void operations(java.util.function.Function<String, String> env) {
+        this.leaderRedirect = LeaderRedirect.parse(env.apply("AXON_CLUSTER_HTTP_PEERS"));
+        this.drain = newDrain(millis(env, "AXON_DRAIN_GRACE_MS", DEFAULT_DRAIN_GRACE_MS),
+            millis(env, "AXON_DRAIN_TIMEOUT_MS", DEFAULT_DRAIN_TIMEOUT_MS));
+        this.drainOnShutdown = "true".equalsIgnoreCase(env.apply("AXON_DRAIN_ON_SHUTDOWN"));
+    }
+
+    NodeDrain drain() {
+        return drain;
+    }
+
+    private static long millis(java.util.function.Function<String, String> env, String name, long fallback) {
+        String raw = env.apply(name);
+        if (raw == null || raw.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(Messages.get("config_invalid_long", raw), e);
+        }
+    }
+
+    private NodeDrain newDrain(long graceMillis, long timeoutMillis) {
+        return new NodeDrain(new NodeDrain.Node() {
+            @Override
+            public boolean leading() {
+                var cluster = clusterRuntime;
+                return cluster != null && cluster.leading();
+            }
+
+            @Override
+            public com.axonbase.core.cluster.TransferResult transfer(java.time.Duration timeout) {
+                return clusterRuntime.transferLeadership(null, timeout);
+            }
+
+            @Override
+            public void abstain(boolean value) {
+                var cluster = clusterRuntime;
+                if (cluster != null) {
+                    cluster.abstain(value);
+                }
+            }
+
+            @Override
+            public long dataRequestsInFlight() {
+                var control = admission;
+                return control == null ? 0 : control.inFlight();
+            }
+        }, graceMillis, timeoutMillis);
+    }
+
     /** Liga o journal de PITR a este servidor (API, métricas e restauração a um instante). */
     public void pitr(com.axonbase.core.journal.PitrJournal journal) {
         this.pitr = journal;
@@ -588,9 +650,10 @@ public final class AxonServer {
         if (status.isLeader()) {
             return false;
         }
-        if (!status.leaderAddress().isEmpty()) {
+        String leaderUrl = leaderRedirect.base(status.leader(), status.leaderAddress());
+        if (!leaderUrl.isEmpty()) {
             String query = req.getQueryString();
-            resp.setHeader("Location", "http://" + status.leaderAddress() + req.getRequestURI()
+            resp.setHeader("Location", leaderUrl + req.getRequestURI()
                 + (query == null ? "" : "?" + query));
             resp.setHeader("Axon-Leader", status.leader());
             resp.setStatus(307);
@@ -630,6 +693,20 @@ public final class AxonServer {
                 + esc(stale.getMessage()) + "\"}");
             return true;
         }
+    }
+
+    /**
+     * A liderança mudou antes de a escrita ser proposta (uma transferência, por exemplo): nada foi gravado, e o
+     * cliente é mandado ao líder novo. Um script que confirma no meio fica de fora, porque o começo dele pode ter
+     * sido gravado.
+     */
+    private boolean lostLeadership(HttpServletRequest req, HttpServletResponse resp, Throwable failure, String sql)
+            throws IOException {
+        if (!(failure instanceof com.axonbase.core.cluster.NotLeaderException)
+            || sql.toLowerCase(java.util.Locale.ROOT).contains("commit")) {
+            return false;
+        }
+        return redirectWrites(req, resp);
     }
 
     /** A escrita pode ter acontecido: nem 2xx nem a resposta de erro comum, para o cliente não repetir às cegas. */
@@ -677,6 +754,9 @@ public final class AxonServer {
             return;
         }
         stopping = true;
+        if (drainOnShutdown) {
+            drain.drainAndWait();
+        }
         long deadline = System.currentTimeMillis() + config.shutdownTimeout();
         while (System.currentTimeMillis() < deadline && inflight.get() > 0) {
             Thread.sleep(100);
@@ -707,7 +787,8 @@ public final class AxonServer {
         @Override
         protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             var s = clusterStatus.status();
-            json(resp, s.ready() ? 200 : 503, "{\"ready\":" + s.ready()
+            boolean ready = s.ready() && !drain.draining();
+            json(resp, ready ? 200 : 503, "{\"ready\":" + ready
                 + ",\"role\":\"" + s.role() + "\""
                 + ",\"leader\":\"" + esc(s.leader()) + "\""
                 + ",\"active\":" + s.active() + ",\"quorum\":" + s.quorum() + "}");
@@ -1196,6 +1277,8 @@ public final class AxonServer {
                 outcomeUnknown(resp, error);
             } else if (RetryableRefusals.overloaded(resp, failure)) {
                 return;
+            } else if (lostLeadership(req, resp, failure, body)) {
+                return;
             } else if (error != null) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(error) + "\"}");
             } else {
@@ -1250,6 +1333,10 @@ public final class AxonServer {
                 json(resp, 200, AxonJson.write(ds.execute(sql, s, null)));
             } catch (com.axonbase.core.cluster.CommitOutcomeUnknownException unknown) {
                 outcomeUnknown(resp, unknown.getMessage());
+            } catch (com.axonbase.core.cluster.NotLeaderException moved) {
+                if (!redirectWrites(req, resp)) {
+                    throw moved;
+                }
             }
         }
     }
