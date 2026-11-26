@@ -116,6 +116,15 @@ public final class Transaction implements KvBackend {
         return List.copyOf(keys);
     }
 
+    /**
+     * Esquece as faixas varridas: o commit deixa de conferir leitura fantasma (e de correr sozinho no armazenamento).
+     * As chaves lidas continuam conferidas. Para o trabalho de segundo plano, que não pode parar as escritas.
+     */
+    public void forgetScans() {
+        ensureOpen();
+        readRanges.clear();
+    }
+
     /** Grava sem exigir que a chave esteja igual no commit: a última gravação vence. */
     public void putBlind(String key, byte[] value) {
         ensureOpen();

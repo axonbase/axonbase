@@ -348,6 +348,9 @@ public final class PartitionMaintenance implements AutoCloseable {
                 Statement delete = new Statement.Delete(new Expr.Param(ROW), null, null);
                 new Executor(ds).execute(new Query(List.of(delete)), session, Map.of(ROW, row));
             }
+            // o DELETE olha se há arestas varrendo o prefixo delas; conferir isso no commit pararia as escritas a
+            // cada lote. As linhas e entradas lidas continuam conferidas.
+            tx.forgetScans();
             return rows.size();
         });
     }
