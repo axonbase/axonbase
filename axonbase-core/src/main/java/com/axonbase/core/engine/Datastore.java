@@ -930,6 +930,13 @@ public final class Datastore {
      * fez uma chamada para fora do banco ({@link ExternalCalls}).
      */
     private <T> T autocommit(Session session, java.util.function.Supplier<T> work) {
+        // durante uma transferência de liderança a escrita espera aqui, antes de executar qualquer coisa
+        try (var admitted = commitCoordinator.admitWrite()) {
+            return autocommitAdmitted(session, work);
+        }
+    }
+
+    private <T> T autocommitAdmitted(Session session, java.util.function.Supplier<T> work) {
         for (int attempt = 1; ; attempt++) {
             beginSession(session);
             boolean committing = false;

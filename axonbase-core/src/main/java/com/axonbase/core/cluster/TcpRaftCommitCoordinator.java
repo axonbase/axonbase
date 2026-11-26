@@ -43,6 +43,11 @@ public final class TcpRaftCommitCoordinator implements CommitCoordinator {
     }
 
     @Override
+    public WritePermit admitWrite() {
+        return runtime == null ? WritePermit.NONE : runtime.admitWrite();
+    }
+
+    @Override
     public long beginValidation() {
         return runtime == null ? 0 : runtime.beginValidation();
     }

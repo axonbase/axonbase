@@ -88,6 +88,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     private final AtomicInteger handling = new AtomicInteger();
     private final AtomicBoolean electing = new AtomicBoolean();
     private final Thread applier;
+    private final LeadershipTransfer transfer = new LeadershipTransfer(stateLock, new TransferView());
     private volatile ClusterRole role;
     private volatile String leader = "";
     private volatile long lastContact = System.nanoTime();
@@ -204,6 +205,9 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 switch (request.type()) {
                     case RaftWire.READ_INDEX -> responses[i] = answerReadIndex();
                     case RaftWire.JOIN -> responses[i] = answerJoin(request);
+                    case RaftWire.PEER_INFO -> responses[i] =
+                        new RaftWire.Response(node.term(), true, RaftWire.PROTOCOL_LEVEL);
+                    case RaftWire.TIMEOUT_NOW -> responses[i] = answerTimeoutNow(request);
                     default -> {
                         if (isReplication(request.type()) && request.term() >= node.term()) {
                             acceptLeader(request);
@@ -298,19 +302,24 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                     lastJoinNanos = now;
                     announce();
                 }
-            } else if (handling.get() == 0
-                && now - lastContact > TimeUnit.MILLISECONDS.toNanos(electionTimeoutMillis)
-                && electing.compareAndSet(false, true)) {
-                elections.execute(() -> {
-                    try {
-                        elect();
-                    } finally {
-                        electing.set(false);
-                    }
-                });
+            } else if (handling.get() == 0 && !transfer.abstaining()
+                && now - lastContact > TimeUnit.MILLISECONDS.toNanos(electionTimeoutMillis)) {
+                startElection();
             }
         } catch (Throwable ignored) {
             // Uma rodada perdida é recuperada no próximo tick; o scheduler não morre.
+        }
+    }
+
+    private void startElection() {
+        if (electing.compareAndSet(false, true)) {
+            elections.execute(() -> {
+                try {
+                    elect();
+                } finally {
+                    electing.set(false);
+                }
+            });
         }
     }
 
@@ -652,24 +661,31 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     public long confirm(String nodeId, CommittedBatch batch, long validation) {
         long index;
         CompletableFuture<Void> applied = new CompletableFuture<>();
-        synchronized (stateLock) {
-            if (role != ClusterRole.LEADER || !config.nodeId().equals(nodeId)) {
-                throw notLeader();
+        while (true) {
+            transfer.awaitProposals();
+            synchronized (stateLock) {
+                if (transfer.blocksProposals()) {
+                    continue;
+                }
+                if (role != ClusterRole.LEADER || !config.nodeId().equals(nodeId)) {
+                    throw notLeader();
+                }
+                if (validation != validationEpoch) {
+                    throw new VersionConflictException("a liderança mudou durante a transação", "");
+                }
+                if (!quorumReachable()) {
+                    // Recusa antes de gravar: aqui é certo que a escrita não aconteceu.
+                    quorumUnavailable.incrementAndGet();
+                    throw new QuorumUnavailableException(config.clusterId());
+                }
+                index = node.propose(leaderTerm, batch);
+                if (index < 0) {
+                    stepDown();
+                    throw notLeader();
+                }
+                pendingWrites.put(index, new PendingWrite(leaderTerm, applied));
+                break;
             }
-            if (validation != validationEpoch) {
-                throw new VersionConflictException("a liderança mudou durante a transação", "");
-            }
-            if (!quorumReachable()) {
-                // Recusa antes de gravar: aqui é certo que a escrita não aconteceu.
-                quorumUnavailable.incrementAndGet();
-                throw new QuorumUnavailableException(config.clusterId());
-            }
-            index = node.propose(leaderTerm, batch);
-            if (index < 0) {
-                stepDown();
-                throw notLeader();
-            }
-            pendingWrites.put(index, new PendingWrite(leaderTerm, applied));
         }
         replicators.values().forEach(PeerReplicator::wake);
         try {
@@ -987,6 +1003,119 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // transferência de liderança
+    // ------------------------------------------------------------------
+
+    @Override
+    public WritePermit admitWrite() {
+        return transfer.admit();
+    }
+
+    /**
+     * Passa o cargo a outro votante sem esperar o prazo de eleição.
+     *
+     * @param target nó que deve assumir, ou {@code null} para o mais adiantado
+     */
+    public TransferResult transferLeadership(String target, java.time.Duration timeout) {
+        return transfer.transfer(target, timeout.toMillis());
+    }
+
+    /** Com {@code true}, o nó deixa de disputar eleições (continua votando). Usado para drenar um nó. */
+    public void abstain(boolean value) {
+        transfer.abstain(value);
+    }
+
+    /** Nível de protocolo de um membro, ou 0 se ele não responde ou é anterior à transferência de liderança. */
+    public int protocolOf(InetSocketAddress peer) {
+        try {
+            RaftWire.Response response = RaftWire.call(peer, new RaftWire.Request(RaftWire.PEER_INFO,
+                config.clusterId(), node.term(), config.nodeId(), advertise(), 0, 0, new byte[0]),
+                VOTE_TIMEOUT_MILLIS);
+            return response.accepted() ? (int) response.matchIndex() : 0;
+        } catch (IOException unreachable) {
+            return 0;
+        }
+    }
+
+    private RaftWire.Response answerTimeoutNow(RaftWire.Request request) {
+        synchronized (stateLock) {
+            if (role == ClusterRole.LEADER || role == ClusterRole.LEARNER || transfer.abstaining()
+                || request.term() != node.term()) {
+                return new RaftWire.Response(node.term(), false, 0);
+            }
+        }
+        startElection();
+        return new RaftWire.Response(request.term(), true, 0);
+    }
+
+    private final class TransferView implements LeadershipTransfer.Leader {
+        @Override
+        public boolean leading() {
+            return ClusterRuntime.this.leading();
+        }
+
+        @Override
+        public String leader() {
+            return leader;
+        }
+
+        @Override
+        public NotLeaderException notLeader() {
+            return ClusterRuntime.this.notLeader();
+        }
+
+        @Override
+        public List<LeadershipTransfer.Candidate> candidates() {
+            List<LeadershipTransfer.Candidate> out = new ArrayList<>();
+            for (InetSocketAddress peer : peers) {
+                PeerReplicator replicator = replicators.get(peer);
+                long since = replicator == null ? -1 : replicator.nanosSinceReply();
+                if (since >= 0 && since <= LIVENESS_NANOS && protocolOf(peer) >= RaftWire.PROTOCOL_LEVEL) {
+                    out.add(new LeadershipTransfer.Candidate(nameOf(peer), peer, replicator.matchIndex()));
+                }
+            }
+            return out;
+        }
+
+        @Override
+        public long lastIndex() {
+            return node.lastIndex();
+        }
+
+        @Override
+        public long appliedIndex() {
+            return node.commitIndex();
+        }
+
+        @Override
+        public long matchIndex(LeadershipTransfer.Candidate candidate) {
+            PeerReplicator replicator = replicators.get(candidate.address());
+            return replicator == null ? 0 : replicator.matchIndex();
+        }
+
+        @Override
+        public boolean sendTimeoutNow(LeadershipTransfer.Candidate candidate) {
+            try {
+                return RaftWire.call(candidate.address(), new RaftWire.Request(RaftWire.TIMEOUT_NOW,
+                    config.clusterId(), leaderTerm, config.nodeId(), advertise(), node.lastIndex(), commit,
+                    new byte[0]), VOTE_TIMEOUT_MILLIS).accepted();
+            } catch (IOException unreachable) {
+                return false;
+            }
+        }
+    }
+
+    /** O identificador de um membro, quando ele já se apresentou; senão, o endereço. */
+    private String nameOf(InetSocketAddress peer) {
+        for (Map.Entry<String, InetSocketAddress> known : addressByNode.entrySet()) {
+            if (known.getValue().equals(peer) && !known.getKey().isEmpty()) {
+                return known.getKey();
+            }
+        }
+        return peer.getHostString() + ":" + peer.getPort();
     }
 
     // ------------------------------------------------------------------
