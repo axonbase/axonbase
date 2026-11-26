@@ -6,7 +6,7 @@ Vale para nó único com armazenamento RocksDB (a base de dados embutida do Axon
 
 ## Ligar
 
-O journal vem desligado. Todas as variáveis são opcionais.
+O journal vem **desligado** por padrão e continua assim até o custo de escrita ser medido numa máquina dedicada (veja "Medidas"). Todas as variáveis são opcionais.
 
 | Variável | Padrão | O que faz |
 |---|---|---|
@@ -26,7 +26,8 @@ Todo lote confirmado recebe um carimbo de um relógio híbrido, o HLC (Hybrid Lo
 - **Persistência:** carimbo e índice são gravados no mesmo lote atômico do RocksDB, em chaves `!hlc/<faixa>` fora do alcance das consultas. Há uma chave por faixa de trava, para que duas escritas simultâneas nunca regravem um valor maior com um menor. No reinício vale o maior carimbo e o maior índice entre elas, e o relógio começa em `max(relógio, persistido + 1)`.
 - **Compatibilidade:** no cluster o carimbo viaja no fim do payload de replicação (12 bytes). Um nó antigo ignora os bytes a mais, e um lote antigo é lido como "sem carimbo".
 - **Linha do tempo:** cada história contínua da base tem um identificador. Ele só continua o mesmo quando a abertura prova que nada foi gravado depois de um desligamento limpo. Uma queda, uma troca de base ou escritas de uma versão sem carimbo criam outra linha do tempo, e o journal de uma nunca é aplicado sobre o backup de outra.
-- **Desvio entre nós (cluster):** a regra abaixo vale quando a replicação passar a estampar os lotes (integração com o Raft). Um carimbo recebido que passe do relógio local mais o desvio máximo é rejeitado, com alerta no log e a métrica `axe_hlc_rejected_total`. Dois nós em lados opostos (um 300 ms adiantado e outro 300 ms atrasado, 600 ms entre si) passam do padrão: o atrasado recusa os lotes até o relógio dele alcançar. Mantenha os relógios sincronizados com NTP (Network Time Protocol), por exemplo com `chrony`.
+- **Desvio entre nós (cluster):** a regra abaixo vale quando a replicação passar a estampar os lotes (integração com o Raft). Um carimbo recebido que passe do relógio local mais o desvio máximo é rejeitado, com alerta no log e a métrica `axe_hlc_rejected_total`. O desvio máximo é de **500 ms**. Dois nós em lados opostos (um 300 ms adiantado e outro 300 ms atrasado, 600 ms entre si) passam dele: o atrasado recusa os lotes até o relógio dele alcançar.
+- **Sincronização dos relógios:** sincronize todos os nós por NTP (Network Time Protocol) com o `chrony` e monitore o desvio (`axe_hlc_drift_max_seconds`). O limite de 500 ms pressupõe relógios sincronizados, e a hora pedida numa restauração só é tão exata quanto o relógio de quem estampou.
 
 ## O journal
 
@@ -126,11 +127,20 @@ A transferência segue o mesmo estilo dos arquivos do backup físico: com `AXON_
 
 A lista de backups (`GET /admin/v1/backups/physical`) traz `stampedAt` e `journalIndex` nos backups que servem de base.
 
+## Requisito para o Enterprise: backup físico automático
+
+Depois de uma **queda** do motor ou de uma **restauração** (física ou a um instante), o Enterprise **deve disparar sozinho um backup físico novo** (`POST /admin/v1/backups/physical`), sem esperar a próxima execução da política. Sem esse backup, nenhum instante posterior ao evento volta a ser alcançável.
+
+- **Restauração:** quem a pediu é o próprio Enterprise. Assim que ela responder 200, ele dispara o backup.
+- **Queda:** a API não anuncia a queda, mas ela aparece em `GET /journal/windows`: o `to` do backup mais novo para de andar. Com o journal ligado e o motor no ar, esse `to` fica a no máximo cerca de 1 minuto do presente, mesmo sem escritas. Se, passados 3 minutos do backup mais novo, o `to` dele for nulo ou estiver mais de 3 minutos atrás, ou se nenhum backup aparecer na lista, o Enterprise dispara um backup. A mesma regra cobre lotes descartados, falha de disco, segmento apagado e volta de versão.
+- **Descartes:** um aumento de `droppedBatches` permite disparar o backup sem esperar os 3 minutos.
+- Um backup que falhar é repetido, e a falha vira alerta, porque a janela do PITR fica parada enquanto isso.
+
 ## Fluxo para um agente externo
 
 1. A cada 30 segundos, `GET /journal` e envio ao armazenamento de objetos, compatível com S3 (Simple Storage Service), dos segmentos que ainda não estão lá. O ponto mais recente guardado fora do servidor é o `completeAt` do último segmento enviado, e a distância dele até agora é o RPO (Recovery Point Objective, a perda tolerada) do PITR.
 2. Retenção no armazenamento de objetos: guarde os segmentos desde o backup mais antigo que ainda se queira usar.
-3. Se `droppedBatches` crescer, ou depois de uma queda ou de um restore, dispare um backup físico.
+3. Cumpra o requisito de backup físico automático descrito acima.
 
 ### Recuperar em outro motor
 
