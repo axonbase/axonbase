@@ -43,6 +43,11 @@ public final class TcpRaftCommitCoordinator implements CommitCoordinator {
     }
 
     @Override
+    public boolean acceptsWrites(String nodeId) {
+        return runtime == null || runtime.role() == ClusterRole.LEADER;
+    }
+
+    @Override
     public long beginValidation() {
         return runtime == null ? 0 : runtime.beginValidation();
     }

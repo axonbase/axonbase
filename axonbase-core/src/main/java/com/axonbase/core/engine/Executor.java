@@ -193,6 +193,14 @@ public final class Executor {
      * activa, usa esa transación; senón, o backend directo.
      */
     private KvBackend records(Database db) {
+        return com.axonbase.core.partition.PartitionedKv.wrap(db, rawRecords(db), partitions, ds.coldTier().records());
+    }
+
+    /** O que o executor sabe das partições durante esta execução. */
+    private final com.axonbase.core.partition.PartitionContext partitions =
+        new com.axonbase.core.partition.PartitionContext();
+
+    private KvBackend rawRecords(Database db) {
         // Ponto único de acesso ao armazenamento: aqui a consulta cancelada (ou que estourou o timeout) para.
         QueryContext.checkCancelled();
         Transaction tx = session.tx();
@@ -230,18 +238,32 @@ public final class Executor {
         if (!(direct instanceof com.axonbase.core.storage.RocksDbBackend rocks)) {
             return runStatementUnbatched(s);
         }
-        com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
-        batch = mine;
-        try {
-            AxonValue result = runStatementUnbatched(s);
-            batch = null;
-            mine.commit();
-            return result;
-        } finally {
-            batch = null;
-            mine.discard();
+        for (int attempt = 1; ; attempt++) {
+            com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
+            batch = mine;
+            long outbound = ExternalCalls.count();
+            try {
+                AxonValue result = runStatementUnbatched(s);
+                batch = null;
+                mine.commit();
+                return result;
+            } catch (com.axonbase.core.storage.VersionConflictException conflict) {
+                // só um lote com condições (tabela particionada) conflita. Nada foi gravado, então refaz sobre o
+                // estado novo, a menos que o statement já tenha chamado para fora
+                if (!mine.conditional() || attempt >= CONDITIONAL_ATTEMPTS || ExternalCalls.count() != outbound) {
+                    throw conflict;
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
+                    .nextLong(1_000_000L * Math.min(attempt, 10)));
+            } finally {
+                batch = null;
+                mine.discard();
+            }
         }
     }
+
+    /** Tentativas de um statement avulso quando outro confirma antes sobre as mesmas linhas particionadas. */
+    private static final int CONDITIONAL_ATTEMPTS = 100;
 
     private AxonError errorStmt(String message) {
         return AxonError.internal(message);
@@ -447,6 +469,7 @@ public final class Executor {
             case Statement.DefineAiAudit aa -> runDefineAiAudit(aa);
             case Statement.DropAiAudit da -> runDropAiAudit(da);
             case Statement.RemoveTable rt -> runRemoveTable(rt);
+            case Statement.Partition p -> runPartition(p.command());
             case Statement.CreateTable ct -> runCreateTable(ct);
             case Statement.ShowAiAudit sa -> runShowAiAudit(sa);
             case Statement.SetReasonAudit sra -> runSetReasonAudit(sra);
@@ -1010,6 +1033,7 @@ public final class Executor {
         if (!dataRuleFilter(document) || !allowed(document, table, "create")) {
             throw errorStmt("permission denied");
         }
+        bindPartition(db, rid, record, explicitKey == null && idKey == null);
         enforceUnique(db, rid, null, record);
         records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));
         indexSearch(db, rid, null, record);
@@ -1189,7 +1213,10 @@ public final class Executor {
             }
         }
         boolean retNone = u.ret() != null && u.ret().kind() == ReturnKind.NONE;
-        List<RecordId> targets = resolveMutationTargets(db, u.target(), u.cond());
+        List<RecordId> targets;
+        try (var scope = prunePartitions(u.target(), u.cond())) {
+            targets = resolveMutationTargets(db, u.target(), u.cond());
+        }
         List<AxonValue> results = new ArrayList<>();
         for (RecordId rid : targets) {
             Document doc = loadDoc(db, rid);
@@ -1221,6 +1248,7 @@ public final class Executor {
             injectDataRuleFields(current);
             AxonValue next = AxonValue.object(current);
             doc.setCurrent(next);
+            bindPartition(db, rid, next, false);
             enforceUnique(db, rid, doc.initial(), next);
             records(db).put(rid.storageKey(db.ns(), db.db()), encode(next));
             indexSearch(db, rid, doc.initial(), next);
@@ -1278,7 +1306,10 @@ public final class Executor {
                 return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d));
             }
         }
-        List<RecordId> targets = resolveMutationTargets(db, d.target(), d.cond());
+        List<RecordId> targets;
+        try (var scope = prunePartitions(d.target(), d.cond())) {
+            targets = resolveMutationTargets(db, d.target(), d.cond());
+        }
         List<AxonValue> deleted = new ArrayList<>();
         boolean edges = !targets.isEmpty() && hasAnyEdge(db);
         for (RecordId rid : targets) {
@@ -1379,7 +1410,50 @@ public final class Executor {
     // ------------------------------------------------------------------
 
     private AxonValue runSelect(Statement.Select sel) {
-        return runSelectResolved(rewriteEmbeddingMatches(sel));
+        Statement.Select resolved = rewriteEmbeddingMatches(sel);
+        // com junção o WHERE fala de mais de uma tabela: lê todas as partições
+        try (var scope = prunePartitions(resolved.from(), resolved.joins().isEmpty() ? resolved.cond() : null)) {
+            return runSelectResolved(resolved);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Partições por tempo e TTL (a lógica fica em core.partition)
+    // ------------------------------------------------------------------
+
+    /** Numa tabela particionada, restringe as varreduras dela à faixa de tempo que o WHERE permite. */
+    private com.axonbase.core.partition.PartitionContext.Scope prunePartitions(Expr from, Expr cond) {
+        if (!(from instanceof Expr.Ident id) || session.namespace() == null || session.database() == null) {
+            return () -> { };
+        }
+        Database db = ds.findDatabase(session.namespace(), session.database());
+        var spec = db == null ? null : db.catalog().partitioning(id.name());
+        if (spec == null) {
+            return () -> { };
+        }
+        return partitions.prune(com.axonbase.core.partition.PartitionedKv.rangeKey(db, id.name()),
+            com.axonbase.core.partition.TimeRange.of(cond, spec.field(), this::eval));
+    }
+
+    /** Numa tabela particionada, define a partição de destino antes de os índices serem gravados. */
+    private void bindPartition(Database db, RecordId rid, AxonValue record, boolean generated) {
+        if (records(db) instanceof com.axonbase.core.partition.PartitionedKv view) {
+            view.bind(rid, record, generated);
+        }
+    }
+
+    private com.axonbase.core.partition.PartitionRunner partitionRunner(Database db) {
+        return new com.axonbase.core.partition.PartitionRunner(ds, session, db, rawRecords(db),
+            batch != null || db.indexLock().getReadHoldCount() > 0, this::eval);
+    }
+
+    private AxonValue runPartition(com.axonbase.parser.ast.PartitionCommand command) {
+        Database db = db();
+        if (command instanceof com.axonbase.parser.ast.PartitionCommand.Define
+            || command instanceof com.axonbase.parser.ast.PartitionCommand.DefineTtl) {
+            ensureTable(db, command.table());
+        }
+        return partitionRunner(db).run(command);
     }
 
     /**
@@ -3196,6 +3270,9 @@ return score;
             throw errorStmt(Messages.get("stmt_no_table"));
         }
         KvBackend bk = records(db);
+        if (bk instanceof com.axonbase.core.partition.PartitionedKv view && db.catalog().partitioning(table) == null) {
+            bk = view.base(); // a vista só importa para tabela particionada; o histórico precisa do armazenamento
+        }
         if (!(bk instanceof VersionedKvBackend vbk)) {
             throw errorStmt(Messages.get("stmt_no_wal"));
         }
@@ -3739,6 +3816,8 @@ return score;
     private AxonValue runDefineIndex(DefineIndex di) {
         Database db = db();
         Catalog.TableDef def = ensureTable(db, di.table());
+        com.axonbase.core.partition.PartitionRunner.checkIndex(db, di.table(), di.name(),
+            di.searchAnalyzer() != null || di.geo() || di.vectorDimension() != null || di.count());
         if (di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", di.searchAnalyzer()));
         }
@@ -4642,11 +4721,14 @@ return score;
     private AxonValue runRemoveTable(Statement.RemoveTable rt) {
         Database db = db();
         String table = rt.name();
+        boolean dropped;
         // sem construção nem escrita no meio: nada pode regravar entradas GEO depois da limpeza
         java.util.concurrent.locks.Lock write = exclusiveIndexLock(db);
         write.lock();
         try {
             Catalog.TableDef removed = db.catalog().table(table);
+            // tabela particionada sai de uma vez, por faixa, antes de o catálogo esquecer que ela é particionada
+            dropped = removed != null && partitionRunner(db).dropTable(table);
             if (!db.catalog().removeTable(table)) {
                 throw errorStmt(Messages.get("stmt_table_undefined", table));
             }
@@ -4661,9 +4743,11 @@ return score;
         } finally {
             write.unlock();
         }
-        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
-        for (String key : records(db).keysWithPrefix(prefix)) {
-            records(db).delete(key);
+        if (!dropped) {
+            String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+            for (String key : records(db).keysWithPrefix(prefix)) {
+                records(db).delete(key);
+            }
         }
         // se a tabela era um tipo de aresta (RELATE), as arestas dele saem junto
         removeEdgesOfKind(db, table);

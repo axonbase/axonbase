@@ -193,7 +193,8 @@ public final class IndexBuilder {
         String prefix = ns + "\u0000" + dbName + "\u0000" + table + "\u0000";
         List<String> chunk = new ArrayList<>(CHUNK);
         boolean[] stop = {false};
-        start.records().scanPrefix(prefix, k -> {
+        com.axonbase.core.partition.PartitionedKv.wrap(start, start.records(),
+            new com.axonbase.core.partition.PartitionContext(), ds.coldTier().records()).scanPrefix(prefix, k -> {
             String part = k.substring(prefix.length());
             // chaves de índice (!uidx...) moram sob o mesmo prefixo da tabela e não são registros
             if (part.isEmpty() || part.charAt(0) == '!') {

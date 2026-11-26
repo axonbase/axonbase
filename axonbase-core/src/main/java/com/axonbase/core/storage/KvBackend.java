@@ -56,6 +56,14 @@ public interface KvBackend {
         }
     }
 
+    /**
+     * Como {@link #scanEntries}, mas a partir da chave {@code from} (inclusive). Backends com iterador sobrescrevem
+     * para saltar direto até ela.
+     */
+    default void scanEntriesFrom(String prefix, String from, java.util.function.BiPredicate<String, byte[]> visitor) {
+        scanEntries(prefix, (key, value) -> key.compareTo(from) < 0 || visitor.test(key, value));
+    }
+
     /** Cando a implementación é persistente, forza a escritura ao disco. */
     default void flush() {
     }

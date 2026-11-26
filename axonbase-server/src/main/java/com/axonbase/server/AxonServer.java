@@ -656,6 +656,13 @@ public final class AxonServer {
         return false;
     }
 
+    private volatile com.axonbase.core.partition.PartitionMaintenance maintenance;
+
+    /** A manutenção de partições e TTL, para o desligamento pará-la. */
+    public void maintenance(com.axonbase.core.partition.PartitionMaintenance background) {
+        this.maintenance = background;
+    }
+
     public void stop() throws Exception {
         if (jetty == null) {
             return;
@@ -668,6 +675,11 @@ public final class AxonServer {
         ticker.shutdownNow();
         jetty.stop();
         jetty = null;
+        var background = maintenance;
+        if (background != null) {
+            background.close(); // antes de o armazenamento fechar
+        }
+        ds.coldTier().close();
         var journal = pitr;
         if (journal != null) {
             journal.close(); // depois das requisições: tudo o que foi confirmado fica num segmento fechado

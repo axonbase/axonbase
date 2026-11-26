@@ -19,7 +19,59 @@ public final class Catalog {
     private final ConcurrentMap<String, DataRuleDef> dataRules = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, com.axonbase.core.audit.AiAuditDef> audits = new ConcurrentHashMap<>();
 
+    /** Fora de {@link TableDef}: redefinir a tabela não desfaz a partição nem o TTL dela. */
+    private final ConcurrentMap<String, PartitionSpec> partitioning = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, TtlSpec> ttl = new ConcurrentHashMap<>();
+    /** Partições definidas por uma transação que ainda não confirmou: quem as definiu. */
+    private final ConcurrentMap<String, Object> pendingPartitioning = new ConcurrentHashMap<>();
+
     public Catalog() {
+    }
+
+    public PartitionSpec partitioning(String table) {
+        return partitioning.get(table);
+    }
+
+    public Map<String, PartitionSpec> partitionedTables() {
+        return Map.copyOf(partitioning);
+    }
+
+    public void partitioning(String table, PartitionSpec spec) {
+        partitioning.put(table, spec);
+    }
+
+    /** A transação que está definindo a partição da tabela, ou {@code null}. */
+    public Object pendingOwner(String table) {
+        return pendingPartitioning.get(table);
+    }
+
+    public void pendingPartitioning(String table, Object owner) {
+        pendingPartitioning.put(table, owner);
+    }
+
+    public void publishPartitioning(String table, Object owner) {
+        pendingPartitioning.remove(table, owner);
+    }
+
+    public TtlSpec ttl(String table) {
+        return ttl.get(table);
+    }
+
+    public Map<String, TtlSpec> ttlTables() {
+        return Map.copyOf(ttl);
+    }
+
+    public void ttl(String table, TtlSpec spec) {
+        ttl.put(table, spec);
+    }
+
+    public boolean removeTtl(String table) {
+        return ttl.remove(table) != null;
+    }
+
+    /** {@code true} quando alguma tabela precisa que o acesso aos registros passe pela camada de partição. */
+    public boolean hasTimeData() {
+        return !partitioning.isEmpty() || !ttl.isEmpty();
     }
 
     public void defineAudit(com.axonbase.core.audit.AiAuditDef def) {
@@ -43,6 +95,9 @@ public final class Catalog {
     }
 
     public boolean removeTable(String name) {
+        partitioning.remove(name);
+        pendingPartitioning.remove(name);
+        ttl.remove(name);
         return tables.remove(name) != null;
     }
 

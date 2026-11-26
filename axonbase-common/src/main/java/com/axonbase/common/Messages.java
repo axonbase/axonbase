@@ -918,8 +918,8 @@ public final class Messages {
     );
 
     static {
-        BUNDLES.put("pt-BR", PT_BR);
-        BUNDLES.put("en", EN);
+        BUNDLES.put("pt-BR", PartitionMessages.addTo(PT_BR, PartitionMessages.PT_BR));
+        BUNDLES.put("en", PartitionMessages.addTo(EN, PartitionMessages.EN));
     }
 
     private static volatile String currentLang = "pt-BR";

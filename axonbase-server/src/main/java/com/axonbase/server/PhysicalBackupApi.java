@@ -1,6 +1,8 @@
 package com.axonbase.server;
 
+import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
+import com.axonbase.core.partition.ColdBackups;
 import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.backup.StreamEncryption;
 import com.axonbase.core.journal.PitrRestore;
@@ -192,10 +194,14 @@ final class PhysicalBackupApi {
         requireBackupSource(srv);
         PhysicalBackups.Info info;
         synchronized (LOCK) {
-            try (PhysicalBackups pb = PhysicalBackups.open(backupDir(rocks))) {
-                info = pb.create(rocks);
+            Path dir = backupDir(rocks);
+            try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
+                // os objetos frios não são copiados: o backup os referencia e os bloqueia
+                info = ColdBackups.createPhysical(srv.ds(), pb, rocks, dir);
             } catch (PhysicalBackups.BackupFailedException e) {
                 throw failed(e);
+            } catch (AxonError e) {
+                throw new AdminV1Servlet.ApiError(409, "COLD_HOLD_FAILED", e.getMessage());
             }
         }
         AdminV1Servlet.write(resp, 200, AdminJson.of(toJson(info)));
@@ -228,11 +234,15 @@ final class PhysicalBackupApi {
         }
         List<Object> out = new ArrayList<>();
         synchronized (LOCK) {
-            try (PhysicalBackups pb = PhysicalBackups.open(backupDir(rocks))) {
+            Path dir = backupDir(rocks);
+            try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
                 pb.purgeKeeping(keep);
+                ColdBackups.releasePurged(srv.ds(), dir, pb.list());
                 pb.list().forEach(i -> out.add(toJson(i)));
             } catch (PhysicalBackups.BackupFailedException e) {
                 throw failed(e);
+            } catch (AxonError e) {
+                throw new AdminV1Servlet.ApiError(409, "COLD_HOLD_FAILED", e.getMessage());
             }
         }
         AdminV1Servlet.write(resp, 200, AdminJson.obj("backups", out));
@@ -265,6 +275,12 @@ final class PhysicalBackupApi {
                 } else {
                     pitr = PitrApi.prepare(srv, rocks, dir, id, source, at);
                     prepared = pitr.directory();
+                }
+                try {
+                    ColdBackups.requireRestorable(srv.ds(), prepared);
+                } catch (AxonError missing) {
+                    PhysicalBackups.discardPrepared(rocks.directory());
+                    throw new AdminV1Servlet.ApiError(409, "COLD_MISSING", missing.getMessage());
                 }
                 // 2) segura as operações, troca a base e reabre; desiste sem tocar na base se não esvaziar a tempo
                 try {

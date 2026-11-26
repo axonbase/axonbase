@@ -486,6 +486,7 @@ public final class Render {
             case Statement.ShowAiAudit sa -> {
                 sb.append("SHOW AI AUDIT ").append(sa.name());
             }
+            case Statement.Partition p -> PartitionRender.render(sb, p.command());
             case Statement.RemoveTable rt -> {
                 sb.append("REMOVE TABLE ").append(rt.name());
             }
@@ -953,6 +954,8 @@ public final class Render {
             case BOOL -> sb.append(v.asBool());
             case NUMBER -> sb.append(numberLiteral(v.asDecimal()));
             case TABLE -> sb.append(v.asTable());
+            // o lexer só aceita o prefixo d com aspas duplas
+            case DATETIME -> sb.append("d\"").append(v.asInstant()).append('"');
             default -> sb.append(v);
         }
     }

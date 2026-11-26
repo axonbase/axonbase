@@ -16,6 +16,8 @@ public final class Database {
     private final KvBackend records;
     private final AiAuditCatalog auditCatalog;
     private final com.axonbase.core.pl.ProgramCatalog programs = new com.axonbase.core.pl.ProgramCatalog();
+    private final com.axonbase.core.partition.PartitionStore.Cache partitionCache =
+        new com.axonbase.core.partition.PartitionStore.Cache();
 
     /**
      * Escritas seguram a parte de leitura durante o statement; a construção de índice segura a de escrita
@@ -87,6 +89,11 @@ public final class Database {
 
     public AiAuditCatalog auditCatalog() {
         return auditCatalog;
+    }
+
+    /** Descritores de partição já lidos deste banco. */
+    public com.axonbase.core.partition.PartitionStore.Cache partitionCache() {
+        return partitionCache;
     }
 
     /** Funções, procedures e packages AxonPL deste banco. */

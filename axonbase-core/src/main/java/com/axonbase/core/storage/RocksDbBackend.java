@@ -437,6 +437,24 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         }
     }
 
+    @Override
+    public void scanEntriesFrom(String prefix, String from, java.util.function.BiPredicate<String, byte[]> visitor) {
+        gate.enter();
+        try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
+            if (from.compareTo(prefix) > 0) {
+                scan.it.seek(utf8(from));
+            }
+            while (scan.it.isValid()) {
+                if (!visitor.test(new String(scan.it.key(), StandardCharsets.UTF_8), scan.it.value())) {
+                    break;
+                }
+                scan.it.next();
+            }
+        } finally {
+            gate.exit();
+        }
+    }
+
     /**
      * Iterador limitado ao prefixo (limite superior exclusivo calculado), sem trava e sem poluir o cache de
      * blocos com varreduras longas.
@@ -471,6 +489,10 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public void put(String key, byte[] value) {
+        if (RangeDelete.isMarker(key)) {
+            commit(Map.of(), Map.of(key, value), Set.of(), Set.of()); // a remoção por faixa pede a trava exclusiva
+            return;
+        }
         gate.enter();
         try {
             putGated(key, value);
@@ -618,7 +640,9 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                              Set<String> deletes,
                              Set<String> readPrefixes,
                              WriteOptions options) {
-        boolean exclusive = !readPrefixes.isEmpty();
+        List<RangeDelete.Range> ranges = RangeDelete.in(puts);
+        // uma remoção por faixa não comuta com escritas dentro dela: roda sozinha, e o carimbo ordena de verdade
+        boolean exclusive = !readPrefixes.isEmpty() || !ranges.isEmpty();
         var lock = exclusive ? rangeLock.writeLock() : rangeLock.readLock();
         lock.lock();
         TreeSet<Integer> touched = exclusive ? new TreeSet<>()
@@ -633,7 +657,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 }
             }
             for (String prefix : readPrefixes) {
-                checkPhantoms(prefix, expectedVersions, puts, deletes);
+                checkPhantoms(prefix, expectedVersions, puts, deletes, ranges);
             }
             int n = puts.size() + deletes.size();
             if (n == 0) {
@@ -644,6 +668,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             ticket = sequencer.begin(n);
             try (WriteBatch batch = new WriteBatch()) {
                 long version = ticket.firstVersion;
+                deleteRanges(batch, ranges);
                 for (String key : deletes) {
                     byte[] raw = utf8(key);
                     batch.delete(dataHandle, raw);
@@ -670,12 +695,24 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         renewCeiling(ticket);
     }
 
+    /** Apaga as faixas nos dados e nas versões. Entra no lote antes dos {@code put}, que prevalecem. */
+    private void deleteRanges(WriteBatch batch, List<RangeDelete.Range> ranges) throws RocksDBException {
+        for (RangeDelete.Range range : ranges) {
+            byte[] from = utf8(range.from());
+            byte[] to = utf8(range.to());
+            batch.deleteRange(dataHandle, from, to);
+            batch.deleteRange(versionsHandle, from, to);
+        }
+    }
+
     private void checkPhantoms(String prefix, Map<String, Long> expectedVersions,
-                               Map<String, byte[]> puts, Set<String> deletes) {
+                               Map<String, byte[]> puts, Set<String> deletes, List<RangeDelete.Range> ranges) {
         try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
             while (scan.it.isValid()) {
                 String key = new String(scan.it.key(), StandardCharsets.UTF_8);
-                if (!expectedVersions.containsKey(key) && !puts.containsKey(key) && !deletes.contains(key)) {
+                // o que o próprio commit apaga por faixa não é leitura fantasma
+                if (!expectedVersions.containsKey(key) && !puts.containsKey(key) && !deletes.contains(key)
+                    && ranges.stream().noneMatch(r -> r.contains(key))) {
                     throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
                 }
                 scan.it.next();
@@ -814,6 +851,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 CommitSequencer.Ticket ticket = sequencer.beginReplay(Math.max(1, n), batch.stamp(), index);
                 try (WriteBatch writes = new WriteBatch()) {
                     long version = ticket.firstVersion;
+                    deleteRanges(writes, RangeDelete.in(batch.puts()));
                     for (String key : batch.deletes()) {
                         byte[] raw = utf8(key);
                         writes.delete(dataHandle, raw);

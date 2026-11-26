@@ -1028,6 +1028,11 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         return role;
     }
 
+    @Override
+    public boolean acceptsWrites(String nodeId) {
+        return role == ClusterRole.LEADER;
+    }
+
     /** Membros que votam. Um learner não se conta. */
     public int members() {
         return peers.size() + (config.learner() ? 0 : 1);
