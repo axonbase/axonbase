@@ -4,6 +4,8 @@ import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterStatusProvider;
 import com.axonbase.core.cluster.NotLeaderException;
 import com.axonbase.core.cluster.QuorumUnavailableException;
+import com.axonbase.core.cluster.ReadConsistency;
+import com.axonbase.core.cluster.StaleReadException;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
@@ -37,6 +39,10 @@ public final class RpcDispatcher {
     public static final int NOT_LEADER = -32010;
     /** Código JSON-RPC de "sem maioria para confirmar a escrita". */
     public static final int NO_QUORUM = -32011;
+    /** Este nó não atende a leitura com a consistência pedida. */
+    public static final int STALE_READ = -32012;
+    /** Métodos que leem dados e por isso passam pela barreira de leitura num cluster. */
+    private static final Set<String> READ_METHODS = Set.of("query", "select", "kv_get", "kv_scan");
     /** Código JSON-RPC de "protocolo incompatível" (comparte -32600 da invalid request). */
     public static final int PROTOCOL_MISMATCH = -32600;
 
@@ -68,6 +74,7 @@ public final class RpcDispatcher {
     private volatile ActivityRegistry activity;
     private volatile Supplier<ClusterStatusProvider.Status> clusterStatus =
         ClusterStatusProvider.Status::local;
+    private volatile java.util.function.Consumer<ReadConsistency> readBarrier = consistency -> { };
 
     public RpcDispatcher(Datastore ds) {
         this(ds, null, false, 0);
@@ -104,6 +111,37 @@ public final class RpcDispatcher {
 
     public void clusterStatus(Supplier<ClusterStatusProvider.Status> status) {
         this.clusterStatus = status == null ? ClusterStatusProvider.Status::local : status;
+    }
+
+    /** Espera o nó poder atender uma leitura; sem cluster não há o que esperar. */
+    public void readBarrier(java.util.function.Consumer<ReadConsistency> barrier) {
+        this.readBarrier = barrier == null ? consistency -> { } : barrier;
+    }
+
+    /**
+     * Aplica a consistência pedida no campo {@code consistency} (ou o padrão do nó).
+     *
+     * @return o erro a devolver, ou {@code null} quando a leitura pode seguir
+     */
+    private String awaitRead(AxonValue id, Map<String, AxonValue> request, ClusterStatusProvider.Status cluster) {
+        AxonValue requested = request.get("consistency");
+        ReadConsistency wanted;
+        try {
+            wanted = ReadConsistency.parse(requested != null && requested.isString() ? requested.asString() : null);
+        } catch (IllegalArgumentException invalid) {
+            return rpcError(id, -32602, invalid.getMessage());
+        }
+        if (wanted == null && cluster.isLeader()) {
+            return null;
+        }
+        try {
+            readBarrier.accept(wanted);
+            return null;
+        } catch (StaleReadException stale) {
+            return "{\"id\":" + idJson(id) + ",\"error\":{\"code\":" + STALE_READ + ",\"message\":\""
+                + esc(stale.getMessage()) + "\",\"kind\":\"STALE_READ\",\"leader\":\"" + esc(cluster.leader())
+                + "\",\"leader_address\":\"" + esc(cluster.leaderAddress()) + "\"}}";
+        }
     }
 
     /**
@@ -449,6 +487,12 @@ public final class RpcDispatcher {
         if (authRequired() && requiresAuthentication(method)
             && (session.auth() == null || !authorizedForSession(session))) {
             return rpcError(id, -32003, Messages.get("auth_required"));
+        }
+        if (READ_METHODS.contains(method) && !isWrite(method, obj)) {
+            String refused = awaitRead(id, obj, cluster);
+            if (refused != null) {
+                return refused;
+            }
         }
         AxonValue result = null;
         String error = null;
