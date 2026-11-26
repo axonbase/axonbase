@@ -214,14 +214,19 @@ final class PeerReplicator {
             }
             if (!warned && quiet >= STALL_WARNING_NANOS) {
                 warned = true;
-                System.getLogger(PeerReplicator.class.getName()).log(System.Logger.Level.WARNING,
-                    "replicação para " + address + " sem envio há " + TimeUnit.NANOSECONDS.toMillis(quiet)
-                        + " ms (disco do líder ou membro lento); batimentos saindo por fora");
+                warnStalled(TimeUnit.NANOSECONDS.toMillis(quiet));
             }
             if (running && (sendingSnapshot || quiet < MAX_COVERED_NANOS)) {
                 beat();
             }
         }
+    }
+
+    /** Avisa por outra thread: o registro vai para o disco, que pode ser justamente o que está parado. */
+    private void warnStalled(long quietMillis) {
+        Thread.ofVirtual().start(() -> System.getLogger(PeerReplicator.class.getName()).log(
+            System.Logger.Level.WARNING, "replicação para " + address + " sem envio há " + quietMillis
+                + " ms (disco do líder ou membro lento); batimentos saindo por fora"));
     }
 
     /** Batimento sem commit, entendido por nós novos e antigos. */
