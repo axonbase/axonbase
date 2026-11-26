@@ -134,7 +134,7 @@ O roteiro `scripts/raft-gates/mixed_versions.py` falhou uma vez: com dois nós n
 | esse nó, como líder, manda outra entrada ou um snapshot em cima do confirmado | o nó novo recusa e, se a entrada for de outro mandato, sobe o mandato para tirá-lo do cargo |
 | um nó antigo aplica entradas além do marcador recebido e depois é atualizado | na partida, o nó novo usa o índice do estado salvo pela versão antiga |
 
-Essas três últimas defesas ainda não têm resultado no ambiente de testes. Elas só valem quando o nó novo participa: com um nó novo e dois antigos, os antigos formam maioria sozinhos.
+Essas três últimas defesas passam na suíte, mas as rodadas do cluster misto com elas ainda não têm resultado. Elas só valem quando o nó novo participa: com um nó novo e dois antigos, os antigos formam maioria sozinhos.
 
 O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível: se acontecer durante a atualização, reinicie o líder antigo travado.
 
