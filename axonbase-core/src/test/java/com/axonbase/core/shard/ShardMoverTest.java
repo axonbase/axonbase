@@ -97,6 +97,21 @@ class ShardMoverTest {
     }
 
     @Test
+    void registroComCampoAcrescentadoDepoisDaCriacaoConfereNaCopia() {
+        try (GatewayFixture fixture = loaded()) {
+            for (int i = 0; i < 200; i++) {
+                fixture.sql("UPDATE pedido SET depois = " + i + " WHERE cliente = 'c" + i + "'");
+            }
+
+            ShardMap done = mover(fixture).move(List.of(new SlotRange(0, 699)), "s2");
+
+            assertTrue(done.migration().isEmpty());
+            assertEquals(200, fixture.sql("SELECT * FROM pedido WHERE depois >= 0").asArray().size());
+            assertPlacement(fixture);
+        }
+    }
+
+    @Test
     void shardNovoRecebeAsDefinicoesEDepoisOsSlots() {
         try (GatewayFixture fixture = loaded()) {
             String before = snapshot(fixture);

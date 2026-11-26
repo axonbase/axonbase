@@ -2,7 +2,6 @@ package com.axonbase.core.shard;
 
 import com.axonbase.core.hlc.ClockDriftException;
 import com.axonbase.core.hlc.HybridClock;
-import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
 import java.math.BigDecimal;
@@ -164,18 +163,19 @@ public final class ShardMover {
 
     /** Só troca o dono quando o destino tem exatamente os mesmos registros, com o mesmo conteúdo. */
     private static void verify(ShardMap.TableKey table, List<AxonValue> source, List<AxonValue> target) {
-        Map<String, String> expected = contents(source);
-        Map<String, String> found = contents(target);
+        // a comparação ignora a ordem dos campos: o motor regrava o id no fim do registro
+        Map<String, AxonValue> expected = contents(source);
+        Map<String, AxonValue> found = contents(target);
         if (!expected.equals(found)) {
             throw new ShardException(ShardException.Code.PARTIAL_WRITE,
                 ShardMessages.get("move_verification", table.table(), expected.size(), found.size()));
         }
     }
 
-    private static Map<String, String> contents(List<AxonValue> items) {
-        Map<String, String> out = new java.util.TreeMap<>();
+    private static Map<String, AxonValue> contents(List<AxonValue> items) {
+        Map<String, AxonValue> out = new java.util.TreeMap<>();
         for (AxonValue item : items) {
-            out.put(item.asObject().get("k").asString(), AxonJson.write(item.asObject().get("r")));
+            out.put(item.asObject().get("k").asString(), item.asObject().get("r"));
         }
         return out;
     }
