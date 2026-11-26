@@ -133,6 +133,8 @@ final class ParallelScan {
             try {
                 A acc = fresh.get();
                 for (I key : keys) {
+                    // cancelamento e orçamento do QoS também valem onde o registro é lido e avaliado
+                    QueryContext.checkCancelled();
                     consume.accept(acc, key);
                 }
                 QueryContext.checkCancelled();

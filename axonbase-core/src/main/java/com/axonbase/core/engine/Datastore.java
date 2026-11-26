@@ -883,7 +883,24 @@ public final class Datastore {
     // Execução
     // ------------------------------------------------------------------
 
+    /** Liga a prioridade por tipo de carga (QoS); {@code null} desliga. */
+    public void workloadGovernor(com.axonbase.core.qos.WorkloadGovernor governor) {
+        this.workloadGovernor = governor;
+    }
+
+    private volatile com.axonbase.core.qos.WorkloadGovernor workloadGovernor;
+
     public AxonValue execute(String sql, Session session, Map<String, AxonValue> vars) {
+        var governor = workloadGovernor;
+        if (governor == null) {
+            return executeAdmitted(sql, session, vars);
+        }
+        try (var admitted = governor.admit(sql, session)) {
+            return executeAdmitted(sql, session, vars);
+        }
+    }
+
+    private AxonValue executeAdmitted(String sql, Session session, Map<String, AxonValue> vars) {
         if (commitCoordinator != null && !session.inTransaction() && isMutation(sql)) {
             return autocommit(session, () -> {
                 var exec = new Executor(this);
