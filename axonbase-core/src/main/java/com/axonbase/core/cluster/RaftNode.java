@@ -137,24 +137,31 @@ public final class RaftNode implements AutoCloseable {
     public void listener(AppliedBatchListener listener) {
         AppliedBatchListener target = listener == null ? AppliedBatchListener.none() : listener;
         List<AppliedBatchListener.AppliedBatch> replayed = new ArrayList<>();
-        applyLock.lock();
-        try {
-            if (!durable) {
-                for (long i = log.firstIndex(); i <= Math.min(applied, log.lastIndex()); i++) {
-                    FileRaftLog.Entry entry = log.entry(i);
-                    if (entry != null) {
-                        // Reaplicar é seguro: o batch é idempotente e o storage já tem os bytes.
-                        replayed.add(RaftApplier.applyReplicated(stateMachine, entry.batch(), i, entry.term()));
-                    }
-                }
-                stateMachine.flush();
-                notifications.clear();
-            }
-        } finally {
-            applyLock.unlock();
-        }
+        // A trava das notificações vem antes e cobre a releitura inteira: um lote aplicado no meio espera por ela
+        // para ser entregue depois, em vez de cair numa fila que o acoplamento descarta.
         notifyLock.lock();
         try {
+            applyLock.lock();
+            try {
+                if (!durable) {
+                    for (long i = log.firstIndex(); i <= Math.min(applied, log.lastIndex()); i++) {
+                        FileRaftLog.Entry entry = log.entry(i);
+                        if (entry != null) {
+                            // Reaplicar é seguro: o batch é idempotente e o storage já tem os bytes.
+                            replayed.add(RaftApplier.applyReplicated(stateMachine, entry.batch(), i, entry.term()));
+                        }
+                    }
+                    // Depois de um snapshot ou de uma compactação o log não conta a história toda: o estado atual
+                    // fecha a releitura.
+                    if (log.baseIndex() > 0) {
+                        replayed.add(currentState());
+                    }
+                    stateMachine.flush();
+                    notifications.clear();
+                }
+            } finally {
+                applyLock.unlock();
+            }
             this.listener = target;
             if (durable) {
                 replayed.addAll(pending);
@@ -165,6 +172,16 @@ public final class RaftNode implements AutoCloseable {
             notifyLock.unlock();
         }
         drainNotifications();
+    }
+
+    /** O armazenamento inteiro como um lote que o substitui. Só sob {@code applyLock}. */
+    private AppliedBatchListener.AppliedBatch currentState() {
+        Map<String, byte[]> values = new LinkedHashMap<>();
+        for (String key : stateMachine.keysWithPrefix("")) {
+            stateMachine.get(key).ifPresent(value -> values.put(key, value));
+        }
+        return new AppliedBatchListener.AppliedBatch(
+            new CommittedBatch("estado-" + applied, values, java.util.Set.of(), true), Map.of());
     }
 
     /** Instala os pontos de extensão da replicação e mostra a eles a entrada mais recente do log. */
