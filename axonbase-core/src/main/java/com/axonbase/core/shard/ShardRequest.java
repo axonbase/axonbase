@@ -43,7 +43,8 @@ public record ShardRequest(String namespace, String database, String sql, Map<St
         return new ShardRequest(namespace, database, sql, values, atomic, partial, filter, stamp, authorization);
     }
 
-    public ShardRequest atomic() {
+    /** A mesma requisição, rodando o script inteiro numa transação ({@code atomic}). */
+    public ShardRequest asAtomic() {
         return new ShardRequest(namespace, database, sql, vars, true, partial, filter, stamp, authorization);
     }
 

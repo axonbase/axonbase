@@ -270,10 +270,10 @@ public final class ShardGateway implements AutoCloseable {
             shard = part.shard();
             String text = part.text();
             // cada INSERT reescrito usa a própria variável
-            for (Map.Entry<String, AxonValue> var : part.vars().entrySet()) {
-                String unique = var.getKey() + i;
-                text = text.replace("$" + var.getKey(), "$" + unique);
-                vars.put(unique, var.getValue());
+            for (Map.Entry<String, AxonValue> own : part.vars().entrySet()) {
+                String unique = own.getKey() + i;
+                text = text.replace("$" + own.getKey(), "$" + unique);
+                vars.put(unique, own.getValue());
             }
             script.append(text).append(";\n");
         }

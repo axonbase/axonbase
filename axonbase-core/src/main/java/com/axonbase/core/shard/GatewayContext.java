@@ -48,7 +48,7 @@ final class GatewayContext {
             .withVars(vars)
             .withAuthorization(session.authorization());
         if (atomic) {
-            request = request.atomic();
+            request = request.asAtomic();
         }
         if (part.partial()) {
             request = request.partial(part.filter());

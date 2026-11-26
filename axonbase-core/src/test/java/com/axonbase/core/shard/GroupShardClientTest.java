@@ -119,10 +119,10 @@ class GroupShardClientTest {
                 new GroupShardClient("unico", () -> List.<ShardMember>of(single), Duration.ofSeconds(2)))) {
 
                 assertThrows(RuntimeException.class, () -> target.execute(
-                    sql("CREATE t:1 SET a = 1; ERROR 'parou';").atomic()));
+                    sql("CREATE t:1 SET a = 1; ERROR 'parou';").asAtomic()));
                 assertEquals(0, count(target, "t"));
 
-                target.execute(sql("CREATE t:1 SET a = 1; CREATE t:2 SET a = 2;").atomic());
+                target.execute(sql("CREATE t:1 SET a = 1; CREATE t:2 SET a = 2;").asAtomic());
                 assertEquals(2, count(target, "t"));
             }
         }

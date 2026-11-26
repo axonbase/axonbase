@@ -112,6 +112,6 @@ public final class ShardMapStore {
     }
 
     private AxonValue atomic(String sql, Map<String, AxonValue> vars) {
-        return meta.execute(ShardRequest.of(NAMESPACE, DATABASE, sql).withVars(vars).atomic()).value();
+        return meta.execute(ShardRequest.of(NAMESPACE, DATABASE, sql).withVars(vars).asAtomic()).value();
     }
 }

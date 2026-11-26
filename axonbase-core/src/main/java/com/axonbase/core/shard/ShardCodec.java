@@ -53,9 +53,9 @@ public final class ShardCodec {
             optional(out, request.database());
             text(out, request.sql());
             out.writeInt(request.vars().size());
-            for (Map.Entry<String, AxonValue> var : request.vars().entrySet()) {
-                text(out, var.getKey());
-                value(out, var.getValue());
+            for (Map.Entry<String, AxonValue> entry : request.vars().entrySet()) {
+                text(out, entry.getKey());
+                value(out, entry.getValue());
             }
             out.writeBoolean(request.atomic());
             out.writeBoolean(request.partial());
