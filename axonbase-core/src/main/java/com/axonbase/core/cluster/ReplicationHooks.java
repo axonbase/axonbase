@@ -15,12 +15,18 @@ public interface ReplicationHooks {
     default void recovered(CommittedBatch batch) {
     }
 
-    /** No líder, sob a trava que atribui o índice: a ordem das chamadas é a ordem do log. */
+    /**
+     * No líder, sob a trava que atribui o índice: a ordem das chamadas é a ordem do log. Também carimba o lote
+     * de um snapshot antes do envio, porque quem o recebe pula as entradas que ele cobre.
+     */
     default CommittedBatch stamp(CommittedBatch batch) {
         return batch;
     }
 
-    /** No seguidor ou learner, antes de gravar um lote recebido; {@code false} rejeita o AppendEntries. */
+    /**
+     * No seguidor ou learner, antes de gravar um lote recebido (inclusive o de um snapshot); {@code false}
+     * rejeita a requisição.
+     */
     default boolean accept(CommittedBatch batch) {
         return true;
     }

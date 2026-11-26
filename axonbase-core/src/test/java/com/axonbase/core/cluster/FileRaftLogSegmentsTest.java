@@ -333,6 +333,36 @@ class FileRaftLogSegmentsTest {
         }
     }
 
+    @Test
+    @DisplayName("um raft.log novo ao lado dos segmentos (volta de versão antiga) impede a abertura")
+    void logWrittenByAnOldVersionAfterMigrationRefusesToOpen() throws Exception {
+        try (FileRaftLog log = new FileRaftLog(dir, SMALL)) {
+            fill(log, 1, 3);
+        }
+        try (DataOutputStream out = new DataOutputStream(Files.newOutputStream(dir.resolve("raft.log")))) {
+            writeLegacy(out, 4, 2);
+        }
+        CorruptRaftLogException failure = assertThrows(CorruptRaftLogException.class,
+            () -> new FileRaftLog(dir, SMALL));
+        assertTrue(failure.getMessage().contains("raft.log"), failure.getMessage());
+        assertTrue(Files.exists(dir.resolve("raft.log")), "o arquivo não pode ser descartado");
+    }
+
+    @Test
+    @DisplayName("uma migração interrompida antes de renomear o arquivo antigo termina na próxima abertura")
+    void interruptedMigrationIsFinished() throws Exception {
+        try (FileRaftLog log = new FileRaftLog(dir, SMALL)) {
+            fill(log, 1, 3);
+        }
+        Files.createFile(dir.resolve("raft-log").resolve("migrating"));
+        Files.createFile(dir.resolve("raft.log"));
+        try (FileRaftLog log = new FileRaftLog(dir, SMALL)) {
+            assertEquals(3, log.lastIndex());
+        }
+        assertFalse(Files.exists(dir.resolve("raft.log")));
+        assertFalse(Files.exists(dir.resolve("raft-log").resolve("migrating")));
+    }
+
     /** Formato de registro das versões 0.9.x e 0.10.x. */
     private static void writeLegacy(DataOutputStream out, long index, long term) throws IOException {
         out.writeLong(index);

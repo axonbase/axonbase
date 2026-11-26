@@ -285,6 +285,16 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new ImportServlet()), "/import");
         ctx.addServlet(new ServletHolder(new GraphQLServlet(ds, this::withNames, requireAuth)), "/graphql");
         ctx.addServlet(new ServletHolder(new McpServlet(ds, this::withNames, requireAuth)), "/mcp/*");
+        // GraphQL e MCP também leem: num nó que não é o líder valem o limite de defasagem e o cabeçalho.
+        jakarta.servlet.Filter readBarrier = (request, response, chain) -> {
+            if (!refusedRead((HttpServletRequest) request, (HttpServletResponse) response)) {
+                chain.doFilter(request, response);
+            }
+        };
+        for (String path : new String[] {"/graphql", "/mcp/*"}) {
+            ctx.addFilter(asyncFilter(readBarrier), path,
+                java.util.EnumSet.of(jakarta.servlet.DispatcherType.REQUEST));
+        }
         JettyWebSocketServletContainerInitializer.configure(ctx, (sc, wsContainer) -> {});
         ctx.addServlet(new ServletHolder(ws), "/rpc/ws/*");
 

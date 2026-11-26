@@ -272,7 +272,7 @@ public final class RaftNode implements AutoCloseable {
     }
 
     private Received vote(RaftWire.Request request) {
-        if (learner) {
+        if (learner || groupSync.failed()) {
             return Received.rejected();
         }
         if (request.term() > state.term()) {
@@ -372,6 +372,9 @@ public final class RaftNode implements AutoCloseable {
         long index = request.index();
         if (index > applied) {
             CommittedBatch batch = RaftPayload.decode(request.payload());
+            if (!hooks.accept(batch)) {
+                return Received.rejected(applied);
+            }
             long term = RaftApplier.decodeMarker(batch.puts().get(RaftApplier.APPLIED_KEY))
                 .map(RaftApplier.Applied::term).orElse(0L);
             applyLock.lock();
@@ -431,6 +434,10 @@ public final class RaftNode implements AutoCloseable {
 
     long durableIndex() {
         return groupSync.durableIndex();
+    }
+
+    boolean diskFailed() {
+        return groupSync.failed();
     }
 
     void periodicSync() {
@@ -542,9 +549,13 @@ public final class RaftNode implements AutoCloseable {
         log.compact(target);
     }
 
-    /** Entrega ao listener, na ordem de aplicação, o que ainda não foi entregue. */
+    /**
+     * Entrega ao listener, na ordem de aplicação, o que ainda não foi entregue. Na volta, tudo que estava
+     * aplicado quando foi chamado já foi entregue, ainda que por outra thread.
+     */
     void drainNotifications() {
-        if (notifications.isEmpty()) {
+        // Vazia e destravada: ninguém está no meio de uma entrega.
+        if (notifications.isEmpty() && !notifyLock.isLocked()) {
             return;
         }
         notifyLock.lock();
@@ -614,7 +625,8 @@ public final class RaftNode implements AutoCloseable {
         }
         long index = RaftApplier.decodeMarker(values.get(RaftApplier.APPLIED_KEY))
             .map(RaftApplier.Applied::index).orElse(applied);
-        return new Image(index, new CommittedBatch("snapshot-" + index, values, java.util.Set.of(), true));
+        return new Image(index,
+            hooks.stamp(new CommittedBatch("snapshot-" + index, values, java.util.Set.of(), true)));
     }
 
     // ---- consultas ----

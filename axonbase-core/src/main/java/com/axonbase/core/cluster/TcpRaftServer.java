@@ -26,6 +26,8 @@ import java.util.concurrent.TimeUnit;
  */
 public final class TcpRaftServer implements AutoCloseable {
     private static final int MAX_BATCH = 64;
+    /** Uma conexão de replicação bate a cada 75 ms: calada por tanto tempo, o outro lado sumiu. */
+    private static final int IDLE_TIMEOUT_MILLIS = 60_000;
 
     private final ServerSocket server;
     private final Handler handler;
@@ -71,6 +73,8 @@ public final class TcpRaftServer implements AutoCloseable {
              var in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 1 << 16));
              var out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()))) {
             socket.setTcpNoDelay(true);
+            socket.setKeepAlive(true);
+            socket.setSoTimeout(IDLE_TIMEOUT_MILLIS);
             while (open) {
                 List<RaftWire.Request> requests = new ArrayList<>();
                 requests.add(RaftWire.readRequest(in));

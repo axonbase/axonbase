@@ -76,6 +76,10 @@ final class PeerReplicator {
     private volatile long lastAckedSendNanos;
     private volatile boolean acked;
     private volatile boolean needsBackup;
+    /** Termo com que o nó antigo gravou cada entrada recente; sobrevive às novas sondagens de protocolo. */
+    private final Map<Long, Long> storedByLegacy = new HashMap<>();
+    /** Depois de um snapshot, a entrada que o nó antigo só aceita sem o cabeçalho de AppendEntries. */
+    private long unframedIndex;
     private boolean heartbeatRequested = true;
 
     PeerReplicator(InetSocketAddress address, boolean voter, long next, Leader leader) {
@@ -117,6 +121,11 @@ final class PeerReplicator {
     /** Nanos desde a última resposta, ou -1 se nunca respondeu. */
     long nanosSinceReply() {
         return replied ? System.nanoTime() - lastReplyNanos : -1;
+    }
+
+    /** Nanos desde o envio da requisição mais recente que o peer respondeu, ou -1 se nunca respondeu. */
+    long nanosSinceAckedSend() {
+        return acked ? System.nanoTime() - lastAckedSendNanos : -1;
     }
 
     /** O peer respondeu a uma requisição enviada depois de {@code nanos}. */
@@ -429,21 +438,53 @@ final class PeerReplicator {
             pause(MAX_BACKOFF_MILLIS);
             return;
         }
-        RaftNode.Image image = leader.node().image();
-        byte[] payload = RaftPayload.encode(image.batch());
-        leader.snapshotSent(payload.length);
-        long sent = System.nanoTime();
-        RaftWire.Response response = RaftWire.call(address,
-            request(RaftWire.SNAPSHOT, image.index(), leader.commitIndex(), payload), SNAPSHOT_TIMEOUT_MILLIS);
-        if (superseded(response)) {
-            return;
+        // Montar e transferir o estado demora; sem batimentos o membro abriria uma eleição no meio.
+        Thread beats = new Thread(this::beatWhileSendingSnapshot, thread.getName() + "-beat");
+        beats.setDaemon(true);
+        beats.start();
+        try {
+            RaftNode.Image image = leader.node().image();
+            byte[] payload = RaftPayload.encode(image.batch());
+            leader.snapshotSent(payload.length);
+            long sent = System.nanoTime();
+            RaftWire.Response response = RaftWire.call(address,
+                request(RaftWire.SNAPSHOT, image.index(), leader.commitIndex(), payload), SNAPSHOT_TIMEOUT_MILLIS);
+            if (superseded(response)) {
+                return;
+            }
+            if (response.accepted()) {
+                match = Math.max(match, image.index());
+                next = image.index() + 1;
+                unframedIndex = next;
+                storedByLegacy.clear();
+                answered(sent);
+            } else {
+                pause(MAX_BACKOFF_MILLIS);
+            }
+        } finally {
+            beats.interrupt();
         }
-        if (response.accepted()) {
-            match = Math.max(match, image.index());
-            next = image.index() + 1;
-            answered(sent);
-        } else {
-            pause(MAX_BACKOFF_MILLIS);
+    }
+
+    /** Batimento sem commit, entendido por nós novos e antigos. */
+    private void beatWhileSendingSnapshot() {
+        while (running && !Thread.currentThread().isInterrupted()) {
+            try {
+                long sent = System.nanoTime();
+                RaftWire.Response response = RaftWire.call(address,
+                    request(RaftWire.APPEND, 0, 0, new byte[0]), RPC_TIMEOUT_MILLIS);
+                if (superseded(response)) {
+                    return;
+                }
+                answered(sent);
+            } catch (IOException unreachable) {
+                // o envio do snapshot descobre e tenta de novo
+            }
+            try {
+                TimeUnit.NANOSECONDS.sleep(HEARTBEAT_NANOS);
+            } catch (InterruptedException done) {
+                return;
+            }
         }
     }
 
@@ -454,7 +495,6 @@ final class PeerReplicator {
      * da requisição, então o termo anterior informado precisa ser o que foi gravado lá.
      */
     private void legacy() throws IOException {
-        Map<Long, Long> storedThere = new HashMap<>();
         RaftNode node = leader.node();
         long until = System.nanoTime() + LEGACY_PROBE_NANOS;
         long lastSend = System.nanoTime() - HEARTBEAT_NANOS;
@@ -472,18 +512,20 @@ final class PeerReplicator {
                 if (entry == null) {
                     continue;
                 }
-                long previousTerm = storedThere.getOrDefault(index - 1, node.lastTermAt(index - 1));
+                long previousTerm = storedByLegacy.getOrDefault(index - 1, node.lastTermAt(index - 1));
+                byte[] payload = index == unframedIndex ? RaftPayload.encode(entry.batch())
+                    : RaftPayload.append(index - 1, previousTerm, entry.batch());
                 RaftWire.Response response = RaftWire.call(address,
                     new RaftWire.Request(RaftWire.APPEND, leader.group(), leader.term(), leader.nodeId(),
-                        leader.advertise(), index, Math.min(leader.commitIndex(), match),
-                        RaftPayload.append(index - 1, previousTerm, entry.batch())), RPC_TIMEOUT_MILLIS);
+                        leader.advertise(), index, Math.min(leader.commitIndex(), match), payload),
+                    RPC_TIMEOUT_MILLIS);
                 if (superseded(response)) {
                     return;
                 }
                 lastSend = sent;
                 if (response.accepted()) {
-                    storedThere.put(index, leader.term());
-                    storedThere.remove(index - 64);
+                    storedByLegacy.put(index, leader.term());
+                    storedByLegacy.remove(index - 64);
                     match = Math.max(match, index);
                     next = index + 1;
                 } else if (index == 1) {

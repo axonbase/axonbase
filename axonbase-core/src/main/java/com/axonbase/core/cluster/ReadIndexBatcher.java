@@ -13,16 +13,20 @@ import java.util.function.LongSupplier;
  */
 final class ReadIndexBatcher {
 
+    /** Índice devolvido pelo líder e o instante local em que a consulta começou. */
+    record Round(long index, long startedNanos) {
+    }
+
     private final LongSupplier askLeader;
-    private CompletableFuture<Long> next;
+    private CompletableFuture<Round> next;
     private boolean running;
 
     ReadIndexBatcher(LongSupplier askLeader) {
         this.askLeader = askLeader;
     }
 
-    long await(long timeoutMillis) {
-        CompletableFuture<Long> round;
+    Round await(long timeoutMillis) {
+        CompletableFuture<Round> round;
         synchronized (this) {
             if (next == null) {
                 next = new CompletableFuture<>();
@@ -50,7 +54,7 @@ final class ReadIndexBatcher {
 
     private void run() {
         while (true) {
-            CompletableFuture<Long> round;
+            CompletableFuture<Round> round;
             synchronized (this) {
                 round = next;
                 next = null;
@@ -60,7 +64,8 @@ final class ReadIndexBatcher {
                 }
             }
             try {
-                round.complete(askLeader.getAsLong());
+                long started = System.nanoTime();
+                round.complete(new Round(askLeader.getAsLong(), started));
             } catch (RuntimeException failure) {
                 round.completeExceptionally(failure);
             }

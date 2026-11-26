@@ -36,6 +36,8 @@ public final class FileRaftLog implements AutoCloseable {
     private static final String LEGACY = "raft.log";
     private static final String LEGACY_DONE = "raft.log.migrated";
     private static final String BASE_FILE = "base";
+    /** Presente entre publicar os segmentos migrados e renomear o arquivo antigo. */
+    private static final String MIGRATION_MARKER = "migrating";
     private static final int BASE_MAGIC = 0x41585242;
     private static final int BASE_BYTES = 24;
 
@@ -485,8 +487,15 @@ public final class FileRaftLog implements AutoCloseable {
      */
     private void migrateLegacy(Path root) throws IOException {
         Path legacy = root.resolve(LEGACY);
+        Path marker = directory.resolve(MIGRATION_MARKER);
         if (!Files.exists(legacy)) {
+            Files.deleteIfExists(marker);
             return;
+        }
+        if (Files.exists(directory) && !Files.exists(marker)) {
+            // Uma versão antiga rodou neste diretório depois da migração: os segmentos estão velhos.
+            throw new CorruptRaftLogException("há um raft.log gravado por uma versão antiga ao lado de " + directory
+                + ". Apague o diretório do Raft deste nó para o líder reenviar o estado");
         }
         if (!Files.exists(directory)) {
             Path building = root.resolve(MIGRATING);
@@ -506,12 +515,16 @@ public final class FileRaftLog implements AutoCloseable {
                 });
                 target.sync();
             }
+            Files.createFile(staging.resolve(MIGRATION_MARKER));
+            LogSegment.forceDirectory(staging);
             Files.move(staging, directory, StandardCopyOption.ATOMIC_MOVE);
+            LogSegment.forceDirectory(root);
             deleteTree(building);
         }
         Files.move(legacy, root.resolve(LEGACY_DONE), StandardCopyOption.REPLACE_EXISTING,
             StandardCopyOption.ATOMIC_MOVE);
         LogSegment.forceDirectory(root);
+        Files.deleteIfExists(marker);
     }
 
     private static void deleteTree(Path path) throws IOException {

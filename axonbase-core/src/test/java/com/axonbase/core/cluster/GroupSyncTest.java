@@ -113,6 +113,20 @@ class GroupSyncTest {
     }
 
     @Test
+    @DisplayName("em batch, um fsync periódico que falha também para o nó")
+    void failedPeriodicSyncIsFatal() {
+        Disk disk = new Disk();
+        GroupSync group = new GroupSync(SyncMode.BATCH, disk.written::get, disk::fsync);
+        disk.written.set(1);
+        disk.broken.set(true);
+        assertThrows(RuntimeException.class, group::periodicSync);
+        disk.broken.set(false);
+        assertTrue(group.failed());
+        assertThrows(RuntimeException.class, group::periodicSync);
+        assertThrows(RuntimeException.class, () -> group.awaitDurable(1));
+    }
+
+    @Test
     @DisplayName("um fsync que falha envenena o log: nada mais é confirmado")
     void failedSyncIsFatal() {
         Disk disk = new Disk();

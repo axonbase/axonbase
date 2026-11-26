@@ -4,12 +4,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -22,6 +19,7 @@ import java.util.Properties;
  */
 public final class RaftNodeState {
     private final Path file;
+    private final Path appliedFile;
     private long term;
     private String votedFor = "";
     private long appliedIndex;
@@ -32,6 +30,7 @@ public final class RaftNodeState {
         try {
             Files.createDirectories(directory);
             file = directory.resolve("raft.state");
+            appliedFile = directory.resolve("raft.applied");
             load();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -59,10 +58,21 @@ public final class RaftNodeState {
     }
 
     public synchronized void update(long term, String votedFor, long appliedIndex) {
+        long previousTerm = this.term;
+        String previousVote = this.votedFor;
+        long previousApplied = this.appliedIndex;
         this.term = term;
         this.votedFor = votedFor == null ? "" : votedFor;
         this.appliedIndex = appliedIndex;
-        save(true);
+        try {
+            save();
+        } catch (RuntimeException notPersisted) {
+            // Um voto que não chegou ao disco não pode valer nem em memória.
+            this.term = previousTerm;
+            this.votedFor = previousVote;
+            this.appliedIndex = previousApplied;
+            throw notPersisted;
+        }
     }
 
     /** Grava termo e voto sem tocar no índice aplicado. */
@@ -70,20 +80,34 @@ public final class RaftNodeState {
         update(term, votedFor, appliedIndex);
     }
 
-    /** Registra até onde o armazenamento aplicou o log. */
+    /**
+     * Registra até onde o armazenamento aplicou o log. Sem {@code durable} (armazenamento volátil, a cada
+     * aplicação) vai para um arquivo próprio, sem fsync, para nunca arriscar o termo e o voto.
+     */
     synchronized void checkpoint(long index, long indexTerm, boolean durable) {
         this.appliedIndex = index;
         this.appliedTerm = indexTerm;
-        save(durable);
+        if (durable) {
+            save();
+            return;
+        }
+        try {
+            Path tmp = appliedFile.resolveSibling("raft.applied.tmp");
+            Files.writeString(tmp, index + " " + indexTerm);
+            Files.move(tmp, appliedFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     public synchronized void updatePeers(List<InetSocketAddress> peers) {
         this.peers = peers == null ? new ArrayList<>() : new ArrayList<>(peers);
-        save(true);
+        save();
     }
 
     private void load() throws IOException {
         if (!Files.exists(file)) {
+            loadApplied();
             return;
         }
         Properties p = new Properties();
@@ -95,31 +119,33 @@ public final class RaftNodeState {
         appliedIndex = Long.parseLong(p.getProperty("applied_index", "0"));
         appliedTerm = Long.parseLong(p.getProperty("applied_term", "0"));
         peers = parsePeers(p.getProperty("peers", ""));
+        loadApplied();
     }
 
-    private void save(boolean durable) {
+    private void loadApplied() throws IOException {
+        if (!Files.exists(appliedFile)) {
+            return;
+        }
+        String[] parts = Files.readString(appliedFile).trim().split(" ");
+        if (parts.length == 2) {
+            appliedIndex = Long.parseLong(parts[0]);
+            appliedTerm = Long.parseLong(parts[1]);
+        }
+    }
+
+    private void save() {
         Properties p = new Properties();
         p.setProperty("term", Long.toString(term));
         p.setProperty("voted_for", votedFor);
         p.setProperty("applied_index", Long.toString(appliedIndex));
         p.setProperty("applied_term", Long.toString(appliedTerm));
         p.setProperty("peers", formatPeers(peers));
-        Path tmp = file.resolveSibling("raft.state.tmp");
         try {
             var bytes = new ByteArrayOutputStream();
             p.store(bytes, "AxonBase Raft state");
-            if (durable) {
-                LogSegment.writeAtomically(file, bytes.toByteArray());
-                return;
-            }
-            try (FileChannel channel = FileChannel.open(tmp, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
-                StandardOpenOption.TRUNCATE_EXISTING)) {
-                ByteBuffer buffer = ByteBuffer.wrap(bytes.toByteArray());
-                while (buffer.hasRemaining()) {
-                    channel.write(buffer);
-                }
-            }
-            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            LogSegment.writeAtomically(file, bytes.toByteArray());
+            // O estado completo é mais novo que o ponto volátil.
+            Files.deleteIfExists(appliedFile);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

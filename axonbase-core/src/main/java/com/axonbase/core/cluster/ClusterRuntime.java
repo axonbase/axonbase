@@ -52,6 +52,9 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     private static final long LEADER_FORGOTTEN_NANOS = TimeUnit.SECONDS.toNanos(2);
     private static final long READ_TIMEOUT_MILLIS = 5_000;
     private static final long BOUNDED_WAIT_MILLIS = 1_000;
+    private static final long BOUNDED_MINIMUM_WAIT_MILLIS = 200;
+    private static final long REPLICATOR_JOIN_MILLIS = 130_000;
+    private static final String ANY_LEARNER = "*";
     private static final long BATCH_SYNC_MILLIS = 1_000;
     private static final int VOTE_TIMEOUT_MILLIS = 250;
     /** Folga máxima de log guardada para um seguidor atrasado, em múltiplos da retenção. */
@@ -75,7 +78,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     private final Map<InetSocketAddress, Learner> learners = new ConcurrentHashMap<>();
     /** Replicadores parados que ainda podem estar lendo o nó; {@link #close()} espera por eles. */
     private final Set<PeerReplicator> retired = ConcurrentHashMap.newKeySet();
-    private final ConcurrentSkipListMap<Long, CompletableFuture<Void>> pendingWrites = new ConcurrentSkipListMap<>();
+    private final ConcurrentSkipListMap<Long, PendingWrite> pendingWrites = new ConcurrentSkipListMap<>();
     private final ReadIndexBatcher readIndexes = new ReadIndexBatcher(this::askLeaderForReadIndex);
     private final AtomicLong electionsStarted = new AtomicLong();
     private final AtomicLong quorumUnavailable = new AtomicLong();
@@ -96,11 +99,15 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     private volatile long unresolved;
     /** Muda a cada troca de liderança ou escrita abandonada; invalida validações feitas antes. */
     private volatile long validationEpoch;
-    private volatile boolean caughtUp;
-    private volatile long caughtUpNanos;
+    /** Instante local a partir do qual os dados deste nó são comprovadamente atuais (via ReadIndex). */
+    private volatile boolean confirmedFresh;
+    private volatile long freshAsOfNanos;
     private long lastJoinNanos = System.nanoTime() - LEARNER_JOIN_NANOS;
 
     private record Learner(String node, long lastJoinNanos) {
+    }
+
+    private record PendingWrite(long term, CompletableFuture<Void> applied) {
     }
 
     public ClusterRuntime(ClusterConfig config, Path dataDir) throws IOException {
@@ -170,7 +177,6 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     // ------------------------------------------------------------------
 
     private List<RaftWire.Response> handleAll(List<RaftWire.Request> requests) {
-        long received = System.nanoTime();
         List<RaftWire.Request> forNode = new ArrayList<>(requests.size());
         RaftWire.Response[] responses = new RaftWire.Response[requests.size()];
         boolean fromLeader = false;
@@ -178,6 +184,10 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         try {
             for (int i = 0; i < requests.size(); i++) {
                 RaftWire.Request request = requests.get(i);
+                if (!config.clusterId().equals(request.group())) {
+                    responses[i] = new RaftWire.Response(node.term(), false, 0);
+                    continue;
+                }
                 switch (request.type()) {
                     case RaftWire.READ_INDEX -> responses[i] = answerReadIndex();
                     case RaftWire.JOIN -> responses[i] = answerJoin(request);
@@ -199,7 +209,9 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 for (int i = 0; i < responses.length; i++) {
                     if (responses[i] == null) {
                         responses[i] = answered.get(next++);
-                        observe(requests.get(i), responses[i], received);
+                        if (requests.get(i).type() == RaftWire.VOTE && responses[i].accepted()) {
+                            lastContact = System.nanoTime();
+                        }
                     }
                 }
             }
@@ -232,19 +244,6 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         // o cliente para um nome, mas não para um destino.
         if (!request.advertise().isEmpty()) {
             addressByNode.put(request.leaderOrCandidate(), parse(request.advertise()));
-        }
-    }
-
-    private void observe(RaftWire.Request request, RaftWire.Response response, long received) {
-        if (!response.accepted()) {
-            return;
-        }
-        if (request.type() == RaftWire.VOTE) {
-            lastContact = System.nanoTime();
-        } else if (isReplication(request.type()) && node.commitIndex() >= request.commitIndex()) {
-            // Aplicado tudo que o líder tinha confirmado quando enviou: em dia a partir da chegada.
-            caughtUpNanos = received;
-            caughtUp = true;
         }
     }
 
@@ -302,7 +301,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         long lastIndex;
         long lastTerm;
         synchronized (stateLock) {
-            if (closed || role == ClusterRole.LEADER || role == ClusterRole.LEARNER) {
+            if (closed || role == ClusterRole.LEADER || role == ClusterRole.LEARNER || node.diskFailed()) {
                 return;
             }
             electionsStarted.incrementAndGet();
@@ -415,16 +414,17 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             }
             leaderTerm = 0;
             validationEpoch++;
-            caughtUp = false;
+            confirmedFresh = false;
             stopping = new ArrayList<>(replicators.values());
             replicators.clear();
             retired.addAll(stopping);
+            // As escritas pendentes podem ou não ser confirmadas pelo próximo líder: o desfecho é
+            // desconhecido. Antes de soltar a trava, para o próximo líder não sobrescrever uma ainda "pendente".
+            pendingWrites.values().forEach(pending -> pending.applied()
+                .completeExceptionally(new QuorumUnavailableException(config.clusterId())));
+            pendingWrites.clear();
         }
         stopping.forEach(PeerReplicator::stop);
-        // As escritas pendentes podem ou não ser confirmadas pelo próximo líder: o desfecho é desconhecido.
-        pendingWrites.values().forEach(
-            future -> future.completeExceptionally(new QuorumUnavailableException(config.clusterId())));
-        pendingWrites.clear();
     }
 
     // ------------------------------------------------------------------
@@ -531,9 +531,16 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 }
                 node.applyThrough(commit);
                 var done = pendingWrites.headMap(node.commitIndex(), true);
-                for (Map.Entry<Long, CompletableFuture<Void>> entry = done.pollFirstEntry(); entry != null;
+                for (Map.Entry<Long, PendingWrite> entry = done.pollFirstEntry(); entry != null;
                      entry = done.pollFirstEntry()) {
-                    entry.getValue().complete(null);
+                    PendingWrite pending = entry.getValue();
+                    // Só é a mesma escrita se o índice ainda tem o termo em que ela foi proposta.
+                    if (entry.getKey() <= node.baseIndex() || node.lastTermAt(entry.getKey()) == pending.term()) {
+                        pending.applied().complete(null);
+                    } else {
+                        pending.applied()
+                            .completeExceptionally(new QuorumUnavailableException(config.clusterId()));
+                    }
                 }
                 // Fora desta thread: um listener que espera uma trava de quem aguarda o commit não a trava.
                 notifier.execute(node::drainNotifications);
@@ -611,7 +618,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 stepDown();
                 throw notLeader();
             }
-            pendingWrites.put(index, applied);
+            pendingWrites.put(index, new PendingWrite(leaderTerm, applied));
         }
         replicators.values().forEach(PeerReplicator::wake);
         try {
@@ -708,53 +715,80 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         switch (wanted.mode()) {
             case STALE -> {
             }
-            case BOUNDED -> awaitFreshness(wanted.maxLagMillis());
-            case LINEARIZABLE -> {
-                long index = role == ClusterRole.LEADER ? leaderReadIndex()
-                    : readIndexes.await(READ_TIMEOUT_MILLIS);
-                if (!node.awaitApplied(index, READ_TIMEOUT_MILLIS)) {
-                    throw new StaleReadException("este nó não aplicou o índice " + index + " a tempo");
+            case BOUNDED -> {
+                if (role == ClusterRole.LEADER) {
+                    awaitLeaderFreshness(wanted.maxLagMillis());
+                } else {
+                    awaitFollowerFreshness(wanted.maxLagMillis());
                 }
             }
+            case LINEARIZABLE -> {
+                long index = role == ClusterRole.LEADER ? leaderReadIndex()
+                    : readIndexes.await(READ_TIMEOUT_MILLIS).index();
+                awaitVisible(index, READ_TIMEOUT_MILLIS);
+            }
         }
+    }
+
+    /** Espera o índice estar aplicado e entregue ao listener (o catálogo em memória). */
+    private void awaitVisible(long index, long timeoutMillis) {
+        if (!node.awaitApplied(index, timeoutMillis)) {
+            throw new StaleReadException("este nó não aplicou o índice " + index + " a tempo");
+        }
+        node.drainNotifications();
     }
 
     /**
-     * Nanos desde que este nó esteve em dia com o líder, ou -1 se nunca esteve. Medido pela chegada da
-     * mensagem do líder, então não inclui o atraso de rede dela.
+     * O líder está em dia desde o envio mais antigo entre os que uma maioria respondeu por último: depois dele
+     * nenhum outro líder podia ter sido eleito sem passar por essa maioria.
      */
-    private long staleness() {
-        if (role == ClusterRole.LEADER) {
-            // O líder está em dia desde o envio que a maioria respondeu por último.
-            List<Long> ages = new ArrayList<>(peers.size() + 1);
-            ages.add(0L);
-            for (InetSocketAddress peer : peers) {
-                PeerReplicator replicator = replicators.get(peer);
-                long since = replicator == null ? -1 : replicator.nanosSinceReply();
-                ages.add(since < 0 ? Long.MAX_VALUE : since);
-            }
-            ages.sort(Comparator.naturalOrder());
-            long age = ages.get(quorum() - 1);
-            return node.commitIndex() >= termStart && age < Long.MAX_VALUE ? age : -1;
-        }
-        return caughtUp ? System.nanoTime() - caughtUpNanos : -1;
-    }
-
-    private void awaitFreshness(long maxLagMillis) {
+    private void awaitLeaderFreshness(long maxLagMillis) {
         long limit = TimeUnit.MILLISECONDS.toNanos(maxLagMillis);
         long deadline = System.nanoTime()
             + TimeUnit.MILLISECONDS.toNanos(Math.min(maxLagMillis, BOUNDED_WAIT_MILLIS));
         while (true) {
-            long age = staleness();
-            if (age >= 0 && age <= limit) {
+            List<Long> ages = new ArrayList<>(peers.size() + 1);
+            ages.add(0L);
+            for (InetSocketAddress peer : peers) {
+                PeerReplicator replicator = replicators.get(peer);
+                long since = replicator == null ? -1 : replicator.nanosSinceAckedSend();
+                ages.add(since < 0 ? Long.MAX_VALUE : since);
+            }
+            ages.sort(Comparator.naturalOrder());
+            if (node.commitIndex() >= termStart && ages.get(quorum() - 1) <= limit) {
+                node.drainNotifications();
                 return;
             }
             if (System.nanoTime() - deadline >= 0) {
-                throw new StaleReadException(age < 0 ? "este nó ainda não está em dia com o líder"
-                    : "este nó está " + TimeUnit.NANOSECONDS.toMillis(age) + " ms atrás do líder; o limite é "
-                    + maxLagMillis + " ms");
+                throw new StaleReadException("o líder não confirma a maioria há mais de " + maxLagMillis + " ms");
             }
             pauseBriefly();
+        }
+    }
+
+    /**
+     * Um seguidor não sabe há quanto tempo uma mensagem recebida saiu do líder, então mede pelo próprio
+     * relógio: vale o que ele aplicou de uma consulta ao líder iniciada há no máximo o limite. Sem uma recente,
+     * faz a consulta agora (dividida entre as leituras que chegam juntas).
+     */
+    private void awaitFollowerFreshness(long maxLagMillis) {
+        if (confirmedFresh && System.nanoTime() - freshAsOfNanos <= TimeUnit.MILLISECONDS.toNanos(maxLagMillis)) {
+            node.drainNotifications();
+            return;
+        }
+        long wait = Math.min(Math.max(maxLagMillis, BOUNDED_MINIMUM_WAIT_MILLIS), BOUNDED_WAIT_MILLIS);
+        try {
+            ReadIndexBatcher.Round round = readIndexes.await(wait);
+            awaitVisible(round.index(), wait);
+            synchronized (readIndexes) {
+                if (!confirmedFresh || round.startedNanos() - freshAsOfNanos > 0) {
+                    freshAsOfNanos = round.startedNanos();
+                    confirmedFresh = true;
+                }
+            }
+        } catch (StaleReadException unconfirmed) {
+            throw new StaleReadException("este nó não confirma estar a menos de " + maxLagMillis + " ms do líder: "
+                + unconfirmed.getMessage());
         }
     }
 
@@ -863,7 +897,10 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 return new RaftWire.Response(node.term(), false, 0);
             }
             InetSocketAddress address = parse(request.advertise());
-            if (peers.contains(address)) {
+            // O learner recebe o banco inteiro: só os endereços que o operador listou.
+            boolean listed = options.allowedLearners().contains(ANY_LEARNER)
+                || options.allowedLearners().contains(request.advertise());
+            if (!listed || peers.contains(address)) {
                 return new RaftWire.Response(node.term(), false, 0);
             }
             learners.put(address, new Learner(request.leaderOrCandidate(), System.nanoTime()));
@@ -1167,8 +1204,10 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             if (!notifier.awaitTermination(5, TimeUnit.SECONDS)) {
                 notifier.shutdownNow();
             }
+            // Um replicador pode estar lendo o armazenamento para um snapshot: fechar antes dele derrubaria o
+            // processo.
             for (PeerReplicator replicator : retired) {
-                replicator.join(5_000);
+                replicator.join(REPLICATOR_JOIN_MILLIS);
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();

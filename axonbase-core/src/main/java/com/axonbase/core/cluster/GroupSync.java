@@ -37,6 +37,9 @@ final class GroupSync {
      */
     boolean awaitDurable(long index) {
         if (mode != SyncMode.ALWAYS) {
+            synchronized (this) {
+                ensureHealthy();
+            }
             return index <= written.getAsLong();
         }
         boolean interrupted = false;
@@ -81,8 +84,9 @@ final class GroupSync {
         long target;
         long started;
         synchronized (this) {
+            ensureHealthy();
             target = written.getAsLong();
-            if (syncing || failure != null || target <= durable) {
+            if (syncing || target <= durable) {
                 return;
             }
             syncing = true;
@@ -131,6 +135,11 @@ final class GroupSync {
         synchronized (this) {
             return durable;
         }
+    }
+
+    /** Um fsync falhou: este nó não pode mais confirmar, votar nem concorrer. */
+    synchronized boolean failed() {
+        return failure != null;
     }
 
     synchronized long syncCount() {

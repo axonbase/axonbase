@@ -90,7 +90,8 @@ final class ClusterHarness implements AutoCloseable {
         VersionedKvBackend backend = rocks ? new RocksDbBackend(dir(id).resolve("db").toString(), options.sync())
             : new MemoryBackend();
         try {
-            ClusterRuntime runtime = new ClusterRuntime(config, dir(id).resolve("raft"), backend, options);
+            ClusterRuntime runtime = new ClusterRuntime(config, dir(id).resolve("raft"), backend,
+                options.withAllowedLearners(List.of("*")));
             backends.put(id, backend);
             running.put(id, runtime);
             return runtime;

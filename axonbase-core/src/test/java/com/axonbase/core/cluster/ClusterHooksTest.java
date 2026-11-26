@@ -119,6 +119,40 @@ class ClusterHooksTest {
     }
 
     @Test
+    @DisplayName("o lote de um snapshot passa pelos ganchos de quem envia e de quem recebe, que pode recusar")
+    void snapshotGoesThroughTheHooks() throws Exception {
+        try (RaftNode source = new RaftNode("a", dir.resolve("a"), new MemoryBackend());
+             RaftNode target = new RaftNode("b", dir.resolve("b"), new MemoryBackend())) {
+            source.hooks(new ReplicationHooks() {
+                @Override
+                public CommittedBatch stamp(CommittedBatch batch) {
+                    return new CommittedBatch("carimbado", batch.puts(), batch.deletes(), batch.fullSnapshot());
+                }
+            });
+            source.appendLocal(1, 1, named("um"));
+            source.commitLocal(1, "a", 1);
+            RaftNode.Image image = source.image();
+            RaftWire.Request request = new RaftWire.Request(RaftWire.SNAPSHOT, "g", 1, "a", image.index(), 1,
+                RaftPayload.encode(image.batch()));
+            List<String> seen = new ArrayList<>();
+            AtomicInteger refusals = new AtomicInteger();
+            target.hooks(new ReplicationHooks() {
+                @Override
+                public boolean accept(CommittedBatch batch) {
+                    seen.add(batch.transactionId());
+                    return refusals.incrementAndGet() > 1;
+                }
+            });
+
+            org.junit.jupiter.api.Assertions.assertFalse(target.handle(request).accepted());
+            assertEquals(0, target.commitIndex());
+            assertTrue(target.handle(request).accepted());
+            assertEquals(1, target.commitIndex());
+            assertEquals(List.of("carimbado", "carimbado"), seen);
+        }
+    }
+
+    @Test
     @DisplayName("ao instalar os ganchos o nó entrega a última entrada do log, para o relógio não voltar")
     void hooksSeeTheTailOfTheLogOnInstall() throws Exception {
         Path node = dir.resolve("n");

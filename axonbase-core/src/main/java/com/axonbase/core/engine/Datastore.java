@@ -29,9 +29,7 @@ import com.axonbase.value.AxonValue;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -80,8 +78,10 @@ public final class Datastore {
      * Transações cuja notificação já saiu pela sessão que as originou. O batch volta
      * pelo listener do consenso e não deve gerar um segundo evento.
      */
-    private final Deque<String> locallyOriginated = new ArrayDeque<>();
-    private static final int ORIGINATED_MEMORY = 256;
+    /** Lotes confirmados por este nó e ainda não entregues pelo consenso. */
+    private final java.util.LinkedHashSet<String> locallyOriginated = new java.util.LinkedHashSet<>();
+    /** Só protege um coordenador que nunca entrega; com group commit centenas ficam em voo ao mesmo tempo. */
+    private static final int ORIGINATED_MEMORY = 100_000;
 
     // Operation audit configuration
     private boolean auditEnabled;
@@ -779,7 +779,7 @@ public final class Datastore {
 
     private void markLocalOrigin(String transactionId) {
         synchronized (locallyOriginated) {
-            locallyOriginated.addLast(transactionId);
+            locallyOriginated.add(transactionId);
             while (locallyOriginated.size() > ORIGINATED_MEMORY) {
                 locallyOriginated.removeFirst();
             }
