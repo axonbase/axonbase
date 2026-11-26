@@ -41,7 +41,6 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
 
     private static final int CHUNK = 1_000;
     private static final long IDLE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
-    private static final long SYNC_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final long FAILURE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
 
     private static final int WRITE_BUFFER_BYTES = 1 << 20;
@@ -57,6 +56,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     private final ByteBuffer writeBuffer = ByteBuffer.allocateDirect(WRITE_BUFFER_BYTES);
     private final AtomicLong dropped = new AtomicLong();
     private final AtomicLong writeErrors = new AtomicLong();
+    private final AtomicLong syncs = new AtomicLong();
     private final CopyOnWriteArrayList<SegmentInfo> sealed = new CopyOnWriteArrayList<>();
     /** Dona da fila (só quem a tem retira lotes) e do segmento aberto. */
     private final ReentrantLock writing = new ReentrantLock(true);
@@ -252,6 +252,11 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
         return dropped.get();
     }
 
+    /** Sincronizações do segmento aberto desde a abertura (sem contar as do fechamento de segmentos). */
+    public long syncCount() {
+        return syncs.get();
+    }
+
     /** Falhas de escrita em disco desde a abertura. */
     public long writeErrors() {
         return writeErrors.get();
@@ -347,10 +352,17 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
         } else if (!options.idleHeartbeat().isZero() && now - lastSealNanos >= options.idleHeartbeat().toNanos()) {
             sealLocked();
         }
-        if (open != null && now - lastSyncNanos >= SYNC_INTERVAL_NANOS) {
-            open.sync();
+        if (open != null && syncDue(now)) {
+            if (open.sync()) {
+                syncs.incrementAndGet();
+            }
             lastSyncNanos = now;
         }
+    }
+
+    private boolean syncDue(long now) {
+        return now - lastSyncNanos >= options.syncInterval().toNanos()
+            || options.syncEveryBytes() > 0 && open.unsyncedBytes() >= options.syncEveryBytes();
     }
 
     /** Grava os lotes, virando de segmento pelo tamanho. Os intermediários não prometem cobertura nova. */

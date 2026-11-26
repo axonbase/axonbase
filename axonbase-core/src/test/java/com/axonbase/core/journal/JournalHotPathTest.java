@@ -211,6 +211,47 @@ class JournalHotPathTest {
     }
 
     @Test
+    @DisplayName("por padrão o segmento aberto sincroniza a cada segundo, sem limite por bytes")
+    void theDefaultSyncPolicyIsOncePerSecond() {
+        assertEquals(Duration.ofSeconds(1), JournalOptions.defaults().syncInterval());
+        assertEquals(0L, JournalOptions.defaults().syncEveryBytes());
+    }
+
+    @Test
+    @DisplayName("com o limite por bytes, sincroniza antes de o intervalo chegar")
+    void syncsAfterEnoughBytes() throws Exception {
+        Path dir = tmp.resolve("j");
+        try (PitrJournal journal = PitrJournal.open(dir, options().withSync(Duration.ofDays(1), 4_096),
+                JournalHotPathTest::watermark)) {
+            for (int i = 1; i <= 20; i++) {
+                journal.committed(i, new HlcTimestamp(100 + i, 0), Map.of("k" + i, new byte[1_024]), Set.of());
+            }
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (journal.syncCount() == 0 && System.currentTimeMillis() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertTrue(journal.syncCount() >= 1);
+        }
+    }
+
+    @Test
+    @DisplayName("sem bytes suficientes e antes do intervalo, nada é sincronizado")
+    void doesNotSyncBeforeItIsDue() throws Exception {
+        Path dir = tmp.resolve("j");
+        try (PitrJournal journal = PitrJournal.open(dir, options().withSync(Duration.ofDays(1), 1L << 30),
+                JournalHotPathTest::watermark)) {
+            journal.committed(1L, new HlcTimestamp(101, 0), Map.of("k", new byte[16]), Set.of());
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (journal.openSegmentBatches() == 0 && System.currentTimeMillis() < deadline) {
+                Thread.onSpinWait();
+            }
+            Thread.sleep(100);
+
+            assertEquals(0L, journal.syncCount());
+        }
+    }
+
+    @Test
     @DisplayName("8 threads: todo lote aceito é arquivado, e o que passa do limite é contado como descartado")
     void everyAcceptedBatchIsArchivedAndTheRestCounted() throws Exception {
         Path dir = tmp.resolve("j");

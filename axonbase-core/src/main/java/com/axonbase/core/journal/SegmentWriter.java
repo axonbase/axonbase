@@ -31,6 +31,7 @@ final class SegmentWriter implements AutoCloseable {
     private final ByteBuffer buffer;
     private final CRC32C crc = new CRC32C();
     private long size;
+    private long syncedSize;
     private boolean unsynced;
 
     /** Faixa de carimbos e índices dos lotes de um segmento. */
@@ -158,12 +159,23 @@ final class SegmentWriter implements AutoCloseable {
         unsynced = true;
     }
 
-    /** Sincroniza em disco o que já foi entregue: limita a perda numa queda de energia. */
-    void sync() throws IOException {
-        if (unsynced) {
-            channel.force(false);
-            unsynced = false;
+    /** Bytes escritos desde a última sincronização. */
+    long unsyncedBytes() {
+        return size - syncedSize;
+    }
+
+    /**
+     * Sincroniza em disco o que já foi entregue: limita a perda numa queda de energia. Só chamar sem nada no buffer
+     * (depois de um {@link #flush()}). Devolve {@code false} quando não havia o que sincronizar.
+     */
+    boolean sync() throws IOException {
+        if (!unsynced) {
+            return false;
         }
+        channel.force(false);
+        unsynced = false;
+        syncedSize = size;
+        return true;
     }
 
     /** Cabeçalho e rodapé. */
