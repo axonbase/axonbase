@@ -36,7 +36,7 @@ Todo lote confirmado recebe um carimbo de um relógio híbrido, o HLC (Hybrid Lo
 
 ## O journal
 
-Cada lote confirmado entra numa fila e uma thread própria o grava. **O commit nunca espera pelo journal.** Dentro do commit o journal só copia os valores do lote (quem chamou pode reaproveitar os mapas e os vetores) e o encadeia numa fila sem trava. A serialização acontece na thread de escrita, direto num buffer reaproveitado.
+Cada lote confirmado entra numa fila e uma thread própria o grava. **O commit nunca espera pelo journal.** Dentro do commit o journal serializa o próprio lote (quem chamou pode reaproveitar os mapas e os vetores) e o encadeia numa fila sem trava. A thread de escrita só junta os bytes prontos num buffer reaproveitado: serializar nela atrasava os commits muito mais do que o mesmo trabalho feito por cada um deles.
 
 - Um segmento fecha ao atingir 25 segundos (configurável até 30) ou 64 MB. Parado, o motor grava um segmento vazio por minuto, que só avança a marca d'água (até onde se sabe que não falta nada).
 - Segmentos fechados são imutáveis. O nome (`seg-<milissegundos>-<contador>.axj`) é único e crescente, então quem copia para um armazenamento de objetos pode pular o que já enviou.
@@ -206,12 +206,19 @@ Contra a 0.10.1, mediana de 9 rodadas pareadas (valor negativo quer dizer mais r
 - **Carimbo: aprovado** nas quatro medidas. A primeira versão, que gravava a chave `!hlc` em todo commit, custava de 9% a 24%.
 - **Journal: reprovado** em três das quatro. A versão anterior custava de 7% a 26%. Por isso ele continua desligado por padrão.
 
-Um perfil com o JFR (JDK Flight Recorder) da versão atual não aponta uma causa única. Com 8 escritores, as threads de commit passam a receber menos CPU, e nem as esperas por travas nem as pausas do coletor de lixo explicam a diferença. As sincronizações do journal somam 1,45 s em 15 s no caminho direto, mas só 0,32 s pelo motor, onde o custo é parecido.
+Uma rodada com variantes da medida (cinco rodadas, 8 escritores, caminho direto e pelo motor) separou a causa:
 
-Para separar as causas, a classe de medida (`WriteCostBench`, nos testes do `axonbase-core`) tem variantes: só a cópia dentro do commit, journal em memória, journal sem sincronizar e duas políticas de sincronização mais frequentes. A política em produção continua a mesma, a cada segundo. Para o custo e as variantes, e para o perfil, sempre numa máquina dedicada:
+| Variante | Custo sobre o carimbo |
+|---|---|
+| journal | 16,8% e 21,7% |
+| journal em memória | 16,2% e 20,1% |
+| journal sem sincronizar | 16,0% e 20,0% |
+| só a cópia dentro do commit | 1,8% e 6,5% |
+
+Disco e sincronização não eram a causa. Com o journal, a CPU parada subia de 7% para 17% no caminho direto: o trabalho da thread de escrita deixava as de commit esperando. Por isso a serialização passou para dentro do commit. **O efeito dessa mudança ainda não foi medido.** Para o custo e as variantes (`WriteCostBench`, nos testes do `axonbase-core`), e para o perfil, sempre numa máquina dedicada:
 
 ```bash
-scripts/bench-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --rounds 5 --seconds 10 --extra copy-only,journal-tmpfs,journal-nosync,journal-sync4m,journal-sync200ms
+scripts/bench-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --rounds 5 --seconds 10 --extra copy-only,journal-tmpfs,journal-pause50ms
 ```
 
 ```bash
