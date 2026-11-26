@@ -159,12 +159,13 @@ class RaftLegacyLeaderTest {
         try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
             confirmTwoEntries(follower);
             // A 0.10.1 apaga o log ao receber um snapshot e pode liderar assim: escreve em índices já confirmados.
-            assertFalse(append(follower, 3, 2, 1, 2, batch("nova")).accepted(),
-                "o aceite faria o líder confirmar uma escrita que ninguém aplica");
+            RaftWire.Response response = append(follower, 3, 2, 1, 2, batch("nova"));
 
+            assertFalse(response.accepted(), "o aceite faria o líder confirmar uma escrita que ninguém aplica");
+            assertTrue(response.term() > 3, "o líder sem a história precisa deixar o cargo");
             assertTrue(follower.stateMachine().get("b").isPresent());
             assertTrue(follower.stateMachine().get("nova").isEmpty());
-            assertTrue(append(follower, 3, 2, 1, 2, batch("b")).accepted(), "o reenvio legítimo continua aceito");
+            assertTrue(append(follower, 5, 2, 1, 2, batch("b")).accepted(), "o reenvio legítimo continua aceito");
         }
     }
 

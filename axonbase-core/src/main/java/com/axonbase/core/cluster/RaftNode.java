@@ -86,6 +86,9 @@ public final class RaftNode implements AutoCloseable {
      */
     private void recover() {
         RaftApplier.Applied marker = durable ? RaftApplier.applied(stateMachine).orElse(null) : null;
+        if (marker != null && state.appliedTerm() == 0 && state.appliedIndex() > marker.index()) {
+            marker = refreshMarker(state.appliedIndex());
+        }
         if (marker != null) {
             applied = marker.index();
             appliedTerm = marker.term();
@@ -113,6 +116,21 @@ public final class RaftNode implements AutoCloseable {
             }
         }
         checkpointed = applied;
+    }
+
+    /**
+     * A 0.10.x não grava o marcador no armazenamento, e o estado que ela salva não traz o termo aplicado. Um nó que
+     * recebeu o marcador num snapshot e continuou rodando a versão antiga tem dados além dele: vale o índice do
+     * estado. Voltar ao marcador faria este nó aceitar como novos índices que os outros já aplicaram.
+     */
+    private RaftApplier.Applied refreshMarker(long index) {
+        long term = log.termAt(index);
+        if (index > log.lastIndex()) {
+            log.reset(index, term);
+        }
+        stateMachine.applyReplicated(Map.of(RaftApplier.APPLIED_KEY, RaftApplier.marker(index, term)),
+            java.util.Set.of());
+        return new RaftApplier.Applied(index, term);
     }
 
     private void replay(long through) {
@@ -312,8 +330,11 @@ public final class RaftNode implements AutoCloseable {
         }
         RaftPayload.Vote candidate = RaftPayload.decodeVote(request.payload());
         long localTerm = log.termAt(log.lastIndex());
-        boolean upToDate = candidate.lastTerm() > localTerm
-            || candidate.lastTerm() == localTerm && candidate.lastIndex() >= log.lastIndex();
+        // Um líder precisa ter tudo o que foi confirmado. A 0.10.x apaga o log ao receber um snapshot e o refaz com o
+        // mandato atual: sem a segunda condição, ela venceria pelo mandato com um log menor que o já aplicado aqui.
+        boolean upToDate = (candidate.lastTerm() > localTerm
+            || candidate.lastTerm() == localTerm && candidate.lastIndex() >= log.lastIndex())
+            && candidate.lastIndex() >= applied;
         boolean free = state.votedFor().isEmpty() || state.votedFor().equals(request.leaderOrCandidate());
         if (free && upToDate) {
             state.vote(request.term(), request.leaderOrCandidate());
@@ -381,6 +402,16 @@ public final class RaftNode implements AutoCloseable {
             return Received.rejected();
         }
         long index = request.index();
+        // Entrada confirmada não muda. Quem manda outra no lugar não a tem, e o aceite daqui faria esse líder
+        // confirmar ao cliente uma escrita que nenhum nó vai aplicar.
+        if (index <= applied && !sameContent(index, append.batch())) {
+            if (log.termAt(index) != request.term()) {
+                // A confirmada é de outro mandato: o líder não tem a história. Só recusar o prenderia no laço de
+                // recuo da 0.10.x, calando os batimentos; um mandato à frente o tira do cargo.
+                state.vote(request.term() + 1, "");
+            }
+            return Received.rejected();
+        }
         if (index > applied) {
             // O líder antigo apaga uma escrita sem quórum e grava outra no mesmo índice e mandato: vale o conteúdo.
             if (index <= log.lastIndex()
@@ -446,6 +477,11 @@ public final class RaftNode implements AutoCloseable {
     private Received snapshot(RaftWire.Request request) {
         // O payload do snapshot é um batch atômico do state machine no índice pedido.
         long index = request.index();
+        // O líder conta como entregue o snapshot aceito. Um que fica atrás deste nó e não traz o marcador dele vem de
+        // um líder antigo que não tem o que já foi confirmado.
+        if (index <= applied && !describesIndex(RaftPayload.decode(request.payload()), index)) {
+            return Received.rejected(applied);
+        }
         if (index > applied) {
             CommittedBatch batch = RaftPayload.decode(request.payload());
             // O líder anterior à fase E2 manda o estado já aplicado com o índice do fim do log dele. Num nó com
