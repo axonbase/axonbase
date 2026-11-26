@@ -145,6 +145,12 @@ public final class Executor {
         return ds.requireDatabase(session);
     }
 
+    /** Avalia uma expressão fora de um statement: o gateway de shards calcula assim chaves e dados de escrita. */
+    public AxonValue evaluate(com.axonbase.parser.ast.Expr expr, Session scope) {
+        this.session = scope;
+        return eval(expr);
+    }
+
     /**
      * Publica uma mudança que o consenso já confirmou nas live queries deste nó.
      *
