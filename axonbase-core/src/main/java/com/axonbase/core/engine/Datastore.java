@@ -687,6 +687,12 @@ public final class Datastore {
         }
     }
 
+    /** {@code true} quando este nó pode confirmar escritas: fora de cluster, ou sendo o líder. */
+    public boolean acceptsWrites() {
+        CommitCoordinator coordinator = commitCoordinator;
+        return coordinator == null || coordinator.acceptsWrites(clusterNodeId);
+    }
+
     /** Ativa confirmação de quórum antes dos commits locais. */
     public void commitCoordinator(CommitCoordinator coordinator, String nodeId) {
         this.commitCoordinator = coordinator;

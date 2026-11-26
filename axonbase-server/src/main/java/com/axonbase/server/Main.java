@@ -174,6 +174,10 @@ public final class Main {
         }
         server.metricsPerDatabase("true".equalsIgnoreCase(System.getenv("AXON_METRICS_PER_DATABASE")));
         server.metricsRequireAuth("true".equalsIgnoreCase(System.getenv("AXON_METRICS_REQUIRE_AUTH")));
+        // retenção por partição e TTL; em cluster só o líder age
+        server.maintenance(new com.axonbase.core.partition.PartitionMaintenance(ds,
+            com.axonbase.core.partition.PartitionMaintenance.Options.fromEnvironment(System.getenv()),
+            System::currentTimeMillis).start());
         AxonLog.log("info", "server_started", Messages.get("server_started", BuildInfo.version(), bind, port, path));
         if (cluster != null) {
             System.out.println(Messages.get("server_cluster", config.clusterId(), config.nodeId(),

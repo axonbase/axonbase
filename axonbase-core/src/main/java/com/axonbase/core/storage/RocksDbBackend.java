@@ -437,6 +437,24 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         }
     }
 
+    @Override
+    public void scanEntriesFrom(String prefix, String from, java.util.function.BiPredicate<String, byte[]> visitor) {
+        gate.enter();
+        try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
+            if (from.compareTo(prefix) > 0) {
+                scan.it.seek(utf8(from));
+            }
+            while (scan.it.isValid()) {
+                if (!visitor.test(new String(scan.it.key(), StandardCharsets.UTF_8), scan.it.value())) {
+                    break;
+                }
+                scan.it.next();
+            }
+        } finally {
+            gate.exit();
+        }
+    }
+
     /**
      * Iterador limitado ao prefixo (limite superior exclusivo calculado), sem trava e sem poluir o cache de
      * blocos com varreduras longas.

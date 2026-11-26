@@ -89,6 +89,15 @@ public final class PartitionedKv implements KvBackend {
         context.target(id(rid.table(), recordKey), start, generated);
     }
 
+    /** O registro existe numa partição que agora não aceita escrita. */
+    boolean readOnlyRow(String table, String recordKey) {
+        if (db.catalog().partitioning(table) == null) {
+            return false;
+        }
+        Found found = locate(table, recordKey);
+        return found != null && !found.partition().writable();
+    }
+
     // ---- leituras ----
 
     @Override

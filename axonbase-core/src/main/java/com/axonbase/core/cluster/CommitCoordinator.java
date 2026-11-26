@@ -23,6 +23,11 @@ public interface CommitCoordinator {
         return confirm(nodeId, batch);
     }
 
+    /** {@code false} quando este nó sabidamente não pode confirmar escritas (não é o líder). */
+    default boolean acceptsWrites(String nodeId) {
+        return true;
+    }
+
     /** O consenso aplica o lote confirmado neste armazenamento, então quem chamou não deve regravá-lo. */
     default boolean appliesTo(KvBackend backend) {
         return false;
