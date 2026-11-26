@@ -91,13 +91,19 @@ public final class RaftReadGateBenchmark {
         return body.length() <= 300 ? body : body.substring(0, 300) + "...";
     }
 
-    /** As linhas de uma resposta do {@code /sql}, ou {@code null} quando ela não é uma lista. */
+    /**
+     * As linhas de uma resposta do {@code /sql}, ou {@code null} quando ela não traz linhas. Um {@code SELECT} por
+     * id com um resultado devolve o objeto sem lista em volta.
+     */
     private static List<AxonValue> resultRows(String body) {
         try {
             AxonValue value = AxonJson.parseDocument(body);
             // o resultado pode vir embrulhado em uma lista de resultados por instrução
             while (value.isArray() && value.asArray().size() == 1 && value.asArray().getFirst().isArray()) {
                 value = value.asArray().getFirst();
+            }
+            if (value.isObject()) {
+                return List.of(value);
             }
             return value.isArray() ? value.asArray() : null;
         } catch (RuntimeException notJson) {
