@@ -36,7 +36,7 @@ Todo lote confirmado recebe um carimbo de um relógio híbrido, o HLC (Hybrid Lo
 
 ## O journal
 
-Cada lote confirmado entra numa fila e uma thread própria o grava. **O commit nunca espera pelo journal.** Dentro do commit o journal serializa o próprio lote (quem chamou pode reaproveitar os mapas e os vetores) e o encadeia numa fila sem trava. A thread de escrita só junta os bytes prontos num buffer reaproveitado: serializar nela atrasava os commits muito mais do que o mesmo trabalho feito por cada um deles.
+Cada lote confirmado entra numa fila e uma thread própria o grava. **O commit nunca espera pelo journal.** Dentro do commit o journal serializa o próprio lote (quem chamou pode reaproveitar os mapas e os vetores) e o encadeia numa fila sem trava. A thread de escrita só junta os bytes prontos num buffer reaproveitado: assim ela trabalha o mínimo.
 
 - Um segmento fecha ao atingir 25 segundos (configurável até 30) ou 64 MB. Parado, o motor grava um segmento vazio por minuto, que só avança a marca d'água (até onde se sabe que não falta nada).
 - Segmentos fechados são imutáveis. O nome (`seg-<milissegundos>-<contador>.axj`) é único e crescente, então quem copia para um armazenamento de objetos pode pular o que já enviou.
@@ -194,28 +194,27 @@ mvn -q -pl axonbase-core -am test -Daxon.gate.pitr=true -Dtest=PitrGateTest -Dsu
 
 ### Portões de custo
 
-Contra a 0.10.1, mediana de 9 rodadas pareadas (valor negativo quer dizer mais rápido que a referência). O custo do journal é medido sobre o motor já com o carimbo.
+Contra a 0.10.1, mediana de pares de rodadas (valor negativo quer dizer mais rápido que a referência). O custo do journal é medido sobre o motor já com o carimbo.
 
 | Escritores | Caminho | Carimbo, meta abaixo de 2% | Journal, meta abaixo de 5% |
 |---|---|---|---|
-| 8 | direto no armazenamento | -3,4% | **20,4%** |
-| 8 | pelo motor (`CREATE`) | -1,6% | **23,1%** |
-| 64 | direto no armazenamento | 0,2% | **6,1%** |
-| 64 | pelo motor (`CREATE`) | -1,0% | 2,7% |
+| 8 | direto no armazenamento | -1,5% | **16,7%** |
+| 8 | pelo motor (`CREATE`) | -1,2% | **14,9%** |
+| 64 | direto no armazenamento | -0,9% | **6,7%** |
+| 64 | pelo motor (`CREATE`) | -0,7% | 4,3% |
 
-- **Carimbo: aprovado** nas quatro medidas. A primeira versão, que gravava a chave `!hlc` em todo commit, custava de 9% a 24%.
-- **Journal: reprovado** em três das quatro. A versão anterior custava de 7% a 26%. Por isso ele continua desligado por padrão.
+- **Carimbo: aprovado.** A primeira versão, que gravava a chave `!hlc` em todo commit, custava de 9% a 24%.
+- **Journal: reprovado** em três das quatro medidas. Por isso ele continua desligado por padrão.
 
-Uma rodada com variantes da medida (cinco rodadas, 8 escritores, caminho direto e pelo motor) separou a causa:
+O que se sabe sobre o custo do journal com 8 escritores, por variantes da medida:
 
-| Variante | Custo sobre o carimbo |
-|---|---|
-| journal | 16,8% e 21,7% |
-| journal em memória | 16,2% e 20,1% |
-| journal sem sincronizar | 16,0% e 20,0% |
-| só a cópia dentro do commit | 1,8% e 6,5% |
+- disco e sincronização não são a causa: o journal em memória custa quase o mesmo;
+- só o trabalho feito dentro do commit custa 2,7% direto no armazenamento e 6,0% pelo motor, acima da meta neste segundo caso;
+- serializar o lote dentro do commit, e não na thread de escrita, reduziu o custo pelo motor de 21,7% para 14,9% e não mudou o caminho direto;
+- com o journal, as threads de commit ficam mais tempo paradas (a CPU ociosa vai de 7% para 17% no caminho direto), e ainda não se sabe onde;
+- a thread de escrita dormindo 50 ms em vez de 10 ms baixa o custo para 13,7% e 11,4%. Esse ajuste não é o padrão.
 
-Disco e sincronização não eram a causa. Com o journal, a CPU parada subia de 7% para 17% no caminho direto: o trabalho da thread de escrita deixava as de commit esperando. Por isso a serialização passou para dentro do commit. **O efeito dessa mudança ainda não foi medido.** Para o custo e as variantes (`WriteCostBench`, nos testes do `axonbase-core`), e para o perfil, sempre numa máquina dedicada:
+Para o custo e as variantes (`WriteCostBench`, nos testes do `axonbase-core`), e para o perfil, sempre numa máquina dedicada:
 
 ```bash
 scripts/bench-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --rounds 5 --seconds 10 --extra copy-only,journal-tmpfs,journal-pause50ms

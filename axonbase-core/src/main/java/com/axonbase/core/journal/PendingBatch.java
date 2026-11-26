@@ -8,7 +8,7 @@ import java.util.Set;
 /**
  * Um lote à espera de escrita, já no formato do segmento. É serializado dentro do commit, cada escritor o seu e em
  * paralelo, o que também deixa o chamador reaproveitar os mapas e os vetores. À thread do journal sobra juntar bytes
- * prontos: trabalho dela atrasa os commits muito mais do que o mesmo trabalho repartido entre eles.
+ * prontos.
  *
  * @param record o registro completo (tamanho, tipo, corpo e CRC); não sai do journal e ninguém o altera
  * @param bytes  o espaço que o lote ocupa na fila, aproximadamente
