@@ -419,6 +419,11 @@ public final class RaftNode implements AutoCloseable {
         long index = request.index();
         if (index > applied) {
             CommittedBatch batch = RaftPayload.decode(request.payload());
+            // O líder anterior à fase E2 manda o estado já aplicado com o índice do fim do log dele. Num nó com
+            // dados isso marcaria como aplicadas entradas que não vieram; recusado, o líder segue entrada a entrada.
+            if (!describesIndex(batch, index) && (applied > 0 || log.lastIndex() > 0)) {
+                return Received.rejected(applied);
+            }
             if (!hooks.accept(batch)) {
                 return Received.rejected(applied);
             }
@@ -443,6 +448,12 @@ public final class RaftNode implements AutoCloseable {
             }
         }
         return new Received(true, -1, 0, 0);
+    }
+
+    /** O snapshot diz, no próprio estado, que ele é o daquele índice (o formato desde a fase E2). */
+    private static boolean describesIndex(CommittedBatch snapshot, long index) {
+        return RaftApplier.decodeMarker(snapshot.puts().get(RaftApplier.APPLIED_KEY))
+            .map(marker -> marker.index() == index).orElse(false);
     }
 
     private void truncate(long index) {
