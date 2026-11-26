@@ -13,6 +13,7 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.zip.CRC32C;
 
 /**
  * Um segmento sendo escrito ({@code <nome>.open}). Não é seguro entre threads: o {@link PitrJournal} o usa sob a
@@ -26,7 +27,9 @@ final class SegmentWriter implements AutoCloseable {
     private final long timeline;
     private final FileChannel channel;
     private final Stats stats = new Stats();
-    private final java.io.ByteArrayOutputStream buffered = new java.io.ByteArrayOutputStream(1 << 16);
+    /** Reaproveitado entre segmentos pelo dono, que o usa sob a própria trava. */
+    private final ByteBuffer buffer;
+    private final CRC32C crc = new CRC32C();
     private long size;
     private boolean unsynced;
 
@@ -67,7 +70,8 @@ final class SegmentWriter implements AutoCloseable {
         }
     }
 
-    SegmentWriter(Path directory, String name, long timeline) throws IOException {
+    SegmentWriter(Path directory, String name, long timeline, ByteBuffer buffer) throws IOException {
+        this.buffer = buffer.clear();
         this.directory = directory;
         this.name = name;
         this.timeline = timeline;
@@ -85,9 +89,21 @@ final class SegmentWriter implements AutoCloseable {
     }
 
     /** Acrescenta um lote. Ele só chega ao disco no próximo {@link #flush()}. */
-    void append(JournalRecord record) throws IOException {
-        write(SegmentFormat.batchRecord(record.index(), record.batch()));
-        stats.add(record.index(), record.batch().stamp());
+    void append(PendingBatch batch) throws IOException {
+        SegmentFormat.BatchBytes record = new SegmentFormat.BatchBytes(batch);
+        int length = record.size();
+        if (length > buffer.remaining()) {
+            flush();
+        }
+        if (length > buffer.capacity()) {
+            ByteBuffer large = ByteBuffer.allocate(length);
+            record.writeTo(large, crc);
+            drain(large.flip());
+        } else {
+            record.writeTo(buffer, crc);
+        }
+        size += length;
+        stats.add(batch.index(), batch.stamp());
     }
 
     long size() {
@@ -125,13 +141,19 @@ final class SegmentWriter implements AutoCloseable {
 
     /** Entrega ao sistema operacional o que está em memória: a partir daqui sobrevive a um kill -9. */
     void flush() throws IOException {
-        if (buffered.size() == 0) {
+        if (buffer.position() == 0) {
             return;
         }
-        ByteBuffer buffer = ByteBuffer.wrap(buffered.toByteArray());
-        buffered.reset();
-        while (buffer.hasRemaining()) {
-            channel.write(buffer);
+        try {
+            drain(buffer.flip());
+        } finally {
+            buffer.clear();
+        }
+    }
+
+    private void drain(ByteBuffer from) throws IOException {
+        while (from.hasRemaining()) {
+            channel.write(from);
         }
         unsynced = true;
     }
@@ -144,12 +166,17 @@ final class SegmentWriter implements AutoCloseable {
         }
     }
 
+    /** Cabeçalho e rodapé. */
     private void write(byte[] bytes) throws IOException {
-        buffered.write(bytes);
-        size += bytes.length;
-        if (buffered.size() >= 1 << 20) {
+        if (bytes.length > buffer.remaining()) {
             flush();
         }
+        if (bytes.length > buffer.capacity()) {
+            drain(ByteBuffer.wrap(bytes));
+        } else {
+            buffer.put(bytes);
+        }
+        size += bytes.length;
     }
 
     /** Larga o arquivo aberto como está; a próxima abertura do journal o recupera. */

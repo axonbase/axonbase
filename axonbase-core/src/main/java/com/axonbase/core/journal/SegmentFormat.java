@@ -56,21 +56,66 @@ final class SegmentFormat {
         return ByteBuffer.allocate(HEADER_BYTES).putInt(MAGIC).putShort(VERSION).putLong(timeline).array();
     }
 
-    /** O registro completo (tamanho, tipo, corpo e CRC). */
-    static byte[] batchRecord(long index, CommittedBatch batch) {
-        return record(BATCH, out -> {
-            out.writeLong(index);
-            writeStamp(out, batch.stamp());
-            out.writeInt(batch.puts().size());
-            for (var put : batch.puts().entrySet()) {
-                writeBytes(out, put.getKey().getBytes(StandardCharsets.UTF_8));
-                writeBytes(out, put.getValue());
+    /**
+     * Um registro de lote pronto para ser medido e escrito direto num buffer, sem montar cópias intermediárias: só as
+     * chaves viram bytes antes.
+     */
+    static final class BatchBytes {
+        /** Tipo, índice, carimbo e as duas contagens. */
+        private static final int FIXED_BYTES = 1 + 8 + 12 + 4 + 4;
+
+        private final PendingBatch batch;
+        private final byte[][] putKeys;
+        private final byte[][] deleteKeys;
+        /** Tamanho do tipo mais o corpo. */
+        private final int covered;
+
+        BatchBytes(PendingBatch batch) {
+            this.batch = batch;
+            this.putKeys = utf8(batch.putKeys());
+            this.deleteKeys = utf8(batch.deletes());
+            long total = FIXED_BYTES;
+            for (int i = 0; i < putKeys.length; i++) {
+                total += 8L + putKeys[i].length + batch.values()[i].length;
             }
-            out.writeInt(batch.deletes().size());
-            for (String key : batch.deletes()) {
-                writeBytes(out, key.getBytes(StandardCharsets.UTF_8));
+            for (byte[] key : deleteKeys) {
+                total += 4L + key.length;
             }
-        });
+            this.covered = Math.toIntExact(total);
+        }
+
+        /** O registro completo: tamanho, tipo, corpo e CRC. */
+        int size() {
+            return Math.addExact(covered, 8);
+        }
+
+        /** Escreve o registro na posição atual de {@code out}, que precisa ter {@link #size()} bytes livres. */
+        void writeTo(ByteBuffer out, CRC32C crc) {
+            out.putInt(covered);
+            int start = out.position();
+            out.put(BATCH).putLong(batch.index())
+                .putLong(batch.stamp().physical()).putInt(batch.stamp().logical());
+            out.putInt(putKeys.length);
+            for (int i = 0; i < putKeys.length; i++) {
+                byte[] value = batch.values()[i];
+                out.putInt(putKeys[i].length).put(putKeys[i]).putInt(value.length).put(value);
+            }
+            out.putInt(deleteKeys.length);
+            for (byte[] key : deleteKeys) {
+                out.putInt(key.length).put(key);
+            }
+            crc.reset();
+            crc.update(out.slice(start, covered));
+            out.putInt((int) crc.getValue());
+        }
+
+        private static byte[][] utf8(String[] keys) {
+            byte[][] encoded = new byte[keys.length][];
+            for (int i = 0; i < keys.length; i++) {
+                encoded[i] = keys[i].getBytes(StandardCharsets.UTF_8);
+            }
+            return encoded;
+        }
     }
 
     /** Registro de rodapé seguido dos bytes finais do arquivo. */
@@ -157,11 +202,6 @@ final class SegmentFormat {
 
     private static HlcTimestamp readStamp(DataInputStream in) throws IOException {
         return new HlcTimestamp(in.readLong(), in.readInt());
-    }
-
-    private static void writeBytes(DataOutputStream out, byte[] bytes) throws IOException {
-        out.writeInt(bytes.length);
-        out.write(bytes);
     }
 
     private static int count(DataInputStream in) throws IOException {

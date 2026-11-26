@@ -8,14 +8,18 @@ import com.axonbase.core.storage.RocksDbBackend;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
@@ -40,14 +44,17 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     private static final long SYNC_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final long FAILURE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
 
-    private record Item(JournalRecord record, long bytes) {
-    }
+    private static final int WRITE_BUFFER_BYTES = 1 << 20;
 
     private final Path directory;
     private final JournalOptions options;
     private final Supplier<CommitWatermark> watermark;
-    private final LinkedBlockingQueue<Item> queue;
+    /** Sem trava: os commits só encadeiam o lote e contam o espaço dele. */
+    private final ConcurrentLinkedQueue<PendingBatch> queue = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger queuedBatches = new AtomicInteger();
     private final AtomicLong queuedBytes = new AtomicLong();
+    /** Buffer de escrita dos segmentos; só com a trava de escrita. */
+    private final ByteBuffer writeBuffer = ByteBuffer.allocateDirect(WRITE_BUFFER_BYTES);
     private final AtomicLong dropped = new AtomicLong();
     private final AtomicLong writeErrors = new AtomicLong();
     private final CopyOnWriteArrayList<SegmentInfo> sealed = new CopyOnWriteArrayList<>();
@@ -68,7 +75,6 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
         this.directory = directory;
         this.options = options;
         this.watermark = watermark;
-        this.queue = new LinkedBlockingQueue<>(options.queueMaxBatches());
         Files.createDirectories(directory);
         JournalSegments.recover(directory);
         sealed.addAll(JournalSegments.list(directory));
@@ -100,20 +106,43 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
 
     @Override
     public void offer(long index, CommittedBatch batch) {
+        committed(index, batch.stamp(), batch.puts(), batch.deletes());
+    }
+
+    @Override
+    public void committed(long index, HlcTimestamp stamp, Map<String, byte[]> puts, Set<String> deletes) {
         if (closing) {
-            writeLate(new Item(new JournalRecord(index, batch), 0));
+            writeLate(PendingBatch.copyOf(index, stamp, puts, deletes, 0));
             return;
         }
-        long bytes = sizeOf(batch);
+        long bytes = PendingBatch.sizeOf(puts, deletes);
+        // reserva o lugar antes de copiar: com a fila cheia o lote não custa uma cópia
+        int batches = queuedBatches.incrementAndGet();
         long total = queuedBytes.addAndGet(bytes);
         // um lote maior que o limite ainda passa quando está sozinho
-        if ((total > options.queueMaxBytes() && total != bytes)
-            || !queue.offer(new Item(new JournalRecord(index, batch), bytes))) {
-            queuedBytes.addAndGet(-bytes);
+        if (batches > options.queueMaxBatches() || (total > options.queueMaxBytes() && total != bytes)) {
+            release(1, bytes);
             if (dropped.getAndIncrement() % 10_000 == 0) {
                 System.err.println("{\"event\":\"pitr_batch_dropped\",\"index\":" + index + ",\"reason\":\"queue_full\"}");
             }
+            return;
         }
+        boolean queued = false;
+        try {
+            queue.add(PendingBatch.copyOf(index, stamp, puts, deletes, bytes));
+            queued = true;
+        } finally {
+            if (!queued) {
+                // faltou memória para a cópia: o lugar volta e o lote conta como descartado
+                release(1, bytes);
+                dropped.incrementAndGet();
+            }
+        }
+    }
+
+    private void release(int batches, long bytes) {
+        queuedBatches.addAndGet(-batches);
+        queuedBytes.addAndGet(-bytes);
     }
 
     /** Fecha o segmento em curso antes de a base mudar de linha do tempo. */
@@ -124,11 +153,9 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
             if (open != null || !queue.isEmpty()) {
                 sealLocked();
             }
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // o segmento aberto é da linha do tempo antiga: mesmo com a falha, não pode receber mais nada
             abandon(e);
-        } catch (RuntimeException e) {
-            writeErrors.incrementAndGet();
-            System.err.println("{\"event\":\"pitr_journal_error\",\"error\":\"" + e.getMessage() + "\"}");
         } finally {
             // nada da história antiga pode sobrar para ser gravado na nova
             dropped.addAndGet(drain(Integer.MAX_VALUE).size());
@@ -140,10 +167,10 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
      * Uma escrita que chega depois do fechamento (trabalho em segundo plano durante o desligamento) vai direto ao
      * disco, atrás do que ainda estiver na fila. A próxima abertura recupera o segmento.
      */
-    private void writeLate(Item item) {
+    private void writeLate(PendingBatch item) {
         writing.lock();
         try {
-            List<Item> items = drain(Integer.MAX_VALUE);
+            List<PendingBatch> items = drain(Integer.MAX_VALUE);
             items.add(item);
             write(items);
         } catch (IOException e) {
@@ -231,7 +258,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     }
 
     public int pendingBatches() {
-        return queue.size();
+        return queuedBatches.get();
     }
 
     public int openSegmentBatches() {
@@ -261,7 +288,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
             if (open != null || !queue.isEmpty()) {
                 sealLocked();
             }
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
             abandon(e);
         } finally {
             writing.unlock();
@@ -278,12 +305,8 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
             try {
                 busy = writeChunk();
                 maintain();
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 abandon(e);
-                failed = true;
-            } catch (RuntimeException e) {
-                writeErrors.incrementAndGet();
-                System.err.println("{\"event\":\"pitr_journal_error\",\"error\":\"" + e.getMessage() + "\"}");
                 failed = true;
             } finally {
                 writing.unlock();
@@ -297,20 +320,21 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     }
 
     private boolean writeChunk() throws IOException {
-        List<Item> items = drain(CHUNK);
+        List<PendingBatch> items = drain(CHUNK);
         write(items);
         return items.size() == CHUNK;
     }
 
     /** Retira lotes da fila e devolve o espaço deles. Só com a trava de escrita. */
-    private List<Item> drain(int max) {
-        List<Item> items = new ArrayList<>();
-        queue.drainTo(items, max);
+    private List<PendingBatch> drain(int max) {
+        List<PendingBatch> items = new ArrayList<>();
         long bytes = 0;
-        for (Item item : items) {
-            bytes += item.bytes();
+        PendingBatch next;
+        while (items.size() < max && (next = queue.poll()) != null) {
+            items.add(next);
+            bytes += next.bytes();
         }
-        queuedBytes.addAndGet(-bytes);
+        release(items.size(), bytes);
         return items;
     }
 
@@ -330,7 +354,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     }
 
     /** Grava os lotes, virando de segmento pelo tamanho. Os intermediários não prometem cobertura nova. */
-    private void write(List<Item> items) throws IOException {
+    private void write(List<PendingBatch> items) throws IOException {
         int safe = 0;
         boolean written = false;
         try {
@@ -338,7 +362,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
                 if (open == null) {
                     openSegment(watermark.get());
                 }
-                open.append(items.get(i).record());
+                open.append(items.get(i));
                 if (open.size() >= options.maxSegmentBytes()) {
                     finish(lastComplete());
                     safe = i + 1;
@@ -373,7 +397,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
             name = after(name);
         }
         lastNamed = name;
-        open = new SegmentWriter(directory, JournalSegments.nameFor(name), current.timeline());
+        open = new SegmentWriter(directory, JournalSegments.nameFor(name), current.timeline(), writeBuffer);
         openedAtNanos = System.nanoTime();
         openBatches = 0;
     }
@@ -411,7 +435,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     }
 
     /** Larga o segmento com defeito; o que não foi gravado aparece como índice faltando. */
-    private void abandon(IOException cause) {
+    private void abandon(Exception cause) {
         writeErrors.incrementAndGet();
         lastSealNanos = System.nanoTime();
         System.err.println("{\"event\":\"pitr_journal_write_failed\",\"error\":\"" + cause.getMessage() + "\"}");
@@ -429,16 +453,5 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     /** O carimbo mais novo que o segmento cita: a idade dele para a retenção. */
     private static HlcTimestamp newestStamp(SegmentInfo segment) {
         return HlcTimestamp.max(segment.lastStamp(), segment.complete().stamp());
-    }
-
-    private static long sizeOf(CommittedBatch batch) {
-        long size = 64;
-        for (var put : batch.puts().entrySet()) {
-            size += put.getKey().length() * 2L + put.getValue().length;
-        }
-        for (String key : batch.deletes()) {
-            size += key.length() * 2L;
-        }
-        return size;
     }
 }
