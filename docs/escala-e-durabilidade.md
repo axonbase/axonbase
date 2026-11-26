@@ -23,7 +23,7 @@ No macOS o fsync completo (`F_FULLFSYNC`) custa cerca de 19 ms. Por isso `always
 - O monitor global do armazenamento foi substituído por 1024 travas por faixa de chave e leituras por iterador sem trava.
 - Valor e versão são gravados num único lote atômico. Cada comando de escrita (`CREATE`, `INSERT`, `UPDATE`, `DELETE`, `RELATE`, `UNRELATE`) grava registro, índices e arestas num único lote. Um comando que falha no meio não deixa linhas nem entradas de índice.
 - `SELECT ... LIMIT` para de varrer ao completar o limite. `ORDER BY ... LIMIT` usa um heap de tamanho fixo (top-K).
-- O índice GEO (de posição geográfica) guarda as coordenadas na própria entrada e responde "os N mais próximos" por expansão de anéis (`GEO_KNN` no `EXPLAIN`).
+- O índice GEO (de posição geográfica) guarda as coordenadas na própria entrada e responde "os N mais próximos" sem varrer a tabela (`GEO_KNN` no `EXPLAIN`). Desde a E4 ele usa o H3: ver [indice-geografico.md](indice-geografico.md).
 - Índices de vetor, contadores de versão e a trilha de auditoria têm custo constante por escrita. Antes, cada escrita listava o log inteiro.
 - O caminho quente do `/sql` (impressão digital da consulta, geração de ids, buffer de log e cache do JWT (JSON Web Token, o token de login)) deixou de alocar e de travar por requisição.
 

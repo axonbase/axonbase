@@ -3,13 +3,10 @@ package com.axonbase.core.engine;
 import java.nio.ByteBuffer;
 
 /**
- * Valor das entradas do índice GEO ({@code SP|ns|db|tabela|índice|célula|chave}). Formato versionado: um byte de
- * versão, um byte que diz se há ponto e, havendo, longitude e latitude como doubles. Com as coordenadas na própria
- * entrada, {@code geo::distance(campo, ponto) <= raio} descarta candidatos sem carregar o documento.
- *
- * <p>Entradas antigas (valor vazio) e geometrias que não são ponto não trazem coordenadas: o leitor então carrega o
- * documento, como antes. O marcador {@link #readyKey} diz que o índice inteiro foi gravado neste formato; sem ele a
- * consulta segue o caminho antigo.</p>
+ * Valor das entradas do índice GEO (ver {@link GeoIndex}). Formato versionado: um byte de versão, um byte que diz se
+ * há ponto e, havendo, longitude e latitude como doubles. Com as coordenadas na própria entrada,
+ * {@code geo::distance(campo, ponto) <= raio} descarta candidatos sem carregar o documento. Geometrias que não são
+ * ponto não trazem coordenadas: o leitor então carrega o documento.
  */
 final class GeoEntry {
 
@@ -20,20 +17,6 @@ final class GeoEntry {
     private static final byte[] WITHOUT_POINT = {V1, NO_POINT};
 
     private GeoEntry() {
-    }
-
-    /** Marcador do índice: todas as entradas gravadas no formato com coordenadas. */
-    static String readyKey(String ns, String db, String table, String index) {
-        return "SPV|" + ns + "|" + db + "|" + table + "|" + index;
-    }
-
-    /**
-     * Marcador de que o índice guarda alguma geometria que não é ponto (linha, polígono). Enquanto não existe, toda
-     * entrada é um ponto e a consulta pode podar células pela distância; com ele a consulta volta a cobrir as
-     * células como o índice antigo, porque a geometria não pontual é candidata pelas células dos seus vértices.
-     */
-    static String nonPointKey(String ns, String db, String table, String index) {
-        return "SPX|" + ns + "|" + db + "|" + table + "|" + index;
     }
 
     /** {@code point} é {@code {lon, lat}}; {@code null} para geometria que não é ponto. */

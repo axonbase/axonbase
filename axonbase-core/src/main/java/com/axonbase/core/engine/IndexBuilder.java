@@ -31,6 +31,9 @@ public final class IndexBuilder {
     /** Linhas por bloco: segura o lock de escrita por alguns milissegundos. */
     static final int CHUNK = 500;
 
+    /** Espera antes de refazer uma construção invalidada por escritas no formato antigo. */
+    private static final long RETRY_PAUSE_MS = 500;
+
     /** Simula a queda do processo no meio da construção: a thread morre sem limpar nada. Só para testes. */
     public static final class Crash extends RuntimeException {
         public Crash() {
@@ -105,6 +108,16 @@ public final class IndexBuilder {
         });
     }
 
+    /** Como {@link #startAsync}, mas se a thread anterior ainda está saindo, começa outra quando ela terminar. */
+    static void restartAsync(Datastore ds, String ns, String dbName, String table, String name) {
+        Future<?> leaving = RUNNING.get(key(ds, ns, dbName, table, name));
+        if (leaving instanceof java.util.concurrent.CompletableFuture<?> running) {
+            running.thenRun(() -> startAsync(ds, ns, dbName, table, name, true));
+        } else {
+            startAsync(ds, ns, dbName, table, name, true);
+        }
+    }
+
     /**
      * Roda a construção na thread atual. Em falha, aborta o índice (limpa tudo) e relança o erro.
      *
@@ -114,25 +127,52 @@ public final class IndexBuilder {
                       boolean purgeFirst) {
         try {
             if (purgeFirst) {
-                Database db = ds.findDatabase(ns, dbName);
-                Catalog.IndexDef index = lookup(db, table, name);
-                if (index != null && !index.ready()) {
-                    Lock w = db.indexLock().writeLock();
-                    w.lock();
-                    try {
-                        ex.purgeIndexEntries(db, table, index);
-                    } finally {
-                        w.unlock();
-                    }
-                }
+                purge(ds, ex, ns, dbName, table, name);
             }
-            scan(ds, ex, ns, dbName, table, name);
-            finish(ds, ex, ns, dbName, table, name);
+            while (true) {
+                Catalog.IndexDef building = lookup(ds.findDatabase(ns, dbName), table, name);
+                if (scan(ds, ex, ns, dbName, table, name)
+                    && finish(ds, ex, ns, dbName, table, name, building)) {
+                    return;
+                }
+                // o catálogo foi recarregado no meio, ou chegaram escritas no formato antigo: refaz do zero
+                pause();
+                Catalog.IndexDef current = lookup(ds.findDatabase(ns, dbName), table, name);
+                if (current == null || current.ready()) {
+                    return;
+                }
+                purge(ds, ex, ns, dbName, table, name);
+            }
         } catch (Crash crash) {
             throw crash;
         } catch (RuntimeException e) {
             abort(ds, ex, ns, dbName, table, name, e);
             throw e;
+        }
+    }
+
+    private static void purge(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
+        Database db = ds.findDatabase(ns, dbName);
+        Catalog.IndexDef index = lookup(db, table, name);
+        if (index != null && !index.ready()) {
+            // as chaves do formato antigo podem ser milhões e ninguém daqui as escreve: saem sem parar as escritas
+            ex.dropLegacyGeoEntries(db, table, index);
+            Lock w = db.indexLock().writeLock();
+            w.lock();
+            try {
+                ex.purgeForRebuild(db, table, index);
+            } finally {
+                w.unlock();
+            }
+        }
+    }
+
+    private static void pause() {
+        try {
+            Thread.sleep(RETRY_PAUSE_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw AxonError.internal(e.toString());
         }
     }
 
@@ -144,10 +184,11 @@ public final class IndexBuilder {
         return def == null ? null : def.indexes().get(name);
     }
 
-    private static void scan(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
+    /** @return {@code false} quando a varredura parou antes do fim da tabela */
+    private static boolean scan(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
         Database start = ds.findDatabase(ns, dbName);
         if (start == null) {
-            return;
+            return false;
         }
         String prefix = ns + "\u0000" + dbName + "\u0000" + table + "\u0000";
         List<String> chunk = new ArrayList<>(CHUNK);
@@ -166,8 +207,9 @@ public final class IndexBuilder {
             return !stop[0];
         });
         if (!stop[0] && !chunk.isEmpty()) {
-            processChunk(ds, ex, ns, dbName, table, name, chunk);
+            stop[0] = !processChunk(ds, ex, ns, dbName, table, name, chunk);
         }
+        return !stop[0];
     }
 
     /** @return {@code false} quando a construção deve parar (índice removido ou já pronto) */
@@ -198,19 +240,36 @@ public final class IndexBuilder {
         }
     }
 
-    private static void finish(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
+    /**
+     * @param scanned a definição que a varredura percorreu
+     * @return {@code false} quando a construção precisa ser refeita
+     */
+    private static boolean finish(Datastore ds, Executor ex, String ns, String dbName, String table, String name,
+                                  Catalog.IndexDef scanned) {
         Database db = ds.findDatabase(ns, dbName);
         if (db == null) {
-            return;
+            return false;
         }
         Lock w = db.indexLock().writeLock();
         w.lock();
         try {
             Catalog.IndexDef index = lookup(db, table, name);
             if (index != null && !index.ready()) {
-                ex.finishIndex(db, table, index);
+                if (index != scanned) {
+                    return false; // outra definição entrou no lugar: parte das linhas pode ter ficado de fora
+                }
+                if (!ex.finishIndex(db, table, index)) {
+                    return false;
+                }
                 index.markReady();
+                // um lote replicado pode ter chegado entre a conferência e a marca; ele só olha índices prontos,
+                // então um dos dois lados sempre o vê
+                if (ex.hasLegacyGeoEntries(db, table, index)) {
+                    index.markBuilding();
+                    return false;
+                }
             }
+            return true;
         } finally {
             w.unlock();
         }

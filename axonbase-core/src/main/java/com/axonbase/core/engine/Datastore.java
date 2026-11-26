@@ -769,6 +769,7 @@ public final class Datastore {
                 replayControl();
             }
         }
+        GeoMigration.onReplicated(this, applied.batch().puts().keySet());
         fanout(applied);
     }
 
@@ -1030,6 +1031,9 @@ public final class Datastore {
                     .append(" COLUMNS ").append(String.join(", ", ix.columns()));
                 if (ix.unique()) {
                     sb.append(" UNIQUE");
+                }
+                if (ix.geo()) {
+                    sb.append(" GEO");
                 }
                 sb.append(";\n");
             }

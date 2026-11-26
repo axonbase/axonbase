@@ -205,6 +205,13 @@ public final class Functions {
             case "geo::area" -> GeoVector.area(arg(args, 0));
             case "geo::contains" -> GeoVector.contains(arg(args, 0), arg(args, 1));
             case "geo::cell" -> GeoVector.cell(arg(args, 0), arg(args, 1));
+            case "geo::h3" -> H3Functions.cell(arg(args, 0), arg(args, 1));
+            case "geo::h3::center" -> H3Functions.center(arg(args, 0));
+            case "geo::h3::boundary" -> H3Functions.boundary(arg(args, 0));
+            case "geo::h3::resolution" -> H3Functions.resolution(arg(args, 0));
+            case "geo::h3::parent" -> H3Functions.parent(arg(args, 0), arg(args, 1));
+            case "geo::h3::children" -> H3Functions.children(arg(args, 0), arg(args, 1));
+            case "geo::h3::disk" -> H3Functions.disk(arg(args, 0), arg(args, 1));
             case "vector::distance::euclidean" -> GeoVector.euclidean(arg(args, 0), arg(args, 1));
             case "vector::distance::manhattan" -> GeoVector.manhattan(arg(args, 0), arg(args, 1));
             case "vector::distance::cosine" -> GeoVector.cosineDistance(arg(args, 0), arg(args, 1));
@@ -759,7 +766,9 @@ public final class Functions {
         "type::is::number", "type::is::object", "type::is::record", "type::is::string",
         "record::id", "record::table", "record::tb", "record::exists", "meta::id", "meta::tb",
         "geometry::point", "geometry::line", "geometry::polygon", "geo::distance", "geo::area",
-        "geo::contains", "geo::cell", "vector::distance::euclidean", "vector::distance::manhattan",
+        "geo::contains", "geo::cell", "geo::h3", "geo::h3::center", "geo::h3::boundary", "geo::h3::resolution",
+        "geo::h3::parent", "geo::h3::children", "geo::h3::disk",
+        "vector::distance::euclidean", "vector::distance::manhattan",
         "vector::distance::cosine",
         "vector::similarity::cosine",
         "search::score", "search::highlight",

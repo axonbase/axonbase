@@ -1827,6 +1827,12 @@ public final class Executor {
         }
     }
 
+    private static Statement.Select withoutOrders(Statement.Select sel) {
+        return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), sel.cond(), List.of(),
+            sel.group(), sel.limit(), sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(),
+            sel.groupAll());
+    }
+
     private static Statement.Select withCond(Statement.Select sel, Expr cond) {
         return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), cond, sel.orders(),
             sel.group(), sel.limit(), sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(),
@@ -1848,7 +1854,9 @@ public final class Executor {
         for (Expr part : parts) {
             Statement.Select probe = withCond(sel, part);
             List<Document> hit = uniqueLookupSourceDocs(db, probe,
-                () -> geoSourceDocs(db, probe, window, () -> columnarSourceDocs(db, probe, window, () -> null)));
+                // sem ORDER BY para o GEO: os mais próximos só valem com o WHERE inteiro, nunca com uma parte dele
+                () -> geoSourceDocs(db, withoutOrders(probe), window,
+                    () -> columnarSourceDocs(db, probe, window, () -> null)));
             if (hit != null) {
                 return hit;
             }
@@ -2381,10 +2389,6 @@ public final class Executor {
             ? vectorDistance(index.vectorDistance(), vector, query) : Double.MAX_VALUE;
     }
 
-    /** Usa a grade GEO para pré-filtrar uma distância radial antes do WHERE exato. */
-    /** Teto de células geohash que a busca por polígono lê; acima disso a varredura completa sai mais barata. */
-    private static final int GEO_CONTAINS_MAX_CELLS = 4096;
-
     /**
      * {@code WHERE geo::contains(<polígono>, campo)} com um índice GEO em {@code campo}: lê só as células que
      * cobrem a caixa do polígono. O polígono não pode depender da linha (literal, variável, {@code $parent...}
@@ -2395,9 +2399,7 @@ public final class Executor {
         if (!(call.args().get(1) instanceof Expr.Ident field) || !isRowIndependent(call.args().get(0))) {
             return fallback.get();
         }
-        Catalog.TableDef def = db.catalog().table(table.name());
-        Catalog.IndexDef index = def == null ? null : def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        Catalog.IndexDef index = geoIndexOn(db.catalog().table(table.name()), field.name());
         if (index == null) {
             return fallback.get();
         }
@@ -2410,29 +2412,25 @@ public final class Executor {
         if (box == null) {
             return fallback.get();
         }
-        double midLat = (box[1] + box[3]) / 2;
-        double heightMeters = (box[3] - box[1]) * 111_320d;
-        double widthMeters = (box[2] - box[0]) * 111_320d * Math.max(0.01, Math.cos(Math.toRadians(midLat)));
-        int precision = geoPrecision(Math.max(heightMeters, widthMeters) / 2);
-        java.util.Set<String> cells = GeoHash.covering(box[1], box[0], box[3], box[2], precision);
-        if (cells.size() > GEO_CONTAINS_MAX_CELLS) {
-            return fallback.get();
-        }
-        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
-        String base = geoIndexBase(db, table.name(), index.name());
-        for (String cell : cells) {
-            for (String key : records(db).keysWithPrefix(base + cell)) {
-                ids.add(key.substring(key.lastIndexOf('|') + 1));
-            }
-        }
         List<Document> docs = new ArrayList<>();
-        for (String id : ids) {
+        geoIndex(db, table.name(), index).box(records(db), box, id -> {
             Document doc = loadDoc(db, new RecordId(table.name(), parseKey(id)));
             if (doc != null) {
                 docs.add(doc);
             }
-        }
+            return true;
+        });
         return docs;
+    }
+
+    /** Índice GEO pronto cuja coluna indexada (a primeira) é o campo. */
+    private static Catalog.IndexDef geoIndexOn(Catalog.TableDef def, String column) {
+        return def == null ? null : def.indexes().values().stream().filter(Catalog.IndexDef::ready)
+            .filter(i -> i.geo() && i.columns().get(0).equals(column)).findFirst().orElse(null);
+    }
+
+    private static GeoIndex geoIndex(Database db, String table, Catalog.IndexDef index) {
+        return new GeoIndex(db.ns(), db.db(), table, index.name());
     }
 
     /** A expressão não lê campos da linha (só literais, variáveis e subqueries), então vale o mesmo para todas. */
@@ -2462,9 +2460,10 @@ public final class Executor {
     }
 
     /**
-     * Fonte pelo índice GEO. Raio: {@code geo::distance(campo, ponto) <= raio}; vizinhos mais próximos:
-     * {@code ORDER BY geo::distance(campo, ponto) LIMIT n}; e {@code geo::contains}. Com {@code window} a leitura
-     * para ao completar START+LIMIT linhas que passam no filtro.
+     * Fonte pelo índice GEO (ver {@link GeoIndex}). Raio: {@code geo::distance(campo, ponto) <= raio}; vizinhos mais
+     * próximos: {@code ORDER BY geo::distance(campo, ponto) LIMIT n}; e {@code geo::contains}. O WHERE inteiro é
+     * reavaliado sobre os documentos devolvidos. Com {@code window} a leitura para ao completar START+LIMIT linhas
+     * que passam no filtro.
      */
     private List<Document> geoSourceDocs(Database db, Statement.Select sel, Window window,
                                          java.util.function.Supplier<List<Document>> fallback) {
@@ -2480,149 +2479,46 @@ public final class Executor {
             List<Document> nearest = geoNearestDocs(db, sel);
             return nearest != null ? nearest : fallback.get();
         }
+        // centro e raio precisam valer para todas as linhas: aqui eles são avaliados sem nenhuma
+        if (!isRowIndependent(distance.args().get(1)) || !isRowIndependent(comparison.right())) {
+            return fallback.get();
+        }
         AxonValue center = eval(distance.args().get(1));
         AxonValue radius = eval(comparison.right());
-        double[] point = geoPoint(center);
+        double[] point = GeoIndex.pointOf(center);
         if (point == null || !radius.isNumber()) {
             return fallback.get();
         }
-        Catalog.TableDef def = db.catalog().table(table.name());
-        if (def == null) {
-            return fallback.get();
-        }
-        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        Catalog.IndexDef index = geoIndexOn(db.catalog().table(table.name()), field.name());
         if (index == null) {
             return fallback.get();
         }
-        double meters = radius.asDouble();
-        double latRange = meters / 111_320d;
-        double lonRange = meters / Math.max(1d, 111_320d * Math.cos(Math.toRadians(point[1])));
-        boolean withCoordinates = geoHasCoordinates(db, table.name(), index);
-        // só pontos: células finas e podadas pela distância; com linhas ou polígonos no índice, as mesmas células do índice antigo
-        boolean pointsOnly = withCoordinates && !geoHasNonPoint(db, table.name(), index);
-        int precision = pointsOnly ? GEO_PRECISION : geoPrecision(meters);
-        java.util.Set<String> cells = GeoHash.covering(
-            point[1] - latRange, point[0] - lonRange,
-            point[1] + latRange, point[0] + lonRange, precision);
-        String base = geoIndexBase(db, table.name(), index.name());
-        if (withCoordinates) {
-            return geoRadiusDocs(db, table.name(), base, cells, point, meters, window, pointsOnly);
-        }
-        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
-        for (String cell : cells) {
-            for (String key : records(db).keysWithPrefix(base + cell)) {
-                ids.add(key.substring(key.lastIndexOf('|') + 1));
-            }
-        }
         List<Document> docs = new ArrayList<>();
-        for (String id : ids) {
+        boolean served = geoIndex(db, table.name(), index).radius(records(db), point, radius.asDouble(), id -> {
             Document doc = loadDoc(db, new RecordId(table.name(), parseKey(id)));
-            if (doc != null) {
+            if (doc != null && (window == null || window.accepts().test(doc))) {
                 docs.add(doc);
             }
-        }
-        return docs;
+            return window == null || docs.size() < window.wanted();
+        });
+        return served ? docs : fallback.get();
     }
-
-    private boolean geoHasNonPoint(Database db, String table, Catalog.IndexDef index) {
-        return records(db).get(GeoEntry.nonPointKey(db.ns(), db.db(), table, index.name())).isPresent();
-    }
-
-    /** O índice foi gravado inteiro no formato com coordenadas (marcador {@code SPV|...}). */
-    private boolean geoHasCoordinates(Database db, String table, Catalog.IndexDef index) {
-        return records(db).get(GeoEntry.readyKey(db.ns(), db.db(), table, index.name())).isPresent();
-    }
-
-    /**
-     * Candidatos do raio com o índice no formato novo: cada entrada traz o ponto, então quem está fora do raio nem
-     * chega a ser carregado. As células vão da mais próxima do centro para a mais distante, e células que a
-     * circunferência não alcança são puladas. A distância é a mesma conta de {@code geo::distance}; o WHERE inteiro
-     * ainda é reavaliado sobre os documentos devolvidos, então a margem do corte só precisa ser conservadora.
-     */
-    private List<Document> geoRadiusDocs(Database db, String table, String base, java.util.Set<String> cells,
-                                         double[] center, double meters, Window window, boolean prune) {
-        double limit = meters * 1.000001 + 1e-3;
-        record Reach(String cell, double meters) {
-        }
-        List<Reach> reach = new ArrayList<>();
-        for (String cell : cells) {
-            double near = prune ? geoCellDistance(cell, center) : 0;
-            if (near <= limit) {
-                reach.add(new Reach(cell, near));
-            }
-        }
-        if (prune) {
-            reach.sort(Comparator.comparingDouble(Reach::meters));
-        }
-        List<Document> docs = new ArrayList<>();
-        java.util.Set<String> seen = new java.util.HashSet<>();
-        boolean[] done = {false};
-        for (Reach r : reach) {
-            if (done[0]) {
-                break;
-            }
-            records(db).scanEntries(base + r.cell(), (key, value) -> {
-                double[] at = GeoEntry.decode(value);
-                if (at != null && GeoVector.haversine(at[0], at[1], center[0], center[1]) > limit) {
-                    return true;
-                }
-                String id = key.substring(key.lastIndexOf('|') + 1);
-                if (!seen.add(id)) {
-                    return true;
-                }
-                Document doc = loadDoc(db, new RecordId(table, parseKey(id)));
-                if (doc == null) {
-                    return true;
-                }
-                if (window == null) {
-                    docs.add(doc);
-                    return true;
-                }
-                if (window.accepts().test(doc)) {
-                    docs.add(doc);
-                }
-                done[0] = docs.size() >= window.wanted();
-                return !done[0];
-            });
-        }
-        return docs;
-    }
-
-    /**
-     * Menor distância (m) do centro à célula. Células menores que ~0,1 grau usam o ponto da caixa mais perto do
-     * centro; células grandes (raios enormes) não são podadas.
-     */
-    private double geoCellDistance(String cell, double[] center) {
-        if (cell.length() < 5) {
-            return 0;
-        }
-        double[] box = GeoHash.bounds(cell);
-        double lat = Math.max(box[0], Math.min(box[2], center[1]));
-        double lon = Math.max(box[1], Math.min(box[3], center[0]));
-        return Math.max(0, GeoVector.haversine(center[0], center[1], lon, lat) - 1);
-    }
-
-    /** Metros por grau de latitude, para baixo: a caixa de busca nunca fica menor que o raio. */
-    private static final double KNN_METERS_PER_DEGREE = 111_000d;
-    private static final double KNN_EARTH_RADIUS = 6_371_008.8;
-    /** Raio inicial da busca dos mais próximos e limite de células antes de varrer o índice todo. */
-    private static final double KNN_START_METERS = 1_000d;
-    private static final int KNN_MAX_CELLS = 4_096;
 
     /** Plano dos vizinhos mais próximos: tabela, índice, centro e quantos (START+LIMIT). */
     private record NearestPlan(String table, Catalog.IndexDef index, double[] center, int wanted) {
     }
 
     /**
-     * {@code ORDER BY geo::distance(campo, ponto) [ASC] LIMIT n} sobre tabela simples com índice GEO no formato novo,
-     * ou {@code null}. O WHERE (se houver) é reavaliado em cada candidato.
+     * {@code ORDER BY geo::distance(campo, ponto) [ASC] LIMIT n} sobre tabela simples com índice GEO que só guarda
+     * pontos, ou {@code null}. O WHERE (se houver) é reavaliado em cada candidato.
      */
     private NearestPlan nearestPlan(Database db, Statement.Select sel) {
         if (!(sel.from() instanceof Expr.Ident table) || sel.limit() == null || sel.orders().size() != 1
             || !sel.joins().isEmpty() || sel.grouped() || sel.having() != null
             || sel.fields().stream().anyMatch(this::isAggregateCall)
-            || (sel.cond() != null && isSearchMatch(sel.cond()))) {
+            || (sel.cond() != null && isSearchMatch(sel.cond()))
+            // numa transação a busca registraria faixas do tamanho de continentes como lidas
+            || (session.tx() != null && session.tx().isOpen())) {
             return null;
         }
         OrderTerm term = ordersByAlias(sel).get(0);
@@ -2631,253 +2527,48 @@ public final class Executor {
             || !isRowIndependent(call.args().get(1))) {
             return null;
         }
-        Catalog.TableDef def = db.catalog().table(table.name());
-        if (def == null) {
+        Catalog.IndexDef index = geoIndexOn(db.catalog().table(table.name()), field.name());
+        if (index == null || geoIndex(db, table.name(), index).hasUnlocated(records(db))) {
             return null;
         }
-        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
-        if (index == null || !geoHasCoordinates(db, table.name(), index) || geoHasNonPoint(db, table.name(), index)) {
-            return null;
-        }
-        double[] center = geoPoint(eval(call.args().get(1)));
+        double[] center = GeoIndex.pointOf(eval(call.args().get(1)));
         int wanted = windowEnd(sel);
-        return center == null || wanted <= 0 ? null : new NearestPlan(table.name(), index, center, wanted);
+        return !GeoIndex.isLocatable(center) || wanted <= 0 ? null
+            : new NearestPlan(table.name(), index, center, wanted);
     }
 
-    private record Candidate(String id, double meters) {
-    }
-
-    /**
-     * Os {@code n} mais próximos do ponto, em ordem de distância, sem varrer o raio inteiro: amplia a caixa de busca
-     * (dobrando o raio) e só lê as células novas, até ter {@code n} linhas válidas dentro de um raio já inteiramente
-     * lido, o que garante que não existe outra mais perto. Passando de {@code KNN_MAX_CELLS} células lê o índice todo.
-     */
+    /** Os {@code n} mais próximos do ponto, em ordem de distância, sem ler o índice além do necessário. */
     private List<Document> geoNearestDocs(Database db, Statement.Select sel) {
         NearestPlan plan = nearestPlan(db, sel);
         if (plan == null) {
             return null;
         }
-        String base = geoIndexBase(db, plan.table(), plan.index().name());
         String column = plan.index().columns().get(0);
         Catalog.TableDef tableDef = db.catalog().table(plan.table());
         boolean filtered = sel.cond() != null || !dataRulePredicates().isEmpty()
             || (tableDef != null && tableDef.permissions() != null);
         Window filter = filtered ? windowFor(db, sel) : null;
-        java.util.Set<String> scanned = new java.util.HashSet<>();
-        java.util.Set<String> listed = new java.util.HashSet<>();
-        List<Candidate> candidates = new ArrayList<>();
-        java.util.Map<String, Document> accepted = new java.util.HashMap<>();
-        java.util.Set<String> rejected = new java.util.HashSet<>();
-        double[] center = plan.center();
-        double radius = KNN_START_METERS;
-        boolean everything = false;
-        while (true) {
-            List<String> fresh = new ArrayList<>();
-            if (!everything) {
-                double delta = Math.toDegrees(Math.min(Math.PI / 2, radius * 1.01 / KNN_EARTH_RADIUS));
-                double latRange = radius * 1.01 / KNN_METERS_PER_DEGREE;
-                java.util.Set<String> cells = null;
-                if (Math.abs(center[1]) + delta < 85) {
-                    double lonRange = Math.toDegrees(Math.asin(Math.min(1d,
-                        Math.sin(Math.toRadians(delta)) / Math.cos(Math.toRadians(Math.abs(center[1]) + delta)))));
-                    cells = GeoHash.cellsInBox(center[1] - latRange, center[0] - lonRange,
-                        center[1] + latRange, center[0] + lonRange, GEO_PRECISION, KNN_MAX_CELLS);
-                }
-                if (cells == null) {
-                    everything = true;
-                } else {
-                    for (String cell : cells) {
-                        if (scanned.add(cell)) {
-                            fresh.add(base + cell);
-                        }
-                    }
-                }
+        List<Document> out = new ArrayList<>();
+        java.util.Set<String> taken = new java.util.HashSet<>();
+        int[] inPlace = {0};
+        geoIndex(db, plan.table(), plan.index()).nearest(records(db), plan.center(), (id, meters, at) -> {
+            if (taken.contains(id)) {
+                return true;
             }
-            if (everything) {
-                fresh = List.of(base);
-            }
-            for (String prefix : fresh) {
-                records(db).scanEntries(prefix, (key, value) -> {
-                    String id = key.substring(key.lastIndexOf('|') + 1);
-                    if (!listed.add(id)) {
-                        return true;
-                    }
-                    double[] at = GeoEntry.decode(value);
-                    if (at == null) {
-                        // entrada sem coordenadas: o ponto vem do documento
-                        Document doc = loadDoc(db, new RecordId(plan.table(), parseKey(id)));
-                        at = doc != null && doc.current().isObject() ? geoPoint(doc.current().asObject().get(column)) : null;
-                        if (at == null) {
-                            return true;
-                        }
-                    }
-                    candidates.add(new Candidate(id, GeoVector.haversine(at[0], at[1], center[0], center[1])));
-                    return true;
-                });
-            }
-            candidates.sort((a, b) -> {
-                int c = Double.compare(a.meters(), b.meters());
-                return c != 0 ? c : a.id().compareTo(b.id());
-            });
-            double certain = everything ? Double.POSITIVE_INFINITY : radius;
-            List<Document> out = new ArrayList<>();
-            for (Candidate c : candidates) {
-                if (c.meters() > certain || out.size() >= plan.wanted()) {
-                    break;
-                }
-                if (rejected.contains(c.id())) {
-                    continue;
-                }
-                Document doc = accepted.get(c.id());
-                if (doc == null) {
-                    doc = loadDoc(db, new RecordId(plan.table(), parseKey(c.id())));
-                    if (doc == null || (filter != null && !filter.accepts().test(doc))) {
-                        rejected.add(c.id());
-                        continue;
-                    }
-                    accepted.put(c.id(), doc);
-                }
+            Document doc = loadDoc(db, new RecordId(plan.table(), parseKey(id)));
+            if (doc != null && GeoIndex.hasPoint(doc.current(), column)
+                && (filter == null || filter.accepts().test(doc))) {
+                taken.add(id);
                 out.add(doc);
-            }
-            if (out.size() >= plan.wanted() || everything) {
-                return out;
-            }
-            radius *= 2;
-        }
-    }
-
-    /** Precisão do geohash usado pelo índice espacial (≈5 km por célula). */
-    private static final int GEO_PRECISION = 6;
-
-    private int geoPrecision(double meters) {
-        for (int p = GEO_PRECISION; p >= 0; p--) {
-            double cellMeters = 111_320d * GeoHash.cellSizeDegrees(p);
-            if (cellMeters * 2 >= meters) {
-                return p;
-            }
-        }
-        return 0;
-    }
-
-    /** Atualiza as células geohash de um documento após uma mutação geo. */
-    /**
-     * Troca as células geohash do registro no índice GEO. As células antigas vêm da chave reversa
-     * ({@code SPR|...|id}, lista de células separada por vírgula), então o custo de cada escrita não depende do
-     * tamanho do índice. Registros gravados antes da chave reversa existir só têm as células achadas olhando o
-     * índice inteiro, uma única vez: a primeira atualização ou exclusão deles grava a chave reversa.
-     *
-     * @param existed o registro já estava gravado (atualização ou exclusão); numa criação não há células antigas
-     */
-    private void cellsUpdate(Database db, RecordId rid, Catalog.IndexDef index, AxonValue value, boolean existed) {
-        KvBackend kv = records(db);
-        String base = geoIndexBase(db, rid.table(), index.name());
-        String key = rid.key().keyString();
-        String reverse = geoReverseKey(db, rid, index);
-        Optional<byte[]> old = kv.get(reverse);
-        if (old.isPresent()) {
-            for (String cell : new String(old.get(), java.nio.charset.StandardCharsets.UTF_8).split(",")) {
-                if (!cell.isEmpty()) {
-                    kv.delete(base + cell + "|" + key);
+                // Quem se moveu depois de a entrada ser lida também entra (o ORDER BY reordena pelo ponto atual),
+                // mas só quem está onde a entrada diz conta para encerrar a busca.
+                if (GeoIndex.isAt(doc.current(), column, at)) {
+                    inPlace[0]++;
                 }
             }
-        } else if (existed) {
-            String suffix = "|" + key;
-            for (String stale : kv.keysWithPrefix(base)) {
-                if (stale.endsWith(suffix)) {
-                    kv.delete(stale);
-                }
-            }
-        }
-        java.util.Set<String> cells = geoCoverCells(value);
-        if (cells.isEmpty()) {
-            kv.delete(reverse);
-            return;
-        }
-        double[] point = geoPoint(value);
-        byte[] entry = GeoEntry.encode(point);
-        if (point == null) {
-            String flag = GeoEntry.nonPointKey(db.ns(), db.db(), rid.table(), index.name());
-            if (kv.get(flag).isEmpty()) {
-                kv.put(flag, new byte[]{1});
-            }
-        }
-        for (String cell : cells) {
-            kv.put(base + cell + "|" + key, entry);
-        }
-        kv.put(reverse, String.join(",", cells).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-    }
-
-    private String geoReverseKey(Database db, RecordId rid, Catalog.IndexDef index) {
-        return "SPR|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|" + index.name() + "|" + rid.key().keyString();
-    }
-
-    private String geoIndexBase(Database db, String table, String index) {
-        return "SP|" + db.ns() + "|" + db.db() + "|" + table + "|" + index + "|";
-    }
-
-    /** Células geohash que cobrem a geometria (ponto, linha ou polígono). */
-    private java.util.Set<String> geoCoverCells(AxonValue geometry) {
-        java.util.Set<String> cells = new java.util.LinkedHashSet<>();
-        if (geometry == null || !geometry.isObject()) {
-            return cells;
-        }
-        AxonValue coords = geometry.asObject().get("coordinates");
-        if (coords == null || !coords.isArray()) {
-            return cells;
-        }
-        for (double[] p : geoFlatten(coords)) {
-            cells.add(GeoHash.encode(p[1], p[0], GEO_PRECISION));
-        }
-        double[] centroid = geoCentroid(coords);
-        if (centroid != null) {
-            cells.add(GeoHash.encode(centroid[1], centroid[0], GEO_PRECISION));
-        }
-        return cells;
-    }
-
-    /** Achata coordenadas de Point, LineString ou Polygon numa lista [lon, lat]. */
-    private List<double[]> geoFlatten(AxonValue coords) {
-        List<double[]> out = new ArrayList<>();
-        if (!coords.isArray()) {
-            return out;
-        }
-        if (coords.asArray().get(0).isNumber()) {
-            double[] p = geoPoint(AxonValue.object(Map.of("coordinates", coords)));
-            if (p != null) {
-                out.add(p);
-            }
-            return out;
-        }
-        for (AxonValue child : coords.asArray()) {
-            out.addAll(geoFlatten(child));
-        }
+            return inPlace[0] < plan.wanted();
+        });
         return out;
-    }
-
-    private double[] geoCentroid(AxonValue coords) {
-        List<double[]> pts = geoFlatten(coords);
-        if (pts.isEmpty()) {
-            return null;
-        }
-        double x = 0, y = 0;
-        for (double[] p : pts) {
-            x += p[0];
-            y += p[1];
-        }
-        return new double[] {x / pts.size(), y / pts.size()};
-    }
-
-    private double[] geoPoint(AxonValue geometry) {
-        if (geometry == null || !geometry.isObject()) {
-            return null;
-        }
-        AxonValue coords = geometry.asObject().get("coordinates");
-        if (coords == null || !coords.isArray() || coords.asArray().size() < 2
-            || !coords.asArray().get(0).isNumber() || !coords.asArray().get(1).isNumber()) {
-            return null;
-        }
-        return new double[] { coords.asArray().get(0).asDouble(), coords.asArray().get(1).asDouble() };
     }
 
     /** Parámetros BM25 clásicos (Robertson–Walker). */
@@ -3469,22 +3160,17 @@ return score;
             && contains.args().size() == 2 && contains.args().get(1) instanceof Expr.Ident containsField
             && isRowIndependent(contains.args().get(0))) {
             Catalog.TableDef tdef = db.catalog().table(table);
-            return tdef == null ? null : tdef.indexes().values().stream().filter(Catalog.IndexDef::ready)
-                .filter(i -> i.geo() && i.columns().contains(containsField.name())).findFirst().orElse(null);
+            return geoIndexOn(tdef, containsField.name());
         }
         if (table.isBlank() || !(sel.cond() instanceof Expr.Binary comparison)
             || (comparison.op() != Expr.BinaryOp.LT && comparison.op() != Expr.BinaryOp.LE)
             || !(comparison.left() instanceof Expr.Call distance)
             || !distance.name().equals("geo::distance") || distance.args().size() != 2
-            || !(distance.args().get(0) instanceof Expr.Ident field)) {
+            || !(distance.args().get(0) instanceof Expr.Ident field)
+            || !isRowIndependent(distance.args().get(1)) || !isRowIndependent(comparison.right())) {
             return null;
         }
-        Catalog.TableDef def = db.catalog().table(table);
-        if (def == null) {
-            return null;
-        }
-        return def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        return geoIndexOn(db.catalog().table(table), field.name());
     }
 
     /** `campo @@ "termos"` con índice SEARCH do campo. */
@@ -4078,19 +3764,34 @@ return score;
         String controlName = di.table() + ":" + di.name();
         if (ds.isReplaying()) {
             // No replay as entradas já estão no KV. Só um marcador de construção (queda no meio) manda refazer.
-            boolean interrupted = records(db).get(marker).isPresent();
+            // O GEO decide pelo próprio formato: índice geohash antigo ou atrasado é reconstruído (ver GeoMigration).
+            boolean interrupted = di.geo() ? GeoMigration.mustRebuild(db, di.table(), di.name())
+                : records(db).get(marker).isPresent();
             if (interrupted) {
                 newIndex.markBuilding();
             }
             def.indexes().put(di.name(), newIndex);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
             if (interrupted) {
-                IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), true);
+                // se a construção anterior ainda está saindo, outra começa quando ela terminar
+                IndexBuilder.restartAsync(ds, db.ns(), db.db(), di.table(), di.name());
             }
             return AxonValue.nul();
         }
         // Redefinir o mesmo UNIQUE é idempotente: só um índice novo precisa olhar os dados.
         if (!((di.unique() && !sameUnique) || advanced)) {
+            if (previous != null && previous.geo()) {
+                // o GEO deixa marcador e entradas: saem junto com a troca, sem escrita no meio
+                java.util.concurrent.locks.Lock swap = exclusiveIndexLock(db);
+                swap.lock();
+                try {
+                    purgeIndexEntries(db, di.table(), previous);
+                    records(db).delete(marker);
+                    def.indexes().put(di.name(), newIndex);
+                } finally {
+                    swap.unlock();
+                }
+            }
             def.indexes().put(di.name(), newIndex);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
             return AxonValue.nul();
@@ -4118,6 +3819,14 @@ return score;
             IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), false);
         }
         return AxonValue.nul();
+    }
+
+    /**
+     * O lado de escrita do indexLock, ou a própria leitura quando esta thread já a segura (um evento que faz DDL no
+     * meio de uma escrita): pedir a escrita nesse caso travaria para sempre.
+     */
+    private static java.util.concurrent.locks.Lock exclusiveIndexLock(Database db) {
+        return db.indexLock().getReadHoldCount() > 0 ? db.indexLock().readLock() : db.indexLock().writeLock();
     }
 
     /** Avança a época de índices; o DDL da própria transação aberta não a invalida. */
@@ -4176,11 +3885,40 @@ return score;
 
     /** Indexa um bloco de registros (chaves já sem o prefixo da tabela). Lança em duplicata de UNIQUE. */
     void buildChunk(Database db, String table, Catalog.IndexDef index, List<String> keyParts) {
+        if (index.geo()) {
+            buildGeoChunk(db, table, index, keyParts);
+            return;
+        }
         inBatch(db, () -> {
             for (String part : keyParts) {
                 indexRow(db, table, index, new RecordId(table, parseKey(part)));
             }
         });
+    }
+
+    /**
+     * Bloco do índice GEO. Num seguidor, um lote replicado pode mudar um registro entre a leitura e a gravação da
+     * entrada (o consenso não usa o indexLock): cada registro é relido depois de gravar e refeito se mudou.
+     */
+    private void buildGeoChunk(Database db, String table, Catalog.IndexDef index, List<String> keyParts) {
+        String column = index.columns().get(0);
+        List<String> pending = keyParts;
+        while (!pending.isEmpty()) {
+            List<String> round = pending;
+            Map<String, byte[]> seen = new java.util.HashMap<>();
+            inBatch(db, () -> {
+                for (String part : round) {
+                    RecordId rid = new RecordId(table, parseKey(part));
+                    byte[] raw = records(db).get(rid.storageKey(db.ns(), db.db())).orElse(null);
+                    seen.put(part, raw);
+                    AxonValue record = raw == null ? null : decode(raw);
+                    AxonValue geometry = record != null && record.isObject() ? record.asObject().get(column) : null;
+                    geoIndex(db, table, index).update(records(db), rid.key().keyString(), geometry);
+                }
+            });
+            pending = round.stream().filter(part -> !java.util.Arrays.equals(seen.get(part), records(db)
+                .get(new RecordId(table, parseKey(part)).storageKey(db.ns(), db.db())).orElse(null))).toList();
+        }
     }
 
     private void indexRow(Database db, String table, Catalog.IndexDef index, RecordId rid) {
@@ -4205,7 +3943,7 @@ return score;
             if (index.search() && records(db).get(docLenKey(db, table, index.name(), rid)).isEmpty()) {
                 indexSearch(db, rid, null, current);
             }
-            if (index.geo() || index.vector()) {
+            if (index.vector()) {
                 indexAdvanced(db, rid, null, current);
             }
             if (index.columnar()) {
@@ -4216,18 +3954,48 @@ return score;
         }
     }
 
-    /** Última etapa: grava as chaves de "pronto" e apaga o marcador no mesmo lote. */
-    void finishIndex(Database db, String table, Catalog.IndexDef index) {
+    /** Limpa as entradas parciais antes de refazer o índice. O marcador de construção é gravado antes de tudo. */
+    void purgeForRebuild(Database db, String table, Catalog.IndexDef index) {
+        records(db).put(buildMarkerKey(db, table, index.name()), new byte[]{1});
+        purgeIndexEntries(db, table, index);
+    }
+
+    /** Apaga o que o índice geohash deixou, depois de garantir o marcador para o binário antigo. */
+    void dropLegacyGeoEntries(Database db, String table, Catalog.IndexDef index) {
+        if (index.geo()) {
+            records(db).put(buildMarkerKey(db, table, index.name()), new byte[]{1});
+            geoIndex(db, table, index).purgeLegacy(records(db), prefix -> deleteAll(db, prefix));
+        }
+    }
+
+    /**
+     * Última etapa: grava as chaves de "pronto" e apaga o marcador no mesmo lote. O índice GEO mantém o marcador de
+     * propósito (ver {@link GeoIndex#tripwireKey}).
+     *
+     * @return {@code false} quando a construção precisa ser refeita: um binário antigo escreveu entradas geohash
+     *     durante a varredura
+     */
+    boolean finishIndex(Database db, String table, Catalog.IndexDef index) {
+        if (hasLegacyGeoEntries(db, table, index)) {
+            return false;
+        }
         inBatch(db, () -> {
             if (index.columnar()) {
                 records(db).put(com.axonbase.core.storage.ColumnarIndex.readyKey(db.ns(), db.db(), table, index.name()),
                     new byte[]{1});
             }
             if (index.geo()) {
-                records(db).put(GeoEntry.readyKey(db.ns(), db.db(), table, index.name()), new byte[]{1});
+                geoIndex(db, table, index).markReady(records(db));
+            } else {
+                records(db).delete(buildMarkerKey(db, table, index.name()));
             }
-            records(db).delete(buildMarkerKey(db, table, index.name()));
         });
+        return true;
+    }
+
+    /** Há escrita de um binário antigo no índice GEO. */
+    boolean hasLegacyGeoEntries(Database db, String table, Catalog.IndexDef index) {
+        return index.geo() && geoIndex(db, table, index).hasLegacyEntries(records(db));
     }
 
     /** Desfaz uma construção que falhou: tira o índice do catálogo e do plano de controle e apaga suas entradas. */
@@ -4282,10 +4050,7 @@ return score;
             deleteAll(db, "VH" + base);
         }
         if (index.geo()) {
-            records(db).delete(GeoEntry.readyKey(db.ns(), db.db(), table, name));
-            records(db).delete(GeoEntry.nonPointKey(db.ns(), db.db(), table, name));
-            deleteAll(db, geoIndexBase(db, table, name));
-            deleteAll(db, "SPR" + base);
+            geoIndex(db, table, index).purge(records(db), prefix -> deleteAll(db, prefix));
         }
         if (index.search()) {
             deleteAll(db, "FT" + base);
@@ -4877,8 +4642,24 @@ return score;
     private AxonValue runRemoveTable(Statement.RemoveTable rt) {
         Database db = db();
         String table = rt.name();
-        if (!db.catalog().removeTable(table)) {
-            throw errorStmt(Messages.get("stmt_table_undefined", table));
+        // sem construção nem escrita no meio: nada pode regravar entradas GEO depois da limpeza
+        java.util.concurrent.locks.Lock write = exclusiveIndexLock(db);
+        write.lock();
+        try {
+            Catalog.TableDef removed = db.catalog().table(table);
+            if (!db.catalog().removeTable(table)) {
+                throw errorStmt(Messages.get("stmt_table_undefined", table));
+            }
+            if (removed != null) {
+                for (Catalog.IndexDef index : removed.indexes().values()) {
+                    if (index.geo()) {
+                        purgeIndexEntries(db, table, index);
+                        records(db).delete(buildMarkerKey(db, table, index.name()));
+                    }
+                }
+            }
+        } finally {
+            write.unlock();
         }
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
         for (String key : records(db).keysWithPrefix(prefix)) {
@@ -6533,7 +6314,7 @@ return score;
             if (index.geo()) {
                 AxonValue geometry = after != null && after.isObject() && !index.columns().isEmpty()
                     ? after.asObject().get(index.columns().get(0)) : null;
-                cellsUpdate(db, rid, index, geometry, before != null);
+                geoIndex(db, rid.table(), index).update(records(db), rid.key().keyString(), geometry);
                 continue;
             }
             String vectorKey = "VX|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|"
