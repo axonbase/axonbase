@@ -75,6 +75,38 @@ class ClusterElectionUnderLoadTest {
         }
     }
 
+    @Test
+    @DisplayName("log do líder preso por mais de 10 segundos acaba em troca de líder")
+    void aLeaderStuckForTooLongIsReplaced() throws Exception {
+        try (ClusterHarness cluster = ClusterHarness.memory(dir, RaftOptions.defaults(), "n1", "n2", "n3")
+                .startAll()) {
+            ClusterRuntime leader = cluster.awaitLeader();
+            write(leader, "antes", "v");
+            cluster.awaitConverged();
+            Object log = field(field(leader, "node"), "log");
+            CountDownLatch held = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            Thread disk = Thread.ofPlatform().start(() -> {
+                synchronized (log) {
+                    held.countDown();
+                    try {
+                        release.await(60, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            });
+            try {
+                assertTrue(held.await(10, TimeUnit.SECONDS));
+                ClusterHarness.await("o líder preso não foi substituído", 40_000, () -> cluster.nodes().stream()
+                    .anyMatch(node -> node != leader && node.role() == ClusterRole.LEADER));
+            } finally {
+                release.countDown();
+                disk.join(60_000);
+            }
+        }
+    }
+
     private static byte[] encoded(RaftWire.Request request) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         RaftWire.write(new DataOutputStream(bytes), request);

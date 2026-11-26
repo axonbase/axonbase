@@ -35,6 +35,11 @@ final class PeerReplicator {
     /** Silêncio que, sem os batimentos por fora, bastaria para um seguidor abrir eleição: vai para o log. */
     private static final long STALL_WARNING_NANOS = TimeUnit.MILLISECONDS.toNanos(350);
     private static final int BEAT_TIMEOUT_MILLIS = 1_000;
+    /**
+     * Maior silêncio que os batimentos por fora cobrem, fora de um snapshot. Um disco travado de vez não pode
+     * prender a liderança: passado isto, eles param e o cluster elege outro líder.
+     */
+    private static final long MAX_COVERED_NANOS = TimeUnit.SECONDS.toNanos(10);
     private static final int CONNECT_TIMEOUT_MILLIS = 250;
     /** Um seguidor que passa disso sem responder (disco travado, rede partida) é reconectado. */
     private static final int RPC_TIMEOUT_MILLIS = 10_000;
@@ -81,6 +86,7 @@ final class PeerReplicator {
     private final Thread keepalive;
     /** Momento em que o envio principal mandou a última requisição. */
     private volatile long lastWriteNanos;
+    private volatile boolean sendingSnapshot;
     private volatile boolean running = true;
     private volatile Socket socket;
     private volatile long next;
@@ -212,7 +218,7 @@ final class PeerReplicator {
                     "replicação para " + address + " sem envio há " + TimeUnit.NANOSECONDS.toMillis(quiet)
                         + " ms (disco do líder ou membro lento); batimentos saindo por fora");
             }
-            if (running) {
+            if (running && (sendingSnapshot || quiet < MAX_COVERED_NANOS)) {
                 beat();
             }
         }
@@ -516,23 +522,28 @@ final class PeerReplicator {
             return;
         }
         // Montar e transferir o estado demora; os batimentos por fora cobrem esse silêncio.
-        RaftNode.Image image = leader.node().image();
-        byte[] payload = RaftPayload.encode(image.batch());
-        leader.snapshotSent(payload.length);
-        long sent = System.nanoTime();
-        RaftWire.Response response = RaftWire.call(address,
-            request(RaftWire.SNAPSHOT, image.index(), leader.commitIndex(), payload), SNAPSHOT_TIMEOUT_MILLIS);
-        if (superseded(response)) {
-            return;
-        }
-        if (response.accepted()) {
-            match = Math.max(match, image.index());
-            next = image.index() + 1;
-            unframedIndex = next;
-            storedByLegacy.clear();
-            answered(sent);
-        } else {
-            pause(MAX_BACKOFF_MILLIS);
+        sendingSnapshot = true;
+        try {
+            RaftNode.Image image = leader.node().image();
+            byte[] payload = RaftPayload.encode(image.batch());
+            leader.snapshotSent(payload.length);
+            long sent = System.nanoTime();
+            RaftWire.Response response = RaftWire.call(address,
+                request(RaftWire.SNAPSHOT, image.index(), leader.commitIndex(), payload), SNAPSHOT_TIMEOUT_MILLIS);
+            if (superseded(response)) {
+                return;
+            }
+            if (response.accepted()) {
+                match = Math.max(match, image.index());
+                next = image.index() + 1;
+                unframedIndex = next;
+                storedByLegacy.clear();
+                answered(sent);
+            } else {
+                pause(MAX_BACKOFF_MILLIS);
+            }
+        } finally {
+            sendingSnapshot = false;
         }
     }
 
