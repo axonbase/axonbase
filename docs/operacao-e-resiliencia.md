@@ -155,7 +155,7 @@ As perdas grandes vêm do [defeito da versão antiga](#defeito-na-0101-e-anterio
 
 **Conclusão.** A atualização um nó de cada vez a partir da 0.10.x não pode ser garantida: enquanto um nó antigo participar do quórum, os defeitos dele atingem o cluster. As defesas do nó novo reduzem a exposição, mas não a eliminam.
 
-**Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Resultado parcial: 17 execuções lidas, todas aprovadas, sem perda causada pela troca e sem divergência; numa delas a versão antiga já tinha perdido 413 escritas antes da parada.
+**Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Em `17bea4d`, 30 rodadas com as duas paradas (60 trocas) passaram todas, sem perda causada pela troca e sem divergência. Em duas trocas limpas a versão antiga já tinha perdido 407 e 413 escritas antes da parada.
 
 **Recomendação para a atualização a partir da 0.10.x:** parada programada. Pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova. Um nó antigo pode já estar diferente dos outros antes da parada, por causa dos próprios defeitos: compare o conteúdo e, havendo diferença, refaça os nós divergentes a partir do que tiver os dados completos.
 
