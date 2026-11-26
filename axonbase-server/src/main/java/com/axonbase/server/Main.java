@@ -13,6 +13,8 @@ import com.axonbase.core.cluster.ClockHooks;
 import com.axonbase.core.cluster.ClusterConfig;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.TcpRaftCommitCoordinator;
+import com.axonbase.core.shard.backup.ShardBackupNode;
+import com.axonbase.core.shard.backup.ShardJournalHooks;
 import com.axonbase.core.backup.S3SyncManager;
 
 import java.nio.file.Files;
@@ -35,6 +37,10 @@ public final class Main {
         String cmd = args[0];
         if ("gateway".equals(cmd)) {
             GatewayMain.run(System.getenv());
+            return;
+        }
+        if ("restore-shards".equals(cmd)) {
+            ShardRestoreMain.run(java.util.Arrays.copyOfRange(args, 1, args.length));
             return;
         }
         if (!"start".equals(cmd)) {
@@ -111,7 +117,11 @@ public final class Main {
         };
 
         // o journal entra antes do Datastore, para arquivar também as escritas da subida
-        PitrJournal journal = startPitr(PitrSettings.fromEnvironment(), backend, config.clusterId());
+        PitrSettings pitrSettings = PitrSettings.fromEnvironment();
+        // em cluster quem arquiva é o apply do Raft (journal de shard, ligado abaixo)
+        boolean shardJournal = pitrSettings.enabled() && !config.clusterId().isBlank()
+            && backend instanceof RocksDbBackend;
+        PitrJournal journal = shardJournal ? null : startPitr(pitrSettings, backend, config.clusterId());
 
         // Create Datastore before default databases so S3 restore can replay into it.
         Datastore ds = new Datastore(backend);
@@ -145,6 +155,7 @@ public final class Main {
         }
 
         ClusterRuntime cluster = null;
+        ShardBackupNode shardBackup = null;
         if (!config.clusterId().isBlank()) {
             if (config.nodeId().isBlank() || config.raftBind().isBlank()) {
                 throw new IllegalArgumentException(Messages.get("server_cluster_missing"));
@@ -160,7 +171,17 @@ public final class Main {
             cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
                 (VersionedKvBackend) backend);
             // logo depois de construir: o relógio precisa ver a cauda do log antes de carimbar qualquer lote
-            cluster.hooks(new ClockHooks(clockFor(backend)));
+            if (shardJournal) {
+                RocksDbBackend rocks = (RocksDbBackend) backend;
+                ShardJournalHooks hooks = ShardJournalHooks.open(rocks.clock(), pitrSettings.directoryFor(rocks),
+                    pitrSettings.options());
+                cluster.hooks(hooks);
+                shardBackup = new ShardBackupNode(cluster, rocks, hooks, shardBackupDir(rocks),
+                    java.time.Duration.ofSeconds(60));
+                Runtime.getRuntime().addShutdownHook(new Thread(hooks::close, "ax-shard-journal-close"));
+            } else {
+                cluster.hooks(new ClockHooks(clockFor(backend)));
+            }
         }
         if (cluster != null) {
             cluster.appliedBatchListener(ds.appliedBatchListener());
@@ -169,6 +190,7 @@ public final class Main {
 
         AxonServer server = AxonServer.start(ds, secret, config);
         server.pitr(journal);
+        server.shardBackup(shardBackup);
         if (cluster != null) {
             server.clusterStatus(cluster);
         }
@@ -219,6 +241,12 @@ public final class Main {
         }
         // quem fecha é o desligamento do servidor, depois de atender as requisições em curso
         return PitrJournal.attach(rocks, settings.directoryFor(rocks), settings.options());
+    }
+
+    /** Onde os backups físicos de shard ficam: {@code AXON_SHARD_BACKUP_DIR}, ou ao lado dos dados. */
+    private static Path shardBackupDir(RocksDbBackend rocks) {
+        // dentro do diretório de dados o nome precisa começar com ponto, como o do journal
+        return Path.of(envOr("AXON_SHARD_BACKUP_DIR", rocks.directory().resolve(".shard-backups").toString()));
     }
 
     /** O relógio do armazenamento já guarda em disco um teto do que emite; sem RocksDB, o do sistema basta. */

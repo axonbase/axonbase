@@ -1,15 +1,29 @@
 package com.axonbase.server;
 
+import com.axonbase.core.Session;
+import com.axonbase.core.cluster.ClusterConfig;
+import com.axonbase.core.cluster.ClusterRuntime;
+import com.axonbase.core.cluster.RaftOptions;
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.journal.JournalOptions;
+import com.axonbase.core.shard.backup.ShardBackupNode;
+import com.axonbase.core.shard.backup.ShardJournalHooks;
+import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -101,6 +115,55 @@ class ShardGatewayHttpTest {
             for (AxonServer shard : shards) {
                 shard.stop();
             }
+        }
+    }
+
+    @Test
+    void backupDoClusterPeloGatewayERestauracaoPelaLinhaDeComando(@TempDir Path dir) throws Exception {
+        // um shard que é um cluster Raft de um nó, com disco e journal
+        int raftPort;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            raftPort = socket.getLocalPort();
+        }
+        RocksDbBackend backend = new RocksDbBackend(dir.resolve("db").toString());
+        ShardJournalHooks hooks = ShardJournalHooks.open(backend.clock(), dir.resolve("journal"),
+            JournalOptions.defaults());
+        ClusterRuntime runtime = new ClusterRuntime(new ClusterConfig("n1", "s0",
+            new InetSocketAddress("127.0.0.1", raftPort), List.of()), dir.resolve("raft"), backend,
+            RaftOptions.defaults());
+        runtime.hooks(hooks);
+        Datastore datastore = new Datastore(backend);
+        runtime.appliedBatchListener(datastore.appliedBatchListener());
+        datastore.commitCoordinator(runtime, "n1");
+        AxonServer server = AxonServer.startRandomPort(datastore, "segredo-de-teste");
+        server.clusterStatus(runtime);
+        server.shardBackup(new ShardBackupNode(runtime, backend, hooks, dir.resolve("backups"),
+            Duration.ofSeconds(30)));
+        try (GatewayServer gateway = GatewayMain.start(GatewayMain.Config.from(environment(List.of(server))))) {
+            sql(gateway, "DEFINE TABLE pedido SHARD BY cliente");
+            sql(gateway, "CREATE pedido SET cliente = 'ana', total = 1");
+
+            Map<String, String> admin = Map.of("Authorization", "Bearer token-de-teste");
+            HttpResponse<String> created = post(gateway.port(), "/admin/backup/create", "", admin);
+            assertEquals(200, created.statusCode(), created.body());
+            Path manifest = dir.resolve("manifesto.json");
+            Files.writeString(manifest, created.body());
+            assertEquals(200, post(gateway.port(), "/admin/backup/barrier", "", admin).statusCode());
+
+            ShardRestoreMain.run(new String[] {manifest.toString(), dir.resolve("restaurado").toString()});
+
+            try (RocksDbBackend restored = new RocksDbBackend(dir.resolve("restaurado/s0").toString())) {
+                Session session = Session.create();
+                session.namespace("n");
+                session.database("d");
+                assertEquals(1, new Datastore(restored).execute("SELECT * FROM pedido", session, null)
+                    .asArray().size());
+            }
+        } finally {
+            server.stop();
+            runtime.close();
+            hooks.close();
+            backend.close();
         }
     }
 

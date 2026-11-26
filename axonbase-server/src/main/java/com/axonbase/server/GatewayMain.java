@@ -8,6 +8,9 @@ import com.axonbase.core.shard.ShardInfo;
 import com.axonbase.core.shard.ShardMap;
 import com.axonbase.core.shard.ShardMapStore;
 import com.axonbase.core.shard.ShardMover;
+import com.axonbase.core.shard.backup.BackupMember;
+import com.axonbase.core.shard.backup.ClusterBackup;
+import com.axonbase.core.shard.backup.HttpBackupMember;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
@@ -22,6 +25,8 @@ import java.util.function.Supplier;
  * Sobe o gateway de shards ({@code axonbase gateway}), configurado pelo ambiente. Veja {@code docs/shards.md}.
  */
 public final class GatewayMain {
+
+    private static final Duration BACKUP_TIMEOUT = Duration.ofHours(1);
 
     private GatewayMain() {
     }
@@ -116,7 +121,10 @@ public final class GatewayMain {
         ShardGateway gateway = new ShardGateway(store, users, ShardGateway.Options.defaults()
             .withMapTtl(config.mapTtl()).withCheckExplicitIds(config.checkExplicitIds()), clock);
         ShardMover mover = new ShardMover(store, administration, config.propagation(), clock);
-        return GatewayServer.start(gateway, mover, store,
+        ClusterBackup backups = new ClusterBackup(store, shard -> shard.endpoints().stream()
+            .map(endpoint -> (BackupMember) new HttpBackupMember(shard.id(), endpoint, http, BACKUP_TIMEOUT, service))
+            .toList(), config.deadline());
+        return GatewayServer.start(gateway, mover, store, backups,
             new GatewayServer.Settings(config.bind(), config.port(), config.adminToken(), config.meta()));
     }
 

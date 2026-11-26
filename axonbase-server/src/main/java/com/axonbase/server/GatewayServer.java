@@ -11,6 +11,8 @@ import com.axonbase.core.shard.ShardMap;
 import com.axonbase.core.shard.ShardMapStore;
 import com.axonbase.core.shard.ShardMover;
 import com.axonbase.core.shard.SlotRange;
+import com.axonbase.core.shard.backup.ClusterBackup;
+import com.axonbase.core.shard.backup.ClusterManifest;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 import jakarta.servlet.http.HttpServlet;
@@ -57,12 +59,15 @@ public final class GatewayServer implements AutoCloseable {
     private final ShardGateway gateway;
     private final ShardMover mover;
     private final ShardMapStore store;
+    private final ClusterBackup backups;
     private final Settings settings;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     private Server jetty;
     private int port;
 
-    private GatewayServer(ShardGateway gateway, ShardMover mover, ShardMapStore store, Settings settings) {
+    private GatewayServer(ShardGateway gateway, ShardMover mover, ShardMapStore store, ClusterBackup backups,
+                          Settings settings) {
+        this.backups = backups;
         this.gateway = gateway;
         this.mover = mover;
         this.store = store;
@@ -70,8 +75,8 @@ public final class GatewayServer implements AutoCloseable {
     }
 
     public static GatewayServer start(ShardGateway gateway, ShardMover mover, ShardMapStore store,
-                                      Settings settings) throws Exception {
-        GatewayServer server = new GatewayServer(gateway, mover, store, settings);
+                                      ClusterBackup backups, Settings settings) throws Exception {
+        GatewayServer server = new GatewayServer(gateway, mover, store, backups, settings);
         server.listen();
         return server;
     }
@@ -93,6 +98,7 @@ public final class GatewayServer implements AutoCloseable {
         context.addServlet(new ServletHolder(handler(this::signin)), "/signin");
         context.addServlet(new ServletHolder(handler(this::map)), "/shard/v1/map");
         context.addServlet(new ServletHolder(handler(this::admin)), "/admin/shard/*");
+        context.addServlet(new ServletHolder(handler(this::backup)), "/admin/backup/*");
         jetty.setHandler(context);
         jetty.start();
         port = connector.getLocalPort();
@@ -203,6 +209,33 @@ public final class GatewayServer implements AutoCloseable {
         }
         gateway.refresh();
         json(resp, 200, AxonJson.write(result.toValue()));
+    }
+
+    /**
+     * {@code POST /admin/backup/create} devolve o manifesto de um backup novo; {@code /barrier} avança o ponto
+     * alcançável; {@code /seal} (com o manifesto no corpo) fecha os journals que ele usa.
+     */
+    private void backup(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        if (refusedAdmin(req, resp)) {
+            return;
+        }
+        if (!"POST".equals(req.getMethod())) {
+            resp.setStatus(405);
+            return;
+        }
+        String action = req.getPathInfo() == null ? "" : req.getPathInfo();
+        switch (action) {
+            case "/create" -> json(resp, 200, AxonJson.write(backups.create().toValue()));
+            case "/barrier" -> json(resp, 200, instant(backups.barrier()));
+            case "/seal" -> json(resp, 200, instant(backups.sealJournals(
+                ClusterManifest.fromValue(AxonJson.parseDocument(body(req))))));
+            default -> resp.setStatus(404);
+        }
+    }
+
+    private static String instant(HlcTimestamp stamp) {
+        return "{\"instant\":\"" + java.time.Instant.ofEpochMilli(stamp.physical()) + "\",\"physical\":"
+            + stamp.physical() + ",\"logical\":" + stamp.logical() + "}";
     }
 
     private boolean refusedAdmin(HttpServletRequest req, HttpServletResponse resp) throws IOException {

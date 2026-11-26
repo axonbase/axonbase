@@ -58,6 +58,7 @@ public final class AxonServer {
     private volatile com.axonbase.core.cluster.ClusterStatusProvider clusterStatus;
     private static final String READ_CONSISTENCY_HEADER = "Axon-Read-Consistency";
     private volatile com.axonbase.core.cluster.ClusterRuntime clusterRuntime;
+    private volatile com.axonbase.core.shard.backup.BackupMember shardBackup;
     private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicLong inflight = new java.util.concurrent.atomic.AtomicLong();
     private final ServerMetrics metrics = new ServerMetrics();
@@ -262,8 +263,8 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new CertificateLoginServlet()), "/certificate/login/*");
         ctx.addServlet(new ServletHolder(new ShardMoveServlet()), "/admin/shard/move");
         // rota interna do gateway de shards (docs/shards.md)
-        ctx.addServlet(new ServletHolder(new ShardNodeServlet(ds, this::withNames, requireAuth, () -> clusterRuntime)),
-            "/shard/v1/*");
+        ctx.addServlet(new ServletHolder(new ShardNodeServlet(ds, this::withNames, requireAuth, () -> clusterRuntime,
+            () -> shardBackup)), "/shard/v1/*");
         ServletHolder adminV1 = new ServletHolder(new AdminV1Servlet(this));
         adminV1.setAsyncSupported(true);
         adminV1.getRegistration().setMultipartConfig(new jakarta.servlet.MultipartConfigElement(
@@ -487,6 +488,11 @@ public final class AxonServer {
 
     com.axonbase.core.cluster.ClusterRuntime clusterRuntime() {
         return clusterRuntime;
+    }
+
+    /** Liga as rotas de backup de shard a este nó ({@code null} quando o journal de cluster está desligado). */
+    public void shardBackup(com.axonbase.core.shard.backup.BackupMember node) {
+        this.shardBackup = node;
     }
 
     /** Liga o journal de PITR a este servidor (API, métricas e restauração a um instante). */

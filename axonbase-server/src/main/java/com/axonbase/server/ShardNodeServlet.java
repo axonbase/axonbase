@@ -6,11 +6,17 @@ import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HybridClock;
 import com.axonbase.core.security.Authz;
 import com.axonbase.core.shard.ShardCodec;
+import com.axonbase.core.shard.ShardException;
+import com.axonbase.core.shard.ShardMessages;
 import com.axonbase.core.shard.ShardHttp;
 import com.axonbase.core.shard.ShardNode;
 import com.axonbase.core.shard.ShardReply;
 import com.axonbase.core.shard.ShardRequest;
+import com.axonbase.core.shard.backup.BackupHttp;
+import com.axonbase.core.shard.backup.BackupMember;
 import com.axonbase.core.storage.RocksDbBackend;
+import com.axonbase.value.AxonJson;
+import com.axonbase.value.AxonValue;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -28,15 +34,18 @@ import java.util.function.Supplier;
 final class ShardNodeServlet extends HttpServlet {
 
     private static final int MAX_BODY = 64 << 20;
+    private static final int MAX_BACKUP_BODY = 4 << 10;
 
     private final transient Datastore datastore;
     private final transient Function<HttpServletRequest, Session> sessions;
     private final boolean requireAuth;
     private final transient Supplier<ClusterRuntime> cluster;
     private final transient HybridClock clock;
+    private final transient Supplier<BackupMember> backup;
 
     ShardNodeServlet(Datastore datastore, Function<HttpServletRequest, Session> sessions, boolean requireAuth,
-                     Supplier<ClusterRuntime> cluster) {
+                     Supplier<ClusterRuntime> cluster, Supplier<BackupMember> backup) {
+        this.backup = backup;
         this.datastore = datastore;
         this.sessions = sessions;
         this.requireAuth = requireAuth;
@@ -47,6 +56,10 @@ final class ShardNodeServlet extends HttpServlet {
 
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        if (req.getRequestURI().startsWith(BackupHttp.PREFIX)) {
+            backup(req, resp);
+            return;
+        }
         if (!ShardHttp.EXECUTE.equals(req.getRequestURI())) {
             resp.setStatus(404);
             return;
@@ -84,6 +97,40 @@ final class ShardNodeServlet extends HttpServlet {
             resp.setStatus(200);
             resp.setContentType(ShardHttp.CONTENT_TYPE);
             resp.getOutputStream().write(ShardCodec.encode(reply));
+        } catch (RuntimeException e) {
+            send(resp, ShardHttp.failure(e));
+        }
+    }
+
+    /** As rotas do coordenador de backup (veja {@link BackupHttp}); só com o journal ligado neste nó. */
+    private void backup(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        Session session = sessions.apply(req);
+        if (requireAuth && session.auth() == null) {
+            refuse(resp, 401, "autenticação obrigatória");
+            return;
+        }
+        if (requireAuth && !Authz.atLeast(session.auth(), Authz.Role.ADMIN)) {
+            refuse(resp, 403, "o backup exige o papel admin");
+            return;
+        }
+        BackupMember node = backup.get();
+        if (node == null) {
+            send(resp, ShardHttp.failure(new ShardException(ShardException.Code.REFUSED,
+                ShardMessages.get("backup_no_journal", req.getServerName() + ":" + req.getServerPort()))));
+            return;
+        }
+        byte[] body = req.getInputStream().readNBytes(MAX_BACKUP_BODY);
+        try {
+            AxonValue in = AxonJson.parseDocument(new String(body, StandardCharsets.UTF_8));
+            AxonValue out = BackupHttp.serve(node, req.getRequestURI().substring(BackupHttp.PREFIX.length()), in);
+            if (out == null) {
+                resp.setStatus(404);
+                return;
+            }
+            resp.setStatus(200);
+            resp.setContentType("application/json");
+            resp.setCharacterEncoding(StandardCharsets.UTF_8.name());
+            resp.getWriter().write(AxonJson.write(out));
         } catch (RuntimeException e) {
             send(resp, ShardHttp.failure(e));
         }
