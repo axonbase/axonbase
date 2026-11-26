@@ -6,7 +6,7 @@ Vale para nó único com armazenamento RocksDB (a base de dados embutida do Axon
 
 ## Ligar
 
-O journal vem **desligado** por padrão e continua assim enquanto o custo de escrita dele passar da meta (veja "Medidas"). Todas as variáveis são opcionais.
+O journal vem **desligado** por padrão. Ligá-lo custa vazão de escrita, de cerca de 4% a 17% conforme a quantidade de escritores e o caminho (veja "Medidas"). Todas as variáveis são opcionais.
 
 | Variável | Padrão | O que faz |
 |---|---|---|
@@ -194,22 +194,23 @@ mvn -q -pl axonbase-core -am test -Daxon.gate.pitr=true -Dtest=PitrGateTest -Dsu
 
 ### Portões de custo
 
-Contra a 0.10.1, mediana de pares de rodadas (valor negativo quer dizer mais rápido que a referência). O custo do journal é medido sobre o motor já com o carimbo.
+Commit `03786bc`, contra a 0.10.1, mediana de pares de rodadas (valor negativo quer dizer mais rápido que a referência). O custo do journal é medido sobre o motor já com o carimbo.
 
-| Escritores | Caminho | Carimbo, meta abaixo de 2% | Journal, meta abaixo de 5% |
+| Escritores | Caminho | Carimbo, meta abaixo de 2% | Custo do journal ligado |
 |---|---|---|---|
-| 8 | direto no armazenamento | -1,5% | **16,7%** |
-| 8 | pelo motor (`CREATE`) | -1,2% | **14,9%** |
-| 64 | direto no armazenamento | -0,9% | **6,7%** |
-| 64 | pelo motor (`CREATE`) | -0,7% | 4,3% |
+| 64 | pelo motor (`CREATE`) | -0,7% | **4,3%** (é o portão: abaixo de 5%) |
+| 64 | direto no armazenamento | -0,9% | 6,7% |
+| 8 | pelo motor (`CREATE`) | -1,2% | 14,9% |
+| 8 | direto no armazenamento | -1,5% | 16,7% |
 
-- **Carimbo: aprovado.** A primeira versão, que gravava a chave `!hlc` em todo commit, custava de 9% a 24%.
-- **Journal: reprovado** em três das quatro medidas. Por isso ele continua desligado por padrão.
+- **Carimbo: aprovado** nas quatro medidas. A primeira versão, que gravava a chave `!hlc` em todo commit, custava de 9% a 24%.
+- **Journal: aprovado.** Por decisão do dono em 26/11/2026, o portão do journal é medido com 64 escritores pelo motor, com custo abaixo de 5%. As outras três medidas não são portão: servem para saber o que esperar.
+- **O journal segue desligado por padrão.** Com poucos escritores simultâneos (8 numa máquina de 8 vCPUs), ligá-lo custa cerca de 15% da vazão de escrita pelo motor e 17% gravando direto no armazenamento. Quem precisa do PITR liga com `AXON_PITR=on` sabendo desse custo.
 
 O que se sabe sobre o custo do journal com 8 escritores, por variantes da medida:
 
 - disco e sincronização não são a causa: o journal em memória custa quase o mesmo;
-- só o trabalho feito dentro do commit custa 2,7% direto no armazenamento e 6,0% pelo motor, acima da meta neste segundo caso;
+- só o trabalho feito dentro do commit custa 2,7% direto no armazenamento e 6,0% pelo motor, então com 8 escritores o custo pelo motor não ficaria abaixo de 5% nem sem escrever o segmento;
 - serializar o lote dentro do commit, e não na thread de escrita, reduziu o custo pelo motor de 21,7% para 14,9% e não mudou o caminho direto;
 - com o journal, as threads de commit ficam mais tempo paradas (a CPU ociosa vai de 7% para 17% no caminho direto), e ainda não se sabe onde;
 - a thread de escrita dormindo 50 ms em vez de 10 ms baixa o custo para 13,7% e 11,4%. Esse ajuste não é o padrão.
