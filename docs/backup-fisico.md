@@ -30,7 +30,9 @@ Todas ficam sob `/admin/v1/backups/physical`. Criar, listar e verificar pedem o 
 | `DELETE /physical?keep=N` | Mantém só os `N` mais novos (`N >= 1`) e apaga os arquivos que mais nenhum backup usa. |
 | `POST /physical/{id}/restore?confirm=true` | Restaura o backup `id` no lugar da base, dentro do processo, sem reiniciar. |
 
-`version` é a marca d'água de versão do instante do backup. A idade do último backup é o RPO (Recovery Point Objective, a perda máxima de dados aceita) do backup físico.
+Um restore com o parâmetro `at=<instante>` reaplica também o journal até aquela hora (veja [pitr.md](pitr.md)).
+
+`version` é a marca d'água de versão do instante do backup. `stampedAt` e `journalIndex` aparecem nos backups que servem de base para a restauração a um instante. A idade do último backup é o RPO (Recovery Point Objective, a perda máxima de dados aceita) do backup físico.
 
 ### Restaurar
 
@@ -137,4 +139,5 @@ Um restore enquanto uma varredura ou construção de índice segura as operaçõ
 ## O que ainda não existe
 
 - Backup físico de cluster com várias réplicas (E2 e E3 do plano de escala).
-- Restauração a um instante (PITR, Point In Time Recovery), que combina este backup com o arquivo de lotes da E2.
+
+A restauração a um instante (PITR, Point-In-Time Recovery), que combina este backup com o journal de lotes, está em [pitr.md](pitr.md).
