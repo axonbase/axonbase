@@ -3,6 +3,8 @@ package com.axonbase.server;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
+import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -14,7 +16,7 @@ import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.IntStream;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * Portão 2 da E2: gerador de leituras HTTP contra um ou vários nós. Cada resposta é conferida: só conta como leitura
@@ -40,7 +42,7 @@ public final class RaftReadGateBenchmark {
      * Uma medida: vazão das respostas certas e quantas não serviram, do aquecimento ao fim (erro, vazia ou com
      * conteúdo diferente do pedido).
      */
-    record Measure(double opsPerSecond, long failed, long empty, long wrong) {
+    record Measure(double opsPerSecond, long failed, long empty, long wrong, double generatorCpu) {
         long errors() {
             return failed + empty + wrong;
         }
@@ -57,7 +59,7 @@ public final class RaftReadGateBenchmark {
         if (args[0].equals("load")) {
             load(urls, rows);
         } else {
-            errors = read(urls, rows, Integer.parseInt(args[3]), urls.size(), Integer.parseInt(args[4]),
+            errors = read(urls, rows, Integer.parseInt(args[3]), Integer.parseInt(args[4]),
                 args.length > 5 ? args[5] : null).errors();
         }
         System.exit(errors == 0 ? 0 : 1);
@@ -218,76 +220,105 @@ public final class RaftReadGateBenchmark {
         }
     }
 
-    static Measure read(List<String> urls, int rows, int connections, int clientCount, int seconds,
-            String consistency) throws Exception {
-        return read(urls, rows, connections, clientCount, WARMUP_SECONDS, seconds, consistency);
+    static Measure read(List<String> urls, int rows, int connections, int seconds, String consistency)
+            throws Exception {
+        return read(urls, rows, connections, WARMUP_SECONDS, seconds, consistency);
+    }
+
+    /** O que as conexões de uma medida compartilham. */
+    private record Tally(AtomicBoolean running, AtomicBoolean measuring, AtomicLong done, AtomicLong failed,
+            AtomicLong empty, AtomicLong wrong, AtomicLong samples) {
+        Tally() {
+            this(new AtomicBoolean(true), new AtomicBoolean(), new AtomicLong(), new AtomicLong(), new AtomicLong(),
+                new AtomicLong(), new AtomicLong());
+        }
     }
 
     /**
-     * Lê ids sorteados com {@code connections} conexões. O número de clientes HTTP é do gerador, não do alvo: um nó e
-     * três nós precisam do mesmo número deles, para o gerador não limitar um lado da comparação.
+     * Lê ids sorteados com {@code connections} conexões, divididas entre os endereços, cada uma com a sua thread e um
+     * pedido por vez. A medida traz o processador usado nesta máquina: com ele perto do total, o número é o do
+     * gerador.
      */
-    static Measure read(List<String> urls, int rows, int connections, int clientCount, int warmup, int seconds,
-            String consistency) throws Exception {
-        AtomicBoolean measuring = new AtomicBoolean();
-        AtomicBoolean running = new AtomicBoolean(true);
-        AtomicLong done = new AtomicLong();
-        AtomicLong failed = new AtomicLong();
-        AtomicLong empty = new AtomicLong();
-        AtomicLong wrong = new AtomicLong();
-        AtomicLong samples = new AtomicLong();
+    static Measure read(List<String> urls, int rows, int connections, int warmup, int seconds, String consistency)
+            throws Exception {
+        Tally tally = new Tally();
+        String headers = "Axon-Ns: app\r\nAxon-Db: main\r\n"
+            + (consistency == null ? "" : "Axon-Read-Consistency: " + consistency + "\r\n");
         List<Thread> workers = new ArrayList<>();
-        // Mais de um cliente, para as conexões não disputarem um único seletor.
-        List<HttpClient> clients = IntStream.range(0, clientCount).mapToObj(i -> client()).toList();
         for (int c = 0; c < connections; c++) {
             String url = urls.get(c % urls.size());
-            HttpClient http = clients.get(c % clientCount);
-            workers.add(Thread.ofVirtual().start(() -> {
-                while (running.get()) {
-                    long id = ThreadLocalRandom.current().nextLong(rows);
-                    String problem;
-                    AtomicLong kind;
-                    try {
-                        HttpResponse<String> response = http.send(sql(url, "SELECT * FROM item:i" + id, consistency),
-                            HttpResponse.BodyHandlers.ofString());
-                        Answer got = response.statusCode() == 200 ? answer(response.body(), id) : null;
-                        if (got == Answer.ROW) {
-                            if (measuring.get()) {
-                                done.incrementAndGet();
-                            }
-                            continue;
-                        }
-                        kind = got == null ? failed : got == Answer.EMPTY ? empty : wrong;
-                        problem = response.statusCode() + " " + cut(response.body());
-                    } catch (Exception e) {
-                        kind = failed;
-                        problem = e.toString();
-                    }
-                    if (!running.get()) {
-                        break; // pedido interrompido pelo fim da medida
-                    }
-                    kind.incrementAndGet();
-                    if (samples.incrementAndGet() <= SAMPLES) {
-                        System.out.println("GATE2 sample " + url + " id=" + id + " " + problem);
-                    }
-                }
-            }));
+            workers.add(Thread.ofPlatform().daemon().start(() -> readLoop(url, headers, rows, tally)));
         }
         Thread.sleep(warmup * 1_000L);
+        var machine = (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
+        machine.getCpuLoad(); // a chamada seguinte devolve o uso desde esta
         long from = System.nanoTime();
-        measuring.set(true);
+        tally.measuring().set(true);
         Thread.sleep(seconds * 1_000L);
-        measuring.set(false);
+        tally.measuring().set(false);
         double elapsed = (System.nanoTime() - from) / 1e9;
-        long count = done.get();
-        running.set(false);
+        double cpu = machine.getCpuLoad();
+        long count = tally.done().get();
+        tally.running().set(false);
         for (Thread worker : workers) {
             worker.join(60_000);
         }
-        Measure measure = new Measure(count / elapsed, failed.get(), empty.get(), wrong.get());
-        System.out.printf("GATE2 read nodes=%d connections=%d clients=%d consistency=%s ops_s=%.0f failed=%d empty=%d "
-                + "wrong=%d%n", urls.size(), connections, clientCount, consistency == null ? "padrao" : consistency,
-            measure.opsPerSecond(), measure.failed(), measure.empty(), measure.wrong());
+        Measure measure = new Measure(count / elapsed, tally.failed().get(), tally.empty().get(), tally.wrong().get(),
+            cpu);
+        System.out.printf("GATE2 read nodes=%d connections=%d consistency=%s ops_s=%.0f failed=%d empty=%d wrong=%d "
+                + "generator_cpu=%.2f%n", urls.size(), connections, consistency == null ? "padrao" : consistency,
+            measure.opsPerSecond(), measure.failed(), measure.empty(), measure.wrong(), measure.generatorCpu());
         return measure;
+    }
+
+    private static void readLoop(String url, String headers, int rows, Tally tally) {
+        LeanHttpConnection connection = null;
+        while (tally.running().get()) {
+            long id = ThreadLocalRandom.current().nextLong(rows);
+            String problem;
+            AtomicLong kind;
+            try {
+                if (connection == null || connection.closing()) {
+                    close(connection);
+                    connection = new LeanHttpConnection(url, headers);
+                }
+                LeanHttpConnection.Response response = connection.post("/sql", "SELECT * FROM item:i" + id);
+                Answer got = response.status() == 200 ? answer(response.body(), id) : null;
+                if (got == Answer.ROW) {
+                    if (tally.measuring().get()) {
+                        tally.done().incrementAndGet();
+                    }
+                    continue;
+                }
+                kind = got == null ? tally.failed() : got == Answer.EMPTY ? tally.empty() : tally.wrong();
+                problem = response.status() + " " + cut(response.body());
+            } catch (IOException | RuntimeException e) {
+                close(connection);
+                connection = null;
+                kind = tally.failed();
+                problem = e.toString();
+            }
+            if (!tally.running().get()) {
+                break; // pedido interrompido pelo fim da medida
+            }
+            kind.incrementAndGet();
+            if (tally.samples().incrementAndGet() <= SAMPLES) {
+                System.out.println("GATE2 sample " + url + " id=" + id + " " + problem);
+            }
+            if (connection == null) {
+                LockSupport.parkNanos(10_000_000); // sem conexão, não gira em falso
+            }
+        }
+        close(connection);
+    }
+
+    private static void close(LeanHttpConnection connection) {
+        if (connection != null) {
+            try {
+                connection.close();
+            } catch (IOException ignored) {
+                // já está fechada
+            }
+        }
     }
 }

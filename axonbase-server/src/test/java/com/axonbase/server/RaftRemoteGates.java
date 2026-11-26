@@ -41,6 +41,7 @@ public final class RaftRemoteGates {
     private static final double GATE3_MAXIMUM_SECONDS = 15 * 60;
     private static final double GATE3_MAXIMUM_GAP_MILLIS = 1_000;
     private static final int LOAD_ATTEMPTS = 10;
+    private static final double GENERATOR_BUSY = 0.80;
 
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final String token;
@@ -163,11 +164,9 @@ public final class RaftRemoteGates {
         Node solo = nodes.getFirst();
         System.out.println(call(solo, "/start?role=solo&mode=batch", 120));
         RaftReadGateBenchmark.load(List.of(solo.sql()), rows);
-        // O mesmo número de clientes HTTP nos dois cenários: um só limitaria o nó único pelo gerador.
-        int clients = nodes.size();
         List<RaftReadGateBenchmark.Measure> single = new ArrayList<>();
         for (int round = 0; round < rounds; round++) {
-            single.add(RaftReadGateBenchmark.read(List.of(solo.sql()), rows, connections, clients, seconds, null));
+            single.add(read(List.of(solo), rows, connections, seconds, null));
         }
         call(solo, "/stop", 120);
 
@@ -180,7 +179,7 @@ public final class RaftRemoteGates {
             for (int round = 0; round < rounds; round++) {
                 for (String consistency : new String[] {null, "max-lag=1000", "linearizable"}) {
                     clustered.computeIfAbsent(consistency == null ? "padrao" : consistency, k -> new ArrayList<>())
-                        .add(RaftReadGateBenchmark.read(urls, rows, connections, clients, seconds, consistency));
+                        .add(read(nodes, rows, connections, seconds, consistency));
                 }
             }
         } finally {
@@ -194,9 +193,35 @@ public final class RaftRemoteGates {
             // Com resposta que não serve não há vazão para comparar: reprova em qualquer consistência.
             String verdict = errors > 0 ? verdict(false)
                 : consistency.equals("padrao") ? verdict(ratio >= GATE2_MINIMUM_RATIO) : "INFO";
+            double generator = Math.max(busiestGenerator(single), busiestGenerator(measures));
             System.out.printf("GATE2 RESULT consistency=%s single=%.0f three=%.0f ratio=%.2f target=%.1f errors=%d "
-                    + "%s%n", consistency, base, medianOps(measures), ratio, GATE2_MINIMUM_RATIO, errors, verdict);
+                    + "generator_cpu=%.2f %s%n", consistency, base, medianOps(measures), ratio, GATE2_MINIMUM_RATIO,
+                errors, generator, verdict);
+            if (generator >= GENERATOR_BUSY) {
+                System.out.printf("GATE2 warning consistency=%s o gerador usou %.0f%% do processador: a razão mede o "
+                    + "gerador, não o cluster; repita numa máquina maior%n", consistency, generator * 100);
+            }
         });
+    }
+
+    /** Uma medida de leitura contra {@code targets}, com o processador usado em cada nó durante ela. */
+    private RaftReadGateBenchmark.Measure read(List<Node> targets, int rows, int connections, int seconds,
+            String consistency) throws Exception {
+        for (Node node : targets) {
+            call(node, "/cpu", 60); // a próxima chamada devolve o uso desde esta
+        }
+        RaftReadGateBenchmark.Measure measure = RaftReadGateBenchmark.read(targets.stream().map(Node::sql).toList(),
+            rows, connections, seconds, consistency);
+        StringBuilder line = new StringBuilder("GATE2 cpu");
+        for (Node node : targets) {
+            line.append(' ').append(node).append('=').append(word(call(node, "/cpu", 60), "cpu"));
+        }
+        System.out.println(line);
+        return measure;
+    }
+
+    private static double busiestGenerator(List<RaftReadGateBenchmark.Measure> measures) {
+        return measures.stream().mapToDouble(RaftReadGateBenchmark.Measure::generatorCpu).max().orElse(0);
     }
 
     private static double medianOps(List<RaftReadGateBenchmark.Measure> measures) {

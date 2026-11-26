@@ -47,11 +47,14 @@ class RaftReadGateBenchmarkTest {
             List<String> urls = List.of("http://127.0.0.1:" + server.port());
             RaftReadGateBenchmark.load(urls, 50);
 
-            RaftReadGateBenchmark.Measure good = RaftReadGateBenchmark.read(urls, 50, 4, 2, 0, 1, null);
+            RaftReadGateBenchmark.Measure good = RaftReadGateBenchmark.read(urls, 50, 4, 0, 1, null);
             assertEquals(0, good.errors());
             assertTrue(good.opsPerSecond() > 0);
 
-            RaftReadGateBenchmark.Measure missing = RaftReadGateBenchmark.read(urls, 5_000, 4, 2, 0, 1, null);
+            RaftReadGateBenchmark.Measure stale = RaftReadGateBenchmark.read(urls, 50, 4, 0, 1, "linearizable");
+            assertEquals(0, stale.errors(), "o cabeçalho de consistência precisa chegar inteiro: " + stale);
+
+            RaftReadGateBenchmark.Measure missing = RaftReadGateBenchmark.read(urls, 5_000, 4, 0, 1, null);
             assertTrue(missing.empty() > 0, missing.toString());
 
             Duration briefly = Duration.ofSeconds(1);
