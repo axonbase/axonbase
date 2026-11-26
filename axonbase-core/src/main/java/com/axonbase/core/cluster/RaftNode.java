@@ -133,6 +133,7 @@ public final class RaftNode {
                 return response(false);
             }
             log.append(new FileRaftLog.Entry(request.index(), request.term(), append.batch()));
+            log.sync();
         }
         commitThrough(Math.min(request.commitIndex(), log.lastIndex()), request.term(),
             request.leaderOrCandidate(), applied);
@@ -158,6 +159,7 @@ public final class RaftNode {
     synchronized void appendLocal(long term, long index, CommittedBatch batch) {
         if (log.entry(index) == null) {
             log.append(new FileRaftLog.Entry(index, term, batch));
+            log.sync();
         }
     }
 

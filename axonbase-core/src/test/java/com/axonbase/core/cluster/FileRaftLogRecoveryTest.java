@@ -50,7 +50,7 @@ class FileRaftLogRecoveryTest {
                 log.append(entry(i));
             }
         }
-        Path file = dir.resolve("raft.log");
+        Path file = dir.resolve("raft-log").resolve("00000000000000000001.seg");
         try (FileChannel ch = FileChannel.open(file, StandardOpenOption.WRITE)) {
             ch.truncate(ch.size() - 3);
         }
