@@ -594,8 +594,8 @@ class OnlineIndexBuildTest {
         java.util.List<String> expected = nearest(before);
         java.util.List<String> got = nearest(after);
         long hit = got.stream().filter(expected::contains).count();
-        // o índice é aproximado e o grafo depende da ordem das escritas concorrentes: 8 de 10 já aparece em 1 de 5 execuções
-        assertTrue(hit >= 7, "recall " + hit + "/10, esperado " + expected + " obtido " + got);
+        // o índice é aproximado e o grafo depende da ordem de inserção: tolera um vizinho trocado
+        assertTrue(hit >= 9, "recall " + hit + "/10, esperado " + expected + " obtido " + got);
         // linhas escritas durante a construção são encontradas; as apagadas não aparecem
         assertEquals(0, rows(after.execute("SELECT * FROM t WHERE id = t:0", session(), null)));
         assertEquals(1, rows(after.execute("SELECT * FROM t WHERE id = t:" + (n + 50), session(), null)));
