@@ -71,6 +71,8 @@ public final class MixedVersionNode {
             for (String line = in.readLine(); line != null && !line.equals("exit"); line = in.readLine()) {
                 if (line.equals("stop")) {
                     writing.set(false);
+                } else if (line.equals("go")) {
+                    writing.set(true);
                 } else if (line.startsWith("check ")) {
                     check(backend, Path.of(line.substring(6)));
                 }
