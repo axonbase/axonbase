@@ -679,6 +679,7 @@ public final class AxonServer {
         if (background != null) {
             background.close(); // antes de o armazenamento fechar
         }
+        ds.coldTier().close();
         var journal = pitr;
         if (journal != null) {
             journal.close(); // depois das requisições: tudo o que foi confirmado fica num segmento fechado

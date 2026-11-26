@@ -22,19 +22,27 @@ final class TimeData implements AutoCloseable {
     private final Path directory;
     private Session session = newSession();
 
-    private TimeData(KvBackend backend, Path directory) {
+    private TimeData(KvBackend backend, Path directory, ColdTier cold) {
         this.backend = backend;
         this.directory = directory;
-        this.ds = new Datastore(backend);
+        this.ds = new Datastore(backend, cold);
         ds.createDatabase("test", "dev");
     }
 
     static TimeData memory() {
-        return new TimeData(new MemoryBackend(), null);
+        return memory(ColdTier.NONE);
+    }
+
+    static TimeData memory(ColdTier cold) {
+        return new TimeData(new MemoryBackend(), null, cold);
     }
 
     static TimeData rocks(Path directory) {
-        return new TimeData(new RocksDbBackend(directory.toString(), RocksDbBackend.SyncMode.OFF), directory);
+        return rocks(directory, ColdTier.NONE);
+    }
+
+    static TimeData rocks(Path directory, ColdTier cold) {
+        return new TimeData(new RocksDbBackend(directory.toString(), RocksDbBackend.SyncMode.OFF), directory, cold);
     }
 
     static Session newSession() {
@@ -46,9 +54,14 @@ final class TimeData implements AutoCloseable {
 
     /** Fecha e reabre a base em disco, como num reinício do servidor. */
     void restart() {
+        restart(ColdTier.NONE);
+    }
+
+    void restart(ColdTier cold) {
+        ds.coldTier().close();
         ((RocksDbBackend) backend).close();
         backend = new RocksDbBackend(directory.toString(), RocksDbBackend.SyncMode.OFF);
-        ds = new Datastore(backend);
+        ds = new Datastore(backend, cold);
         session = newSession();
     }
 
@@ -60,8 +73,13 @@ final class TimeData implements AutoCloseable {
         return ds.execute(sql, other, null);
     }
 
+    /** As linhas do resultado: um SELECT por id devolve o próprio registro, e não uma lista. */
     List<AxonValue> rows(String sql) {
-        return run(sql).asArray();
+        AxonValue result = run(sql);
+        if (result.isArray()) {
+            return result.asArray();
+        }
+        return result.isObject() ? List.of(result) : List.of();
     }
 
     int count(String sql) {
@@ -93,6 +111,7 @@ final class TimeData implements AutoCloseable {
 
     @Override
     public void close() {
+        ds.coldTier().close();
         backend.close();
     }
 }

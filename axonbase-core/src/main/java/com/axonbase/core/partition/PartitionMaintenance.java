@@ -28,9 +28,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 /**
- * Trabalho de segundo plano dos dados no tempo: retenção por partição e remoção das linhas vencidas pelo TTL. Em
- * cluster só o líder age, e tudo passa por transações comuns, então chega aos seguidores e ao journal como qualquer
- * escrita.
+ * Trabalho de segundo plano dos dados no tempo: retenção por partição, mudança de camada, remoção das linhas vencidas
+ * pelo TTL e coleta de lixo dos objetos frios. Em cluster só o líder age, e tudo passa por transações comuns, então
+ * chega aos seguidores e ao journal como qualquer escrita.
  *
  * <p>O TTL percorre as entradas de vencimento em ordem e só até a hora atual: o custo é proporcional ao que venceu.
  * Ele remove em lotes pequenos, com pausa entre eles e um teto por rodada, para não disputar com as escritas.</p>
@@ -95,17 +95,21 @@ public final class PartitionMaintenance implements AutoCloseable {
     }
 
     /** O que uma rodada fez. */
-    public record Report(int droppedPartitions, int expiredRows, int backfilledRows, int failures) {
+    public record Report(int droppedPartitions, int expiredRows, int backfilledRows, int movedCold, int thawed,
+                         int collectedObjects, int failures) {
     }
 
     private static final class Tally {
         int dropped;
         int expired;
         int backfilled;
+        int movedCold;
+        int thawed;
+        int collected;
         int failures;
 
         Report report() {
-            return new Report(dropped, expired, backfilled, failures);
+            return new Report(dropped, expired, backfilled, movedCold, thawed, collected, failures);
         }
     }
 
@@ -115,6 +119,7 @@ public final class PartitionMaintenance implements AutoCloseable {
     /** Até onde a fila de vencimentos de cada tabela já foi percorrida. */
     private final Map<String, String> cursors = new ConcurrentHashMap<>();
     private long rounds;
+    private long lastCollection = Long.MIN_VALUE;
     private volatile boolean closed;
     private ScheduledExecutorService scheduler;
 
@@ -156,14 +161,55 @@ public final class PartitionMaintenance implements AutoCloseable {
         }
         long now = clock.getAsLong();
         for (Database db : ds.allDatabases()) {
-            db.catalog().partitionedTables().forEach((table, spec) -> attempt(tally, db, table,
-                () -> tally.dropped += retain(db, table, spec, now)));
+            db.catalog().partitionedTables().forEach((table, spec) -> attempt(tally, db, table, () -> {
+                tally.dropped += retain(db, table, spec, now);
+                moveTiers(tally, db, table, spec, now);
+            }));
             db.catalog().ttlTables().forEach((table, ttl) -> attempt(tally, db, table, () -> {
                 tally.backfilled += backfill(db, table, ttl);
                 tally.expired += expire(db, table, ttl, now);
             }));
         }
+        collectGarbage(tally, now);
         return tally.report();
+    }
+
+    // ---- camada fria ----
+
+    private void moveTiers(Tally tally, Database db, String table, PartitionSpec spec, long now) {
+        ColdTier tier = ds.coldTier();
+        if (!tier.configured()) {
+            return;
+        }
+        ColdMover mover = new ColdMover(ds);
+        for (PartitionDescriptor partition : PartitionStore.list(db, db.records(), table)) {
+            if (closed) {
+                return;
+            }
+            PartitionDescriptor.State state = partition.state();
+            boolean due = state == PartitionDescriptor.State.HOT && !partition.pinned()
+                && spec.coldAfterMillis() != null && partition.end() <= now - spec.coldAfterMillis();
+            if (due || state == PartitionDescriptor.State.FREEZING) {
+                tally.movedCold += mover.freeze(db, table, partition.start()) ? 1 : 0;
+            } else if (state == PartitionDescriptor.State.THAWING) {
+                tally.thawed += mover.thaw(db, table, partition.start()) ? 1 : 0;
+            }
+        }
+    }
+
+    private void collectGarbage(Tally tally, long now) {
+        ColdTier tier = ds.coldTier();
+        if (closed || !tier.configured()
+            || lastCollection != Long.MIN_VALUE && now - lastCollection < tier.settings().gcInterval().toMillis()) {
+            return;
+        }
+        try {
+            tally.collected += ColdGarbage.collect(ds, tier, now);
+            lastCollection = now;
+        } catch (java.io.IOException | RuntimeException e) {
+            tally.failures++;
+            log("cold_garbage_failed", tier.store().describe(), e);
+        }
     }
 
     private void attempt(Tally tally, Database db, String table, Runnable work) {
@@ -353,7 +399,7 @@ public final class PartitionMaintenance implements AutoCloseable {
         }
     }
 
-    private static void log(String event, String target, RuntimeException e) {
+    private static void log(String event, String target, Exception e) {
         System.err.println("{\"event\":\"" + event + "\",\"target\":\"" + target + "\",\"error\":\""
             + String.valueOf(e.getMessage()).replace('"', '\'') + "\"}");
     }

@@ -110,7 +110,8 @@ public final class Main {
         PitrJournal journal = startPitr(PitrSettings.fromEnvironment(), backend, config.clusterId());
 
         // Create Datastore before default databases so S3 restore can replay into it.
-        Datastore ds = new Datastore(backend);
+        Datastore ds = new Datastore(backend,
+            com.axonbase.core.partition.ColdTier.fromEnvironment(System.getenv()));
         ds.aiProvider(new com.axonbase.core.audit.AiProviderClient(
             config.aiProvider(), config.aiModel(), config.aiApiKey(), config.aiBaseUrl()));
         ds.auditConfig(config.auditEnabled(), config.auditUserFrom(),

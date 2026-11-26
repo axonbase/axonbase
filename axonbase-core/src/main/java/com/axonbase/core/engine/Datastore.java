@@ -64,7 +64,7 @@ public final class Datastore {
         new com.axonbase.core.embedding.EmbeddingClient();
     private final ControlStore controlStore;
     private final Object controlLock = new Object();
-    private volatile com.axonbase.core.partition.ColdTier coldTier = com.axonbase.core.partition.ColdTier.NONE;
+    private final com.axonbase.core.partition.ColdTier coldTier;
     private volatile CommitCoordinator commitCoordinator;
     private volatile String clusterNodeId;
     private volatile JksRegistrar jksRegistrar;
@@ -91,6 +91,12 @@ public final class Datastore {
     private int auditMaxBody = 65536;
 
     public Datastore(KvBackend backend) {
+        this(backend, com.axonbase.core.partition.ColdTier.NONE);
+    }
+
+    /** A camada fria entra antes do replay do catálogo: construções de índice retomadas já leem partições frias. */
+    public Datastore(KvBackend backend, com.axonbase.core.partition.ColdTier coldTier) {
+        this.coldTier = coldTier;
         this.backend = backend != null ? backend : new MemoryBackend();
         this.controlStore = new ControlStore(this.backend);
         synchronized (controlLock) {
@@ -1069,7 +1075,10 @@ public final class Datastore {
             com.axonbase.core.partition.PartitionKeys.StoredRecord stored =
                 com.axonbase.core.partition.PartitionKeys.record(key.substring(prefix.length()));
             if (stored != null) {
-                database.records().get(key).ifPresent(raw -> appendCreate(sb, stored.table(), stored.recordKey(), raw));
+                boolean timeData = database.catalog().partitioning(stored.table()) != null
+                    || database.catalog().ttl(stored.table()) != null;
+                database.records().get(key)
+                    .ifPresent(raw -> appendCreate(sb, stored.table(), stored.recordKey(), raw, timeData));
             }
         }
         exportColdRecords(sb, database);
@@ -1082,7 +1091,7 @@ public final class Datastore {
             for (var partition : com.axonbase.core.partition.PartitionStore.list(database, database.records(), table)) {
                 if (partition.coldData()) {
                     coldTier.records().scan(database, table, partition, "", (recordKey, raw) -> {
-                        appendCreate(sb, table, recordKey, raw);
+                        appendCreate(sb, table, recordKey, raw, true);
                         return true;
                     });
                 }
@@ -1090,7 +1099,7 @@ public final class Datastore {
         }
     }
 
-    private void appendCreate(StringBuilder sb, String table, String keyStr, byte[] raw) {
+    private void appendCreate(StringBuilder sb, String table, String keyStr, byte[] raw, boolean timeData) {
         AxonValue record = AxonJson.decode(raw);
         if (!record.isObject() || !record.asObject().containsKey("id")) {
             return;
@@ -1098,20 +1107,49 @@ public final class Datastore {
         // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>
         Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
         m.remove("id");
-        String content = AxonJson.write(AxonValue.object(m));
-        sb.append("CREATE ").append(table).append(":").append(literalKey(keyStr))
-            .append(" CONTENT ").append(content).append(";\n");
+        sb.append("CREATE ").append(table).append(":").append(literalKey(keyStr)).append(" CONTENT ");
+        if (timeData) {
+            appendLiteral(sb, AxonValue.object(m));
+        } else {
+            sb.append(AxonJson.write(AxonValue.object(m)));
+        }
+        sb.append(";\n");
+    }
+
+    /**
+     * Literal AxonQL do valor. Nas tabelas particionadas ou com TTL as datas precisam voltar como datas: o JSON as
+     * escreveria como um objeto marcado, que a importação leria como objeto.
+     */
+    private static void appendLiteral(StringBuilder sb, AxonValue value) {
+        if (value.isDatetime()) {
+            sb.append("d\"").append(value.asInstant()).append('"');
+        } else if (value.isArray()) {
+            sb.append('[');
+            String separator = "";
+            for (AxonValue item : value.asArray()) {
+                sb.append(separator);
+                appendLiteral(sb, item);
+                separator = ", ";
+            }
+            sb.append(']');
+        } else if (value.isObject()) {
+            sb.append('{');
+            String separator = "";
+            for (Map.Entry<String, AxonValue> entry : value.asObject().entrySet()) {
+                sb.append(separator).append(AxonJson.write(AxonValue.str(entry.getKey()))).append(": ");
+                appendLiteral(sb, entry.getValue());
+                separator = ", ";
+            }
+            sb.append('}');
+        } else {
+            sb.append(AxonJson.write(value));
+        }
     }
 
     /** A definição de partição e de TTL da tabela, depois dos campos e índices dela e antes dos dados. */
     private static void appendTimeData(StringBuilder sb, Database database, Catalog.TableDef def) {
         var partition = database.catalog().partitioning(def.name());
         if (partition != null) {
-            if (!def.fields().containsKey(partition.field())) {
-                // o dump escreve datas como texto: o tipo no campo as converte de volta na importação
-                sb.append("DEFINE FIELD ").append(partition.field()).append(" ON TABLE ").append(def.name())
-                    .append(" TYPE datetime;\n");
-            }
             sb.append(com.axonbase.parser.Render.stmt(new Statement.Partition(
                 new com.axonbase.parser.ast.PartitionCommand.Define(def.name(), partition.field(),
                     partition.intervalMillis(), partition.retentionMillis(), partition.coldAfterMillis()))))

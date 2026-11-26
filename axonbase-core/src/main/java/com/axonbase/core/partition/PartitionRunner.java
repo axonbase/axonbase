@@ -163,27 +163,17 @@ public record PartitionRunner(Datastore ds, Session session, Database db, KvBack
                 .filter(p -> p.start() <= instant && instant < p.end()).findFirst()
                 .orElseThrow(() -> AxonError.internal(Messages.get("partition_none_found", m.table(),
                     Instant.ofEpochMilli(instant))));
-            PartitionDescriptor.State next = requestedState(partition.state(), m.cold());
-            if (next != partition.state()) {
+            PartitionDescriptor next = m.cold() ? partition.requestCold() : partition.requestHot();
+            if (!next.equals(partition)) {
                 if (m.cold() && !ds.coldTier().configured()) {
                     throw AxonError.internal(Messages.get("cold_not_configured"));
                 }
                 PartitionChanges changes = new PartitionChanges();
-                changes.save(db, m.table(), partition.with(next));
+                changes.save(db, m.table(), next);
                 changes.apply(db, m.table(), records);
             }
-            return AxonValue.str(next.name());
+            return AxonValue.str(next.state().name());
         });
-    }
-
-    /** O estado pedido: a mudança de camada em si é feita em segundo plano pela manutenção. */
-    private static PartitionDescriptor.State requestedState(PartitionDescriptor.State current, boolean cold) {
-        return switch (current) {
-            case HOT -> cold ? PartitionDescriptor.State.FREEZING : PartitionDescriptor.State.HOT;
-            case FREEZING -> cold ? PartitionDescriptor.State.FREEZING : PartitionDescriptor.State.HOT;
-            case COLD -> cold ? PartitionDescriptor.State.COLD : PartitionDescriptor.State.THAWING;
-            case THAWING -> cold ? PartitionDescriptor.State.COLD : PartitionDescriptor.State.THAWING;
-        };
     }
 
     private AxonValue show(String table) {

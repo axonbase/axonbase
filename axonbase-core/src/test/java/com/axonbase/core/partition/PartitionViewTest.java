@@ -110,6 +110,10 @@ class PartitionViewTest {
 
         assertEquals(hot, PartitionDescriptor.decode(hot.encode()));
         assertEquals(cold, PartitionDescriptor.decode(cold.encode()));
+        PartitionDescriptor pinned = cold.requestHot();
+        assertEquals(PartitionDescriptor.State.THAWING, pinned.state());
+        assertEquals(pinned, PartitionDescriptor.decode(pinned.encode()));
+        assertTrue(pinned.thawed().pinned());
         assertEquals(AxonValue.num(7).asLong(), PartitionDescriptor.decode(cold.encode()).rows());
     }
 }
