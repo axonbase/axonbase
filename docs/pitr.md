@@ -6,7 +6,7 @@ Vale para nó único com armazenamento RocksDB (a base de dados embutida do Axon
 
 ## Ligar
 
-O journal vem **desligado** por padrão e continua assim até o custo de escrita ser medido numa máquina dedicada (veja "Medidas"). Todas as variáveis são opcionais.
+O journal vem **desligado** por padrão e continua assim enquanto o custo de escrita dele passar da meta (veja "Medidas"). Todas as variáveis são opcionais.
 
 | Variável | Padrão | O que faz |
 |---|---|---|
@@ -176,16 +176,17 @@ Depois de uma **queda** do motor ou de uma **restauração** (física ou a um in
 
 ## Medidas
 
+Todas numa máquina dedicada do GCP (Google Cloud Platform), 8 vCPUs e disco NVMe (Non-Volatile Memory Express) local.
+
 ### Portões de correção
 
-| Portão | Como medir | Resultado | Meta |
+| Portão | Como medir | Resultado em 26/11/2026 | Meta |
 |---|---|---|---|
-| Relógio saltando para trás e para frente, 1 milhão de commits em 8 threads | `PitrGateTest` | ordem de índice igual à ordem de carimbo (com o teto, conferido com 100 mil commits) | estritamente crescentes |
+| Relógio saltando para trás e para frente, 1 milhão de commits em 8 threads | `PitrGateTest` | ordem de índice igual à ordem de carimbo | estritamente crescentes |
 | Restauração a instantes aleatórios contra um modelo de referência | `PitrRestoreTest` | diferença zero | diferença zero |
-| `kill -9` sob carga | `PitrGateTest` | com o teto, 3 rodadas: pior perda de 19 ms (102 commits) fora do journal; restauração consistente em todas | no máximo 60 s de lotes |
-| Teto: reinício, relógio que salta para trás, queda entre gravar o teto e usá-lo, nos três modos de sincronização | `RocksDbBackendCeilingTest`, `CeilingRecordTest`, `CommitSequencerTest` | aprovado antes das correções da última revisão | carimbo nunca repete nem recua |
-
-As conferências com o teto rodaram num Mac, em tamanho reduzido (`-Daxon.gate.pitr.commits=100000` e `-Daxon.gate.pitr.rounds=3`) e antes das correções da última revisão. Falta repetir tudo na máquina dedicada. Os portões completos usam os padrões, 1 milhão de commits e 8 rodadas:
+| `kill -9` sob carga, 8 rodadas | `PitrGateTest` | pior perda de 23 ms (661 commits) fora do journal; restauração consistente em todas | no máximo 60 s de lotes |
+| Teto: reinício, relógio que salta para trás, queda entre gravar o teto e usá-lo, nos três modos de sincronização | `RocksDbBackendCeilingTest`, `CeilingRecordTest`, `CommitSequencerTest` | aprovado na suíte completa | carimbo nunca repete nem recua |
+| Troca de líder no cluster com relógios 300 ms adiantado e atrasado | `ClusterClockTest` | aprovado na suíte completa | ordem de carimbo igual à ordem do log |
 
 ```bash
 mvn -q -pl axonbase-core -am test -Daxon.gate.pitr=true -Dtest=PitrGateTest -Dsurefire.failIfNoSpecifiedTests=false
@@ -193,26 +194,24 @@ mvn -q -pl axonbase-core -am test -Daxon.gate.pitr=true -Dtest=PitrGateTest -Dsu
 
 ### Portões de custo
 
-Medida de 26/11/2026 numa máquina dedicada do GCP (Google Cloud Platform), 8 vCPUs e disco NVMe (Non-Volatile Memory Express) local, contra a 0.10.1, com a persistência **antiga** (a chave `!hlc` em todo commit) e o journal antigo (commit `d459b3c`). Mediana de 9 rodadas pareadas:
+Contra a 0.10.1, mediana de 9 rodadas pareadas (valor negativo quer dizer mais rápido que a referência). O custo do journal é medido sobre o motor já com o carimbo.
 
 | Escritores | Caminho | Carimbo, meta abaixo de 2% | Journal, meta abaixo de 5% |
 |---|---|---|---|
-| 8 | direto no armazenamento | 17,3% | 26,0% |
-| 8 | pelo motor (`CREATE`) | 23,6% | 24,4% |
-| 64 | direto no armazenamento | 9,4% | 8,3% |
-| 64 | pelo motor (`CREATE`) | 9,6% | 6,9% |
+| 8 | direto no armazenamento | -3,4% | **20,4%** |
+| 8 | pelo motor (`CREATE`) | -1,6% | **23,1%** |
+| 64 | direto no armazenamento | 0,2% | **6,1%** |
+| 64 | pelo motor (`CREATE`) | -1,0% | 2,7% |
 
-**Os dois portões reprovaram.** Um perfil com o JFR (JDK Flight Recorder) na mesma máquina mostrou onde ia o tempo:
+- **Carimbo: aprovado** nas quatro medidas. A primeira versão, que gravava a chave `!hlc` em todo commit, custava de 9% a 24%.
+- **Journal: reprovado** em três das quatro. A versão anterior custava de 7% a 26%. Por isso ele continua desligado por padrão.
 
-- no carimbo, a espera por travas não aumentou (caiu em relação à 0.10.1) e quase todas as amostras estavam na escrita do RocksDB, que passara a levar uma chave a mais em cada commit. O teto remove essa chave;
-- no journal, o grosso era alocação: cópias do lote dentro do commit e várias cópias na serialização, com dez vezes mais pausas do coletor de lixo. O perfil também mostra 1,2 s em sincronizações de arquivo do journal em 15 s, que podem atrasar a escrita do próprio RocksDB. Essa parte não foi confirmada nem alterada.
+Um perfil com o JFR (JDK Flight Recorder) da versão atual não aponta uma causa única. Com 8 escritores, as threads de commit passam a receber menos CPU, e nem as esperas por travas nem as pausas do coletor de lixo explicam a diferença. As sincronizações do journal somam 1,45 s em 15 s no caminho direto, mas só 0,32 s pelo motor, onde o custo é parecido.
 
-**O custo depois dessas mudanças ainda não foi medido.** Por isso o journal continua desligado por padrão.
-
-Para o custo, compare os classpaths da versão anterior e da atual (a classe de medida é `WriteCostBench`, nos testes do `axonbase-core`), e para o perfil use `scripts/profile-pitr.py`, sempre numa máquina dedicada:
+Para separar as causas, a classe de medida (`WriteCostBench`, nos testes do `axonbase-core`) tem variantes: só a cópia dentro do commit, journal em memória, journal sem sincronizar e duas políticas de sincronização mais frequentes. A política em produção continua a mesma, a cada segundo. Para o custo e as variantes, e para o perfil, sempre numa máquina dedicada:
 
 ```bash
-scripts/bench-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --rounds 9 --seconds 10
+scripts/bench-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --rounds 5 --seconds 10 --extra copy-only,journal-tmpfs,journal-nosync,journal-sync4m,journal-sync200ms
 ```
 
 ```bash
