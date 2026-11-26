@@ -36,6 +36,25 @@ class FingerprintTest {
     }
 
     @Test
+    @DisplayName("leituras por id compartilham o fingerprint, seja o id texto, número, entre crases ou entre ⟨⟩")
+    void recordKeysCollapse() {
+        assertEquals("SELECT * FROM item:?", Fingerprint.of("SELECT * FROM item:i1"));
+        assertEquals("SELECT * FROM item:?", Fingerprint.of("SELECT * FROM item:i99999"));
+        assertEquals("SELECT * FROM item:?", Fingerprint.of("SELECT * FROM item:7"));
+        assertEquals("CREATE pedido:? CONTENT { n: ? }",
+            Fingerprint.of("CREATE pedido:`raw64-1-2` CONTENT { n: 7 }"));
+        assertEquals("SELECT * FROM pessoa:?", Fingerprint.of("SELECT * FROM pessoa:⟨ana@x.com⟩"));
+        assertEquals("RELATE pessoa:?->segue->pessoa:?", Fingerprint.of("RELATE pessoa:ana->segue->pessoa:bia"));
+    }
+
+    @Test
+    @DisplayName("caminhos de função com :: e objetos com espaço ficam como estão")
+    void functionPathsAndObjectsSurvive() {
+        String sql = "SELECT vector::distance::euclidean(v, $q) AS d FROM t WHERE o = { campo: $v }";
+        assertEquals(sql, Fingerprint.of(sql));
+    }
+
+    @Test
     @DisplayName("colapsa espaços e limita o tamanho")
     void collapsesAndTruncates() {
         assertEquals("SELECT * FROM t", Fingerprint.of("  SELECT   *\n FROM\tt  "));
@@ -43,7 +62,10 @@ class FingerprintTest {
         assertEquals("", Fingerprint.of(null));
     }
 
-    // ---- equivalência com a implementação anterior (quatro expressões regulares) ----
+    // ---- equivalência com a implementação por expressões regulares (a anterior, mais a chave de registro) ----
+
+    private static final java.util.regex.Pattern RECORD_KEYS =
+        java.util.regex.Pattern.compile("(?<=[A-Za-z0-9_`⟩]):(?:[A-Za-z0-9_]+|`[^`]*`|⟨[^⟩]*⟩)");
 
     private static final java.util.regex.Pattern STRINGS = java.util.regex.Pattern.compile("'(?:[^'\\\\]|\\\\.)*'|\"(?:[^\"\\\\]|\\\\.)*\"");
     private static final java.util.regex.Pattern NUMBERS = java.util.regex.Pattern.compile("\\b\\d+(?:\\.\\d+)?\\b");
@@ -52,6 +74,7 @@ class FingerprintTest {
 
     private static String legacy(String sql) {
         String s = STRINGS.matcher(sql).replaceAll("?");
+        s = RECORD_KEYS.matcher(s).replaceAll(":?");
         s = NUMBERS.matcher(s).replaceAll("?");
         s = LISTS.matcher(s).replaceAll("?");
         s = SPACES.matcher(s).replaceAll(" ").trim();

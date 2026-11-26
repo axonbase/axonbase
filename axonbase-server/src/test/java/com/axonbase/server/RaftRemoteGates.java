@@ -156,29 +156,43 @@ public final class RaftRemoteGates {
         Node solo = nodes.getFirst();
         System.out.println(call(solo, "/start?role=solo&mode=batch", 120));
         RaftReadGateBenchmark.load(List.of(solo.sql()), rows);
-        List<Double> single = new ArrayList<>();
+        // O mesmo número de clientes HTTP nos dois cenários: um só limitaria o nó único pelo gerador.
+        int clients = nodes.size();
+        List<RaftReadGateBenchmark.Measure> single = new ArrayList<>();
         for (int round = 0; round < rounds; round++) {
-            single.add(RaftReadGateBenchmark.read(List.of(solo.sql()), rows, connections, seconds, null));
+            single.add(RaftReadGateBenchmark.read(List.of(solo.sql()), rows, connections, clients, seconds, null));
         }
         call(solo, "/stop", 120);
 
         startCluster(nodes, "batch", "");
         List<String> urls = nodes.stream().map(Node::sql).toList();
         RaftReadGateBenchmark.load(urls, rows);
-        Map<String, List<Double>> clustered = new LinkedHashMap<>();
+        Map<String, List<RaftReadGateBenchmark.Measure>> clustered = new LinkedHashMap<>();
         for (int round = 0; round < rounds; round++) {
             for (String consistency : new String[] {null, "max-lag=1000", "linearizable"}) {
                 clustered.computeIfAbsent(consistency == null ? "padrao" : consistency, k -> new ArrayList<>())
-                    .add(RaftReadGateBenchmark.read(urls, rows, connections, seconds, consistency));
+                    .add(RaftReadGateBenchmark.read(urls, rows, connections, clients, seconds, consistency));
             }
         }
-        double base = median(single);
-        clustered.forEach((consistency, values) -> {
-            double ratio = median(values) / base;
-            String verdict = consistency.equals("padrao") ? verdict(ratio >= GATE2_MINIMUM_RATIO) : "INFO";
-            System.out.printf("GATE2 RESULT consistency=%s single=%.0f three=%.0f ratio=%.2f target=%.1f %s%n",
-                consistency, base, median(values), ratio, GATE2_MINIMUM_RATIO, verdict);
+        double base = medianOps(single);
+        long soloErrors = errors(single);
+        clustered.forEach((consistency, measures) -> {
+            double ratio = medianOps(measures) / base;
+            long errors = soloErrors + errors(measures);
+            // Com resposta que não serve não há vazão para comparar: reprova em qualquer consistência.
+            String verdict = errors > 0 ? verdict(false)
+                : consistency.equals("padrao") ? verdict(ratio >= GATE2_MINIMUM_RATIO) : "INFO";
+            System.out.printf("GATE2 RESULT consistency=%s single=%.0f three=%.0f ratio=%.2f target=%.1f errors=%d "
+                    + "%s%n", consistency, base, medianOps(measures), ratio, GATE2_MINIMUM_RATIO, errors, verdict);
         });
+    }
+
+    private static double medianOps(List<RaftReadGateBenchmark.Measure> measures) {
+        return median(measures.stream().map(RaftReadGateBenchmark.Measure::opsPerSecond).toList());
+    }
+
+    private static long errors(List<RaftReadGateBenchmark.Measure> measures) {
+        return measures.stream().mapToLong(RaftReadGateBenchmark.Measure::errors).sum();
     }
 
     // ---- portão 3 ----
