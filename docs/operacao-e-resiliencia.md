@@ -163,7 +163,7 @@ As perdas grandes vêm do [defeito da versão antiga](#defeito-na-0101-e-anterio
 
 **Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Em `17bea4d`, 30 rodadas com as duas paradas (60 trocas) passaram todas, sem perda causada pela troca e sem divergência. Em duas trocas limpas a versão antiga já tinha perdido 407 e 413 escritas antes da parada.
 
-**Recomendação para a atualização a partir da 0.10.x:** parada programada. Pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova. Um nó antigo pode já estar diferente dos outros antes da parada, por causa dos próprios defeitos: compare o conteúdo e, havendo diferença, refaça os nós divergentes a partir do que tiver os dados completos.
+**Atualização a partir da 0.10.x (decidido pelo dono):** parada total, que a 1.0.0-rc1 pode exigir. Pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova. Um nó antigo pode já estar diferente dos outros antes da parada, por causa dos próprios defeitos: compare o conteúdo e, havendo diferença, refaça os nós divergentes a partir do que tiver os dados completos.
 
 ## Testes de caos
 
@@ -243,7 +243,7 @@ Os portões são opt-in e rodam em máquinas separadas, com `scripts/resilience-
 
 ## Decisões que dependem do dono
 
-Cada uma segue a recomendação até resposta em contrário.
+Cada uma segue a recomendação até resposta em contrário. Já decidido: a atualização a partir da 0.10.x é com parada total. A verificação de atualização (`upgrade-check`) ainda não aplica essa regra.
 
 | Decisão | Recomendação adotada |
 |---|---|
