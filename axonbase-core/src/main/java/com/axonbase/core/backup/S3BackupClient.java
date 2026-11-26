@@ -8,6 +8,9 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -143,25 +146,93 @@ public final class S3BackupClient implements RemoteBackupStore {
         }
     }
 
-    /** Lista as chaves do bucket que começam com {@code prefix}, em ordem léxica. */
+    /** Lista as chaves do bucket que começam com {@code prefix}, em ordem léxica, seguindo todas as páginas. */
     public List<String> listObjects(String bucket, String prefix) {
         try {
-            String query = "?list-type=2";
-            if (prefix != null && !prefix.isBlank()) {
-                query += "&prefix=" + URLEncoder.encode(prefix, StandardCharsets.UTF_8);
-            }
             String encodedBucket = URLEncoder.encode(bucket, StandardCharsets.UTF_8);
-            HttpURLConnection conn = openUrl("GET", endpoint + "/" + encodedBucket + query);
-            int status = conn.getResponseCode();
-            if (status < 200 || status >= 300) {
-                throw error("listObjects", conn);
-            }
-            String xml = new String(conn.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            return parseKeys(xml);
+            List<String> keys = new ArrayList<>();
+            String continuation = null;
+            do {
+                // parâmetros em ordem alfabética: é a forma canônica que a assinatura exige
+                StringBuilder query = new StringBuilder("?");
+                if (continuation != null) {
+                    query.append("continuation-token=").append(encodeQuery(continuation)).append('&');
+                }
+                query.append("list-type=2");
+                if (prefix != null && !prefix.isBlank()) {
+                    query.append("&prefix=").append(encodeQuery(prefix));
+                }
+                HttpURLConnection conn = openUrl("GET", endpoint + "/" + encodedBucket + query);
+                int status = conn.getResponseCode();
+                if (status < 200 || status >= 300) {
+                    throw error("listObjects", conn);
+                }
+                String xml = new String(conn.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                keys.addAll(parseKeys(xml));
+                continuation = nextPage(xml);
+            } while (continuation != null);
+            return keys;
         } catch (AxonError e) {
             throw e;
         } catch (Exception e) {
             throw AxonError.internal(Messages.get("backup_s3_list_failed", e.getMessage()));
+        }
+    }
+
+    private static String encodeQuery(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
+    /** O token da próxima página, ou {@code null} se a listagem acabou. */
+    private static String nextPage(String xml) {
+        if (!xml.contains("<IsTruncated>true</IsTruncated>")) {
+            return null;
+        }
+        Matcher token = Pattern.compile("<NextContinuationToken>(.*?)</NextContinuationToken>", Pattern.DOTALL)
+            .matcher(xml);
+        if (!token.find()) {
+            throw AxonError.internal(Messages.get("backup_s3_list_failed", "página sem token de continuação"));
+        }
+        return token.group(1).trim();
+    }
+
+    /** Envia um arquivo sem carregá-lo na memória. */
+    public void uploadFile(String bucket, String key, Path file) {
+        try {
+            long size = Files.size(file);
+            HttpURLConnection conn = open("PUT", bucket, key, null);
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(size);
+            try (OutputStream out = conn.getOutputStream()) {
+                Files.copy(file, out);
+            }
+            check("upload", conn);
+        } catch (AxonError e) {
+            throw e;
+        } catch (Exception e) {
+            throw AxonError.internal(Messages.get("backup_s3_upload_failed", e.getMessage()));
+        }
+    }
+
+    /** Baixa um objeto direto para um arquivo; um objeto inexistente é erro. */
+    public void downloadFile(String bucket, String key, Path target) {
+        try {
+            HttpURLConnection conn = open("GET", bucket, key, null);
+            check("download", conn);
+            Files.createDirectories(target.toAbsolutePath().getParent());
+            Path partial = target.resolveSibling(target.getFileName() + ".partial");
+            try (InputStream in = conn.getInputStream()) {
+                long copied = Files.copy(in, partial, StandardCopyOption.REPLACE_EXISTING);
+                long declared = conn.getContentLengthLong();
+                if (declared >= 0 && copied != declared) {
+                    throw new java.io.IOException("download incompleto de " + key + ": " + copied + " de " + declared);
+                }
+            }
+            Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AxonError e) {
+            throw e;
+        } catch (Exception e) {
+            throw AxonError.internal(Messages.get("backup_s3_download_failed", e.getMessage()));
         }
     }
 

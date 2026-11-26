@@ -106,7 +106,7 @@ final class PhysicalBackupApi {
         return rocks;
     }
 
-    private static boolean clustered(AxonServer srv) {
+    static boolean clustered(AxonServer srv) {
         return !"local".equals(srv.clusterStatus().status().clusterId());
     }
 
