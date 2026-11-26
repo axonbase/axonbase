@@ -23,7 +23,11 @@ Tire um backup físico logo depois de ligar o journal: o PITR só alcança insta
 Todo lote confirmado recebe um carimbo de um relógio híbrido, o HLC (Hybrid Logical Clock): milissegundos físicos e um contador lógico, comparados nessa ordem. Junto vai um **índice** sem buracos, na mesma ordem dos carimbos.
 
 - **Emissão:** o físico é o maior entre o anterior e o relógio local. Se ele não avançou, o contador sobe. O carimbo nunca recua, mesmo que o relógio recue.
-- **Persistência:** carimbo e índice são gravados no mesmo lote atômico do RocksDB, em chaves `!hlc/<faixa>` fora do alcance das consultas. Há uma chave por faixa de trava, para que duas escritas simultâneas nunca regravem um valor maior com um menor. No reinício vale o maior carimbo e o maior índice entre elas, e o relógio começa em `max(relógio, persistido + 1)`.
+- **Persistência por teto:** o motor não grava cada carimbo. Ele grava na chave `!hlc`, fora do alcance das consultas, um **teto**: o maior milissegundo e o maior índice que podem ser usados. O teto é gravado e sincronizado em disco (nos três modos de `AXON_STORAGE_SYNC`) **antes** de qualquer carimbo ou índice acima dele ser usado. Se a gravação falhar, o commit que precisava dele falha e nada é escrito.
+- **Folga e renovação:** o teto vai à frente do relógio em metade do desvio máximo, entre 50 e 250 ms (250 ms no padrão), e reserva um milhão de índices. Passada a metade da folga, um commit o renova depois de soltar as travas dele, sem parar os outros. Sem escritas, nada é gravado. Sob carga são cerca de 8 gravações por segundo.
+- **Reinício:** o relógio começa em `max(relógio, teto + 1)` e o índice continua acima do teto. Depois de uma queda, os carimbos novos podem ficar até a folga (250 ms) à frente do relógio. Um fechamento limpo aperta o teto ao último valor exato, sem salto.
+- **Posição do conteúdo:** durante um backup físico, e só durante ele, cada commit grava a própria posição junto do lote (chaves `!hlc/...`). Assim a base restaurada sabe exatamente até que carimbo vai. Numa base que caiu sem cópia em curso, vale o teto, que nunca fica abaixo do conteúdo.
+- **Troca de base:** antes de um restore em processo, a base preparada recebe o teto atual e perde a marca de desligamento limpo. Uma queda em qualquer ponto da troca reabre acima de tudo que já foi usado, em outra linha do tempo.
 - **Compatibilidade:** no cluster o carimbo viaja no fim do payload de replicação (12 bytes). Um nó antigo ignora os bytes a mais, e um lote antigo é lido como "sem carimbo".
 - **Linha do tempo:** cada história contínua da base tem um identificador. Ele só continua o mesmo quando a abertura prova que nada foi gravado depois de um desligamento limpo. Uma queda, uma troca de base ou escritas de uma versão sem carimbo criam outra linha do tempo, e o journal de uma nunca é aplicado sobre o backup de outra.
 - **Desvio entre nós (cluster):** a regra abaixo vale quando a replicação passar a estampar os lotes (integração com o Raft). Um carimbo recebido que passe do relógio local mais o desvio máximo é rejeitado, com alerta no log e a métrica `axe_hlc_rejected_total`. O desvio máximo é de **500 ms**. Dois nós em lados opostos (um 300 ms adiantado e outro 300 ms atrasado, 600 ms entre si) passam dele: o atrasado recusa os lotes até o relógio dele alcançar.
@@ -31,7 +35,7 @@ Todo lote confirmado recebe um carimbo de um relógio híbrido, o HLC (Hybrid Lo
 
 ## O journal
 
-Cada lote confirmado entra numa fila e uma thread própria o grava. **O commit nunca espera pelo journal.**
+Cada lote confirmado entra numa fila e uma thread própria o grava. **O commit nunca espera pelo journal.** Dentro do commit o journal só copia os valores do lote (quem chamou pode reaproveitar os mapas e os vetores) e o encadeia numa fila sem trava. A serialização acontece na thread de escrita, direto num buffer reaproveitado.
 
 - Um segmento fecha ao atingir 25 segundos (configurável até 30) ou 64 MB. Parado, o motor grava um segmento vazio por minuto, que só avança a marca d'água (até onde se sabe que não falta nada).
 - Segmentos fechados são imutáveis. O nome (`seg-<milissegundos>-<contador>.axj`) é único e crescente, então quem copia para um armazenamento de objetos pode pular o que já enviou.
@@ -45,7 +49,7 @@ O formato é próprio e leva a versão no cabeçalho. As chaves usam tamanho de 
 
 ## Até onde dá para restaurar
 
-A partir de um backup, o motor segue o índice sem falhas no journal, dentro da mesma linha do tempo. A janela de cada backup começa no instante dele e vai até o último milissegundo inteiro coberto. Sob escrita contínua, o backup contém lotes um pouco posteriores ao início anunciado: um instante muito próximo do começo pode responder `PITR_BASE_TOO_NEW`, e a saída é usar o backup anterior.
+A partir de um backup, o motor segue o índice sem falhas no journal, dentro da mesma linha do tempo. A janela de cada backup começa no instante dele e vai até o último milissegundo inteiro coberto. Sob escrita contínua, o backup contém lotes um pouco posteriores ao início anunciado: um instante muito próximo do começo pode responder `PITR_BASE_TOO_NEW`, e a saída é usar o backup anterior. O mesmo vale, por até 250 ms, num backup tirado logo depois de uma queda e antes de qualquer escrita.
 
 A restauração **nunca** pula um lote nem mistura histórias. A janela para quando:
 
@@ -171,33 +175,45 @@ Depois de uma **queda** do motor ou de uma **restauração** (física ou a um in
 
 ## Medidas
 
-Medidas de 26/11/2026 num Mac com SSD (Solid State Drive), com a máquina muito carregada por outros processos.
+### Portões de correção
 
 | Portão | Como medir | Resultado | Meta |
 |---|---|---|---|
-| Relógio saltando para trás e para frente, 1 milhão de commits em 8 threads | `PitrGateTest` | ordem de índice igual à ordem de carimbo | estritamente crescentes |
+| Relógio saltando para trás e para frente, 1 milhão de commits em 8 threads | `PitrGateTest` | ordem de índice igual à ordem de carimbo (com o teto, conferido com 100 mil commits) | estritamente crescentes |
 | Restauração a instantes aleatórios contra um modelo de referência | `PitrRestoreTest` | diferença zero | diferença zero |
-| `kill -9` sob carga, 8 rodadas | `PitrGateTest` | pior perda de 28 ms (453 lotes) fora do journal; restauração consistente em todas as rodadas | no máximo 60 s de lotes |
-| Custo do carimbo mais a chave `!hlc` | `scripts/bench-pitr.py` | **inconclusivo** | abaixo de 2% |
-| Custo do journal | `scripts/bench-pitr.py` | **inconclusivo** | abaixo de 5% |
+| `kill -9` sob carga | `PitrGateTest` | com o teto, 3 rodadas: pior perda de 19 ms (102 commits) fora do journal; restauração consistente em todas | no máximo 60 s de lotes |
+| Teto: reinício, relógio que salta para trás, queda entre gravar o teto e usá-lo, nos três modos de sincronização | `RocksDbBackendCeilingTest`, `CeilingRecordTest`, `CommitSequencerTest` | aprovado antes das correções da última revisão | carimbo nunca repete nem recua |
 
-Os dois portões de custo precisam ser repetidos numa máquina isolada. Foram duas séries de 9 rodadas pareadas, com a carga do sistema entre 17 e 650. A razão entre duas medidas da mesma rodada variou de 0,06 a 20, então as medianas abaixo não aprovam nem reprovam o portão (negativo quer dizer mais rápido que a referência).
-
-| Série | Caminho | Carimbo mais `!hlc` | Journal |
-|---|---|---|---|
-| 1 | direto no armazenamento | 14,9% | 1,0% |
-| 1 | pelo motor (`CREATE`) | -4,0% | -0,8% |
-| 2 | direto no armazenamento | 11,0% | 8,7% |
-| 2 | pelo motor (`CREATE`) | 3,5% | -1,4% |
-
-No caminho direto o custo do carimbo saiu positivo nas duas séries. Ali cada commit ganha uma terceira chave pequena e passa por uma trava a mais, a do sequenciador, então um custo real acima de 2% no pior caso é possível. Se a máquina isolada confirmar, o primeiro ajuste é unir essa trava à que já numera as versões.
+As conferências com o teto rodaram num Mac, em tamanho reduzido (`-Daxon.gate.pitr.commits=100000` e `-Daxon.gate.pitr.rounds=3`) e antes das correções da última revisão. Falta repetir tudo na máquina dedicada. Os portões completos usam os padrões, 1 milhão de commits e 8 rodadas:
 
 ```bash
 mvn -q -pl axonbase-core -am test -Daxon.gate.pitr=true -Dtest=PitrGateTest -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-Para o custo, compare os classpaths da versão anterior e da atual (a classe de medida é `WriteCostBench`, nos testes do `axonbase-core`):
+### Portões de custo
+
+Medida de 26/11/2026 numa máquina dedicada do GCP (Google Cloud Platform), 8 vCPUs e disco NVMe (Non-Volatile Memory Express) local, contra a 0.10.1, com a persistência **antiga** (a chave `!hlc` em todo commit) e o journal antigo (commit `d459b3c`). Mediana de 9 rodadas pareadas:
+
+| Escritores | Caminho | Carimbo, meta abaixo de 2% | Journal, meta abaixo de 5% |
+|---|---|---|---|
+| 8 | direto no armazenamento | 17,3% | 26,0% |
+| 8 | pelo motor (`CREATE`) | 23,6% | 24,4% |
+| 64 | direto no armazenamento | 9,4% | 8,3% |
+| 64 | pelo motor (`CREATE`) | 9,6% | 6,9% |
+
+**Os dois portões reprovaram.** Um perfil com o JFR (JDK Flight Recorder) na mesma máquina mostrou onde ia o tempo:
+
+- no carimbo, a espera por travas não aumentou (caiu em relação à 0.10.1) e quase todas as amostras estavam na escrita do RocksDB, que passara a levar uma chave a mais em cada commit. O teto remove essa chave;
+- no journal, o grosso era alocação: cópias do lote dentro do commit e várias cópias na serialização, com dez vezes mais pausas do coletor de lixo. O perfil também mostra 1,2 s em sincronizações de arquivo do journal em 15 s, que podem atrasar a escrita do próprio RocksDB. Essa parte não foi confirmada nem alterada.
+
+**O custo depois dessas mudanças ainda não foi medido.** Por isso o journal continua desligado por padrão.
+
+Para o custo, compare os classpaths da versão anterior e da atual (a classe de medida é `WriteCostBench`, nos testes do `axonbase-core`), e para o perfil use `scripts/profile-pitr.py`, sempre numa máquina dedicada:
 
 ```bash
-scripts/bench-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --rounds 9 --seconds 6
+scripts/bench-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --rounds 9 --seconds 10
+```
+
+```bash
+scripts/profile-pitr.py --base "<classes da 0.10.1>:<rocksdbjni.jar>" --new "<classes atuais e de teste>:<rocksdbjni.jar>" --out perfil
 ```

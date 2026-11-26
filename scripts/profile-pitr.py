@@ -88,7 +88,8 @@ def table(title, rows, unit):
 
 
 def summarize(jfr, recording):
-    out = subprocess.run([jfr, "print", "--json", "--events", ",".join(EVENTS), recording],
+    # o padrão do jfr é imprimir 5 quadros, o que esconde de onde veio uma espera dentro do JDK
+    out = subprocess.run([jfr, "print", "--json", "--stack-depth", "40", "--events", ",".join(EVENTS), recording],
                          capture_output=True, text=True, check=True)
     events = json.loads(out.stdout)["recording"]["events"]
     monitors, parks, io = (collections.defaultdict(lambda: [0.0, 0]) for _ in range(3))
