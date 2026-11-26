@@ -383,8 +383,9 @@ public final class RaftNode implements AutoCloseable {
                 log.append(new FileRaftLog.Entry(index, request.term(), append.batch()));
             }
         }
-        return new Received(true, -1, Math.min(index, log.lastIndex()),
-            Math.min(request.commitIndex(), log.lastIndex()));
+        // Só se aplica até a entrada que este pedido conferiu: o que vem depois dela ainda não foi comparado.
+        long checked = Math.min(index, log.lastIndex());
+        return new Received(true, -1, checked, Math.min(request.commitIndex(), checked));
     }
 
     /**
