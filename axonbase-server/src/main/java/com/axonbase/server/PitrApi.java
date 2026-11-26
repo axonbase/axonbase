@@ -120,7 +120,7 @@ final class PitrApi {
             case BASE_TOO_NEW -> new AdminV1Servlet.ApiError(409, "PITR_BASE_TOO_NEW",
                 Messages.get("pitr_base_too_new", id, instant.toString()));
             case UNREACHABLE -> {
-                String latest = String.valueOf(AdminJson.iso(e.latest().physical()));
+                String latest = String.valueOf(AdminJson.iso(PitrCoverage.latestMillisUpTo(e.latest())));
                 yield new AdminV1Servlet.ApiError(409, "PITR_UNREACHABLE",
                     Messages.get("pitr_unreachable", id, latest), Map.of("latest", latest));
             }
@@ -189,14 +189,17 @@ final class PitrApi {
         RocksDbBackend rocks = PhysicalBackupApi.rocks(srv);
         String source = req.getParameter("source");
         List<SegmentInfo> segments = segments(srv, rocks, source);
+        Path journalDir = root(srv, rocks, source, false);
         List<Object> out = new ArrayList<>();
         for (PhysicalBackups.Info backup : PhysicalBackupApi.backups(rocks, source)) {
             if (backup.watermark().equals(CommitWatermark.NONE)) {
                 continue;
             }
-            PitrCoverage.Window window = PitrCoverage.window(segments, backup.watermark());
+            PitrCoverage.Window window = PitrCoverage.window(journalDir, segments, backup.watermark());
+            long latest = window.latestMillis();
+            // "to" nulo: ainda não há instante inteiro coberto depois do backup
             out.add(AdminJson.obj("backupId", backup.id(), "from", AdminJson.iso(window.from().physical()),
-                "to", AdminJson.iso(window.to().physical())));
+                "to", latest < window.from().physical() ? null : AdminJson.iso(latest)));
         }
         AdminV1Servlet.write(resp, 200, AdminJson.obj("windows", out));
     }

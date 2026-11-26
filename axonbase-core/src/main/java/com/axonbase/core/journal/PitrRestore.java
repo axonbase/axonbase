@@ -48,7 +48,7 @@ public final class PitrRestore {
         } catch (IOException e) {
             throw new PitrException(PitrException.Reason.BAD_JOURNAL, e.getMessage(), HlcTimestamp.NONE, e);
         }
-        PitrCoverage.Window window = PitrCoverage.window(segments, base);
+        PitrCoverage.Window window = PitrCoverage.window(journalDir, segments, base);
         if (target.compareTo(window.to()) > 0) {
             throw new PitrException(PitrException.Reason.UNREACHABLE,
                 "o journal só alcança " + window.to() + " a partir do backup " + backupId, window.to(), null);

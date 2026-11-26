@@ -305,6 +305,36 @@ class PitrRestoreTest {
     }
 
     @Test
+    @DisplayName("um segmento com um buraco no meio vale até o último lote antes dele, não é descartado inteiro")
+    void aSegmentIsUsableUpToItsFirstHole() throws Exception {
+        try (Node node = new Node("partial")) {
+            node.db.put("a", bytes("1"));
+            int base = node.backup();
+            node.journal.seal();
+            wall.addAndGet(10);
+            node.db.put("b", bytes("2"));
+            wall.addAndGet(10);
+            node.db.put("c", bytes("3"));
+            long reachable = wall.get();
+            wall.addAndGet(10);
+            node.db.commitSink(null);
+            node.db.put("perdido", bytes("x"));
+            node.db.commitSink(node.journal);
+            wall.addAndGet(10);
+            node.db.put("d", bytes("4")); // no mesmo segmento, depois do buraco
+            node.journal.seal();
+
+            PitrCoverage.Window window = PitrCoverage.window(node.journalDir, node.journal.segments(),
+                node.engine.list().get(0).watermark());
+
+            assertEquals(reachable, window.to().physical(), "vai até o lote imediatamente antes do buraco");
+            // o milissegundo do lote c pode ter mais lotes (o perdido): o último que se pode pedir é o anterior
+            assertEquals(reachable - 1, window.latestMillis());
+            assertEquals(Map.of("a", "1", "b", "2"), node.restoreTo(base, window.latestMillis()));
+        }
+    }
+
+    @Test
     @DisplayName("um backup tirado depois do buraco volta a permitir instantes novos")
     void aNewBackupAfterAGapResumesCoverage() {
         try (Node node = new Node("gapbase")) {
@@ -430,7 +460,7 @@ class PitrRestoreTest {
             node.db.put("b", bytes("2"));
             node.journal.seal();
 
-            PitrCoverage.Window window = PitrCoverage.window(node.journal.segments(),
+            PitrCoverage.Window window = PitrCoverage.window(node.journalDir, node.journal.segments(),
                 node.engine.list().stream().filter(i -> i.id() == base).findFirst().orElseThrow().watermark());
 
             assertTrue(window.from().physical() >= atBackup - 10 && window.from().physical() <= atBackup + 1);

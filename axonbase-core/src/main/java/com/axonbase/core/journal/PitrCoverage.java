@@ -3,12 +3,15 @@ package com.axonbase.core.journal;
 import com.axonbase.core.hlc.HlcTimestamp;
 import com.axonbase.core.storage.CommitWatermark;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
 /**
- * Até onde dá para restaurar a partir de um backup, olhando só o índice dos segmentos.
+ * Até onde dá para restaurar a partir de um backup. Olha o índice dos segmentos e só lê o conteúdo dos poucos que o
+ * ponto de parada corta ao meio.
  *
  * <p>Como o índice dos lotes não tem buracos e cresce junto com o carimbo, partindo do que o backup já contém basta
  * achar o maior índice {@code K} sem falhas no journal: todo instante até o carimbo de {@code K} (ou até uma marca
@@ -22,12 +25,25 @@ public final class PitrCoverage {
      * @param contiguousIndex maior índice sem falhas a partir do backup
      */
     public record Window(HlcTimestamp from, HlcTimestamp to, long contiguousIndex) {
+
+        /** O último milissegundo que se pode pedir: o de {@code to} só vale quando está inteiro coberto. */
+        public long latestMillis() {
+            return latestMillisUpTo(to);
+        }
+    }
+
+    /**
+     * O último milissegundo inteiro coberto quando se conhece tudo até {@code stamp}: restaurar a um instante inclui
+     * todos os carimbos daquele milissegundo.
+     */
+    public static long latestMillisUpTo(HlcTimestamp stamp) {
+        return stamp.logical() == Integer.MAX_VALUE ? stamp.physical() : stamp.physical() - 1;
     }
 
     private PitrCoverage() {
     }
 
-    public static Window window(List<SegmentInfo> segments, CommitWatermark base) {
+    public static Window window(Path directory, List<SegmentInfo> segments, CommitWatermark base) {
         List<IndexRange> present = new ArrayList<>();
         for (SegmentInfo s : segments) {
             if (s.batches() == 0) {
@@ -52,11 +68,31 @@ public final class PitrCoverage {
         for (SegmentInfo s : segments) {
             if (s.batches() > 0 && s.lastIndex() <= contiguous) {
                 to = HlcTimestamp.max(to, s.lastStamp());
+            } else if (s.batches() > 0 && s.firstIndex() <= contiguous && contiguous > base.index()) {
+                // o ponto de parada cai dentro deste segmento: vale o carimbo do último lote antes dele
+                to = HlcTimestamp.max(to, newestUpTo(directory.resolve(s.name()), contiguous));
             }
             if (s.complete().index() <= contiguous) {
                 to = HlcTimestamp.max(to, s.complete().stamp());
             }
         }
         return new Window(base.stamp(), to, contiguous);
+    }
+
+    /** O maior carimbo entre os lotes do segmento com índice até {@code index}. */
+    private static HlcTimestamp newestUpTo(Path segment, long index) {
+        HlcTimestamp[] newest = {HlcTimestamp.NONE};
+        try {
+            JournalSegments.read(segment, record -> {
+                if (record.index() <= index) {
+                    newest[0] = HlcTimestamp.max(newest[0], record.batch().stamp());
+                }
+                return true;
+            });
+        } catch (IOException unreadable) {
+            // um trecho ilegível não amplia a janela; a reaplicação acusaria o defeito
+            return HlcTimestamp.NONE;
+        }
+        return newest[0];
     }
 }

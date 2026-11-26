@@ -259,6 +259,9 @@ class PitrApiTest {
             Instant from = Instant.parse(window.asObject().get("from").asString());
             Instant to = Instant.parse(window.asObject().get("to").asString());
             assertFalse(to.isBefore(from));
+            assertEquals(200, n.call("POST", "/physical/" + id + "/restore?confirm=true&at=" + to).statusCode(),
+                "o instante anunciado como alcançável restaura de fato");
+            assertEquals(200, n.call("POST", "/journal/seal").statusCode());
 
             AxonValue backups = body(n.call("GET", "/physical", n.operator));
             assertTrue(backups.asObject().get("backups").asArray().get(0).asObject().containsKey("stampedAt"));
