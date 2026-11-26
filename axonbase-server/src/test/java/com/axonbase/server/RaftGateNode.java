@@ -165,6 +165,7 @@ public final class RaftGateNode {
             case "/start" -> start(query);
             case "/stop" -> stop();
             case "/status" -> status();
+            case "/cpu" -> cpu();
             case "/load" -> load(Double.parseDouble(query.get("gb")));
             case "/write" -> measureWrites(Integer.parseInt(query.get("writers")),
                 Integer.parseInt(query.get("seconds")), Integer.parseInt(query.getOrDefault("warmup", "5")),
@@ -256,6 +257,13 @@ public final class RaftGateNode {
         return "role=" + cluster.role() + " ready=" + cluster.status().ready() + " commit=" + cluster.commitIndex()
             + " last=" + cluster.lastIndex() + " snapshot_bytes=" + cluster.snapshotBytes()
             + " need_backup=" + cluster.learnersNeedingBackup().size() + " elections=" + cluster.electionsStarted();
+    }
+
+    /** Fração do processador da máquina usada desde a chamada anterior. */
+    private String cpu() {
+        var machine = (com.sun.management.OperatingSystemMXBean)
+            java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+        return String.format("GATE cpu node=%s cpu=%.2f", id, machine.getCpuLoad());
     }
 
     private synchronized ClusterRuntime leader() {

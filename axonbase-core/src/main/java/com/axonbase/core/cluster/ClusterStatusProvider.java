@@ -9,6 +9,14 @@ public interface ClusterStatusProvider {
     Status status();
 
     /**
+     * Este nó é o líder agora. Para o caminho de cada requisição: uma implementação responde sem montar o
+     * {@link #status()}, que pode disputar travas do consenso.
+     */
+    default boolean leading() {
+        return status().isLeader();
+    }
+
+    /**
      * Espera o nó poder atender uma leitura com a consistência pedida ({@code null} usa o padrão do nó).
      * Um nó único sempre pode.
      *

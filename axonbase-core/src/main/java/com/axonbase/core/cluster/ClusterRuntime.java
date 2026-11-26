@@ -1216,6 +1216,11 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         return snapshotBytes.get();
     }
 
+    @Override
+    public boolean leading() {
+        return role == ClusterRole.LEADER;
+    }
+
     /** Estado observável, na forma que os endpoints do servidor consomem. */
     @Override
     public ClusterStatusProvider.Status status() {
