@@ -250,6 +250,23 @@ public final class PhysicalBackups implements AutoCloseable {
         return restoring;
     }
 
+    /**
+     * Põe no lugar de {@code liveDir}, que não pode estar aberta, o diretório preparado por {@link #prepareRestore}.
+     * Uma queda no meio é desfeita na próxima abertura.
+     */
+    public static Path commitPrepared(Path liveDir) {
+        try {
+            return DirectorySwap.swap(liveDir, DirectorySwap.restoringDir(liveDir));
+        } catch (IOException e) {
+            try {
+                DirectorySwap.recover(liveDir);
+            } catch (IOException recoverFailed) {
+                e.addSuppressed(recoverFailed);
+            }
+            throw new BackupFailedException("falha ao trocar a base restaurada pela original", e);
+        }
+    }
+
     /** Descarta o diretório preparado por {@link #prepareRestore} quando a troca desistiu. */
     public static void discardPrepared(Path liveDir) {
         DirectorySwap.deleteTree(DirectorySwap.restoringDir(liveDir));
