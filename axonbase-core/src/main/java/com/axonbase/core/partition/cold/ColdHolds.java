@@ -41,6 +41,16 @@ public final class ColdHolds {
         store.delete(key(name));
     }
 
+    /** Os objetos presos pelo bloqueio {@code name}; vazio quando ele não existe. */
+    public Set<String> objects(String name) throws IOException {
+        Set<String> objects = new TreeSet<>();
+        var raw = store.read(key(name));
+        if (raw.isPresent()) {
+            parse(name, raw.get()).get("objects").asArray().forEach(v -> objects.add(v.asString()));
+        }
+        return objects;
+    }
+
     /** Os nomes dos bloqueios que começam com {@code prefix}. */
     public List<String> names(String prefix) throws IOException {
         List<String> out = new ArrayList<>();
@@ -63,12 +73,7 @@ public final class ColdHolds {
             if (raw.isEmpty()) {
                 continue;
             }
-            Map<String, AxonValue> document;
-            try {
-                document = AxonJson.decode(raw.get()).asObject();
-            } catch (RuntimeException unreadable) {
-                throw new IOException("bloqueio ilegível: " + name, unreadable);
-            }
+            Map<String, AxonValue> document = parse(name, raw.get());
             if (document.get("expiresAt").asLong() <= now) {
                 release(name);
                 continue;
@@ -76,6 +81,14 @@ public final class ColdHolds {
             document.get("objects").asArray().forEach(v -> held.add(v.asString()));
         }
         return held;
+    }
+
+    private static Map<String, AxonValue> parse(String name, byte[] raw) throws IOException {
+        try {
+            return AxonJson.decode(raw).asObject();
+        } catch (RuntimeException unreadable) {
+            throw new IOException("bloqueio ilegível: " + name, unreadable);
+        }
     }
 
     private static String key(String name) {

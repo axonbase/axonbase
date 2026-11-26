@@ -89,9 +89,15 @@ public final class ColdTier implements AutoCloseable {
             store = new S3ColdStore(client, client.bucket(s3), client.key(s3));
         }
         Settings d = Settings.defaults();
+        long grace = number(env, "AXON_COLD_GC_GRACE_DAYS", d.grace().toDays());
+        String pitr = value(env, "AXON_PITR");
+        if (pitr != null && (pitr.equalsIgnoreCase("on") || pitr.equalsIgnoreCase("true"))) {
+            // a restauração a um instante alcança objetos de partições removidas há até a retenção do journal
+            grace = Math.max(grace, number(env, "AXON_PITR_RETENTION_DAYS", 7));
+        }
         Settings settings = new Settings(
             number(env, "AXON_COLD_CACHE_MB", d.cacheBytes() >> 20) << 20,
-            Duration.ofDays(number(env, "AXON_COLD_GC_GRACE_DAYS", d.grace().toDays())),
+            Duration.ofDays(grace),
             Duration.ofSeconds(number(env, "AXON_COLD_GC_INTERVAL_SECONDS", d.gcInterval().toSeconds())),
             Duration.ofDays(number(env, "AXON_COLD_LOGICAL_HOLD_DAYS", d.logicalHold().toDays())));
         String cache = value(env, "AXON_COLD_CACHE_DIR");

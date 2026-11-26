@@ -20,6 +20,7 @@ public final class ColdGarbage {
 
     static final String OBJECTS = "parts/";
     private static final String ORPHANS = "orphans/";
+    private static final long MIN_ENGINE_HOLD_MS = 3_600_000L;
 
     private ColdGarbage() {
     }
@@ -49,7 +50,8 @@ public final class ColdGarbage {
         var candidates = store.list(OBJECTS);
         Set<String> live = referenced(ds);
         // o bloqueio do motor protege os objetos da base viva de outro motor que use o mesmo armazenamento
-        holds.put("engine-" + tier.engineId(), live, now + Math.max(grace, tier.settings().gcInterval().toMillis() * 2));
+        long holdFor = Math.max(MIN_ENGINE_HOLD_MS, Math.max(grace, tier.settings().gcInterval().toMillis() * 2));
+        holds.put("engine-" + tier.engineId(), live, now + holdFor);
         Set<String> kept = new HashSet<>(holds.held(now));
         kept.addAll(live);
         int deleted = 0;

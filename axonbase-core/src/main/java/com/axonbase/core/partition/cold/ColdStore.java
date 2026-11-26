@@ -27,6 +27,9 @@ public interface ColdStore {
     /** Lê um objeto pequeno, ou vazio quando não existe. */
     Optional<byte[]> read(String key) throws IOException;
 
+    /** O objeto existe. */
+    boolean exists(String key) throws IOException;
+
     /** Apaga o objeto; apagar o que não existe não é erro. */
     void delete(String key) throws IOException;
 

@@ -81,6 +81,25 @@ public final class PartitionStore {
         putBlind(kv, PartitionKeys.generationKey(db.ns(), db.db(), table), newGeneration());
     }
 
+    /** Quantas linhas a tabela particionada tem, sem baixar objeto frio algum. Linear nas linhas locais. */
+    public static long countRows(Database db, String table) {
+        long[] total = {0};
+        for (PartitionDescriptor partition : list(db, db.records(), table)) {
+            if (partition.coldData()) {
+                total[0] += partition.rows();
+                continue;
+            }
+            String prefix = PartitionKeys.partitionPrefix(db.ns(), db.db(), table, partition.start());
+            for (String lead : List.of("n", "s", "x")) {
+                db.records().scanPrefix(prefix + lead, key -> {
+                    total[0]++;
+                    return true;
+                });
+            }
+        }
+        return total[0];
+    }
+
     /** Um valor de geração nunca repetido. */
     static byte[] newGeneration() {
         UUID id = UUID.randomUUID();

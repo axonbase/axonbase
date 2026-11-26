@@ -59,6 +59,11 @@ public final class S3ColdStore implements ColdStore {
     }
 
     @Override
+    public boolean exists(String key) {
+        return client.listObjects(bucket, prefix + key).contains(prefix + key);
+    }
+
+    @Override
     public void delete(String key) {
         client.deleteObject(bucket, prefix + key);
     }

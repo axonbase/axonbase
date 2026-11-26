@@ -1194,6 +1194,7 @@ public final class Datastore {
      * precedidos do cabeçalho {@code --axonbase-backup-v1--}.
      */
     public String backupCluster() {
+        var coldHold = com.axonbase.core.partition.ColdBackups.beginLogical(this);
         StringBuilder sb = new StringBuilder("--axonbase-backup-v1--\n");
         sb.append("ctrl\t")
             .append(java.util.Base64.getEncoder().encodeToString(
@@ -1208,6 +1209,7 @@ public final class Datastore {
                     .append(b64.encodeToString(raw.get())).append('\n');
             }
         }
+        coldHold.complete();
         return sb.toString();
     }
 
@@ -1312,6 +1314,8 @@ public final class Datastore {
         String engine = engineVersion != null ? engineVersion : Datastore.class.getPackage().getImplementationVersion();
         BackupFormat.SegmentWriter w = new BackupFormat.SegmentWriter(out, !incremental, since, mark, nodeId,
             engine == null ? "dev" : engine);
+        // os objetos frios não são copiados: o backup os referencia e os bloqueia
+        var coldHold = com.axonbase.core.partition.ColdBackups.beginLogical(this);
         w.ctrl(com.axonbase.core.control.CatalogCodec.encode(controlState.snapshot())
             .getBytes(java.nio.charset.StandardCharsets.UTF_8));
         if (versioned != null) {
@@ -1337,6 +1341,7 @@ public final class Datastore {
                 throw failure[0];
             }
         }
+        coldHold.complete(); // antes do rodapé: sem bloqueio o arquivo não fica válido
         w.finish();
         return incremental;
     }
@@ -1372,6 +1377,7 @@ public final class Datastore {
             }
         }
         List<BackupFormat.Segment> segments = BackupFormat.validate(file);
+        requireColdObjects(file);
         clearAll();
         byte[][] lastCtrl = new byte[1][];
         long[] applied = new long[1];
@@ -1405,6 +1411,34 @@ public final class Datastore {
             segments.size() == 1 && last.full() ? "full" : "chain");
     }
 
+    /** Antes de apagar a base: os objetos frios que o backup referencia precisam existir. */
+    private void requireColdObjects(java.nio.file.Path file) throws java.io.IOException {
+        Map<String, String> cold = new java.util.HashMap<>();
+        BackupFormat.apply(file, new BackupFormat.LineSink() {
+            @Override
+            public void ctrl(byte[] snapshot) {
+            }
+
+            @Override
+            public void put(String key, byte[] value) {
+                if (key.startsWith(com.axonbase.core.partition.PartitionKeys.DESCRIPTORS)) {
+                    var partition = com.axonbase.core.partition.PartitionDescriptor.decode(value);
+                    if (partition.coldData()) {
+                        cold.put(key, partition.object());
+                    } else {
+                        cold.remove(key);
+                    }
+                }
+            }
+
+            @Override
+            public void delete(String key) {
+                cold.remove(key);
+            }
+        });
+        com.axonbase.core.partition.ColdBackups.requireObjects(this, cold.values());
+    }
+
     private void clearAll() {
         List<String> batch = new ArrayList<>();
         do {
@@ -1434,6 +1468,7 @@ public final class Datastore {
             return backupCluster();
         }
         VersionedKvBackend versionedBackend = (VersionedKvBackend) backend;
+        var coldHold = com.axonbase.core.partition.ColdBackups.beginLogical(this);
         StringBuilder sb = new StringBuilder("--axonbase-backup-v1--\n");
         sb.append("ctrl\t")
             .append(java.util.Base64.getEncoder().encodeToString(
@@ -1456,6 +1491,7 @@ public final class Datastore {
                 key.getBytes(java.nio.charset.StandardCharsets.UTF_8))).append('\n');
             return true;
         });
+        coldHold.complete();
         return sb.toString();
     }
 
