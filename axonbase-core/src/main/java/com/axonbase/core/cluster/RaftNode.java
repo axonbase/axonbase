@@ -50,6 +50,8 @@ public final class RaftNode implements AutoCloseable {
     /** Só usado sob {@code notifyLock}. */
     private final ArrayDeque<AppliedBatchListener.AppliedBatch> pending = new ArrayDeque<>();
     private volatile AppliedBatchListener listener = AppliedBatchListener.none();
+    /** Só sob o monitor do nó. */
+    private final LegacyAppendRepair legacyRepair = new LegacyAppendRepair();
     private volatile ReplicationHooks hooks = ReplicationHooks.NONE;
     private volatile LongSupplier retentionFloor = () -> Long.MAX_VALUE;
     private volatile boolean learner;
@@ -362,13 +364,14 @@ public final class RaftNode implements AutoCloseable {
         }
         long previous = append.previousIndex();
         if (previous != 0 && previous > applied && log.termAt(previous) != append.previousTerm()
-            && !LegacyAppendRepair.retag(log, groupSync, previous, append.previousTerm(), request.term())) {
+            && !legacyRepair.retag(log, groupSync, previous, append.previousTerm(), request.term())) {
             return Received.rejected();
         }
         long index = request.index();
         if (index > applied) {
             if (index <= log.lastIndex() && log.termAt(index) != request.term()
-                && !LegacyAppendRepair.alreadyStored(log, index, append.batch(), request.term())) {
+                && !legacyRepair.alreadyStored(log, index, append.batch())) {
+                legacyRepair.forgetFrom(index);
                 truncate(index);
             }
             if (index > log.lastIndex()) {
@@ -384,6 +387,7 @@ public final class RaftNode implements AutoCloseable {
         }
         // Só se aplica até a entrada que este pedido conferiu: o que vem depois dela ainda não foi comparado.
         long checked = Math.min(index, log.lastIndex());
+        legacyRepair.delivered(checked, request.term());
         return new Received(true, -1, checked, Math.min(request.commitIndex(), checked));
     }
 
