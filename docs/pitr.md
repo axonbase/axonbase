@@ -2,7 +2,7 @@
 
 A restauração a um instante, ou PITR (Point-In-Time Recovery), devolve a base ao estado que ela tinha numa hora escolhida. O motor combina duas peças: um [backup físico](backup-fisico.md) tirado antes do instante e o **journal**, um arquivo que registra cada lote confirmado com um carimbo de tempo. Restaurar a um instante é restaurar o backup e reaplicar os lotes do journal até lá.
 
-Vale para nó único com armazenamento RocksDB (a base de dados embutida do AxonBase). Em cluster a API (Application Programming Interface) responde 409, como o backup físico.
+Vale para nó único com armazenamento RocksDB (a base de dados embutida do AxonBase). Em cluster o journal fica desligado: a API (Application Programming Interface) responde 409 a quem tenta restaurar, importar ou apagar segmentos.
 
 ## Ligar
 
@@ -30,7 +30,8 @@ Todo lote confirmado recebe um carimbo de um relógio híbrido, o HLC (Hybrid Lo
 - **Troca de base:** antes de um restore em processo, a base preparada recebe o teto atual e perde a marca de desligamento limpo. Uma queda em qualquer ponto da troca reabre acima de tudo que já foi usado, em outra linha do tempo.
 - **Compatibilidade:** no cluster o carimbo viaja no fim do payload de replicação (12 bytes). Um nó antigo ignora os bytes a mais, e um lote antigo é lido como "sem carimbo".
 - **Linha do tempo:** cada história contínua da base tem um identificador. Ele só continua o mesmo quando a abertura prova que nada foi gravado depois de um desligamento limpo. Uma queda, uma troca de base ou escritas de uma versão sem carimbo criam outra linha do tempo, e o journal de uma nunca é aplicado sobre o backup de outra.
-- **Desvio entre nós (cluster):** a regra abaixo vale quando a replicação passar a estampar os lotes (integração com o Raft). Um carimbo recebido que passe do relógio local mais o desvio máximo é rejeitado, com alerta no log e a métrica `axe_hlc_rejected_total`. O desvio máximo é de **500 ms**. Dois nós em lados opostos (um 300 ms adiantado e outro 300 ms atrasado, 600 ms entre si) passam dele: o atrasado recusa os lotes até o relógio dele alcançar.
+- **Cluster:** o líder carimba cada lote ao propô-lo no log do Raft, quem recebe adota o carimbo e, no arranque, o relógio parte da última entrada do log. O lote de um snapshot também é carimbado. A ordem dos índices do log é a ordem dos carimbos, inclusive depois de uma troca de líder.
+- **Desvio entre nós (cluster):** um carimbo recebido que passe do relógio local mais o desvio máximo é rejeitado, com alerta no log e a métrica `axe_hlc_rejected_total`, e o líder reenvia o lote. O desvio máximo é de **500 ms**. Dois nós em lados opostos (um 300 ms adiantado e outro 300 ms atrasado, 600 ms entre si) passam dele: sob um líder adiantado, o atrasado acompanha com pelo menos 100 ms de atraso, e a escrita que depender dele para o quórum espera esse tempo.
 - **Sincronização dos relógios:** sincronize todos os nós por NTP (Network Time Protocol) com o `chrony` e monitore o desvio (`axe_hlc_drift_max_seconds`). O limite de 500 ms pressupõe relógios sincronizados, e a hora pedida numa restauração só é tão exata quanto o relógio de quem estampou.
 
 ## O journal
@@ -170,7 +171,7 @@ Depois de uma **queda** do motor ou de uma **restauração** (física ou a um in
 
 - O instante é o do relógio do servidor: a exatidão em relação à hora real é a do NTP dele. Pedir ao segundo é seguro.
 - Um salto grande de relógio não quebra a ordem dos carimbos, mas faz o instante pedido deixar de corresponder à hora real.
-- Em cluster o PITR ainda não existe: falta o backup físico de cluster (E3 do plano de escala).
+- Em cluster o PITR ainda não existe: falta o backup de cluster com a posição do log e o carimbo de cada lote aplicado (E3 do plano de escala).
 - O `kill -9` não perde dado confirmado da base, mas encerra a linha do tempo: os instantes posteriores à queda pedem um backup novo. O desligamento normal do servidor não encerra.
 
 ## Medidas

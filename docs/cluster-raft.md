@@ -117,6 +117,10 @@ Um learner no ar não pode ser promovido a votante pela API (Application Program
 
 Restaurar ou importar um backup físico pela API continua recusado em cluster: trocaria a base de um membro por fora do consenso. Para repor um membro, apague a base e o diretório do Raft dele e entre pelo backup, como acima.
 
+## Carimbo de tempo
+
+Cada entrada do log leva um carimbo de um relógio híbrido, o HLC (Hybrid Logical Clock). O líder carimba ao propor, e seguidores e learners adotam o carimbo recebido, então a ordem do log é a ordem dos carimbos mesmo depois de uma troca de líder. Um lote que chegue mais de 500 ms à frente do relógio local é recusado e reenviado: sincronize os nós com o `chrony`. O journal de restauração a um instante não é ligado em cluster. Detalhes em [pitr.md](pitr.md#o-carimbo-de-tempo).
+
 ## Compatibilidade na atualização
 
 Atualize um nó de cada vez. Um líder novo percebe um membro antigo e fala com ele o protocolo anterior (uma entrada por conexão), e um membro novo continua aceitando um líder antigo. Enquanto houver nó antigo, a vazão de replicação para ele é a da versão anterior. Com líder antigo, os seguidores novos não atendem `linearizable` nem `max-lag` (o líder antigo não responde à consulta); `stale`, o padrão, continua funcionando. Requisições com outro `AXON_CLUSTER_ID` são recusadas.
