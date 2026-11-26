@@ -220,6 +220,9 @@ public final class Render {
                 if (dt.drop()) {
                     sb.append(" DROP");
                 }
+                if (dt.shardBy() != null) {
+                    sb.append(" SHARD BY ").append(dt.shardBy());
+                }
                 renderPermissions(sb, dt.permissions());
             }
             case Statement.DefineField df -> {

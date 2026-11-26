@@ -1008,6 +1008,9 @@ public final class Datastore {
             if (def.drop()) {
                 sb.append(" DROP");
             }
+            if (def.shardBy() != null) {
+                sb.append(" SHARD BY ").append(def.shardBy());
+            }
             sb.append(";\n");
             for (Catalog.FieldDef fd : def.fields().values()) {
                 sb.append("DEFINE FIELD ").append(fd.name()).append(" ON TABLE ").append(def.name());

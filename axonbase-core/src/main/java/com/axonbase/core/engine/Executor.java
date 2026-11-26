@@ -893,6 +893,9 @@ public final class Executor {
         out.put("name", AxonValue.str(def.name()));
         out.put("schema", AxonValue.str(def.schemafull() ? "SCHEMAFULL" : "SCHEMALESS"));
         out.put("drop", AxonValue.bool(def.drop()));
+        if (def.shardBy() != null) {
+            out.put("shard_by", AxonValue.str(def.shardBy()));
+        }
         out.put("fields", AxonValue.object(fields));
         out.put("indexes", AxonValue.object(indexes));
         if (!def.indexFailures().isEmpty()) {
@@ -3998,6 +4001,7 @@ return score;
             def.events().putAll(previous.events());
         }
         def.permissions(dt.permissions());
+        def.shardBy(dt.shardBy());
         db.catalog().defineTable(def);
         control(db, ControlCommand.Kind.TABLE, dt.name(), com.axonbase.parser.Render.stmt(dt));
         return AxonValue.nul();
@@ -4011,6 +4015,7 @@ return score;
         Catalog.TableDef previous = db.catalog().table(ct.name());
         Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), false);
         if (previous != null) {
+            def.shardBy(previous.shardBy());
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());
             def.events().putAll(previous.events());
