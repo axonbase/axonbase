@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
@@ -33,12 +35,14 @@ import java.util.concurrent.locks.LockSupport;
  *
  * <p>As demais variantes separam de onde vem o custo do journal ou experimentam outra política de sincronização:</p>
  * <ul>
- * <li>{@code copy-only}: só a cópia do lote dentro do commit e uma thread que a descarta. Nada é escrito.</li>
+ * <li>{@code copy-only}: só o trabalho do journal dentro do commit (contar, serializar e enfileirar) e uma thread
+ *     que descarta. Nada é escrito.</li>
  * <li>{@code journal-tmpfs}: o journal inteiro, com os segmentos em memória ({@code AXON_BENCH_SHM}, padrão
  *     {@code /dev/shm}): serialização e escrita sem disco.</li>
  * <li>{@code journal-nosync}: no disco, sem sincronizar durante a medida. Não vale para produção.</li>
  * <li>{@code journal-sync4m}: sincroniza a cada 4 MB, além de a cada segundo.</li>
  * <li>{@code journal-sync200ms}: sincroniza a cada 200 ms.</li>
+ * <li>{@code journal-pause50ms}: a thread de escrita dorme 50 ms, em vez de 10, quando a fila esvazia.</li>
  * </ul>
  */
 public final class WriteCostBench {
@@ -74,6 +78,7 @@ public final class WriteCostBench {
                     .withMaxSegmentBytes(Long.MAX_VALUE).withMaxSegmentAge(Duration.ofDays(1));
                 case "journal-sync4m" -> defaults.withSync(Duration.ofSeconds(1), 4L << 20);
                 case "journal-sync200ms" -> defaults.withSync(Duration.ofMillis(200), 0);
+                case "journal-pause50ms" -> defaults.withWriterPause(Duration.ofMillis(50));
                 default -> throw new IllegalArgumentException("variante desconhecida: " + variant);
             };
         }
@@ -94,14 +99,25 @@ public final class WriteCostBench {
         }
     }
 
-    /** O custo dentro do commit, sem escrita nenhuma. */
+    /** O custo dentro do commit, sem escrita nenhuma, com os mesmos contadores do journal. */
     private static final class CopyOnly implements BatchSink {
         private final ConcurrentLinkedQueue<PendingBatch> queue = new ConcurrentLinkedQueue<>();
+        private final AtomicInteger queuedBatches = new AtomicInteger();
+        private final AtomicLong queuedBytes = new AtomicLong();
 
         CopyOnly() {
             Thread.ofPlatform().daemon(true).start(() -> {
                 while (true) {
-                    if (queue.poll() == null) {
+                    int batches = 0;
+                    long bytes = 0;
+                    PendingBatch next;
+                    while (batches < 1_000 && (next = queue.poll()) != null) {
+                        batches++;
+                        bytes += next.bytes();
+                    }
+                    queuedBatches.addAndGet(-batches);
+                    queuedBytes.addAndGet(-bytes);
+                    if (batches < 1_000) {
                         LockSupport.parkNanos(10_000_000);
                     }
                 }
@@ -115,7 +131,10 @@ public final class WriteCostBench {
 
         @Override
         public void committed(long index, HlcTimestamp stamp, Map<String, byte[]> puts, Set<String> deletes) {
-            queue.add(PendingBatch.copyOf(index, stamp, puts, deletes, PendingBatch.sizeOf(puts, deletes)));
+            long bytes = PendingBatch.sizeOf(puts, deletes);
+            queuedBatches.incrementAndGet();
+            queuedBytes.addAndGet(bytes);
+            queue.add(PendingBatch.encode(index, stamp, puts, deletes, bytes));
         }
     }
 

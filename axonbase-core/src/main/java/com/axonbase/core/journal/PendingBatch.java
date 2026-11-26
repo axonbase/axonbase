@@ -6,15 +6,18 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Um lote à espera de escrita: a menor cópia que ainda deixa o chamador reaproveitar os mapas e os vetores dele. Feita
- * dentro do commit, então só duplica os valores e guarda as chaves (imutáveis) em vetores, sem montar mapas nem
- * serializar nada. Os vetores deste registro não saem do journal e ninguém os altera.
+ * Um lote à espera de escrita, já no formato do segmento. É serializado dentro do commit, cada escritor o seu e em
+ * paralelo, o que também deixa o chamador reaproveitar os mapas e os vetores. À thread do journal sobra juntar bytes
+ * prontos: trabalho dela atrasa os commits muito mais do que o mesmo trabalho repartido entre eles.
+ *
+ * @param record o registro completo (tamanho, tipo, corpo e CRC); não sai do journal e ninguém o altera
+ * @param bytes  o espaço que o lote ocupa na fila, aproximadamente
  */
-record PendingBatch(long index, HlcTimestamp stamp, String[] putKeys, byte[][] values, String[] deletes, long bytes) {
+record PendingBatch(long index, HlcTimestamp stamp, byte[] record, long bytes) {
 
     private static final long OVERHEAD_BYTES = 64L;
 
-    /** Quanto o lote ocupa na fila, aproximadamente, sem copiar nada. */
+    /** Quanto o lote ocupa na fila, aproximadamente, sem serializar nada. */
     static long sizeOf(Map<String, byte[]> puts, Set<String> deletes) {
         long size = OVERHEAD_BYTES;
         for (var put : puts.entrySet()) {
@@ -26,15 +29,8 @@ record PendingBatch(long index, HlcTimestamp stamp, String[] putKeys, byte[][] v
         return size;
     }
 
-    static PendingBatch copyOf(long index, HlcTimestamp stamp, Map<String, byte[]> puts, Set<String> deletes,
+    static PendingBatch encode(long index, HlcTimestamp stamp, Map<String, byte[]> puts, Set<String> deletes,
                                long bytes) {
-        String[] keys = new String[puts.size()];
-        byte[][] values = new byte[keys.length][];
-        int i = 0;
-        for (var put : puts.entrySet()) {
-            keys[i] = put.getKey();
-            values[i++] = put.getValue().clone();
-        }
-        return new PendingBatch(index, stamp, keys, values, deletes.toArray(new String[0]), bytes);
+        return new PendingBatch(index, stamp, SegmentFormat.batchRecord(index, stamp, puts, deletes), bytes);
     }
 }

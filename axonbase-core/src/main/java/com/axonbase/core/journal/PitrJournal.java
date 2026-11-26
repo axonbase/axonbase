@@ -40,7 +40,6 @@ import java.util.function.Supplier;
 public final class PitrJournal implements BatchSink, AutoCloseable {
 
     private static final int CHUNK = 1_000;
-    private static final long IDLE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
     private static final long FAILURE_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
 
     private static final int WRITE_BUFFER_BYTES = 1 << 20;
@@ -112,11 +111,11 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     @Override
     public void committed(long index, HlcTimestamp stamp, Map<String, byte[]> puts, Set<String> deletes) {
         if (closing) {
-            writeLate(PendingBatch.copyOf(index, stamp, puts, deletes, 0));
+            writeLate(PendingBatch.encode(index, stamp, puts, deletes, 0));
             return;
         }
         long bytes = PendingBatch.sizeOf(puts, deletes);
-        // reserva o lugar antes de copiar: com a fila cheia o lote não custa uma cópia
+        // reserva o lugar antes de serializar: com a fila cheia o lote não custa nada
         int batches = queuedBatches.incrementAndGet();
         long total = queuedBytes.addAndGet(bytes);
         // um lote maior que o limite ainda passa quando está sozinho
@@ -129,11 +128,11 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
         }
         boolean queued = false;
         try {
-            queue.add(PendingBatch.copyOf(index, stamp, puts, deletes, bytes));
+            queue.add(PendingBatch.encode(index, stamp, puts, deletes, bytes));
             queued = true;
         } finally {
             if (!queued) {
-                // faltou memória para a cópia: o lugar volta e o lote conta como descartado
+                // a serialização falhou (sem memória, lote grande demais): o lugar volta e o lote conta como descartado
                 release(1, bytes);
                 dropped.incrementAndGet();
             }
@@ -319,7 +318,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
             if (failed) {
                 LockSupport.parkNanos(FAILURE_PARK_NANOS);
             } else if (!busy) {
-                LockSupport.parkNanos(IDLE_PARK_NANOS);
+                LockSupport.parkNanos(options.writerPause().toNanos());
             }
         }
     }
@@ -332,7 +331,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
 
     /** Retira lotes da fila e devolve o espaço deles. Só com a trava de escrita. */
     private List<PendingBatch> drain(int max) {
-        List<PendingBatch> items = new ArrayList<>();
+        List<PendingBatch> items = new ArrayList<>(Math.min(max, CHUNK));
         long bytes = 0;
         PendingBatch next;
         while (items.size() < max && (next = queue.poll()) != null) {

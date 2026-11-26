@@ -13,7 +13,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.zip.CRC32C;
 
 /**
  * Um segmento sendo escrito ({@code <nome>.open}). Não é seguro entre threads: o {@link PitrJournal} o usa sob a
@@ -29,7 +28,6 @@ final class SegmentWriter implements AutoCloseable {
     private final Stats stats = new Stats();
     /** Reaproveitado entre segmentos pelo dono, que o usa sob a própria trava. */
     private final ByteBuffer buffer;
-    private final CRC32C crc = new CRC32C();
     private long size;
     private long syncedSize;
     private boolean unsynced;
@@ -91,19 +89,7 @@ final class SegmentWriter implements AutoCloseable {
 
     /** Acrescenta um lote. Ele só chega ao disco no próximo {@link #flush()}. */
     void append(PendingBatch batch) throws IOException {
-        SegmentFormat.BatchBytes record = new SegmentFormat.BatchBytes(batch);
-        int length = record.size();
-        if (length > buffer.remaining()) {
-            flush();
-        }
-        if (length > buffer.capacity()) {
-            ByteBuffer large = ByteBuffer.allocate(length);
-            record.writeTo(large, crc);
-            drain(large.flip());
-        } else {
-            record.writeTo(buffer, crc);
-        }
-        size += length;
+        write(batch.record());
         stats.add(batch.index(), batch.stamp());
     }
 
@@ -178,7 +164,7 @@ final class SegmentWriter implements AutoCloseable {
         return true;
     }
 
-    /** Cabeçalho e rodapé. */
+    /** Copia para o buffer; o que não cabe nele vai direto ao arquivo, depois do que já estava lá. */
     private void write(byte[] bytes) throws IOException {
         if (bytes.length > buffer.remaining()) {
             flush();

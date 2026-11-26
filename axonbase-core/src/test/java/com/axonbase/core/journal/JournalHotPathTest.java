@@ -115,7 +115,7 @@ class JournalHotPathTest {
     }
 
     @Test
-    @DisplayName("o journal copia o que recebe antes de voltar: o chamador pode reaproveitar mapas e vetores")
+    @DisplayName("o journal serializa o que recebe antes de voltar: o chamador pode reaproveitar mapas e vetores")
     void theCallerMayReuseMapsAndArraysAfterwards() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
         AtomicBoolean block = new AtomicBoolean(true);
@@ -215,6 +215,7 @@ class JournalHotPathTest {
     void theDefaultSyncPolicyIsOncePerSecond() {
         assertEquals(Duration.ofSeconds(1), JournalOptions.defaults().syncInterval());
         assertEquals(0L, JournalOptions.defaults().syncEveryBytes());
+        assertEquals(Duration.ofMillis(10), JournalOptions.defaults().writerPause());
     }
 
     @Test

@@ -56,66 +56,49 @@ final class SegmentFormat {
         return ByteBuffer.allocate(HEADER_BYTES).putInt(MAGIC).putShort(VERSION).putLong(timeline).array();
     }
 
+    /** Tipo, índice, carimbo e as duas contagens. */
+    private static final int BATCH_FIXED_BYTES = 1 + 8 + 12 + 4 + 4;
+
     /**
-     * Um registro de lote pronto para ser medido e escrito direto num buffer, sem montar cópias intermediárias: só as
-     * chaves viram bytes antes.
+     * O registro completo de um lote (tamanho, tipo, corpo e CRC), montado num vetor do tamanho exato. Roda dentro do
+     * commit: só as chaves viram bytes antes, e cada valor é copiado uma única vez.
      */
-    static final class BatchBytes {
-        /** Tipo, índice, carimbo e as duas contagens. */
-        private static final int FIXED_BYTES = 1 + 8 + 12 + 4 + 4;
-
-        private final PendingBatch batch;
-        private final byte[][] putKeys;
-        private final byte[][] deleteKeys;
-        /** Tamanho do tipo mais o corpo. */
-        private final int covered;
-
-        BatchBytes(PendingBatch batch) {
-            this.batch = batch;
-            this.putKeys = utf8(batch.putKeys());
-            this.deleteKeys = utf8(batch.deletes());
-            long total = FIXED_BYTES;
-            for (int i = 0; i < putKeys.length; i++) {
-                total += 8L + putKeys[i].length + batch.values()[i].length;
-            }
-            for (byte[] key : deleteKeys) {
-                total += 4L + key.length;
-            }
-            this.covered = Math.toIntExact(total);
+    static byte[] batchRecord(long index, HlcTimestamp stamp, Map<String, byte[]> puts, Set<String> deletes) {
+        byte[][] putKeys = new byte[puts.size()][];
+        byte[][] values = new byte[putKeys.length][];
+        long covered = BATCH_FIXED_BYTES;
+        int i = 0;
+        for (var put : puts.entrySet()) {
+            putKeys[i] = put.getKey().getBytes(StandardCharsets.UTF_8);
+            values[i] = put.getValue();
+            covered += 8L + putKeys[i].length + values[i].length;
+            i++;
         }
-
-        /** O registro completo: tamanho, tipo, corpo e CRC. */
-        int size() {
-            return Math.addExact(covered, 8);
+        byte[][] deleteKeys = new byte[deletes.size()][];
+        i = 0;
+        for (String key : deletes) {
+            deleteKeys[i] = key.getBytes(StandardCharsets.UTF_8);
+            covered += 4L + deleteKeys[i].length;
+            i++;
         }
-
-        /** Escreve o registro na posição atual de {@code out}, que precisa ter {@link #size()} bytes livres. */
-        void writeTo(ByteBuffer out, CRC32C crc) {
-            out.putInt(covered);
-            int start = out.position();
-            out.put(BATCH).putLong(batch.index())
-                .putLong(batch.stamp().physical()).putInt(batch.stamp().logical());
-            out.putInt(putKeys.length);
-            for (int i = 0; i < putKeys.length; i++) {
-                byte[] value = batch.values()[i];
-                out.putInt(putKeys[i].length).put(putKeys[i]).putInt(value.length).put(value);
-            }
-            out.putInt(deleteKeys.length);
-            for (byte[] key : deleteKeys) {
-                out.putInt(key.length).put(key);
-            }
-            crc.reset();
-            crc.update(out.slice(start, covered));
-            out.putInt((int) crc.getValue());
+        int length = Math.toIntExact(covered);
+        byte[] record = new byte[Math.addExact(length, 8)];
+        ByteBuffer out = ByteBuffer.wrap(record);
+        out.putInt(length);
+        int start = out.position();
+        out.put(BATCH).putLong(index).putLong(stamp.physical()).putInt(stamp.logical());
+        out.putInt(putKeys.length);
+        for (int k = 0; k < putKeys.length; k++) {
+            out.putInt(putKeys[k].length).put(putKeys[k]).putInt(values[k].length).put(values[k]);
         }
-
-        private static byte[][] utf8(String[] keys) {
-            byte[][] encoded = new byte[keys.length][];
-            for (int i = 0; i < keys.length; i++) {
-                encoded[i] = keys[i].getBytes(StandardCharsets.UTF_8);
-            }
-            return encoded;
+        out.putInt(deleteKeys.length);
+        for (byte[] key : deleteKeys) {
+            out.putInt(key.length).put(key);
         }
+        CRC32C crc = new CRC32C();
+        crc.update(record, start, length);
+        out.putInt((int) crc.getValue());
+        return record;
     }
 
     /** Registro de rodapé seguido dos bytes finais do arquivo. */
