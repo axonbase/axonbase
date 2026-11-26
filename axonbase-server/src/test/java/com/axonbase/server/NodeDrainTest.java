@@ -98,6 +98,36 @@ class NodeDrainTest {
     }
 
     @Test
+    @DisplayName("se o cargo voltar durante a espera, passa de novo antes de se declarar drenado")
+    void movesLeadershipThatArrivesWhileWaiting() throws Exception {
+        node.inFlight.set(1);
+        NodeDrain drain = new NodeDrain(node, 0, 20_000);
+        drain.start();
+        Thread.sleep(100);
+
+        node.leading.set(true);
+        node.inFlight.set(0);
+        NodeDrain.Status status = drain.drainAndWait();
+
+        assertEquals(NodeDrain.State.DRAINED, status.state(), status.reason());
+        assertEquals("n2", status.leader());
+        assertFalse(node.leading.get(), "o nó se declarou drenado ainda liderando");
+    }
+
+    @Test
+    @DisplayName("um valor mal escrito é recusado antes de o servidor subir")
+    void validatesSettings() {
+        AxonServer.validateSettings(name -> null);
+        for (java.util.Map<String, String> env : java.util.List.of(
+                java.util.Map.of("AXON_QOS", "talvez"),
+                java.util.Map.of("AXON_CLUSTER_HTTP_PEERS", "n1=a:8000"),
+                java.util.Map.of("AXON_DRAIN_GRACE_MS", "cinco"),
+                java.util.Map.of("AXON_DRAIN_TIMEOUT_MS", "1s"))) {
+            assertThrows(RuntimeException.class, () -> AxonServer.validateSettings(env::get), env.toString());
+        }
+    }
+
+    @Test
     @DisplayName("desfazer volta a atender e a disputar eleição")
     void undrain() throws Exception {
         node.inFlight.set(1);

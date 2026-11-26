@@ -26,7 +26,7 @@ class LeadershipTransferTest {
         new LeadershipTransfer.Candidate("n3", new InetSocketAddress("127.0.0.1", 7003), 4);
 
     /** Um líder de mentira que obedece ao pedido de eleição imediata. */
-    private static final class FakeLeader implements LeadershipTransfer.Leader {
+    private static class FakeLeader implements LeadershipTransfer.Leader {
         final AtomicBoolean leading = new AtomicBoolean(true);
         final AtomicInteger asked = new AtomicInteger();
         volatile String leader = "n1";
@@ -34,6 +34,7 @@ class LeadershipTransferTest {
         volatile long match = 10;
         volatile boolean accepts = true;
         volatile boolean steps = true;
+        volatile boolean settled = true;
         volatile LeadershipTransfer.Candidate chosen;
 
         @Override
@@ -69,6 +70,11 @@ class LeadershipTransferTest {
         @Override
         public long matchIndex(LeadershipTransfer.Candidate candidate) {
             return match;
+        }
+
+        @Override
+        public boolean settled(long index) {
+            return settled;
         }
 
         @Override
@@ -131,6 +137,58 @@ class LeadershipTransferTest {
         try (var permit = transfer.admit()) {
             assertTrue(node.leading());
         }
+    }
+
+    @Test
+    @DisplayName("escrita aplicada mas ainda sem resposta: o pedido de eleição espera")
+    void waitsUntilConfirmedWritesAreAnswered() throws Exception {
+        node.settled = false;
+        CompletableFuture<TransferResult> moving =
+            CompletableFuture.supplyAsync(() -> transfer.transfer(null, 20_000));
+        Thread.sleep(100);
+        assertEquals(0, node.asked.get(), "o pedido saiu antes de quem escreveu receber a resposta");
+
+        node.settled = true;
+
+        assertTrue(moving.get(20, TimeUnit.SECONDS).transferred());
+    }
+
+    @Test
+    @DisplayName("escritas admitidas durante muitas transferências nunca escapam da contagem")
+    void admissionNeverEscapesTheCount() throws Exception {
+        AtomicInteger running = new AtomicInteger();
+        AtomicInteger violations = new AtomicInteger();
+        AtomicBoolean stop = new AtomicBoolean();
+        LeadershipTransfer.Leader counting = new FakeLeader() {
+            @Override
+            public boolean sendTimeoutNow(LeadershipTransfer.Candidate candidate) {
+                if (running.get() > 0) {
+                    violations.incrementAndGet();
+                }
+                return false;
+            }
+        };
+        LeadershipTransfer raced = new LeadershipTransfer(new Object(), counting);
+        List<CompletableFuture<Void>> writers = java.util.stream.IntStream.range(0, 4)
+            .mapToObj(n -> CompletableFuture.runAsync(() -> {
+                while (!stop.get()) {
+                    try (var permit = raced.admit()) {
+                        running.incrementAndGet();
+                        Thread.yield();
+                        running.decrementAndGet();
+                    }
+                }
+            })).toList();
+
+        for (int i = 0; i < 300; i++) {
+            raced.transfer(null, 1_000);
+        }
+        stop.set(true);
+        for (CompletableFuture<Void> writer : writers) {
+            writer.get(20, TimeUnit.SECONDS);
+        }
+
+        assertEquals(0, violations.get(), "o pedido de eleição saiu com uma escrita em curso");
     }
 
     @Test

@@ -519,6 +519,14 @@ public final class AxonServer {
         this.drainOnShutdown = "true".equalsIgnoreCase(env.apply("AXON_DRAIN_ON_SHUTDOWN"));
     }
 
+    /** Confere as variáveis que {@link #qos} e {@link #operations} vão ler, sem mudar nada. */
+    static void validateSettings(java.util.function.Function<String, String> env) {
+        com.axonbase.core.qos.QosSettings.from(env, 1, 2);
+        LeaderRedirect.parse(env.apply("AXON_CLUSTER_HTTP_PEERS"));
+        millis(env, "AXON_DRAIN_GRACE_MS", DEFAULT_DRAIN_GRACE_MS);
+        millis(env, "AXON_DRAIN_TIMEOUT_MS", DEFAULT_DRAIN_TIMEOUT_MS);
+    }
+
     NodeDrain drain() {
         return drain;
     }

@@ -1,5 +1,8 @@
 package com.axonbase.core.dr;
 
+import com.axonbase.core.journal.JournalOptions;
+import com.axonbase.core.journal.PitrJournal;
+import com.axonbase.core.storage.CommitWatermark;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -9,6 +12,7 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,6 +61,26 @@ class DrToolTest {
         assertEquals(1, run(Map.of(), "restore", "--store", dir.resolve("a").toString(), "--epoch", "e1",
             "--target", dir.resolve("t").toString(), "--work", dir.resolve("w").toString()));
         assertTrue(output().startsWith("DR FAILED"), output());
+    }
+
+    @Test
+    @DisplayName("um backup com defeito não segura os segmentos do journal")
+    void brokenBackupDoesNotStopTheJournal() throws Exception {
+        Path backups = dir.resolve("backups");
+        Files.createDirectories(backups.resolve("meta"));
+        Files.writeString(backups.resolve("meta").resolve("1"), "metadata zz\n");
+        Path journal = dir.resolve("journal");
+        try (PitrJournal open = PitrJournal.open(journal,
+                JournalOptions.defaults().withIdleHeartbeat(Duration.ZERO), () -> CommitWatermark.NONE)) {
+            open.seal();
+        }
+
+        int code = run(Map.of(), "push", "--store", dir.resolve("a").toString(), "--epoch", "e1", "--node", "n1",
+            "--backups", backups.toString(), "--journal", journal.toString());
+
+        assertEquals(1, code, output());
+        assertTrue(output().contains("backups=0 segments=1"), output());
+        assertTrue(output().contains("error="), output());
     }
 
     @Test

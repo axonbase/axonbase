@@ -957,6 +957,15 @@ public final class Datastore {
                 // Espera curta e sorteada para os concorrentes não voltarem todos juntos.
                 java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
                     .nextLong(1_000_000L * Math.min(attempt, 10)));
+            } catch (com.axonbase.core.cluster.NotLeaderException moved) {
+                if (session.inTransaction()) {
+                    cancelSession(session);
+                }
+                // O redirecionamento faria o cliente repetir, e a chamada para fora aconteceria de novo.
+                if (ExternalCalls.count() != outbound) {
+                    throw new AxonError(-32000, Messages.get("txn_external_not_retried", moved.getMessage()), moved);
+                }
+                throw moved;
             } catch (RuntimeException e) {
                 if (session.inTransaction()) {
                     cancelSession(session);

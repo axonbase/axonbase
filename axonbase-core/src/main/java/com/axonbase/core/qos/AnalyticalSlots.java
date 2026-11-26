@@ -54,7 +54,15 @@ final class AnalyticalSlots {
     private void waitInQueue(QueryContext.Handle handle) {
         long started = System.nanoTime();
         Thread waiter = Thread.currentThread();
-        Runnable wake = waiter::interrupt;
+        // o cancelamento percorre uma cópia dos avisos: depois da fila este não pode mais interromper
+        boolean[] waiting = {true};
+        Runnable wake = () -> {
+            synchronized (waiting) {
+                if (waiting[0]) {
+                    waiter.interrupt();
+                }
+            }
+        };
         boolean acquired = false;
         try {
             handle.onCancel(wake);
@@ -62,6 +70,9 @@ final class AnalyticalSlots {
         } catch (InterruptedException interrupted) {
             throw interrupted(handle);
         } finally {
+            synchronized (waiting) {
+                waiting[0] = false;
+            }
             handle.removeOnCancel(wake);
             queued.decrementAndGet();
             waitNanos.add(System.nanoTime() - started);

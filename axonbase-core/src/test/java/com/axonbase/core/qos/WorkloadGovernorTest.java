@@ -181,6 +181,42 @@ class WorkloadGovernorTest {
     }
 
     @Test
+    @DisplayName("no pool compartilhado ninguém pausa: a thread da consulta paga depois")
+    void sharedWorkersDoNotPause() throws Exception {
+        WorkloadGovernor governor = governor(auto("AXON_QOS_ANALYTICAL_CPU_PERCENT", "5"));
+        try (var transactional = transactionalInBackground(governor);
+             var ticket = governor.admit(SCAN, session())) {
+            QueryContext.sharedWorker(true);
+            try {
+                access(100 * WorkloadGovernor.STRIDE, MILLI / 10);
+            } finally {
+                QueryContext.sharedWorker(false);
+            }
+            assertTrue(pauses.isEmpty(), "o pool compartilhado pausou " + pauses.size() + " vezes");
+
+            access(WorkloadGovernor.STRIDE, MILLI / 10);
+
+            assertEquals(1, pauses.size());
+        }
+    }
+
+    @Test
+    @DisplayName("o tempo parado entre dois lotes não conta como execução")
+    void idleTimeIsNotBilled() throws Exception {
+        WorkloadGovernor governor = governor(auto("AXON_QOS_ANALYTICAL_CPU_PERCENT", "5"));
+        try (var transactional = transactionalInBackground(governor);
+             var ticket = governor.admit(SCAN, session())) {
+            access(WorkloadGovernor.STRIDE, 1);
+            now.addAndGet(10_000 * MILLI);
+            QueryContext.resumed();
+
+            access(WorkloadGovernor.STRIDE, 1);
+        }
+
+        assertTrue(pauses.isEmpty(), "pausas: " + pauses.size());
+    }
+
+    @Test
     @DisplayName("leitura que passa do limite de acessos é rebaixada")
     void demotesLongRead() {
         WorkloadGovernor governor = governor(auto("AXON_QOS_SCAN_THRESHOLD", "1000"));

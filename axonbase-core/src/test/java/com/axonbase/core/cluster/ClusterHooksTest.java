@@ -153,6 +153,34 @@ class ClusterHooksTest {
     }
 
     @Test
+    @DisplayName("ao instalar os ganchos o nó reentrega o que já aplicou, a partir do índice que eles pedem")
+    void hooksReplayAppliedEntries() throws Exception {
+        try (RaftNode node = new RaftNode("n", dir.resolve("n"), new MemoryBackend())) {
+            for (int i = 1; i <= 4; i++) {
+                node.appendLocal(1, i, named("t" + i));
+            }
+            node.commitLocal(1, "n", 3);
+            List<Long> seen = new ArrayList<>();
+
+            node.hooks(new ReplicationHooks() {
+                @Override
+                public long replayFrom() {
+                    return 2;
+                }
+
+                @Override
+                public void committed(long index, long term, CommittedBatch batch) {
+                    seen.add(index);
+                }
+            });
+            assertEquals(List.of(2L, 3L), seen, "a quarta entrada ainda não foi confirmada");
+
+            node.commitLocal(1, "n", 4);
+            assertEquals(List.of(2L, 3L, 4L), seen);
+        }
+    }
+
+    @Test
     @DisplayName("ao instalar os ganchos o nó entrega a última entrada do log, para o relógio não voltar")
     void hooksSeeTheTailOfTheLogOnInstall() throws Exception {
         Path node = dir.resolve("n");

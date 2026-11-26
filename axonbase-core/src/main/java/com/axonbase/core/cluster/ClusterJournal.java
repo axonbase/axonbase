@@ -44,6 +44,14 @@ public final class ClusterJournal implements ReplicationHooks, AutoCloseable {
         return journal;
     }
 
+    /** O que veio depois do último lote arquivado pode ter ficado na fila quando o nó caiu. */
+    @Override
+    public long replayFrom() {
+        long archived = journal.archived().index();
+        // um journal novo não pede a história: quem liga o PITR começa a arquivar dali em diante
+        return archived == 0 ? Long.MAX_VALUE : archived + 1;
+    }
+
     @Override
     public void recovered(CommittedBatch batch) {
         next.recovered(batch);

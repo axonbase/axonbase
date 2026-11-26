@@ -184,12 +184,27 @@ public final class RaftNode implements AutoCloseable {
             new CommittedBatch("estado-" + applied, values, java.util.Set.of(), true), Map.of());
     }
 
-    /** Instala os pontos de extensão da replicação e mostra a eles a entrada mais recente do log. */
+    /**
+     * Instala os pontos de extensão da replicação, mostra a eles a entrada mais recente do log e reentrega o que já
+     * foi aplicado e eles pedem para rever ({@link ReplicationHooks#replayFrom}).
+     */
     public synchronized void hooks(ReplicationHooks hooks) {
         this.hooks = hooks == null ? ReplicationHooks.NONE : hooks;
         FileRaftLog.Entry tail = log.entry(log.lastIndex());
         if (tail != null) {
             this.hooks.recovered(tail.batch());
+        }
+        applyLock.lock();
+        try {
+            for (long i = Math.max(this.hooks.replayFrom(), log.firstIndex());
+                 i <= Math.min(applied, log.lastIndex()); i++) {
+                FileRaftLog.Entry entry = log.entry(i);
+                if (entry != null) {
+                    this.hooks.committed(i, entry.term(), entry.batch());
+                }
+            }
+        } finally {
+            applyLock.unlock();
         }
     }
 

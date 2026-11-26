@@ -30,6 +30,9 @@ import java.util.regex.Pattern;
  */
 public final class S3BackupClient implements RemoteBackupStore {
 
+    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
+    private static final int READ_TIMEOUT_MILLIS = 120_000;
+
     private static final int CHUNK_SIZE = 8192;
 
     private final String endpoint;
@@ -292,6 +295,9 @@ public final class S3BackupClient implements RemoteBackupStore {
         try {
             var conn = (HttpURLConnection) new java.net.URL(rawUrl).openConnection();
             conn.setRequestMethod(method);
+            // um armazenamento que para de responder não pode prender o arquivamento nem a restauração para sempre
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
+            conn.setReadTimeout(READ_TIMEOUT_MILLIS);
             if (basicAuth) {
                 String credentials = Base64.getEncoder().encodeToString(
                     (accessKey + ":" + secretKey).getBytes(StandardCharsets.UTF_8));

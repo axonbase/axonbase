@@ -130,6 +130,8 @@ final class ParallelScan {
         BATCHES.incrementAndGet();
         return Pool.INSTANCE.submit(() -> {
             QueryContext.Handle previous = QueryContext.attach(handle);
+            QueryContext.sharedWorker(true);
+            QueryContext.resumed();
             try {
                 A acc = fresh.get();
                 for (I key : keys) {
@@ -140,6 +142,7 @@ final class ParallelScan {
                 QueryContext.checkCancelled();
                 return acc;
             } finally {
+                QueryContext.sharedWorker(false);
                 QueryContext.detach(previous);
             }
         });
@@ -147,7 +150,9 @@ final class ParallelScan {
 
     private static <A> A await(Future<A> future) {
         try {
-            return future.get();
+            A result = future.get();
+            QueryContext.resumed();
+            return result;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new AxonError(QueryContext.CANCELLED, "scan interrupted");

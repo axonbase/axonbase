@@ -1,8 +1,10 @@
 package com.axonbase.core;
 
+import com.axonbase.common.AxonError;
 import com.axonbase.core.audit.AiProviderClient;
 import com.axonbase.core.cluster.CommitCoordinator;
 import com.axonbase.core.cluster.CommittedBatch;
+import com.axonbase.core.cluster.NotLeaderException;
 import com.axonbase.core.embedding.EmbeddingClient;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.engine.ExternalCalls;
@@ -17,9 +19,11 @@ import org.junit.jupiter.api.Test;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @DisplayName("Cluster: comando avulso em conflito só é refeito sem efeito externo")
@@ -29,6 +33,8 @@ class ClusterExternalEffectTest {
     /** Quantas confirmações ainda vão falhar por conflito antes de passar. */
     private final AtomicInteger conflicts = new AtomicInteger();
     private final AtomicInteger confirmations = new AtomicInteger();
+    /** A liderança saiu entre a execução do comando e a confirmação. */
+    private final AtomicBoolean moved = new AtomicBoolean();
     private HttpServer provider;
     private Datastore ds;
     private Session session;
@@ -59,6 +65,9 @@ class ClusterExternalEffectTest {
         ds.commitCoordinator(new CommitCoordinator() {
             @Override
             public long confirm(String node, CommittedBatch batch) {
+                if (moved.get()) {
+                    throw new NotLeaderException("n2");
+                }
                 if (conflicts.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
                     throw new VersionConflictException("outro confirmou antes", "k");
                 }
@@ -89,6 +98,26 @@ class ClusterExternalEffectTest {
             () -> ds.execute("CREATE artigo:1 CONTENT { corpo: \"grafo\" }", session, null));
         assertEquals(1, providerCalls.get());
         assertEquals(0, confirmations.get());
+        assertEquals(false, session.inTransaction());
+    }
+
+    @Test
+    @DisplayName("sem chamada para fora, a perda da liderança chega como redirecionamento")
+    void lostLeadershipIsRedirected() {
+        moved.set(true);
+        assertThrows(NotLeaderException.class,
+            () -> ds.execute("CREATE simples:1 CONTENT { v: 1 }", session, null));
+        assertEquals(false, session.inTransaction());
+    }
+
+    @Test
+    @DisplayName("depois de uma chamada para fora, a perda da liderança não manda o cliente repetir")
+    void lostLeadershipAfterExternalCallIsNotRedirected() {
+        moved.set(true);
+        AxonError error = assertThrows(AxonError.class,
+            () -> ds.execute("CREATE artigo:1 CONTENT { corpo: \"grafo\" }", session, null));
+        assertInstanceOf(NotLeaderException.class, error.getCause());
+        assertEquals(1, providerCalls.get());
         assertEquals(false, session.inTransaction());
     }
 

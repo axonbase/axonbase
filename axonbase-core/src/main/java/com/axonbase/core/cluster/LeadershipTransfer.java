@@ -39,6 +39,9 @@ final class LeadershipTransfer {
 
         long matchIndex(Candidate candidate);
 
+        /** Quem esperava uma escrita até {@code index} já recebeu a resposta. */
+        boolean settled(long index);
+
         boolean sendTimeoutNow(Candidate candidate);
     }
 
@@ -111,12 +114,12 @@ final class LeadershipTransfer {
                     throw node.notLeader();
                 }
             }
+            // na mesma trava da conferência: daqui em diante a transferência conta esta escrita
+            writers++;
         }
         if (waited && !node.leading()) {
+            leave();
             throw node.notLeader();
-        }
-        synchronized (this) {
-            writers++;
         }
     }
 
@@ -221,7 +224,7 @@ final class LeadershipTransfer {
         blockProposals(true);
         long last = node.lastIndex();
         if (!await(deadline, () -> !node.leading()
-            || node.appliedIndex() >= last && node.matchIndex(candidate) >= last)) {
+            || node.appliedIndex() >= last && node.matchIndex(candidate) >= last && node.settled(last))) {
             return TransferResult.refused("o membro " + candidate.node() + " não alcançou o líder no prazo", started);
         }
         if (!node.leading()) {

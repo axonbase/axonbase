@@ -119,6 +119,9 @@ public final class Main {
         ds.auditConfig(config.auditEnabled(), config.auditUserFrom(),
             config.auditSelect(), config.auditMaxBody());
 
+        // um valor mal escrito derruba o processo aqui, antes de haver porta aberta ou nó no cluster
+        AxonServer.validateSettings(System::getenv);
+
         // Try S3 restore BEFORE creating default databases (they would make the
         // backend non-empty and skip the restore).
         if (!config.s3Bucket().isBlank() && !config.s3Endpoint().isBlank()) {
@@ -156,9 +159,7 @@ public final class Main {
             if (learner) {
                 clusterConfig = clusterConfig.asLearner();
             }
-            cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
-                (VersionedKvBackend) backend);
-            // logo depois de construir: o relógio precisa ver a cauda do log antes de carimbar qualquer lote
+            // os ganchos ficam prontos antes do nó: abrir o journal pode demorar, e o nó já aplicaria lotes sem eles
             ReplicationHooks hooks = new ClockHooks(clockFor(backend));
             if (pitr.enabled() && backend instanceof RocksDbBackend rocks) {
                 // em cluster os lotes do journal vêm do log Raft; a restauração é a do exercício de DR (DrTool)
@@ -166,6 +167,9 @@ public final class Main {
                 journal = archived.journal();
                 hooks = archived;
             }
+            cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
+                (VersionedKvBackend) backend);
+            // logo depois de construir: o relógio precisa ver a cauda do log antes de carimbar qualquer lote
             cluster.hooks(hooks);
         }
         if (cluster != null) {

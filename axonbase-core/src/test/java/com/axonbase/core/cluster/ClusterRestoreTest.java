@@ -1,5 +1,10 @@
 package com.axonbase.core.cluster;
 
+import com.axonbase.core.dr.ArchiveLayout;
+import com.axonbase.core.dr.ArchiveStore;
+import com.axonbase.core.dr.DirectoryArchiveStore;
+import com.axonbase.core.dr.DrArchiver;
+import com.axonbase.core.dr.DrRestore;
 import com.axonbase.core.hlc.HlcTimestamp;
 import com.axonbase.core.journal.JournalOptions;
 import com.axonbase.core.journal.PitrJournal;
@@ -182,6 +187,42 @@ class ClusterRestoreTest {
     }
 
     @Test
+    @DisplayName("na recuperação, um backup que já passa do instante cede lugar ao anterior")
+    void recoveryFallsBackToAnOlderBackup() throws Exception {
+        Path backups = dir.resolve("backups");
+        try (RocksDbBackend source = new RocksDbBackend(dir.resolve("origem").toString());
+             PhysicalBackups engine = PhysicalBackups.open(backups)) {
+            for (long index = BASE; index <= BASE + 3; index++) {
+                source.applyArchived(index, new CommittedBatch("tx" + index,
+                    Map.of(RaftApplier.APPLIED_KEY, RaftApplier.marker(index, 3), "k" + index, bytes("v" + index)),
+                    Set.of(), false, stamp(index)));
+                if (index == BASE || index == BASE + 3) {
+                    engine.create(source);
+                }
+            }
+        }
+        Path archive = dir.resolve("arquivo");
+        ArchiveStore store = new DirectoryArchiveStore(archive);
+        ArchiveLayout layout = new ArchiveLayout("axon-dr", "e1", "g");
+        DrArchiver archiver = new DrArchiver(store, layout, "n1");
+        assertEquals(2, archiver.pushBackups(backups));
+        assertTrue(archiver.pushSegments(journal("n1", range(BASE + 1, BASE + 3))) > 0);
+        HlcTimestamp until = HlcTimestamp.endOfMillisecond(stamp(BASE + 1).physical());
+        // o carimbo do descritor diz que o segundo backup serve, mas a base dele já passa do instante
+        Path second = archive.resolve(store.list("axon-dr/").stream().filter(k -> k.contains("/descriptors/2-"))
+            .findFirst().orElseThrow());
+        java.nio.file.Files.move(second, second.resolveSibling("2-" + stamp(BASE + 1).physical() + "-0"));
+
+        DrRestore.Result result = DrRestore.restore(store, layout, dir.resolve("work"),
+            dir.resolve("restaurada"), until, 2);
+
+        assertEquals(1, result.backupId());
+        assertEquals(BASE + 1, result.prepared().lastIndex());
+        Set<String> keys = keys(dir.resolve("restaurada"));
+        assertTrue(keys.contains("k6") && !keys.contains("k7"), keys.toString());
+    }
+
+    @Test
     @DisplayName("o journal de um nó arquiva cada lote confirmado e mantém os ganchos anteriores")
     void clusterJournalDecoratesHooks() throws Exception {
         StringBuilder calls = new StringBuilder();
@@ -199,6 +240,7 @@ class ClusterRestoreTest {
         Path directory = dir.resolve("journal-hooks");
         CommittedBatch batch = new CommittedBatch("t", Map.of("k", bytes("v")), Set.of(), false, stamp(6));
         try (ClusterJournal journal = ClusterJournal.open(directory, JournalOptions.defaults(), previous)) {
+            assertEquals(Long.MAX_VALUE, journal.replayFrom(), "um journal novo não pede a história");
             assertFalse(journal.accept(batch));
             assertEquals(batch, journal.stamp(batch));
             journal.recovered(batch);
@@ -207,6 +249,7 @@ class ClusterRestoreTest {
         }
         assertEquals("6;", calls.toString());
         try (ClusterJournal reopened = ClusterJournal.open(directory, JournalOptions.defaults(), previous)) {
+            assertEquals(7, reopened.replayFrom(), "o que veio depois do arquivado é pedido de volta");
             assertEquals(6, reopened.journal().seal().complete().index(), "a marca precisa sobreviver à reabertura");
         }
     }

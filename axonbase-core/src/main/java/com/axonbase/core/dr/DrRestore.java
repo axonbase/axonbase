@@ -57,8 +57,23 @@ public final class DrRestore {
     public static Result restore(ArchiveStore store, ArchiveLayout layout, Path work, Path target,
                                  HlcTimestamp until, int transfers) {
         requireEmpty(work);
-        BackupDescriptor backup = choose(store, layout, until);
+        List<BackupDescriptor> candidates = candidates(store, layout, until);
         long started = System.nanoTime();
+        ClusterRestore.BaseTooNew tooNew = null;
+        for (int attempt = 0; attempt < candidates.size(); attempt++) {
+            Path directory = attempt == 0 ? work : work.resolve("tentativa-" + (attempt + 1));
+            try {
+                return restoreFrom(store, layout, candidates.get(attempt), directory, target, until, transfers,
+                    started);
+            } catch (ClusterRestore.BaseTooNew newer) {
+                tooNew = newer;
+            }
+        }
+        throw tooNew;
+    }
+
+    private static Result restoreFrom(ArchiveStore store, ArchiveLayout layout, BackupDescriptor backup, Path work,
+                                      Path target, HlcTimestamp until, int transfers, long started) {
         Path backupDir = work.resolve("backup");
         Map<String, Path> downloads = new LinkedHashMap<>();
         Path listing = work.resolve("descriptor.txt");
@@ -78,13 +93,18 @@ public final class DrRestore {
         return new Result(prepared, backup.node(), backup.id(), backup.stamp(), segments.size(), bytes, millis);
     }
 
-    /** O backup mais novo cujo carimbo não passa do instante pedido. */
-    private static BackupDescriptor choose(ArchiveStore store, ArchiveLayout layout, HlcTimestamp until) {
-        return store.list(layout.backupsRoot()).stream().map(BackupDescriptor::parse).flatMap(Optional::stream)
+    /** Os backups cujo carimbo não passa do instante pedido, do mais novo para o mais velho. */
+    private static List<BackupDescriptor> candidates(ArchiveStore store, ArchiveLayout layout, HlcTimestamp until) {
+        List<BackupDescriptor> found = store.list(layout.backupsRoot()).stream().map(BackupDescriptor::parse)
+            .flatMap(Optional::stream)
             .filter(d -> until == null || d.stamp().compareTo(until) <= 0)
-            .max(Comparator.comparing(BackupDescriptor::stamp))
-            .orElseThrow(() -> new IllegalStateException("nenhum backup arquivado em " + layout.backupsRoot()
-                + (until == null ? "" : " é anterior ao instante pedido")));
+            .sorted(Comparator.comparing(BackupDescriptor::stamp).reversed())
+            .toList();
+        if (found.isEmpty()) {
+            throw new IllegalStateException("nenhum backup arquivado em " + layout.backupsRoot()
+                + (until == null ? "" : " é anterior ao instante pedido"));
+        }
+        return found;
     }
 
     /**

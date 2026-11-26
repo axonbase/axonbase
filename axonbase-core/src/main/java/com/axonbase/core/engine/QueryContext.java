@@ -22,6 +22,34 @@ public final class QueryContext {
     public interface Pacer {
         /** Pode pausar a thread, ou lançar para interromper a consulta. */
         void checkpoint();
+
+        /** A thread começou um lote ou voltou de uma espera: o tempo parado não conta como execução. */
+        default void resumed() {
+        }
+    }
+
+    private static final ThreadLocal<Boolean> SHARED_WORKER = new ThreadLocal<>();
+
+    /** Marca a thread atual como parte de um pool usado por todas as consultas, que não deve ser pausada. */
+    public static void sharedWorker(boolean shared) {
+        if (shared) {
+            SHARED_WORKER.set(Boolean.TRUE);
+        } else {
+            SHARED_WORKER.remove();
+        }
+    }
+
+    public static boolean onSharedWorker() {
+        return SHARED_WORKER.get() != null;
+    }
+
+    /** Avisa a contenção da consulta desta thread de que ela voltou a executar. */
+    public static void resumed() {
+        Handle h = CURRENT.get();
+        Pacer pacer = h == null ? null : h.pacer;
+        if (pacer != null) {
+            pacer.resumed();
+        }
     }
 
     /** Uma consulta em andamento. {@code cancel()} pode vir de qualquer thread. */

@@ -42,7 +42,7 @@ public final class ClusterRestore {
     }
 
     /** O instante pedido não é alcançável com este backup e estes segmentos. Nada é entregue. */
-    public static final class Unreachable extends RuntimeException {
+    public static class Unreachable extends RuntimeException {
         private final HlcTimestamp latest;
 
         Unreachable(String message, HlcTimestamp latest) {
@@ -53,6 +53,13 @@ public final class ClusterRestore {
         /** O último carimbo que se consegue alcançar. */
         public HlcTimestamp latest() {
             return latest;
+        }
+    }
+
+    /** O backup usado já passa do instante pedido: um mais antigo ainda pode servir. */
+    public static final class BaseTooNew extends Unreachable {
+        BaseTooNew(String message, HlcTimestamp latest) {
+            super(message, latest);
         }
     }
 
@@ -95,7 +102,7 @@ public final class ClusterRestore {
         RaftApplier.Applied base = RaftApplier.applied(db).orElseThrow(() -> new IllegalStateException(
             "o backup não veio de um nó de cluster: não diz em que ponto do log foi tirado"));
         if (until != null && db.recordedPosition().stamp().compareTo(until) > 0) {
-            throw new Unreachable("o backup já contém escritas posteriores ao instante pedido; use um mais antigo",
+            throw new BaseTooNew("o backup já contém escritas posteriores ao instante pedido; use um mais antigo",
                 db.recordedPosition().stamp());
         }
         Merge merge = new Merge(db, base.index() + 1, until);

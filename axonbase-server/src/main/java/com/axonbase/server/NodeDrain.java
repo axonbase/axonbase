@@ -105,29 +105,30 @@ final class NodeDrain {
         long deadline = started + timeoutMillis * 1_000_000L;
         String leader = "";
         try {
-            String refusal = "";
-            while (node.leading()) {
-                TransferResult result = node.transfer(TRANSFER_ATTEMPT);
-                if (result.transferred()) {
-                    leader = result.leader();
-                    break;
+            do {
+                while (node.leading()) {
+                    TransferResult result = node.transfer(TRANSFER_ATTEMPT);
+                    if (result.transferred()) {
+                        leader = result.leader();
+                        break;
+                    }
+                    if (System.nanoTime() - deadline > 0) {
+                        finish(State.FAILED, leader, "a liderança não foi transferida: " + result.reason(), started);
+                        return;
+                    }
+                    Thread.sleep(POLL_MILLIS * 10);
                 }
-                refusal = result.reason();
-                if (System.nanoTime() - deadline > 0) {
-                    finish(State.FAILED, leader, "a liderança não foi transferida: " + refusal, started);
-                    return;
+                Thread.sleep(graceMillis);
+                while (node.dataRequestsInFlight() > 0) {
+                    if (System.nanoTime() - deadline > 0) {
+                        finish(State.FAILED, leader, node.dataRequestsInFlight() + " requisições ainda em curso",
+                            started);
+                        return;
+                    }
+                    Thread.sleep(POLL_MILLIS);
                 }
-                Thread.sleep(POLL_MILLIS * 10);
-            }
-            Thread.sleep(graceMillis);
-            while (node.dataRequestsInFlight() > 0) {
-                if (System.nanoTime() - deadline > 0) {
-                    finish(State.FAILED, leader, node.dataRequestsInFlight() + " requisições ainda em curso",
-                        started);
-                    return;
-                }
-                Thread.sleep(POLL_MILLIS);
-            }
+                // o cargo pode ter chegado durante a espera: passa de novo antes de liberar a parada
+            } while (node.leading());
             finish(State.DRAINED, leader, "", started);
         } catch (InterruptedException undone) {
             // desfeito por undrain, que já registrou o estado

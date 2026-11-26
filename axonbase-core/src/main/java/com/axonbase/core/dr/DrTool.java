@@ -8,8 +8,11 @@ import java.io.PrintStream;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.ToIntFunction;
 
 /**
  * Linha de comando da recuperação de desastre, DR (Disaster Recovery).
@@ -108,20 +111,14 @@ public final class DrTool {
         }
         long pause = Math.max(1, Long.parseLong(options.getOrDefault("every", "10"))) * 1_000L;
         while (true) {
-            try {
-                int sentBackups = backups == null ? 0 : archiver.pushBackups(Path.of(backups));
-                int sentSegments = journal == null ? 0 : archiver.pushSegments(Path.of(journal));
-                out.println("DR push node=" + options.get("node") + " backups=" + sentBackups + " segments="
-                    + sentSegments);
-            } catch (RuntimeException failure) {
-                if (!watch) {
-                    throw failure;
-                }
-                // o armazenamento pode estar fora por um tempo: a próxima volta envia o que faltou
-                out.println("DR push node=" + options.get("node") + " error=" + failure.getMessage());
-            }
+            // o journal vai primeiro e cada parte falha sozinha: um backup com defeito não segura os segmentos
+            List<String> errors = new ArrayList<>(2);
+            int sentSegments = send(journal, archiver::pushSegments, errors);
+            int sentBackups = send(backups, archiver::pushBackups, errors);
+            out.println("DR push node=" + options.get("node") + " backups=" + sentBackups + " segments="
+                + sentSegments + (errors.isEmpty() ? "" : " error=" + String.join(" | ", errors)));
             if (!watch) {
-                return 0;
+                return errors.isEmpty() ? 0 : 1;
             }
             try {
                 Thread.sleep(pause);
@@ -129,6 +126,19 @@ public final class DrTool {
                 Thread.currentThread().interrupt();
                 return 0;
             }
+        }
+    }
+
+    /** O armazenamento pode estar fora por um tempo: o erro é anotado e a próxima volta envia o que faltou. */
+    private static int send(String directory, ToIntFunction<Path> push, List<String> errors) {
+        if (directory == null) {
+            return 0;
+        }
+        try {
+            return push.applyAsInt(Path.of(directory));
+        } catch (RuntimeException failure) {
+            errors.add(String.valueOf(failure.getMessage()));
+            return 0;
         }
     }
 

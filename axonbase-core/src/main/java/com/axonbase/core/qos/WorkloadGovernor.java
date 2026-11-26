@@ -133,6 +133,8 @@ public final class WorkloadGovernor {
         private final boolean demotable;
         private final long startedNanos = clock.getAsLong();
         private final AtomicLong accesses = new AtomicLong();
+        /** Pausa devida por trabalho feito no pool compartilhado, paga pela thread da consulta. */
+        private final AtomicLong owed = new AtomicLong();
         private final AtomicBoolean closed = new AtomicBoolean();
         private volatile boolean analytical;
         private volatile long analyticalSince;
@@ -169,6 +171,16 @@ public final class WorkloadGovernor {
             charge(stride);
         }
 
+        @Override
+        public void resumed() {
+            Stride stride = STRIDES.get();
+            if (stride.owner != this) {
+                stride.owner = this;
+                stride.accesses = 0;
+            }
+            stride.mark = clock.getAsLong();
+        }
+
         private synchronized void demote() {
             if (analytical || closed.get()) {
                 return;
@@ -193,6 +205,14 @@ public final class WorkloadGovernor {
                 return;
             }
             long wait = budget.charge(executed);
+            if (QueryContext.onSharedWorker()) {
+                // pausar aqui seguraria as varreduras das consultas transacionais que dividem o pool
+                if (wait > 0) {
+                    owed.accumulateAndGet(wait, Math::max);
+                }
+                return;
+            }
+            wait = Math.max(wait, owed.getAndSet(0));
             if (wait > 0) {
                 pause.accept(wait);
                 stride.mark = clock.getAsLong();

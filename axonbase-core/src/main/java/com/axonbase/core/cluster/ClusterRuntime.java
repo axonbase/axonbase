@@ -411,7 +411,8 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
                 return;
             }
             lastContact = System.nanoTime();
-            if (granted.size() + 1 < needed) {
+            // uma eleição já em curso quando a drenagem começou não pode dar o cargo a quem está saindo
+            if (granted.size() + 1 < needed || transfer.abstaining()) {
                 role = ClusterRole.FOLLOWER;
                 return;
             }
@@ -1094,6 +1095,12 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         public long matchIndex(LeadershipTransfer.Candidate candidate) {
             PeerReplicator replicator = replicators.get(candidate.address());
             return replicator == null ? 0 : replicator.matchIndex();
+        }
+
+        @Override
+        public boolean settled(long index) {
+            // o índice aplicado avança antes de quem esperava a escrita ser liberado
+            return pendingWrites.headMap(index, true).isEmpty();
         }
 
         @Override
