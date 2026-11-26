@@ -134,4 +134,6 @@ mvn -B -pl axonbase-core -am test -Dtest=GeoLatencyGateTest -Dsurefire.failIfNoS
 
 - O índice não pagina por conta própria: um raio grande sem `LIMIT` carrega todos os documentos de dentro do raio.
 - Um polígono que cobre quase toda a tabela lê o índice inteiro, o que pode custar um pouco mais que a varredura.
-- Em cluster, a construção de um índice grande é local a cada nó, como a dos demais índices criados em segundo plano.
+- Em cluster, a construção de um índice grande é local a cada nó, como a dos demais índices criados em segundo plano. Uma recarga do catálogo no meio dela (por exemplo, um comando de definição replicado) faz a construção recomeçar, o que pode atrasá-la muito se essas definições forem frequentes.
+- Dentro de uma transação aberta, a busca dos mais próximos varre a tabela. As consultas de raio e de polígono usam o índice.
+- Nos armazenamentos em memória e em arquivo WAL (Write-Ahead Log), cada passo da busca dos mais próximos copia as chaves da área examinada, e o custo cresce com a tabela. No RocksDB a leitura é em fluxo.

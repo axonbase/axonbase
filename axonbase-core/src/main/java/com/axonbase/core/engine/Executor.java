@@ -1827,6 +1827,12 @@ public final class Executor {
         }
     }
 
+    private static Statement.Select withoutOrders(Statement.Select sel) {
+        return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), sel.cond(), List.of(),
+            sel.group(), sel.limit(), sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(),
+            sel.groupAll());
+    }
+
     private static Statement.Select withCond(Statement.Select sel, Expr cond) {
         return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), cond, sel.orders(),
             sel.group(), sel.limit(), sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(),
@@ -1848,7 +1854,9 @@ public final class Executor {
         for (Expr part : parts) {
             Statement.Select probe = withCond(sel, part);
             List<Document> hit = uniqueLookupSourceDocs(db, probe,
-                () -> geoSourceDocs(db, probe, window, () -> columnarSourceDocs(db, probe, window, () -> null)));
+                // sem ORDER BY para o GEO: os mais próximos só valem com o WHERE inteiro, nunca com uma parte dele
+                () -> geoSourceDocs(db, withoutOrders(probe), window,
+                    () -> columnarSourceDocs(db, probe, window, () -> null)));
             if (hit != null) {
                 return hit;
             }
@@ -2471,6 +2479,10 @@ public final class Executor {
             List<Document> nearest = geoNearestDocs(db, sel);
             return nearest != null ? nearest : fallback.get();
         }
+        // centro e raio precisam valer para todas as linhas: aqui eles são avaliados sem nenhuma
+        if (!isRowIndependent(distance.args().get(1)) || !isRowIndependent(comparison.right())) {
+            return fallback.get();
+        }
         AxonValue center = eval(distance.args().get(1));
         AxonValue radius = eval(comparison.right());
         double[] point = GeoIndex.pointOf(center);
@@ -2504,7 +2516,9 @@ public final class Executor {
         if (!(sel.from() instanceof Expr.Ident table) || sel.limit() == null || sel.orders().size() != 1
             || !sel.joins().isEmpty() || sel.grouped() || sel.having() != null
             || sel.fields().stream().anyMatch(this::isAggregateCall)
-            || (sel.cond() != null && isSearchMatch(sel.cond()))) {
+            || (sel.cond() != null && isSearchMatch(sel.cond()))
+            // numa transação a busca registraria faixas do tamanho de continentes como lidas
+            || (session.tx() != null && session.tx().isOpen())) {
             return null;
         }
         OrderTerm term = ordersByAlias(sel).get(0);
@@ -2535,14 +2549,24 @@ public final class Executor {
             || (tableDef != null && tableDef.permissions() != null);
         Window filter = filtered ? windowFor(db, sel) : null;
         List<Document> out = new ArrayList<>();
+        java.util.Set<String> taken = new java.util.HashSet<>();
+        int[] inPlace = {0};
         geoIndex(db, plan.table(), plan.index()).nearest(records(db), plan.center(), (id, meters, at) -> {
-            Document doc = loadDoc(db, new RecordId(plan.table(), parseKey(id)));
-            // entrada atrasada (escrita no meio de uma construção em outro nó): quem vale é o ponto do documento
-            if (doc != null && GeoIndex.isAt(doc.current(), column, at)
-                && (filter == null || filter.accepts().test(doc))) {
-                out.add(doc);
+            if (taken.contains(id)) {
+                return true;
             }
-            return out.size() < plan.wanted();
+            Document doc = loadDoc(db, new RecordId(plan.table(), parseKey(id)));
+            if (doc != null && GeoIndex.hasPoint(doc.current(), column)
+                && (filter == null || filter.accepts().test(doc))) {
+                taken.add(id);
+                out.add(doc);
+                // Quem se moveu depois de a entrada ser lida também entra (o ORDER BY reordena pelo ponto atual),
+                // mas só quem está onde a entrada diz conta para encerrar a busca.
+                if (GeoIndex.isAt(doc.current(), column, at)) {
+                    inPlace[0]++;
+                }
+            }
+            return inPlace[0] < plan.wanted();
         });
         return out;
     }
@@ -3142,7 +3166,8 @@ return score;
             || (comparison.op() != Expr.BinaryOp.LT && comparison.op() != Expr.BinaryOp.LE)
             || !(comparison.left() instanceof Expr.Call distance)
             || !distance.name().equals("geo::distance") || distance.args().size() != 2
-            || !(distance.args().get(0) instanceof Expr.Ident field)) {
+            || !(distance.args().get(0) instanceof Expr.Ident field)
+            || !isRowIndependent(distance.args().get(1)) || !isRowIndependent(comparison.right())) {
             return null;
         }
         return geoIndexOn(db.catalog().table(table), field.name());
@@ -3748,7 +3773,8 @@ return score;
             def.indexes().put(di.name(), newIndex);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
             if (interrupted) {
-                IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), true);
+                // se a construção anterior ainda está saindo, outra começa quando ela terminar
+                IndexBuilder.restartAsync(ds, db.ns(), db.db(), di.table(), di.name());
             }
             return AxonValue.nul();
         }
@@ -3756,10 +3782,11 @@ return score;
         if (!((di.unique() && !sameUnique) || advanced)) {
             if (previous != null && previous.geo()) {
                 // o GEO deixa marcador e entradas: saem junto com a troca, sem escrita no meio
-                java.util.concurrent.locks.Lock swap = db.indexLock().writeLock();
+                java.util.concurrent.locks.Lock swap = exclusiveIndexLock(db);
                 swap.lock();
                 try {
                     purgeIndexEntries(db, di.table(), previous);
+                    records(db).delete(marker);
                     def.indexes().put(di.name(), newIndex);
                 } finally {
                     swap.unlock();
@@ -3792,6 +3819,14 @@ return score;
             IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), false);
         }
         return AxonValue.nul();
+    }
+
+    /**
+     * O lado de escrita do indexLock, ou a própria leitura quando esta thread já a segura (um evento que faz DDL no
+     * meio de uma escrita): pedir a escrita nesse caso travaria para sempre.
+     */
+    private static java.util.concurrent.locks.Lock exclusiveIndexLock(Database db) {
+        return db.indexLock().getReadHoldCount() > 0 ? db.indexLock().readLock() : db.indexLock().writeLock();
     }
 
     /** Avança a época de índices; o DDL da própria transação aberta não a invalida. */
@@ -3850,11 +3885,40 @@ return score;
 
     /** Indexa um bloco de registros (chaves já sem o prefixo da tabela). Lança em duplicata de UNIQUE. */
     void buildChunk(Database db, String table, Catalog.IndexDef index, List<String> keyParts) {
+        if (index.geo()) {
+            buildGeoChunk(db, table, index, keyParts);
+            return;
+        }
         inBatch(db, () -> {
             for (String part : keyParts) {
                 indexRow(db, table, index, new RecordId(table, parseKey(part)));
             }
         });
+    }
+
+    /**
+     * Bloco do índice GEO. Num seguidor, um lote replicado pode mudar um registro entre a leitura e a gravação da
+     * entrada (o consenso não usa o indexLock): cada registro é relido depois de gravar e refeito se mudou.
+     */
+    private void buildGeoChunk(Database db, String table, Catalog.IndexDef index, List<String> keyParts) {
+        String column = index.columns().get(0);
+        List<String> pending = keyParts;
+        while (!pending.isEmpty()) {
+            List<String> round = pending;
+            Map<String, byte[]> seen = new java.util.HashMap<>();
+            inBatch(db, () -> {
+                for (String part : round) {
+                    RecordId rid = new RecordId(table, parseKey(part));
+                    byte[] raw = records(db).get(rid.storageKey(db.ns(), db.db())).orElse(null);
+                    seen.put(part, raw);
+                    AxonValue record = raw == null ? null : decode(raw);
+                    AxonValue geometry = record != null && record.isObject() ? record.asObject().get(column) : null;
+                    geoIndex(db, table, index).update(records(db), rid.key().keyString(), geometry);
+                }
+            });
+            pending = round.stream().filter(part -> !java.util.Arrays.equals(seen.get(part), records(db)
+                .get(new RecordId(table, parseKey(part)).storageKey(db.ns(), db.db())).orElse(null))).toList();
+        }
     }
 
     private void indexRow(Database db, String table, Catalog.IndexDef index, RecordId rid) {
@@ -3879,7 +3943,7 @@ return score;
             if (index.search() && records(db).get(docLenKey(db, table, index.name(), rid)).isEmpty()) {
                 indexSearch(db, rid, null, current);
             }
-            if (index.geo() || index.vector()) {
+            if (index.vector()) {
                 indexAdvanced(db, rid, null, current);
             }
             if (index.columnar()) {
@@ -3890,10 +3954,18 @@ return score;
         }
     }
 
-    /** Limpa as entradas parciais antes de refazer o índice e mantém o marcador de construção. */
+    /** Limpa as entradas parciais antes de refazer o índice. O marcador de construção é gravado antes de tudo. */
     void purgeForRebuild(Database db, String table, Catalog.IndexDef index) {
-        purgeIndexEntries(db, table, index);
         records(db).put(buildMarkerKey(db, table, index.name()), new byte[]{1});
+        purgeIndexEntries(db, table, index);
+    }
+
+    /** Apaga o que o índice geohash deixou, depois de garantir o marcador para o binário antigo. */
+    void dropLegacyGeoEntries(Database db, String table, Catalog.IndexDef index) {
+        if (index.geo()) {
+            records(db).put(buildMarkerKey(db, table, index.name()), new byte[]{1});
+            geoIndex(db, table, index).purgeLegacy(records(db), prefix -> deleteAll(db, prefix));
+        }
     }
 
     /**
@@ -4570,13 +4642,24 @@ return score;
     private AxonValue runRemoveTable(Statement.RemoveTable rt) {
         Database db = db();
         String table = rt.name();
-        Catalog.TableDef removed = db.catalog().table(table);
-        if (!db.catalog().removeTable(table)) {
-            throw errorStmt(Messages.get("stmt_table_undefined", table));
-        }
-        if (removed != null) {
-            removed.indexes().values().stream().filter(Catalog.IndexDef::geo)
-                .forEach(index -> purgeIndexEntries(db, table, index));
+        // sem construção nem escrita no meio: nada pode regravar entradas GEO depois da limpeza
+        java.util.concurrent.locks.Lock write = exclusiveIndexLock(db);
+        write.lock();
+        try {
+            Catalog.TableDef removed = db.catalog().table(table);
+            if (!db.catalog().removeTable(table)) {
+                throw errorStmt(Messages.get("stmt_table_undefined", table));
+            }
+            if (removed != null) {
+                for (Catalog.IndexDef index : removed.indexes().values()) {
+                    if (index.geo()) {
+                        purgeIndexEntries(db, table, index);
+                        records(db).delete(buildMarkerKey(db, table, index.name()));
+                    }
+                }
+            }
+        } finally {
+            write.unlock();
         }
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
         for (String key : records(db).keysWithPrefix(prefix)) {

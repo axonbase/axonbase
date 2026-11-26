@@ -221,6 +221,11 @@ class GeoIndexTest {
         assertTrue(index.mustRebuild(kv), "o binário antigo reconstruiu depois de um downgrade");
         index.markReady(kv);
 
+        index.markStale(kv);
+        assertTrue(kv.get(index.tripwireKey()).isPresent(), "o binário antigo precisa do marcador");
+        assertTrue(index.mustRebuild(kv), "marcado como atrasado");
+        index.markReady(kv);
+
         kv.put("SP|ns|db|t|i|6gyf4b|sa", new byte[0]);
         assertTrue(index.hasLegacyEntries(kv));
         assertTrue(index.mustRebuild(kv), "há escrita no formato antigo");
@@ -239,7 +244,8 @@ class GeoIndexTest {
             kv.put(legacy, new byte[] {1});
         }
         index.purge(kv, prefix -> kv.keysWithPrefix(prefix).forEach(kv::delete));
-        assertTrue(kv.keysWithPrefix("").stream().allMatch(k -> k.contains("|i2")),
+        // o marcador só sai quando o índice é removido do catálogo: uma reconstrução interrompida precisa dele
+        assertTrue(kv.keysWithPrefix("").stream().allMatch(k -> k.contains("|i2") || k.equals(index.tripwireKey())),
             kv.keysWithPrefix("").toString());
         assertFalse(other.mustRebuild(kv));
     }

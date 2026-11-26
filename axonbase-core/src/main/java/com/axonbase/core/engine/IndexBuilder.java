@@ -129,12 +129,19 @@ public final class IndexBuilder {
             if (purgeFirst) {
                 purge(ds, ex, ns, dbName, table, name);
             }
-            scan(ds, ex, ns, dbName, table, name);
-            while (!finish(ds, ex, ns, dbName, table, name)) {
-                // chegaram escritas no formato antigo (cluster com versões misturadas): refaz do zero
+            while (true) {
+                Catalog.IndexDef building = lookup(ds.findDatabase(ns, dbName), table, name);
+                if (scan(ds, ex, ns, dbName, table, name)
+                    && finish(ds, ex, ns, dbName, table, name, building)) {
+                    return;
+                }
+                // o catálogo foi recarregado no meio, ou chegaram escritas no formato antigo: refaz do zero
                 pause();
+                Catalog.IndexDef current = lookup(ds.findDatabase(ns, dbName), table, name);
+                if (current == null || current.ready()) {
+                    return;
+                }
                 purge(ds, ex, ns, dbName, table, name);
-                scan(ds, ex, ns, dbName, table, name);
             }
         } catch (Crash crash) {
             throw crash;
@@ -148,6 +155,8 @@ public final class IndexBuilder {
         Database db = ds.findDatabase(ns, dbName);
         Catalog.IndexDef index = lookup(db, table, name);
         if (index != null && !index.ready()) {
+            // as chaves do formato antigo podem ser milhões e ninguém daqui as escreve: saem sem parar as escritas
+            ex.dropLegacyGeoEntries(db, table, index);
             Lock w = db.indexLock().writeLock();
             w.lock();
             try {
@@ -175,10 +184,11 @@ public final class IndexBuilder {
         return def == null ? null : def.indexes().get(name);
     }
 
-    private static void scan(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
+    /** @return {@code false} quando a varredura parou antes do fim da tabela */
+    private static boolean scan(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
         Database start = ds.findDatabase(ns, dbName);
         if (start == null) {
-            return;
+            return false;
         }
         String prefix = ns + "\u0000" + dbName + "\u0000" + table + "\u0000";
         List<String> chunk = new ArrayList<>(CHUNK);
@@ -197,8 +207,9 @@ public final class IndexBuilder {
             return !stop[0];
         });
         if (!stop[0] && !chunk.isEmpty()) {
-            processChunk(ds, ex, ns, dbName, table, name, chunk);
+            stop[0] = !processChunk(ds, ex, ns, dbName, table, name, chunk);
         }
+        return !stop[0];
     }
 
     /** @return {@code false} quando a construção deve parar (índice removido ou já pronto) */
@@ -229,17 +240,24 @@ public final class IndexBuilder {
         }
     }
 
-    /** @return {@code false} quando a construção precisa ser refeita */
-    private static boolean finish(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
+    /**
+     * @param scanned a definição que a varredura percorreu
+     * @return {@code false} quando a construção precisa ser refeita
+     */
+    private static boolean finish(Datastore ds, Executor ex, String ns, String dbName, String table, String name,
+                                  Catalog.IndexDef scanned) {
         Database db = ds.findDatabase(ns, dbName);
         if (db == null) {
-            return true;
+            return false;
         }
         Lock w = db.indexLock().writeLock();
         w.lock();
         try {
             Catalog.IndexDef index = lookup(db, table, name);
             if (index != null && !index.ready()) {
+                if (index != scanned) {
+                    return false; // outra definição entrou no lugar: parte das linhas pode ter ficado de fora
+                }
                 if (!ex.finishIndex(db, table, index)) {
                     return false;
                 }

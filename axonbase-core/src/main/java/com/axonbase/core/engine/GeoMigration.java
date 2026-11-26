@@ -26,7 +26,13 @@ final class GeoMigration {
      */
     static boolean mustRebuild(Database db, String table, String index) {
         H3Cells.core();
-        return new GeoIndex(db.ns(), db.db(), table, index).mustRebuild(db.records());
+        GeoIndex geo = new GeoIndex(db.ns(), db.db(), table, index);
+        if (!geo.mustRebuild(db.records())) {
+            return false;
+        }
+        // antes de a primeira escrita deixar de atualizar o índice antigo
+        geo.markStale(db.records());
+        return true;
     }
 
     /** Depois de um lote replicado: entradas geohash nele deixam o índice H3 daquela tabela atrasado. */
@@ -56,6 +62,7 @@ final class GeoMigration {
         }
         index.markBuilding();
         db.bumpIndexEpoch();
+        new GeoIndex(ns, dbName, table, name).markStale(db.records());
         IndexBuilder.restartAsync(ds, ns, dbName, table, name);
     }
 }

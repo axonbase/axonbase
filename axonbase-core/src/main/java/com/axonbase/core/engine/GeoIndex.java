@@ -1,6 +1,7 @@
 package com.axonbase.core.engine;
 
 import com.axonbase.core.storage.KvBackend;
+import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
 import java.nio.charset.StandardCharsets;
@@ -64,6 +65,11 @@ final class GeoIndex {
         return point != null && Double.isFinite(point[0]) && Math.abs(point[1]) <= 90;
     }
 
+    /** O campo do documento é um ponto. */
+    static boolean hasPoint(AxonValue document, String column) {
+        return document != null && document.isObject() && pointOf(document.asObject().get(column)) != null;
+    }
+
     /** O campo do documento é exatamente o ponto que a entrada do índice registrou. */
     static boolean isAt(AxonValue document, String column, double[] at) {
         if (document == null || !document.isObject()) {
@@ -82,6 +88,18 @@ final class GeoIndex {
             return items.size() >= 2 && items.get(1).isNumber();
         }
         return items.stream().anyMatch(GeoIndex::hasCoordinatePair);
+    }
+
+    /**
+     * A geometria como a leitura a verá depois de gravada. Os envelopes de valor tipado do JSON
+     * ({@code {"$decimal": "..."}}, que o dump de exportação escreve) chegam à escrita como objetos e voltam do
+     * armazenamento como números: o índice tem de enxergar o mesmo que a varredura.
+     */
+    private static AxonValue asRead(AxonValue geometry) {
+        if (geometry == null || !geometry.isObject() || pointOf(geometry) != null) {
+            return geometry;
+        }
+        return AxonJson.decode(AxonJson.encode(geometry));
     }
 
     /** Caminhos em que a geometria é gravada: um para ponto válido, o balde sem lugar para as demais. */
@@ -127,7 +145,8 @@ final class GeoIndex {
     // ------------------------------------------------------------------ escrita
 
     /** Grava, move ou remove ({@code geometry} sem coordenadas) a entrada do registro. */
-    void update(KvBackend kv, String id, AxonValue geometry) {
+    void update(KvBackend kv, String id, AxonValue value) {
+        AxonValue geometry = asRead(value);
         String reverse = reverseKey(id);
         double[] point = pointOf(geometry);
         Set<String> paths = pathsOf(geometry, point);
@@ -174,14 +193,30 @@ final class GeoIndex {
         kv.put(tripwireKey(), TRIPWIRE.clone());
     }
 
-    /** Apaga entradas e marcadores, do formato atual e do geohash. */
+    /**
+     * Declara o índice atrasado antes de qualquer outra coisa: tira a versão (este binário o refaz, mesmo depois de
+     * uma queda) e grava o marcador (o binário antigo também).
+     */
+    void markStale(KvBackend kv) {
+        kv.delete(formatKey());
+        kv.put(tripwireKey(), TRIPWIRE.clone());
+    }
+
+    /**
+     * Apaga as entradas, do formato atual e do geohash. O marcador {@link #tripwireKey} fica: quem remove o índice do
+     * catálogo o apaga; uma reconstrução interrompida precisa dele.
+     */
     void purge(KvBackend kv, Consumer<String> deletePrefix) {
         kv.delete(formatKey());
-        kv.delete("SPV|" + scope);
-        kv.delete("SPX|" + scope);
-        kv.delete(tripwireKey());
         deletePrefix.accept(entryBase());
         deletePrefix.accept("SHR|" + scope + "|");
+        purgeLegacy(kv, deletePrefix);
+    }
+
+    /** Apaga o que o índice geohash gravou. Nenhuma escrita deste binário toca nessas chaves. */
+    void purgeLegacy(KvBackend kv, Consumer<String> deletePrefix) {
+        kv.delete("SPV|" + scope);
+        kv.delete("SPX|" + scope);
         deletePrefix.accept(legacyBase());
         deletePrefix.accept("SPR|" + scope + "|");
     }
