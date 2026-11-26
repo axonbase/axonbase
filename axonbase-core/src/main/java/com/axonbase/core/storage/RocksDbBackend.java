@@ -86,9 +86,13 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     private static final int STRIPES = 1024;
     private static final long BATCH_SYNC_INTERVAL_MS = 1000L;
 
-    private final RocksDB db;
-    private final ColumnFamilyHandle dataHandle;
-    private final ColumnFamilyHandle versionsHandle;
+    private volatile RocksDB db;
+    private volatile ColumnFamilyHandle dataHandle;
+    private volatile ColumnFamilyHandle versionsHandle;
+    /** Diretório da base ativa; a troca por restore físico renomeia este diretório. */
+    private final Path directory;
+    /** Segura as operações novas e espera as em curso durante {@link #replaceWith}. */
+    private final QuiesceGate gate = new QuiesceGate();
     private final SyncMode syncMode;
     private final WriteOptions writeOptions;
     private final DBOptions dbOptions;
@@ -122,6 +126,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     }
 
     private RocksDbBackend(String directory, DBOptions dbOpts, SyncMode syncMode) {
+        this.directory = Path.of(directory).toAbsolutePath();
         for (int i = 0; i < STRIPES; i++) {
             stripes[i] = new ReentrantLock();
         }
@@ -134,38 +139,16 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         this.writeOptions = new WriteOptions().setSync(syncMode == SyncMode.ALWAYS);
         try {
             Path dir = Path.of(directory);
-            boolean exists = Files.exists(dir.resolve("IDENTITY"));
+            // IDENTITY nem sempre existe (um diretório restaurado pelo BackupEngine só traz CURRENT, MANIFEST e OPTIONS)
+            if (Files.isDirectory(dir)) {
+                DirectorySwap.recover(dir); // uma troca de base interrompida volta para a base anterior
+            }
+            boolean exists = Files.exists(dir.resolve("IDENTITY")) || Files.exists(dir.resolve("CURRENT"));
             if (!exists) {
                 Files.createDirectories(dir);
             }
 
-            String pathStr = dir.toAbsolutePath().toString();
-
-            if (exists) {
-                List<byte[]> cfNames;
-                try (Options listingOpts = new Options()) {
-                    cfNames = RocksDB.listColumnFamilies(listingOpts, pathStr);
-                }
-                List<ColumnFamilyDescriptor> cfDescs = new ArrayList<>(cfNames.size());
-                for (byte[] name : cfNames) {
-                    cfDescs.add(new ColumnFamilyDescriptor(name, cfOptions));
-                }
-                List<ColumnFamilyHandle> handles = new ArrayList<>(cfNames.size());
-                this.db = RocksDB.open(this.dbOptions, pathStr, cfDescs, handles);
-                this.dataHandle = findHandle(handles, cfNames, DATA_CF);
-                this.versionsHandle = findHandle(handles, cfNames, VERSIONS_CF);
-            } else {
-                List<ColumnFamilyDescriptor> bootstrap = List.of(
-                    new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions));
-                List<ColumnFamilyHandle> tmp = new ArrayList<>(1);
-                this.db = RocksDB.open(this.dbOptions, pathStr, bootstrap, tmp);
-                ColumnFamilyHandle def = tmp.get(0);
-                this.dataHandle = db.createColumnFamily(
-                    new ColumnFamilyDescriptor(DATA_CF.getBytes(StandardCharsets.UTF_8), cfOptions));
-                this.versionsHandle = db.createColumnFamily(
-                    new ColumnFamilyDescriptor(VERSIONS_CF.getBytes(StandardCharsets.UTF_8), cfOptions));
-                def.close();
-            }
+            openDatabase(dir.toAbsolutePath().toString(), exists);
             // O contador de versão não é gravado. O número de sequência do RocksDB é monotônico entre
             // restarts e nunca menor que uma versão já atribuída (cada versão é uma escrita), então
             // recomeçar dele impede que chaves novas ganhem versão menor que as já copiadas no backup.
@@ -234,6 +217,35 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         throw new IllegalStateException(Messages.get("rocksdb_column_family_missing", target));
     }
 
+    /** Abre o RocksDB em {@code pathStr} e preenche os três handles. Usado na abertura e depois da troca. */
+    private void openDatabase(String pathStr, boolean exists) throws Exception {
+        if (exists) {
+            List<byte[]> cfNames;
+            try (Options listingOpts = new Options()) {
+                cfNames = RocksDB.listColumnFamilies(listingOpts, pathStr);
+            }
+            List<ColumnFamilyDescriptor> cfDescs = new ArrayList<>(cfNames.size());
+            for (byte[] name : cfNames) {
+                cfDescs.add(new ColumnFamilyDescriptor(name, cfOptions));
+            }
+            List<ColumnFamilyHandle> handles = new ArrayList<>(cfNames.size());
+            this.db = RocksDB.open(this.dbOptions, pathStr, cfDescs, handles);
+            this.dataHandle = findHandle(handles, cfNames, DATA_CF);
+            this.versionsHandle = findHandle(handles, cfNames, VERSIONS_CF);
+        } else {
+            List<ColumnFamilyDescriptor> bootstrap = List.of(
+                new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOptions));
+            List<ColumnFamilyHandle> tmp = new ArrayList<>(1);
+            this.db = RocksDB.open(this.dbOptions, pathStr, bootstrap, tmp);
+            ColumnFamilyHandle def = tmp.get(0);
+            this.dataHandle = db.createColumnFamily(
+                new ColumnFamilyDescriptor(DATA_CF.getBytes(StandardCharsets.UTF_8), cfOptions));
+            this.versionsHandle = db.createColumnFamily(
+                new ColumnFamilyDescriptor(VERSIONS_CF.getBytes(StandardCharsets.UTF_8), cfOptions));
+            def.close();
+        }
+    }
+
     private void startSyncThread() {
         syncThread = new Thread(() -> {
             while (!closed) {
@@ -243,10 +255,13 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                     return;
                 }
                 if (dirty.compareAndSet(true, false)) {
+                    gate.enter();
                     try {
                         db.syncWal();
                     } catch (RocksDBException | RuntimeException e) {
                         dirty.set(true);
+                    } finally {
+                        gate.exit();
                     }
                 }
             }
@@ -259,6 +274,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public Optional<byte[]> get(String key) {
+        gate.enter();
+        try {
+            return getGated(key);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private Optional<byte[]> getGated(String key) {
         try {
             byte[] v = db.get(dataHandle, utf8(key));
             return v == null ? Optional.empty() : Optional.of(v);
@@ -270,6 +294,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     /** Valor e versão da mesma foto do banco: um commit concorrente não aparece pela metade. */
     @Override
     public Optional<VersionedValue> getVersioned(String key) {
+        gate.enter();
+        try {
+            return getVersionedGated(key);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private Optional<VersionedValue> getVersionedGated(String key) {
         byte[] raw = utf8(key);
         Snapshot snapshot = db.getSnapshot();
         try (ReadOptions ro = new ReadOptions().setSnapshot(snapshot)) {
@@ -289,6 +322,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public long versionOf(String key) {
+        gate.enter();
+        try {
+            return versionOfGated(key);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private long versionOfGated(String key) {
         try {
             byte[] v = db.get(versionsHandle, utf8(key));
             return v == null ? 0L : bytesToLong(v);
@@ -309,6 +351,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public void scanPrefix(String prefix, java.util.function.Predicate<String> visitor) {
+        gate.enter();
+        try {
+            scanPrefixGated(prefix, visitor);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private void scanPrefixGated(String prefix, java.util.function.Predicate<String> visitor) {
         try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
             while (scan.it.isValid()) {
                 if (!visitor.test(new String(scan.it.key(), StandardCharsets.UTF_8))) {
@@ -321,6 +372,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public void scanEntries(String prefix, java.util.function.BiPredicate<String, byte[]> visitor) {
+        gate.enter();
+        try {
+            scanEntriesGated(prefix, visitor);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private void scanEntriesGated(String prefix, java.util.function.BiPredicate<String, byte[]> visitor) {
         try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
             while (scan.it.isValid()) {
                 if (!visitor.test(new String(scan.it.key(), StandardCharsets.UTF_8), scan.it.value())) {
@@ -365,6 +425,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public void put(String key, byte[] value) {
+        gate.enter();
+        try {
+            putGated(key, value);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private void putGated(String key, byte[] value) {
         byte[] raw = utf8(key);
         rangeLock.readLock().lock();
         ReentrantLock stripe = stripeOf(raw);
@@ -379,6 +448,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public boolean putIfAbsent(String key, byte[] value) {
+        gate.enter();
+        try {
+            return putIfAbsentGated(key, value);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private boolean putIfAbsentGated(String key, byte[] value) {
         byte[] raw = utf8(key);
         rangeLock.readLock().lock();
         ReentrantLock stripe = stripeOf(raw);
@@ -399,6 +477,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     @Override
     public boolean delete(String key) {
+        gate.enter();
+        try {
+            return deleteGated(key);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private boolean deleteGated(String key) {
         byte[] raw = utf8(key);
         rangeLock.readLock().lock();
         ReentrantLock stripe = stripeOf(raw);
@@ -443,6 +530,18 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                        Map<String, byte[]> puts,
                        Set<String> deletes,
                        Set<String> readPrefixes) {
+        gate.enter();
+        try {
+            commitGated(expectedVersions, puts, deletes, readPrefixes);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private void commitGated(Map<String, Long> expectedVersions,
+                             Map<String, byte[]> puts,
+                             Set<String> deletes,
+                             Set<String> readPrefixes) {
         boolean exclusive = !readPrefixes.isEmpty();
         var lock = exclusive ? rangeLock.writeLock() : rangeLock.readLock();
         lock.lock();
@@ -554,6 +653,84 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         return held;
     }
 
+    /** Cria um backup físico deste banco dentro do portão, para uma troca de base não fechar o banco no meio. */
+    void createPhysicalBackup(org.rocksdb.BackupEngine engine, String metadata) throws RocksDBException {
+        gate.enter();
+        try {
+            engine.createNewBackupWithMetadata(db, metadata, true);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    /** O diretório da base ativa. */
+    public Path directory() {
+        return directory;
+    }
+
+    /** A troca de base desistiu: havia operações que não terminaram a tempo. */
+    public static final class SwapTimeoutException extends RuntimeException {
+        public SwapTimeoutException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Troca a base ativa por {@code prepared}, um diretório RocksDB já restaurado e validado (veja
+     * {@link PhysicalBackups#prepareRestore}). Segura as operações novas, espera as em curso (até
+     * {@code quiesceTimeoutMs}), fecha o RocksDB, renomeia o diretório ativo para {@code .replaced-<instante>}
+     * e o preparado para o lugar dele, e reabre. Devolve o caminho da base anterior. Se desistir por tempo, a
+     * base fica como estava ({@link SwapTimeoutException}); se a renomeação falhar, a anterior é reaberta.
+     * A marca d'água de versão nunca regride, então um token de versão já entregue a um cliente continua
+     * sendo menor que as versões novas.
+     */
+    public Path replaceWith(Path prepared, long quiesceTimeoutMs) {
+        if (!gate.quiesce(quiesceTimeoutMs)) {
+            throw new SwapTimeoutException("há operações em curso que não terminaram em " + quiesceTimeoutMs + " ms");
+        }
+        long clockBefore = clock.get();
+        try {
+            try {
+                db.syncWal();
+            } catch (RocksDBException ignored) {
+                // o fechamento segue; o WAL já está no sistema operacional
+            }
+            dataHandle.close();
+            versionsHandle.close();
+            db.close();
+            Path replaced;
+            try {
+                replaced = DirectorySwap.swap(directory, prepared);
+            } catch (java.io.IOException e) {
+                try {
+                    DirectorySwap.recover(directory);
+                } catch (java.io.IOException recoverFailed) {
+                    e.addSuppressed(recoverFailed);
+                }
+                reopen();
+                throw new RuntimeException("falha ao trocar a base: " + e.getMessage(), e);
+            }
+            reopen();
+            synchronized (versionGate) {
+                clock.set(Math.max(clockBefore, clock.get()));
+            }
+            return replaced;
+        } finally {
+            gate.resume();
+        }
+    }
+
+    private void reopen() {
+        try {
+            openDatabase(directory.toString(), true);
+            synchronized (versionGate) {
+                clock.set(Math.max(clock.get(), db.getLatestSequenceNumber()));
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(Messages.get("rocksdb_open_failed", directory.toString()), e);
+        }
+    }
+
     // ---- VersionedKvBackend ----
 
     /** Marca d'água de backup: não passa de um lote ainda em gravação, para o incremental não perdê-lo. */
@@ -572,6 +749,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
      */
     @Override
     public long snapshotScan(long since, EntryVisitor entries, KeyVisitor deleted) throws java.io.IOException {
+        gate.enter();
+        try {
+            return snapshotScanGated(since, entries, deleted);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private long snapshotScanGated(long since, EntryVisitor entries, KeyVisitor deleted) throws java.io.IOException {
         long mark = currentVersion();
         Snapshot snapshot = db.getSnapshot();
         try (ReadOptions ro = new ReadOptions().setSnapshot(snapshot).setFillCache(false);
@@ -616,6 +802,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     /** Varre a column family de versões: chave com versão maior que {@code since} e sem dado é uma deleção. */
     @Override
     public void scanDeletedSince(long since, java.util.function.Predicate<String> visitor) {
+        gate.enter();
+        try {
+            scanDeletedSinceGated(since, visitor);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private void scanDeletedSinceGated(long since, java.util.function.Predicate<String> visitor) {
         try (ReadOptions ro = new ReadOptions().setFillCache(false);
              RocksIterator it = db.newIterator(versionsHandle, ro)) {
             it.seekToFirst();
@@ -643,6 +838,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
      */
     @Override
     public void flush() {
+        gate.enter();
+        try {
+            flushGated();
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private void flushGated() {
         if (syncMode == SyncMode.ALWAYS) {
             return; // cada escrita já foi sincronizada
         }
@@ -655,6 +859,15 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     /** Força o fsync do WAL agora, em qualquer modo. */
     public void syncWal() {
+        gate.enter();
+        try {
+            syncWalGated();
+        } finally {
+            gate.exit();
+        }
+    }
+
+    private void syncWalGated() {
         try {
             db.syncWal();
             dirty.set(false);

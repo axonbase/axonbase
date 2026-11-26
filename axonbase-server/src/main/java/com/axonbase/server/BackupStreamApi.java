@@ -199,7 +199,7 @@ final class BackupStreamApi {
      * Detecta o cabeçalho e devolve o fluxo de texto claro: blocos v2 são decifrados em streaming; o
      * formato v1 criptografado (um único Base64) é lido por inteiro e decifrado; o plano passa direto.
      */
-    private static InputStream openPlain(BufferedInputStream body, String password) throws IOException {
+    static InputStream openPlain(BufferedInputStream body, String password) throws IOException {
         body.mark(SNIFF);
         byte[] head = body.readNBytes(SNIFF);
         body.reset();
