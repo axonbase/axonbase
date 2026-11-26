@@ -249,6 +249,43 @@ class GeoMigrationTest {
         assertCurrent(ds);
     }
 
+    private static void replicate(Datastore ds, String key) {
+        CommittedBatch batch = new CommittedBatch("lider-antigo-" + key, Map.of(key, new byte[0]), Set.of());
+        ds.onReplicatedBatch(new AppliedBatchListener.AppliedBatch(batch, Map.of()));
+    }
+
+    @Test
+    @DisplayName("chave antiga de banco, tabela ou índice que não é um GEO daqui não invalida nada")
+    void unrelatedReplicatedKeysAreIgnored() {
+        MemoryBackend backend = loaded(40);
+        Datastore ds = new Datastore(backend);
+        run(ds, "DEFINE INDEX g_status ON TABLE g COLUMNS status");
+        IndexBuilder.chunkHook(() -> {
+            throw new AssertionError("não deveria reconstruir");
+        });
+        for (String key : List.of("SP|outro|dev|g|g_pos|c|n1", "SP|test|dev|nada|g_pos|c|n1",
+            "SP|test|dev|g|nada|c|n1", "SP|test|dev|g|g_status|c|n1", "SPR|test|dev|g|g_pos|n1",
+            "KV|test|dev|chave")) {
+            replicate(ds, key);
+        }
+        assertEquals("GEO", strategy(ds, "SELECT n FROM g" + RADIUS));
+        assertTrue(backend.get("SHV|test|dev|g|g_pos").isPresent());
+    }
+
+    @Test
+    @DisplayName("vários lotes antigos durante a reconstrução não abrem outra, e o índice termina em dia")
+    void replicatedWritesDuringRebuild() throws InterruptedException {
+        MemoryBackend backend = loaded(700);
+        Datastore ds = new Datastore(backend);
+        assertRebuilds(() -> {
+            String key = "SP|test|dev|g|g_pos|6gyf4b|n5";
+            backend.put(key, new byte[0]);
+            replicate(ds, key);
+            replicate(ds, key);
+            return ds;
+        });
+    }
+
     @Test
     @DisplayName("índice em dia não é reconstruído ao reabrir")
     void currentIndexIsKept() {
