@@ -20,13 +20,14 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class RaftReadGateBenchmark {
 
-    private static final int WARMUP_SECONDS = 10;
+    private static final int WARMUP_SECONDS = Integer.getInteger("axon.gate.read.warmup", 10);
     private static final int LOADERS = 32;
 
     private RaftReadGateBenchmark() {
     }
 
     public static void main(String[] args) throws Exception {
+        java.util.Locale.setDefault(java.util.Locale.ROOT);
         List<String> urls = List.of(args[1].split(","));
         int rows = Integer.parseInt(args[2]);
         if (args[0].equals("load")) {
@@ -72,7 +73,7 @@ public final class RaftReadGateBenchmark {
         throw new IllegalStateException("nenhum líder em " + urls);
     }
 
-    private static void load(List<String> urls, int rows) throws Exception {
+    static void load(List<String> urls, int rows) throws Exception {
         HttpClient http = client();
         String leader = leader(http, urls);
         String text = "x".repeat(200);
@@ -107,7 +108,7 @@ public final class RaftReadGateBenchmark {
         }
     }
 
-    private static void read(List<String> urls, int rows, int connections, int seconds, String consistency)
+    static double read(List<String> urls, int rows, int connections, int seconds, String consistency)
             throws Exception {
         AtomicBoolean measuring = new AtomicBoolean();
         AtomicBoolean running = new AtomicBoolean(true);
@@ -156,5 +157,6 @@ public final class RaftReadGateBenchmark {
         System.out.printf("GATE2 read nodes=%d connections=%d consistency=%s ops_s=%.0f failed=%d empty=%d%n",
             urls.size(), connections, consistency == null ? "padrao" : consistency, count / elapsed, failed.get(),
             empty.get());
+        return count / elapsed;
     }
 }

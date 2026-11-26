@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Portão 1 da E2: vazão de escrita de um cluster de três nós, no modo de {@code AXON_STORAGE_SYNC} (ou da
  * propriedade {@code axon.storage.sync}).
  *
- * <p>Usa só a API que já existia na 0.10.1, para a mesma medida rodar contra a versão anterior. Uso:
+ * <p>Os três nós ficam no mesmo processo e no mesmo disco, então os fsyncs dos três disputam o dispositivo. Uso:
  * {@code RaftWriteGateBenchmark <diretório> [escritores] [segundos]}, com {@code escritores} separados por
  * vírgula (padrão {@code 8,64,256}). Imprime uma linha {@code GATE1} por cenário e quantidade de escritores:
  * {@code raw} confirma lotes direto no consenso; {@code sql} faz {@code CREATE} pelo datastore.</p>
