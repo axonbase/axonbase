@@ -88,7 +88,7 @@ class ShardGatewayHttpTest {
                 sql(gateway, "DEFINE TABLE pedido SHARD BY cliente");
                 for (int i = 0; i < 40; i++) {
                     sql(gateway, "CREATE pedido SET cliente = 'c" + i + "', total = " + i
-                        + ", quando = d'2026-11-26T10:00:00Z'");
+                        + ", quando = d\"2026-11-26T10:00:00Z\"");
                 }
 
                 AxonValue sums = sql(gateway, "SELECT count(), sum(total) FROM pedido GROUP ALL");
