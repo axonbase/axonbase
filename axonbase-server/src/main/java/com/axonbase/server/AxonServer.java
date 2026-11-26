@@ -591,14 +591,14 @@ public final class AxonServer {
             json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(invalid.getMessage()) + "\"}");
             return true;
         }
-        var status = clusterStatus.status();
-        if (wanted == null && status.isLeader()) {
+        if (wanted == null && clusterStatus.leading()) {
             return false;
         }
         try {
             clusterStatus.awaitRead(wanted);
             return false;
         } catch (com.axonbase.core.cluster.StaleReadException stale) {
+            var status = clusterStatus.status();
             json(resp, 503, "{\"status\":\"ERR\",\"kind\":\"STALE_READ\",\"leader\":\"" + esc(status.leader())
                 + "\",\"leader_address\":\"" + esc(status.leaderAddress()) + "\",\"detail\":\""
                 + esc(stale.getMessage()) + "\"}");
@@ -1112,7 +1112,7 @@ public final class AxonServer {
             String body = readBody(req);
             // Só um nó que não é o líder (para redirecionar) ou um pedido de consistência precisam saber se a
             // instrução escreve; fora disso custaria um parse a mais em toda requisição.
-            boolean follower = !clusterStatus.status().isLeader();
+            boolean follower = !clusterStatus.leading();
             boolean classify = follower || req.getHeader(READ_CONSISTENCY_HEADER) != null;
             boolean mutation = classify && com.axonbase.core.engine.Datastore.isMutation(body);
             if (follower && mutation && redirectWrites(req, resp)) {
