@@ -243,6 +243,25 @@ public final class FileRaftLog implements AutoCloseable {
         return baseIndex;
     }
 
+    /**
+     * Último índice dos segmentos fechados cuja escrita mais recente é anterior a {@code epochMillis}; a base,
+     * se não há nenhum. O segmento ativo nunca conta.
+     */
+    public synchronized long lastIndexWrittenBefore(long epochMillis) {
+        long index = baseIndex;
+        try {
+            for (int i = 0; i < segments.size() - 1; i++) {
+                if (segments.get(i).lastWrittenMillis() >= epochMillis) {
+                    break;
+                }
+                index = Math.max(index, segments.get(i).lastIndex());
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return index;
+    }
+
     /** Termo da entrada, ou 0 quando o índice não é conhecido. */
     public synchronized long termAt(long index) {
         if (index == baseIndex) {

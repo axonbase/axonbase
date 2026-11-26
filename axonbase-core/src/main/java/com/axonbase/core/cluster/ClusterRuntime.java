@@ -954,7 +954,8 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
      */
     public boolean addPeer(String nodeId, InetSocketAddress addr) {
         synchronized (stateLock) {
-            if (peers.contains(addr)) {
+            // Um learner no ar não vota: para virar membro, precisa antes reiniciar sem o modo learner.
+            if (peers.contains(addr) || learners.containsKey(addr)) {
                 return false;
             }
         }
@@ -967,12 +968,6 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             if (!peers.contains(addr)) {
                 peers.add(addr);
                 addressByNode.put(nodeId, addr);
-                learners.remove(addr);
-                PeerReplicator learner = replicators.remove(addr);
-                if (learner != null) {
-                    learner.stop();
-                    retired.add(learner);
-                }
                 if (role == ClusterRole.LEADER) {
                     PeerReplicator replicator = replicator(addr, true, node.lastIndex() + 1);
                     // Carência para o membro novo responder antes de contar como perdido.
@@ -1062,6 +1057,14 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
             out.add(peerInfo(name, peer));
         }
         return out;
+    }
+
+    /** Learners para os quais o log já não basta: precisam entrar de um backup mais novo. */
+    public List<String> learnersNeedingBackup() {
+        return learners.entrySet().stream().filter(e -> {
+            PeerReplicator replicator = replicators.get(e.getKey());
+            return replicator != null && replicator.needsBackup();
+        }).map(e -> e.getValue().node()).toList();
     }
 
     /** Learners que este líder está alimentando. */

@@ -131,7 +131,7 @@ class ClusterReplicationTest {
     @Test
     @DisplayName("um seguidor atrás do log compactado recebe snapshot e converge")
     void followerBehindCompactionGetsSnapshot() throws Exception {
-        RaftOptions small = RaftOptions.defaults().withRetainEntries(20).withSegmentBytes(2_000);
+        RaftOptions small = RaftOptions.defaults().withRetainEntries(20).withSegmentBytes(2_000).withRetainMillis(0);
         try (ClusterHarness cluster = ClusterHarness.rocks(dir, small, "n1", "n2", "n3").startAll()) {
             String down = cluster.awaitFollower().config().nodeId();
             cluster.stop(down);
@@ -152,7 +152,7 @@ class ClusterReplicationTest {
     @Test
     @DisplayName("reiniciar um cluster durável recompõe o estado e aceita escritas")
     void restartKeepsData() throws Exception {
-        RaftOptions options = RaftOptions.defaults().withRetainEntries(20).withSegmentBytes(2_000);
+        RaftOptions options = RaftOptions.defaults().withRetainEntries(20).withSegmentBytes(2_000).withRetainMillis(0);
         Map<String, String> expected;
         try (ClusterHarness cluster = ClusterHarness.rocks(dir, options, "n1", "n2", "n3").startAll()) {
             ClusterRuntime leader = cluster.awaitLeader();

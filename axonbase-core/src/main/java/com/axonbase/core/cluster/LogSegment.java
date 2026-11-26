@@ -184,6 +184,11 @@ final class LogSegment {
         return size;
     }
 
+    /** Quando o arquivo foi escrito pela última vez. */
+    long lastWrittenMillis() throws IOException {
+        return Files.getLastModifiedTime(path).toMillis();
+    }
+
     long term(long index) {
         return terms[slot(index)];
     }

@@ -525,6 +525,10 @@ public final class RaftNode implements AutoCloseable {
         }
         long retain = options.retainEntries();
         long target = Math.min(applied - retain, retentionFloor.getAsLong());
+        if (options.retainMillis() > 0 && target > log.baseIndex()) {
+            target = Math.min(target,
+                log.lastIndexWrittenBefore(System.currentTimeMillis() - options.retainMillis()));
+        }
         if (target - log.baseIndex() < Math.max(1, retain / 4)) {
             return;
         }
