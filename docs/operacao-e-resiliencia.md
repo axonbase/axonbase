@@ -134,7 +134,7 @@ O roteiro `scripts/raft-gates/mixed_versions.py` falhou uma vez: com dois nós n
 | esse nó, como líder, manda outra entrada ou um snapshot em cima do confirmado | o nó novo recusa e, se a entrada for de outro mandato, sobe o mandato para tirá-lo do cargo |
 | um nó antigo aplica entradas além do marcador recebido e depois é atualizado | na partida, o nó novo usa o índice do estado salvo pela versão antiga |
 
-Essas três últimas defesas passam na suíte, mas as rodadas do cluster misto com elas ainda não têm resultado. Elas só valem quando o nó novo participa: com um nó novo e dois antigos, os antigos formam maioria sozinhos.
+Essas três últimas defesas passam na suíte e não bastam no cluster misto (veja a tabela abaixo). Elas só valem quando o nó novo participa: com um nó novo e dois antigos, os antigos formam maioria sozinhos.
 
 O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível: se acontecer durante a atualização, reinicie o líder antigo travado.
 
@@ -146,12 +146,18 @@ O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível
 | `0ee8798`, só o laço e a troca da entrada | 30 rodadas: 27 boas, 2 com uma escrita perdida num nó, 1 parada |
 | `b56cf07`, com as cinco primeiras defesas | 60 rodadas: 57 boas, 3 com 435 a 447 escritas perdidas nos três nós |
 | `b1d915f`, mesmo código de consenso | 60 rodadas: 58 boas, 2 com 221 e 232 escritas perdidas |
+| `9b53841`, com diagnóstico | 60 rodadas: 58 boas, 1 com 427 escritas perdidas, 1 parada ainda no cluster antigo |
+| `238e9a1`, com todas as defesas | 60 rodadas: 55 boas, 4 com 207 a 440 escritas perdidas por líder antigo, 1 com uma escrita ausente num nó antigo |
 
-As perdas grandes são compatíveis com o [defeito da versão antiga](#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar): numa rodada com diagnóstico, as 427 escritas perdidas foram confirmadas por um líder antigo com o log vazio. A prova determinística ainda precisa rodar.
+As perdas grandes são compatíveis com o [defeito da versão antiga](#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar): numa rodada com diagnóstico, as escritas perdidas foram confirmadas por um líder antigo com o log vazio. A prova determinística ainda precisa rodar.
+
+**Um caso em que a líder era nova.** Em `238e9a1`, uma escrita confirmada pela líder nova ficou fora de um seguidor antigo; os outros dois nós a guardam. Pelos registros, o outro seguidor antigo não a gravou (a líder não contou a resposta dele), então o voto que fechou o quórum veio de um nó antigo que já se dizia aplicado naquele índice, com o log vazio, e por isso nunca a aplicou. Se a líder caísse naquele instante, a escrita se perderia. Como esse nó chegou a esse estado não foi determinado, e o nó novo não tem como perceber: o protocolo antigo não informa o índice aplicado.
+
+**Conclusão.** A atualização um nó de cada vez a partir da 0.10.x não pode ser garantida: enquanto um nó antigo participar do quórum, os defeitos dele atingem o cluster. As defesas do nó novo reduzem a exposição, mas não a eliminam.
 
 **Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Ainda sem resultado.
 
-**Risco que continua na atualização a partir da 0.10.x.** O protocolo antigo não carrega o termo das entradas, e a escolha do líder depende dele. Um cluster que mistura as duas versões herda as falhas de segurança do protocolo antigo, que nenhum nó novo consegue corrigir sozinho. Enquanto as rodadas do cluster misto não passarem sem perda, trate a atualização a partir da 0.10.x como **parada programada**: pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova.
+**Recomendação para a atualização a partir da 0.10.x:** parada programada. Pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova. Um nó antigo pode já estar diferente dos outros antes da parada, por causa dos próprios defeitos: compare o conteúdo e, havendo diferença, refaça os nós divergentes a partir do que tiver os dados completos.
 
 ## Testes de caos
 
