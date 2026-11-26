@@ -51,8 +51,18 @@ public final class RaftReadGateBenchmark {
     private RaftReadGateBenchmark() {
     }
 
+    /**
+     * O cliente HTTP do Java guarda uma conexão parada por 30 s, o mesmo prazo em que os servidores a fecham: quem
+     * a reusasse nesse instante receberia "header parser received no bytes". O cliente desiste dela antes. Precisa
+     * valer antes de o primeiro cliente ser criado.
+     */
+    static void closeIdleConnectionsBeforeTheServers() {
+        System.setProperty("jdk.httpclient.keepalive.timeout", "20");
+    }
+
     public static void main(String[] args) throws Exception {
         java.util.Locale.setDefault(java.util.Locale.ROOT);
+        closeIdleConnectionsBeforeTheServers();
         List<String> urls = List.of(args[1].split(","));
         int rows = Integer.parseInt(args[2]);
         long errors = 0;
