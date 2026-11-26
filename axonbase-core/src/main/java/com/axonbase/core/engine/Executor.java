@@ -2174,13 +2174,13 @@ public final class Executor {
             return new LinkedHashSet<>();
         }
         for (int level = top.level(); level > 0; level--) {
-            List<Neighbor> near = searchLevel(db, table, index, level, entry, query, 1);
+            List<Neighbor> near = searchLevel(db, table, index, level, List.of(entry), query, 1);
             if (!near.isEmpty()) {
                 entry = near.get(0).key();
             }
         }
         Set<String> out = new LinkedHashSet<>();
-        for (Neighbor candidate : searchLevel(db, table, index, 0, entry, query, Math.max(1, efSearch))) {
+        for (Neighbor candidate : searchLevel(db, table, index, 0, List.of(entry), query, Math.max(1, efSearch))) {
             out.add(candidate.key());
         }
         return out;
@@ -2304,20 +2304,26 @@ public final class Executor {
     }
 
     /**
-     * Busca greedy num nível: devolve até <code>ef</code> candidatos ordenados pela
-     * menor distância, usando as arestas persistidas VH|...|<nivel>|<key>|<vizinho>.
+     * Busca greedy num nível a partir de um ou mais pontos de entrada: devolve até <code>ef</code> candidatos
+     * ordenados pela menor distância, usando as arestas persistidas VH|...|<nivel>|<key>|<vizinho>.
      */
     private List<Neighbor> searchLevel(Database db, String table, Catalog.IndexDef index, int level,
-                                       String entry, AxonValue query, int ef) {
+                                       List<String> entries, AxonValue query, int ef) {
         PriorityQueue<Neighbor> candidates = new PriorityQueue<>(
             Comparator.comparingDouble(Neighbor::distance));
         PriorityQueue<Neighbor> results = new PriorityQueue<>(
             java.util.Comparator.comparingDouble(Neighbor::distance).reversed());
         Set<String> visited = new HashSet<>();
-        double start = vectorNodeDistance(db, table, index, entry, query);
-        visited.add(entry);
-        candidates.add(new Neighbor(entry, start));
-        results.add(new Neighbor(entry, start));
+        for (String entry : entries) {
+            if (visited.add(entry)) {
+                Neighbor start = new Neighbor(entry, vectorNodeDistance(db, table, index, entry, query));
+                candidates.add(start);
+                results.add(start);
+            }
+        }
+        while (results.size() > ef) {
+            results.poll();
+        }
         while (!candidates.isEmpty()) {
             Neighbor current = candidates.poll();
             Neighbor furthest = results.peek();
@@ -6835,30 +6841,27 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
                             int nodeTop, int topExisting, String entry, int maxLinks, int efConstruction) {
         // acima do nível do nó a busca só aproxima o ponto de entrada
         for (int level = topExisting; level > nodeTop; level--) {
-            List<Neighbor> near = searchLevel(db, rid.table(), index, level, entry, vector, 1);
+            List<Neighbor> near = searchLevel(db, rid.table(), index, level, List.of(entry), vector, 1);
             if (!near.isEmpty()) {
                 entry = near.get(0).key();
             }
         }
+        // o nível de baixo parte de todos os candidatos achados no de cima, não só do mais próximo: assim a busca
+        // cobre regiões vizinhas que ainda não têm caminho curto entre si, e o nó novo passa a ligá-las
+        List<String> entries = entry == null ? List.of() : List.of(entry);
         for (int level = nodeTop; level >= 0; level--) {
             List<Neighbor> nearest = List.of();
-            if (entry != null && level <= topExisting) {
-                nearest = searchLevel(db, rid.table(), index, level, entry, vector, efConstruction);
+            if (!entries.isEmpty() && level <= topExisting) {
+                nearest = searchLevel(db, rid.table(), index, level, entries, vector, efConstruction).stream()
+                    .filter(nb -> !nb.key().equals(key) && nb.distance() != Double.MAX_VALUE).toList();
             }
             int linkLimit = level == 0 ? maxLinks : Math.max(2, maxLinks / 2);
-            int linked = 0;
-            for (Neighbor nb : nearest) {
-                if (nb.key().equals(key) || nb.distance() == Double.MAX_VALUE) {
-                    continue;
-                }
-                if (linked == 0) {
-                    entry = nb.key();
-                }
-                if (linked++ >= linkLimit) {
-                    break;
-                }
+            for (Neighbor nb : nearest.subList(0, Math.min(linkLimit, nearest.size()))) {
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, key) + nb.key(), new byte[0]);
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, nb.key()) + key, new byte[0]);
+            }
+            if (!nearest.isEmpty()) {
+                entries = nearest.stream().map(Neighbor::key).toList();
             }
             String entryKey = vhEntryKey(db, rid.table(), index.name(), level);
             if (records(db).get(entryKey).isEmpty()) {
