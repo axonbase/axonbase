@@ -1187,7 +1187,9 @@ public final class Parser {
                 matchKeyword("schemaless");
             }
             String shardBy = null;
-            if (matchKeyword("shard")) {
+            // "shard" não é palavra reservada: vale só aqui, depois do esquema
+            if (atWord("shard")) {
+                pos++;
                 expectKeyword("by");
                 shardBy = expectIdent();
             }

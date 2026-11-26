@@ -65,6 +65,16 @@ class ShardRoutingTest {
     }
 
     @Test
+    void textoDeCadaInstrucaoNaoLevaOsComentarios() {
+        List<ScriptStatements.Piece> pieces = ScriptStatements.split(
+            "-- abre\nCREATE t SET a = $x -- ; fim da linha\n; /* bloco ; */ CREATE `t` SET b = \"c;d\" // resto");
+
+        assertEquals(2, pieces.size());
+        assertEquals("CREATE t SET a = $x", pieces.get(0).text());
+        assertEquals("CREATE `t` SET b = \"c;d\"", pieces.get(1).text());
+    }
+
+    @Test
     void varreduraAchaOQueAtravessaTabelas() {
         StatementScan nested = StatementScan.of(AxonQl.parse(
             "SELECT * FROM a WHERE x INSIDE (SELECT VALUE id FROM b)").statements().get(0));

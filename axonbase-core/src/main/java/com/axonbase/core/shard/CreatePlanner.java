@@ -3,8 +3,6 @@ package com.axonbase.core.shard;
 import com.axonbase.parser.AxonQl;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Statement;
-import com.axonbase.parser.token.Lexer;
-import com.axonbase.parser.token.Token;
 import com.axonbase.value.AxonValue;
 
 import java.util.ArrayList;
@@ -254,10 +252,9 @@ final class CreatePlanner {
 
     /** Escreve a chave gerada no texto, logo depois do nome da tabela, e confere o resultado. */
     private static String withKey(ScriptStatements.Piece piece, Statement.Create create, String table, String key) {
-        List<Token> tokens = Lexer.tokenize(piece.text());
-        Token target = tokens.get(create.only() ? 2 : 1);
-        String text = piece.text().substring(0, target.end()) + ":\"" + key + "\""
-            + piece.text().substring(target.end());
+        // depois de "create" (e de "only") vem o nome da tabela
+        int end = ScriptStatements.units(piece.text()).get(create.only() ? 2 : 1).end();
+        String text = piece.text().substring(0, end) + ":\"" + key + "\"" + piece.text().substring(end);
         Statement expected = new Statement.Create(create.only(),
             new Expr.RecordId(new Expr.Ident(table), new Expr.Literal(AxonValue.str(key))), create.data(), create.ret());
         List<Statement> parsed = AxonQl.parse(text).statements();

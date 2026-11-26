@@ -2,9 +2,6 @@ package com.axonbase.core.shard;
 
 import com.axonbase.parser.AxonQl;
 import com.axonbase.parser.ast.Statement;
-import com.axonbase.parser.token.Lexer;
-import com.axonbase.parser.token.Token;
-import com.axonbase.parser.token.TokenType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -52,31 +49,117 @@ final class ScriptStatements {
         int depth = 0;
         int start = -1;
         int end = -1;
-        for (Token token : Lexer.tokenize(script)) {
-            TokenType type = token.type();
-            if (type == TokenType.EOF) {
-                break;
-            }
-            if (type == TokenType.SEMI && depth == 0) {
+        for (Unit unit : units(script)) {
+            char first = script.charAt(unit.start());
+            if (first == ';' && depth == 0) {
                 if (start >= 0) {
                     texts.add(script.substring(start, end));
                     start = -1;
                 }
                 continue;
             }
-            if (type == TokenType.LPAREN || type == TokenType.LBRACE || type == TokenType.LBRACKET) {
+            if (first == '(' || first == '{' || first == '[') {
                 depth++;
-            } else if (type == TokenType.RPAREN || type == TokenType.RBRACE || type == TokenType.RBRACKET) {
+            } else if (first == ')' || first == '}' || first == ']') {
                 depth--;
             }
             if (start < 0) {
-                start = token.start();
+                start = unit.start();
             }
-            end = token.end();
+            end = unit.end();
         }
         if (start >= 0) {
             texts.add(script.substring(start, end));
         }
         return texts;
+    }
+
+    /** Um pedaço do texto: uma palavra, um texto entre delimitadores ou um símbolo, sem espaços nem comentários. */
+    record Unit(int start, int end) {
+    }
+
+    /**
+     * Percorre o script pelas regras do analisador léxico para textos, nomes entre crases, blocos entre cifrões e
+     * comentários. Os deslocamentos dos tokens do analisador não servem para recortar o texto.
+     */
+    static List<Unit> units(String script) {
+        List<Unit> units = new ArrayList<>();
+        int length = script.length();
+        int i = 0;
+        while (i < length) {
+            char c = script.charAt(i);
+            char next = i + 1 < length ? script.charAt(i + 1) : 0;
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                i++;
+                continue;
+            }
+            if (c == '-' && next == '-' || c == '/' && next == '/') {
+                int line = script.indexOf('\n', i);
+                i = line < 0 ? length : line;
+                continue;
+            }
+            if (c == '/' && next == '*') {
+                int close = script.indexOf("*/", i + 2);
+                i = close < 0 ? length : close + 2;
+                continue;
+            }
+            int from = i;
+            if (c == '\'' || c == '"') {
+                i = afterString(script, i);
+            } else if (c == '`' || c == '\u27e8') {
+                int close = script.indexOf(c == '`' ? '`' : '\u27e9', i + 1);
+                i = close < 0 ? length : close + 1;
+            } else if (c == '$') {
+                i = afterDollar(script, i);
+            } else if (isWord(c)) {
+                while (i < length && isWord(script.charAt(i))) {
+                    i++;
+                }
+            } else if (c == '<' && next == '-') {
+                // a seta "<-" consome o traço, que não abre comentário
+                i += 2;
+            } else {
+                i++;
+            }
+            units.add(new Unit(from, i));
+        }
+        return units;
+    }
+
+    private static boolean isWord(char c) {
+        return Character.isAlphabetic(c) || Character.isDigit(c) || c == '_';
+    }
+
+    private static int afterString(String script, int open) {
+        char quote = script.charAt(open);
+        int i = open + 1;
+        while (i < script.length()) {
+            char c = script.charAt(i);
+            if (c == '\\') {
+                i += 2;
+                continue;
+            }
+            i++;
+            if (c == quote) {
+                return i;
+            }
+        }
+        return script.length();
+    }
+
+    /** Depois de um {@code $nome} ou de um bloco {@code $$ ... $$} (ou {@code $tag$ ... $tag$}). */
+    private static int afterDollar(String script, int open) {
+        int i = open + 1;
+        while (i < script.length() && (Character.isLetterOrDigit(script.charAt(i)) || script.charAt(i) == '_')) {
+            i++;
+        }
+        boolean delimiter = i < script.length() && script.charAt(i) == '$'
+            && !(i > open + 1 && Character.isDigit(script.charAt(open + 1)));
+        if (!delimiter) {
+            return i;
+        }
+        String mark = script.substring(open, i + 1);
+        int close = script.indexOf(mark, i + 1);
+        return close < 0 ? script.length() : close + mark.length();
     }
 }
