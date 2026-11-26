@@ -2372,13 +2372,27 @@ public final class Executor {
 
     private double vectorNodeDistanceUncached(Database db, String table, Catalog.IndexDef index, String key,
                                               AxonValue query) {
-        Document doc = loadDoc(db, new RecordId(table, parseKey(key)));
-        if (doc == null || !doc.current().isObject()) {
-            return Double.MAX_VALUE;
+        AxonValue vector = nodeVector(db, table, index, key);
+        return vector == null ? Double.MAX_VALUE : vectorDistance(index.vectorDistance(), vector, query);
+    }
+
+    /** Vetores já lidos durante uma inserção no grafo; {@code null} fora dela. */
+    private java.util.Map<String, AxonValue> hnswVectors;
+
+    /** Vetor de um nó, ou {@code null} quando o registro não existe ou não tem um vetor válido. */
+    private AxonValue nodeVector(Database db, String table, Catalog.IndexDef index, String key) {
+        java.util.Map<String, AxonValue> cache = hnswVectors;
+        if (cache != null && cache.containsKey(key)) {
+            return cache.get(key);
         }
-        AxonValue vector = doc.current().asObject().get(index.columns().get(0));
-        return validVector(vector, index.vectorDimension())
-            ? vectorDistance(index.vectorDistance(), vector, query) : Double.MAX_VALUE;
+        Document doc = loadDoc(db, new RecordId(table, parseKey(key)));
+        AxonValue value = doc == null || !doc.current().isObject()
+            ? null : doc.current().asObject().get(index.columns().get(0));
+        AxonValue vector = validVector(value, index.vectorDimension()) ? value : null;
+        if (cache != null) {
+            cache.put(key, vector);
+        }
+        return vector;
     }
 
     /** Usa a grade GEO para pré-filtrar uma distância radial antes do WHERE exato. */
@@ -6810,7 +6824,7 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
     /**
      * Insere o vetor no grafo HNSW multicamado. O nó entra só do nível 0 até o nível sorteado para ele, de modo que
      * os níveis de cima ficam esparsos e levam a busca depressa para perto do alvo. Em cada nível em que entra, ele é
-     * ligado aos vizinhos mais próximos (limite {@code M}).
+     * ligado a vizinhos próximos e em direções diferentes (limite {@code M}).
      */
     private void linkHnsw(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector) {
         String key = rid.key().keyString();
@@ -6830,10 +6844,12 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         // Inserção HNSW: desce do nível mais alto seguindo a busca no grafo e liga o nó aos mais próximos de cada
         // nível. O custo depende de efConstruction e M, não do número de nós do índice.
         hnswDistances = new java.util.HashMap<>();
+        hnswVectors = new java.util.HashMap<>();
         try {
             linkLevels(db, rid, index, vector, key, nodeTop, topExisting, current.entry(), maxLinks, efConstruction);
         } finally {
             hnswDistances = null;
+            hnswVectors = null;
         }
     }
 
@@ -6856,9 +6872,9 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
                     .filter(nb -> !nb.key().equals(key) && nb.distance() != Double.MAX_VALUE).toList();
             }
             int linkLimit = level == 0 ? maxLinks : Math.max(2, maxLinks / 2);
-            for (Neighbor nb : nearest.subList(0, Math.min(linkLimit, nearest.size()))) {
-                records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, key) + nb.key(), new byte[0]);
-                records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, nb.key()) + key, new byte[0]);
+            for (String neighbor : selectNeighbors(db, rid.table(), index, nearest, linkLimit)) {
+                records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, key) + neighbor, new byte[0]);
+                records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, neighbor) + key, new byte[0]);
             }
             if (!nearest.isEmpty()) {
                 entries = nearest.stream().map(Neighbor::key).toList();
@@ -6868,6 +6884,36 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
                 records(db).put(entryKey, key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
         }
+    }
+
+    /**
+     * Escolhe os vizinhos de um nó novo (heurística de seleção do HNSW). Um candidato entra quando está mais perto do
+     * nó novo do que de qualquer vizinho já escolhido: isso guarda arestas em direções diferentes, inclusive para um
+     * agrupamento mais distante, em vez de gastar todas num só. As vagas que sobram ficam com os descartados mais
+     * próximos.
+     *
+     * @param nearest candidatos em ordem crescente de distância ao nó novo
+     */
+    private List<String> selectNeighbors(Database db, String table, Catalog.IndexDef index, List<Neighbor> nearest,
+                                         int limit) {
+        List<String> selected = new ArrayList<>(limit);
+        List<String> discarded = new ArrayList<>();
+        for (Neighbor candidate : nearest) {
+            if (selected.size() >= limit) {
+                break;
+            }
+            AxonValue vector = nodeVector(db, table, index, candidate.key());
+            boolean apart = selected.stream().allMatch(other -> vectorDistance(index.vectorDistance(), vector,
+                nodeVector(db, table, index, other)) >= candidate.distance());
+            (apart ? selected : discarded).add(candidate.key());
+        }
+        for (String key : discarded) {
+            if (selected.size() >= limit) {
+                break;
+            }
+            selected.add(key);
+        }
+        return selected;
     }
 
     /**
