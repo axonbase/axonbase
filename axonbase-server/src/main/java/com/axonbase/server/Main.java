@@ -1,6 +1,7 @@
 package com.axonbase.server;
 
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.journal.PitrJournal;
 import com.axonbase.common.Messages;
 import com.axonbase.core.storage.KvBackend;
 import com.axonbase.core.storage.MemoryBackend;
@@ -89,6 +90,9 @@ public final class Main {
             default -> new RocksDbBackend(path);
         };
 
+        // o journal entra antes do Datastore, para arquivar também as escritas da subida
+        PitrJournal journal = startPitr(PitrSettings.fromEnvironment(), backend, config.clusterId());
+
         // Create Datastore before default databases so S3 restore can replay into it.
         Datastore ds = new Datastore(backend);
         ds.aiProvider(new com.axonbase.core.audit.AiProviderClient(
@@ -139,6 +143,7 @@ public final class Main {
         }
 
         AxonServer server = AxonServer.start(ds, secret, config);
+        server.pitr(journal);
         if (cluster != null) {
             server.clusterStatus(cluster);
         }
@@ -173,6 +178,22 @@ public final class Main {
         }
 
         Thread.currentThread().join();
+    }
+
+    /**
+     * Liga o journal de PITR quando pedido, em nó único com RocksDB. No cluster os lotes vêm do log Raft e a
+     * restauração a um instante ainda não existe (o backup físico é só de nó único).
+     */
+    static PitrJournal startPitr(PitrSettings settings, KvBackend backend, String clusterId) {
+        if (!settings.enabled()) {
+            return null;
+        }
+        if (!(backend instanceof RocksDbBackend rocks) || !clusterId.isBlank()) {
+            AxonLog.log("warn", "pitr_unavailable", Messages.get("pitr_unavailable"));
+            return null;
+        }
+        // quem fecha é o desligamento do servidor, depois de atender as requisições em curso
+        return PitrJournal.attach(rocks, settings.directoryFor(rocks), settings.options());
     }
 
     private static String envOr(String key, String def) {

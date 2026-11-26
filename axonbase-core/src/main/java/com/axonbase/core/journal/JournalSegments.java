@@ -57,6 +57,24 @@ public final class JournalSegments {
         return journalDir.resolve("imports").resolve(source);
     }
 
+    /** Apaga a área de importação da origem inteira. */
+    public static void deleteImport(Path journalDir, String source) throws IOException {
+        if (source == null) {
+            throw new IllegalArgumentException("origem obrigatória");
+        }
+        Path root = importRoot(journalDir, source);
+        if (!Files.exists(root)) {
+            return;
+        }
+        List<Path> all;
+        try (Stream<Path> s = Files.walk(root)) {
+            all = s.sorted(Comparator.reverseOrder()).toList();
+        }
+        for (Path path : all) {
+            Files.delete(path);
+        }
+    }
+
     /** O arquivo do segmento {@code name}; recusa qualquer nome fora do padrão. */
     public static Path resolve(Path journalDir, String source, String name) {
         if (name == null || !NAME.matcher(name).matches()) {

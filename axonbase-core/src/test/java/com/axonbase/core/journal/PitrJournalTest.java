@@ -274,6 +274,22 @@ class PitrJournalTest {
     }
 
     @Test
+    @DisplayName("uma escrita que chega depois do fechamento vai ao disco e é recuperada na próxima abertura")
+    void aWriteAfterCloseIsKept() throws Exception {
+        Path dir = tmp.resolve("j");
+        PitrJournal journal = PitrJournal.open(dir, options(), watermark);
+        offer(journal, "a", "1");
+        journal.close();
+        offer(journal, "atrasado", "2");
+
+        try (PitrJournal reopened = PitrJournal.open(dir, options(), watermark)) {
+            assertEquals(2L, reopened.segments().stream().mapToLong(SegmentInfo::batches).sum());
+            assertEquals(2L, reopened.archived().index());
+            assertEquals(0L, journal.droppedBatches());
+        }
+    }
+
+    @Test
     @DisplayName("a retenção apaga segmentos mais velhos que o prazo e mantém os novos")
     void retentionRemovesOldSegments() throws Exception {
         try (PitrJournal journal = PitrJournal.open(tmp.resolve("j"), options().withRetention(Duration.ofDays(7)),

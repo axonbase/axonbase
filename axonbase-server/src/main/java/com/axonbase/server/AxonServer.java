@@ -67,6 +67,7 @@ public final class AxonServer {
     private volatile boolean metricsPerDatabase;
     private volatile boolean metricsRequireAuth;
     private volatile com.axonbase.core.backup.S3SyncManager backups;
+    private volatile com.axonbase.core.journal.PitrJournal pitr;
     private final EventBus events = new EventBus();
     private final java.util.concurrent.ScheduledExecutorService ticker =
         Executors.newSingleThreadScheduledExecutor(r -> {
@@ -474,6 +475,15 @@ public final class AxonServer {
         return clusterRuntime;
     }
 
+    /** Liga o journal de PITR a este servidor (API, métricas e restauração a um instante). */
+    public void pitr(com.axonbase.core.journal.PitrJournal journal) {
+        this.pitr = journal;
+    }
+
+    com.axonbase.core.journal.PitrJournal pitr() {
+        return pitr;
+    }
+
     long uptimeSeconds() {
         return Math.max(0, System.nanoTime() - startedAtNanos) / 1_000_000_000L;
     }
@@ -610,6 +620,10 @@ public final class AxonServer {
         ticker.shutdownNow();
         jetty.stop();
         jetty = null;
+        var journal = pitr;
+        if (journal != null) {
+            journal.close(); // depois das requisições: tudo o que foi confirmado fica num segmento fechado
+        }
     }
 
     // ------------------------------------------------------------------
@@ -795,6 +809,7 @@ public final class AxonServer {
               .append("# TYPE axe_backup_runs_total counter\n")
               .append("axe_backup_runs_total{result=\"success\"} ").append(bk == null ? 0 : bk.runsOk()).append("\n")
               .append("axe_backup_runs_total{result=\"failure\"} ").append(bk == null ? 0 : bk.runsFailed()).append("\n");
+            PitrMetrics.append(sb, pitr, ds);
             if (metricsPerDatabase) {
                 sb.append("# TYPE axe_db_keys gauge\n");
                 for (var db : ds.allDatabases()) {

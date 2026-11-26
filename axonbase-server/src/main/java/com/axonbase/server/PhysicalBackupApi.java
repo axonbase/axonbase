@@ -2,6 +2,8 @@ package com.axonbase.server;
 
 import com.axonbase.common.Messages;
 import com.axonbase.core.backup.StreamEncryption;
+import com.axonbase.core.journal.PitrRestore;
+import com.axonbase.core.storage.CommitWatermark;
 import com.axonbase.core.security.Authz;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.PhysicalFiles;
@@ -95,7 +97,7 @@ final class PhysicalBackupApi {
         }
     }
 
-    private static RocksDbBackend rocks(AxonServer srv) {
+    static RocksDbBackend rocks(AxonServer srv) {
         RocksDbBackend rocks = srv.ds().rocksBackend()
             .orElseThrow(() -> new AdminV1Servlet.ApiError(409, "PHYSICAL_UNSUPPORTED",
                 Messages.get("physical_unsupported")));
@@ -121,7 +123,37 @@ final class PhysicalBackupApi {
         m.put("sizeBytes", i.sizeBytes());
         m.put("files", i.files());
         m.put("version", i.version());
+        if (!i.watermark().equals(CommitWatermark.NONE)) {
+            // só backups com carimbo servem de base para restaurar a um instante
+            m.put("stampedAt", AdminJson.iso(i.watermark().stamp().physical()));
+            m.put("journalIndex", i.watermark().index());
+        }
         return m;
+    }
+
+    /** Os backups do diretório do motor ou de uma área de importação. */
+    static List<PhysicalBackups.Info> backups(RocksDbBackend rocks, String source) {
+        Path dir = sourceDir(rocks, source, true);
+        synchronized (LOCK) {
+            try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
+                return pb.list();
+            } catch (PhysicalBackups.BackupFailedException e) {
+                throw failed(e);
+            }
+        }
+    }
+
+    /** O cabeçalho opcional {@code X-Axon-Size}, ou -1. */
+    static long declaredSize(HttpServletRequest req) {
+        String header = req.getHeader("X-Axon-Size");
+        if (header == null) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(header.trim());
+        } catch (NumberFormatException e) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", "X-Axon-Size");
+        }
     }
 
     private static void list(AxonServer srv, HttpServletResponse resp) throws IOException {
@@ -193,17 +225,27 @@ final class PhysicalBackupApi {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("admin_restore_confirm"));
         }
         RocksDbBackend rocks = rocks(srv);
-        Path dir = sourceDir(rocks, req.getParameter("source"), true);
+        String source = req.getParameter("source");
+        String at = req.getParameter("at");
+        Path dir = sourceDir(rocks, source, true);
         Path previous;
         long version;
+        PitrRestore.Prepared pitr = null;
         synchronized (LOCK) {
             try {
                 try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
                     requireExists(pb, id);
                     version = pb.list().stream().filter(i -> i.id() == id).findFirst().orElseThrow().version();
                 }
-                // 1) restaura num diretório vizinho e prova que abre, com o servidor atendendo normalmente
-                Path prepared = PhysicalBackups.prepareRestore(dir, id, rocks.directory());
+                // 1) restaura num diretório vizinho e prova que abre, com o servidor atendendo normalmente; com
+                // "at", reaplica também o journal até o instante pedido
+                Path prepared;
+                if (at == null) {
+                    prepared = PhysicalBackups.prepareRestore(dir, id, rocks.directory());
+                } else {
+                    pitr = PitrApi.prepare(srv, rocks, dir, id, source, at);
+                    prepared = pitr.directory();
+                }
                 // 2) segura as operações, troca a base e reabre; desiste sem tocar na base se não esvaziar a tempo
                 try {
                     previous = rocks.replaceWith(prepared, QUIESCE_TIMEOUT_MS);
@@ -220,8 +262,17 @@ final class PhysicalBackupApi {
                 srv.auth().ensureRoot(srv.config().user(), srv.config().password());
             }
         }
-        AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true, "id", id, "version", version,
-            "previous", previous.getFileName().toString()));
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("restored", true);
+        body.put("id", id);
+        body.put("version", version);
+        body.put("previous", previous.getFileName().toString());
+        if (pitr != null) {
+            body.put("at", at);
+            body.put("appliedBatches", pitr.appliedBatches());
+            body.put("restoredUntil", AdminJson.iso(pitr.position().stamp().physical()));
+        }
+        AdminV1Servlet.write(resp, 200, AdminJson.of(body));
     }
 
     // ---- transferência de arquivos ----
@@ -294,15 +345,7 @@ final class PhysicalBackupApi {
         if (source == null || source.isBlank()) {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("physical_source_required"));
         }
-        long declared = -1;
-        String header = req.getHeader("X-Axon-Size");
-        if (header != null) {
-            try {
-                declared = Long.parseLong(header.trim());
-            } catch (NumberFormatException e) {
-                throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", "X-Axon-Size");
-            }
-        }
+        long declared = declaredSize(req);
         long written;
         try (java.io.InputStream plain = BackupStreamApi.openPlain(
                 new java.io.BufferedInputStream(req.getInputStream(), 1 << 16), srv.config().s3EncryptKey())) {

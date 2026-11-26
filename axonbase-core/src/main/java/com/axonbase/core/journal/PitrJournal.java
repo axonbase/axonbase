@@ -100,7 +100,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
     @Override
     public void offer(long index, CommittedBatch batch) {
         if (closing) {
-            dropped.incrementAndGet();
+            writeLate(new Item(new JournalRecord(index, batch), 0));
             return;
         }
         long bytes = sizeOf(batch);
@@ -112,6 +112,24 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
             if (dropped.getAndIncrement() % 10_000 == 0) {
                 System.err.println("{\"event\":\"pitr_batch_dropped\",\"index\":" + index + ",\"reason\":\"queue_full\"}");
             }
+        }
+    }
+
+    /**
+     * Uma escrita que chega depois do fechamento (trabalho em segundo plano durante o desligamento) vai direto ao
+     * disco, atrás do que ainda estiver na fila. A próxima abertura recupera o segmento.
+     */
+    private void writeLate(Item item) {
+        writing.lock();
+        try {
+            List<Item> items = new ArrayList<>();
+            queue.drainTo(items);
+            items.add(item);
+            write(items);
+        } catch (IOException e) {
+            abandon(e);
+        } finally {
+            writing.unlock();
         }
     }
 
@@ -178,7 +196,7 @@ public final class PitrJournal implements BatchSink, AutoCloseable {
         return directory;
     }
 
-    /** Lotes descartados (fila cheia ou journal fechando) desde a abertura. */
+    /** Lotes descartados porque a fila estava cheia, desde a abertura. */
     public long droppedBatches() {
         return dropped.get();
     }
