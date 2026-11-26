@@ -349,7 +349,7 @@ public final class RaftNode implements AutoCloseable {
     /** Protocolo antigo: uma entrada por requisição, gravada com o termo da requisição. */
     private Received legacyAppend(RaftWire.Request request) {
         if (request.payload().length == 0) {
-            return new Received(true, -1, 0, Math.min(request.commitIndex(), log.lastIndex()));
+            return new Received(true, -1, 0, checkedCommit(request));
         }
         RaftPayload.Append append;
         boolean legacy = false;
@@ -385,6 +385,19 @@ public final class RaftNode implements AutoCloseable {
         }
         return new Received(true, -1, Math.min(index, log.lastIndex()),
             Math.min(request.commitIndex(), log.lastIndex()));
+    }
+
+    /**
+     * O batimento antigo traz o índice confirmado sem entrada anterior para conferir. Aplica-se só até a última
+     * entrada gravada com o mandato deste líder: ela veio dele, e com ela o que está antes. Uma cauda de outro
+     * mandato pode ser uma escrita que nunca se confirmou.
+     */
+    private long checkedCommit(RaftWire.Request request) {
+        long index = Math.min(request.commitIndex(), log.lastIndex());
+        while (index > applied && log.termAt(index) != request.term()) {
+            index--;
+        }
+        return index;
     }
 
     /**
