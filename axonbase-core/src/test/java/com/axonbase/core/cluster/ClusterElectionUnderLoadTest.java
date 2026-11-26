@@ -16,6 +16,9 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static com.axonbase.core.cluster.ClusterHarness.write;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -72,6 +75,52 @@ class ClusterElectionUnderLoadTest {
                 cluster.describe());
             assertEquals(ClusterRole.LEADER, leader.role(), cluster.describe());
             write(leader, "depois", "v");
+        }
+    }
+
+    @Test
+    @DisplayName("o aviso de disco lento, gravado no mesmo disco, não interrompe os batimentos")
+    void aBlockedLogWriterDoesNotStopTheHeartbeats() throws Exception {
+        // O registro do nó vai para um arquivo: com o disco saturado, quem avisa também pode ficar preso.
+        Logger replication = Logger.getLogger(PeerReplicator.class.getName());
+        Handler stuck = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                try {
+                    Thread.sleep(STALL_MILLIS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        try (ClusterHarness cluster = ClusterHarness.memory(dir, RaftOptions.defaults(), "n1", "n2", "n3")
+                .startAll()) {
+            ClusterRuntime leader = cluster.awaitLeader();
+            write(leader, "antes", "v");
+            cluster.awaitConverged();
+            List<ClusterRuntime> nodes = cluster.nodes();
+            long elections = nodes.stream().mapToLong(ClusterRuntime::electionsStarted).sum();
+            Object log = field(field(leader, "node"), "log");
+            replication.addHandler(stuck);
+            try {
+                synchronized (log) {
+                    Thread.sleep(STALL_MILLIS);
+                }
+                Thread.sleep(500);
+
+                assertEquals(elections, nodes.stream().mapToLong(ClusterRuntime::electionsStarted).sum(),
+                    cluster.describe());
+            } finally {
+                replication.removeHandler(stuck);
+            }
         }
     }
 
