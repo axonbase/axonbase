@@ -1,5 +1,6 @@
 package com.axonbase.core.storage;
 
+import com.axonbase.core.hlc.HlcTimestamp;
 import org.rocksdb.BackupEngine;
 import org.rocksdb.BackupEngineOptions;
 import org.rocksdb.BackupInfo;
@@ -26,8 +27,14 @@ import java.util.stream.Stream;
  */
 public final class PhysicalBackups implements AutoCloseable {
 
-    /** Um backup do diretório. {@code version} é a marca d'água de versão do instante do backup. */
-    public record Info(int id, long timestampSeconds, long sizeBytes, int files, long version) {
+    /**
+     * Um backup do diretório. {@code version} é a marca d'água de versão do instante do backup; {@code watermark},
+     * a posição HLC lida antes de copiar (o backup contém todos os lotes até ela), é
+     * {@link CommitWatermark#NONE} em backups anteriores à 0.11, que não servem de base para a restauração a um
+     * instante.
+     */
+    public record Info(int id, long timestampSeconds, long sizeBytes, int files, long version,
+                       CommitWatermark watermark) {
     }
 
     /** Falha de backup físico, com a causa original do RocksDB ou do sistema de arquivos. */
@@ -42,6 +49,8 @@ public final class PhysicalBackups implements AutoCloseable {
     }
 
     private static final String META_PREFIX = "axon-version=";
+    private static final String META_STAMP = "axon-hlc=";
+    private static final String META_INDEX = "axon-idx=";
 
     static {
         // ferramentas que só restauram (sem abrir um RocksDbBackend antes) precisam da biblioteca nativa carregada
@@ -78,8 +87,12 @@ public final class PhysicalBackups implements AutoCloseable {
     /** Cria um backup do banco em uso, sem pará-lo: descarrega o memtable e copia os arquivos. */
     public Info create(RocksDbBackend backend) {
         long version = backend.currentVersion();
+        // antes de copiar: o backup contém tudo até esta marca
+        CommitWatermark mark = backend.watermark();
+        String metadata = META_PREFIX + version + ";" + META_STAMP + mark.stamp().physical() + "."
+            + mark.stamp().logical() + ";" + META_INDEX + mark.index();
         try {
-            backend.createPhysicalBackup(engine, META_PREFIX + version);
+            backend.createPhysicalBackup(engine, metadata);
         } catch (RocksDBException e) {
             throw new BackupFailedException("falha ao criar o backup físico", e);
         }
@@ -91,7 +104,8 @@ public final class PhysicalBackups implements AutoCloseable {
     public List<Info> list() {
         List<Info> out = new ArrayList<>();
         for (BackupInfo b : engine.getBackupInfo()) {
-            out.add(new Info(b.backupId(), b.timestamp(), b.size(), b.numberFiles(), parseVersion(b.appMetadata())));
+            out.add(new Info(b.backupId(), b.timestamp(), b.size(), b.numberFiles(), parseVersion(b.appMetadata()),
+                parseWatermark(b.appMetadata())));
         }
         out.sort(Comparator.comparingInt(Info::id));
         return out;
@@ -263,14 +277,36 @@ public final class PhysicalBackups implements AutoCloseable {
     }
 
     private static long parseVersion(String meta) {
-        if (meta != null && meta.startsWith(META_PREFIX)) {
-            try {
-                return Long.parseLong(meta.substring(META_PREFIX.length()).trim());
-            } catch (NumberFormatException ignored) {
-                return 0L;
+        try {
+            return Long.parseLong(field(meta, META_PREFIX));
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    private static CommitWatermark parseWatermark(String meta) {
+        try {
+            String[] stamp = field(meta, META_STAMP).split("\\.", 2);
+            if (stamp.length < 2) {
+                return CommitWatermark.NONE;
+            }
+            return new CommitWatermark(new HlcTimestamp(Long.parseLong(stamp[0]), Integer.parseInt(stamp[1])),
+                Long.parseLong(field(meta, META_INDEX)));
+        } catch (NumberFormatException ignored) {
+            return CommitWatermark.NONE;
+        }
+    }
+
+    /** O valor do campo {@code name=} nos metadados {@code a=1;b=2}, ou vazio. */
+    private static String field(String meta, String name) {
+        if (meta != null) {
+            for (String part : meta.split(";")) {
+                if (part.startsWith(name)) {
+                    return part.substring(name.length()).trim();
+                }
             }
         }
-        return 0L;
+        return "";
     }
 
     private static void deleteQuietly(Path dir) {
