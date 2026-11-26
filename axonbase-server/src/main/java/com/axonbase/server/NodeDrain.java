@@ -65,7 +65,9 @@ final class NodeDrain {
     synchronized Status start() {
         if (status.state() == State.ACTIVE || status.state() == State.FAILED) {
             status = new Status(State.DRAINING, "", "", 0);
-            worker = Thread.ofPlatform().name("axon-drain").daemon(true).start(this::run);
+            // aqui, sob a mesma trava do undrain: antes de sair, para o nó não voltar a se eleger
+            node.abstain(true);
+            worker =Thread.ofPlatform().name("axon-drain").daemon(true).start(this::run);
         }
         return status;
     }
@@ -103,8 +105,6 @@ final class NodeDrain {
         long deadline = started + timeoutMillis * 1_000_000L;
         String leader = "";
         try {
-            // antes de sair, para o nó não voltar a se eleger logo depois de passar o cargo
-            node.abstain(true);
             String refusal = "";
             while (node.leading()) {
                 TransferResult result = node.transfer(TRANSFER_ATTEMPT);
