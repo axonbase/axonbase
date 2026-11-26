@@ -1,6 +1,9 @@
 package com.axonbase.core.storage;
 
 import com.axonbase.common.Messages;
+import com.axonbase.core.cluster.CommittedBatch;
+import com.axonbase.core.hlc.HlcTimestamp;
+import com.axonbase.core.hlc.HybridClock;
 
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
@@ -46,6 +49,11 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * (striped locks), sempre adquiridas em ordem crescente para evitar deadlock. Um commit que varreu prefixos
  * (detecção de leitura fantasma) pega a trava exclusiva do conjunto; os demais entram em modo compartilhado.</p>
  *
+ * <p>Carimbo: todo lote recebe um carimbo do relógio híbrido (HLC) e um índice sem buracos depois de pegar as
+ * travas e antes de gravar. Os dois vão, no mesmo lote atômico, para a column family padrão, numa chave
+ * {@code !hlc/<faixa>} (uma por faixa de trava, para que escritas concorrentes nunca regravem um valor maior com um
+ * menor). No reinício valem o maior carimbo e o maior índice entre elas. Veja {@link BatchSink}.</p>
+ *
  * <p>Durabilidade: o WAL (write-ahead log) fica sempre ligado. {@link SyncMode} escolhe quando ele é
  * sincronizado em disco; veja a variável opcional {@code AXON_STORAGE_SYNC}.</p>
  */
@@ -85,6 +93,9 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     private static final String VERSIONS_CF = "versions";
     private static final int STRIPES = 1024;
     private static final long BATCH_SYNC_INTERVAL_MS = 1000L;
+    private static final String HLC_PREFIX = "!hlc/";
+    /** Sequência do RocksDB no fechamento limpo: se mudou até a próxima abertura, alguém gravou sem carimbar. */
+    private static final byte[] CLEAN_KEY = "!hlc-clean".getBytes(StandardCharsets.UTF_8);
 
     private volatile RocksDB db;
     private volatile ColumnFamilyHandle dataHandle;
@@ -101,13 +112,18 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     private final BloomFilter bloom;
 
     /** Último número de versão atribuído. Só muda dentro de {@link #versionGate}. */
-    private final AtomicLong clock = new AtomicLong();
+    private final AtomicLong versionClock = new AtomicLong();
     private final Object versionGate = new Object();
     /** Primeira versão de cada lote ainda não gravado: a marca d'água de backup não passa dela. */
     private final TreeSet<Long> inFlight = new TreeSet<>();
 
     private final ReentrantLock[] stripes = new ReentrantLock[STRIPES];
     private final ReentrantReadWriteLock rangeLock = new ReentrantReadWriteLock();
+
+    private final HybridClock hlc;
+    private final CommitSequencer sequencer;
+    private final byte[][] hlcSlots = new byte[STRIPES][];
+    private volatile BatchSink sink;
 
     private final AtomicBoolean dirty = new AtomicBoolean();
     private volatile boolean closed;
@@ -118,17 +134,25 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     }
 
     public RocksDbBackend(String directory, SyncMode syncMode) {
-        this(directory, null, syncMode);
+        this(directory, null, syncMode, HybridClock.system());
+    }
+
+    /** Com um relógio próprio (testes com relógio falso e nós que compartilham o relógio com o cluster). */
+    public RocksDbBackend(String directory, SyncMode syncMode, HybridClock hlc) {
+        this(directory, null, syncMode, hlc);
     }
 
     RocksDbBackend(String directory, DBOptions dbOpts) {
-        this(directory, dbOpts, SyncMode.fromEnvironment());
+        this(directory, dbOpts, SyncMode.fromEnvironment(), HybridClock.system());
     }
 
-    private RocksDbBackend(String directory, DBOptions dbOpts, SyncMode syncMode) {
+    private RocksDbBackend(String directory, DBOptions dbOpts, SyncMode syncMode, HybridClock hlc) {
         this.directory = Path.of(directory).toAbsolutePath();
+        this.hlc = hlc;
+        this.sequencer = new CommitSequencer(hlc);
         for (int i = 0; i < STRIPES; i++) {
             stripes[i] = new ReentrantLock();
+            hlcSlots[i] = utf8(String.format("%s%04d", HLC_PREFIX, i));
         }
         this.syncMode = syncMode;
         this.dbOptions = dbOpts != null ? dbOpts : defaultDbOptions();
@@ -152,7 +176,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             // O contador de versão não é gravado. O número de sequência do RocksDB é monotônico entre
             // restarts e nunca menor que uma versão já atribuída (cada versão é uma escrita), então
             // recomeçar dele impede que chaves novas ganhem versão menor que as já copiadas no backup.
-            this.clock.set(db.getLatestSequenceNumber());
+            this.versionClock.set(db.getLatestSequenceNumber());
+            resumeStamps();
         } catch (Exception e) {
             throw new RuntimeException(Messages.get("rocksdb_open_failed", directory), e);
         }
@@ -439,7 +464,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         ReentrantLock stripe = stripeOf(raw);
         stripe.lock();
         try {
-            writeOne(raw, value);
+            writeOne(key, raw, value);
         } finally {
             stripe.unlock();
             rangeLock.readLock().unlock();
@@ -465,7 +490,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             if (db.get(dataHandle, raw) != null) {
                 return false;
             }
-            writeOne(raw, value);
+            writeOne(key, raw, value);
             return true;
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
@@ -495,11 +520,14 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 return false;
             }
             long first = allocate(1);
+            CommitSequencer.Ticket ticket = sequencer.begin();
             try (WriteBatch batch = new WriteBatch()) {
                 batch.delete(dataHandle, raw);
                 batch.put(versionsHandle, raw, longToBytes(first));
-                write(batch);
+                write(batch, ticket, stripeIndex(raw));
+                deliver(ticket, Map.of(), Set.of(key));
             } finally {
+                sequencer.end(ticket);
                 release(first);
             }
             return true;
@@ -512,15 +540,18 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     }
 
     /** Valor e versão no mesmo lote. O chamador já tem a trava da faixa da chave. */
-    private void writeOne(byte[] raw, byte[] value) {
+    private void writeOne(String key, byte[] raw, byte[] value) {
         long first = allocate(1);
+        CommitSequencer.Ticket ticket = sequencer.begin();
         try (WriteBatch batch = new WriteBatch()) {
             batch.put(dataHandle, raw, value);
             batch.put(versionsHandle, raw, longToBytes(first));
-            write(batch);
+            write(batch, ticket, stripeIndex(raw));
+            deliver(ticket, Map.of(key, value), Set.of());
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
         } finally {
+            sequencer.end(ticket);
             release(first);
         }
     }
@@ -545,7 +576,9 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         boolean exclusive = !readPrefixes.isEmpty();
         var lock = exclusive ? rangeLock.writeLock() : rangeLock.readLock();
         lock.lock();
-        List<ReentrantLock> held = exclusive ? List.of() : lockStripes(expectedVersions.keySet(), puts.keySet(), deletes);
+        TreeSet<Integer> touched = exclusive ? new TreeSet<>()
+            : stripeIndexes(expectedVersions.keySet(), puts.keySet(), deletes);
+        List<ReentrantLock> held = lockStripes(touched);
         try {
             for (var expected : expectedVersions.entrySet()) {
                 long current = versionOf(expected.getKey());
@@ -561,6 +594,9 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 return;
             }
             long first = allocate(n);
+            // a faixa de menor índice entre as travadas; com a trava exclusiva ninguém mais grava
+            int slot = touched.isEmpty() ? 0 : touched.first();
+            CommitSequencer.Ticket ticket = sequencer.begin();
             try (WriteBatch batch = new WriteBatch()) {
                 long version = first;
                 for (String key : deletes) {
@@ -573,10 +609,12 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                     batch.put(dataHandle, raw, entry.getValue());
                     batch.put(versionsHandle, raw, longToBytes(version++));
                 }
-                write(batch);
+                write(batch, ticket, slot);
+                deliver(ticket, puts, deletes);
             } catch (RocksDBException e) {
                 throw new RuntimeException(e);
             } finally {
+                sequencer.end(ticket);
                 release(first);
             }
         } finally {
@@ -600,6 +638,12 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         }
     }
 
+    /** Grava o lote junto com o carimbo e o índice dele. O chamador tem a trava da faixa {@code slot}. */
+    private void write(WriteBatch batch, CommitSequencer.Ticket ticket, int slot) throws RocksDBException {
+        batch.put(hlcSlots[slot], CommitSequencer.encode(ticket.stamp(), ticket.index()));
+        write(batch);
+    }
+
     private void write(WriteBatch batch) throws RocksDBException {
         db.write(writeOptions, batch);
         if (syncMode == SyncMode.BATCH) {
@@ -607,11 +651,153 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         }
     }
 
+    /** Entrega o lote já gravado. Uma falha do destino não desfaz o commit: ela deixa um buraco no índice. */
+    private void deliver(CommitSequencer.Ticket ticket, Map<String, byte[]> puts, Set<String> deletes) {
+        BatchSink target = sink;
+        if (target == null) {
+            return;
+        }
+        try {
+            target.offer(ticket.index(), new CommittedBatch("", puts, deletes, false, ticket.stamp()));
+        } catch (RuntimeException e) {
+            System.err.println("{\"event\":\"commit_sink_failed\",\"index\":" + ticket.index() + ",\"error\":\""
+                + e.getMessage() + "\"}");
+        }
+    }
+
+    // ---- carimbo e sequência ----
+
+    /** O relógio híbrido deste armazenamento. */
+    public HybridClock clock() {
+        return hlc;
+    }
+
+    /** Passa a entregar cada lote confirmado a {@code target} ({@code null} desliga). */
+    public void commitSink(BatchSink target) {
+        this.sink = target;
+    }
+
+    /** Até onde os lotes já foram gravados e entregues. Emite um carimbo quando nada está em gravação. */
+    public CommitWatermark watermark() {
+        return sequencer.watermark();
+    }
+
+    /** O maior carimbo e o maior índice gravados na base. */
+    public CommitWatermark persistedPosition() {
+        gate.enter();
+        try {
+            return readPosition();
+        } finally {
+            gate.exit();
+        }
+    }
+
+    /**
+     * O journal já arquivou até {@code archivedIndex}. Se a base está atrás disso (voltou no tempo por um restore ou
+     * por perda de escritas numa queda), os índices recomeçam depois do journal, com um buraco no meio.
+     */
+    public void resumeAfter(long archivedIndex, HlcTimestamp archivedStamp) {
+        gate.enter();
+        try {
+            hlc.observe(archivedStamp);
+            if (archivedIndex > sequencer.lastIndex()) {
+                breakTimeline(archivedIndex);
+            }
+        } finally {
+            gate.exit();
+        }
+    }
+
+    /**
+     * Reaplica um lote do journal com o carimbo e o índice originais, sem entregá-lo de volta. Usado pela
+     * restauração a um instante numa base ainda fora de uso.
+     */
+    public void applyArchived(long index, CommittedBatch batch) {
+        gate.enter();
+        try {
+            rangeLock.writeLock().lock();
+            try {
+                int n = batch.puts().size() + batch.deletes().size();
+                long first = allocate(Math.max(1, n));
+                try (WriteBatch writes = new WriteBatch()) {
+                    long version = first;
+                    for (String key : batch.deletes()) {
+                        byte[] raw = utf8(key);
+                        writes.delete(dataHandle, raw);
+                        writes.put(versionsHandle, raw, longToBytes(version++));
+                    }
+                    for (var entry : batch.puts().entrySet()) {
+                        byte[] raw = utf8(entry.getKey());
+                        writes.put(dataHandle, raw, entry.getValue());
+                        writes.put(versionsHandle, raw, longToBytes(version++));
+                    }
+                    writes.put(hlcSlots[0], CommitSequencer.encode(batch.stamp(), index));
+                    write(writes);
+                    hlc.observe(batch.stamp());
+                    sequencer.advanceTo(index);
+                } catch (RocksDBException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    release(first);
+                }
+            } finally {
+                rangeLock.writeLock().unlock();
+            }
+        } finally {
+            gate.exit();
+        }
+    }
+
+    /** Na abertura: o relógio e o índice continuam do que está gravado. */
+    private void resumeStamps() throws RocksDBException {
+        CommitWatermark persisted = readPosition();
+        hlc.restore(persisted.stamp());
+        sequencer.advanceTo(persisted.index());
+        byte[] clean = db.get(CLEAN_KEY);
+        if (clean != null) {
+            boolean writtenByAnother = bytesToLong(clean) != db.getLatestSequenceNumber();
+            db.delete(CLEAN_KEY);
+            if (writtenByAnother) {
+                breakTimeline(persisted.index());
+            }
+        }
+    }
+
+    /** Abre um buraco no índice e o grava. Só chamar sem escritas concorrentes. */
+    private void breakTimeline(long atLeast) {
+        long skipped = sequencer.skipIndex(atLeast);
+        try (WriteBatch batch = new WriteBatch()) {
+            batch.put(hlcSlots[0], CommitSequencer.encode(hlc.now(), skipped));
+            write(batch);
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private CommitWatermark readPosition() {
+        byte[] prefix = utf8(HLC_PREFIX);
+        HlcTimestamp stamp = HlcTimestamp.NONE;
+        long index = 0L;
+        try (RocksIterator it = db.newIterator()) {
+            for (it.seek(prefix); it.isValid() && startsWith(it.key(), prefix); it.next()) {
+                CommitWatermark slot = CommitSequencer.decode(it.value());
+                stamp = HlcTimestamp.max(stamp, slot.stamp());
+                index = Math.max(index, slot.index());
+            }
+        }
+        return new CommitWatermark(stamp, index);
+    }
+
+    private static boolean startsWith(byte[] key, byte[] prefix) {
+        return key.length >= prefix.length
+            && java.util.Arrays.equals(key, 0, prefix.length, prefix, 0, prefix.length);
+    }
+
     /** Reserva {@code n} versões consecutivas e registra o lote como em andamento. Devolve a primeira. */
     private long allocate(int n) {
         synchronized (versionGate) {
-            long first = clock.get() + 1;
-            clock.set(first + n - 1);
+            long first = versionClock.get() + 1;
+            versionClock.set(first + n - 1);
             inFlight.add(first);
             return first;
         }
@@ -635,15 +821,20 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         return (h & 0x7fffffff) % STRIPES;
     }
 
-    /** Pega, em ordem crescente de índice, a trava de cada faixa tocada pelas chaves. */
+    /** As faixas tocadas pelas chaves, em ordem crescente. */
     @SafeVarargs
-    private List<ReentrantLock> lockStripes(Collection<String>... keySets) {
+    private static TreeSet<Integer> stripeIndexes(Collection<String>... keySets) {
         TreeSet<Integer> indexes = new TreeSet<>();
         for (Collection<String> keys : keySets) {
             for (String key : keys) {
                 indexes.add(stripeIndex(utf8(key)));
             }
         }
+        return indexes;
+    }
+
+    /** Pega, em ordem crescente de índice, a trava de cada faixa. */
+    private List<ReentrantLock> lockStripes(TreeSet<Integer> indexes) {
         List<ReentrantLock> held = new ArrayList<>(indexes.size());
         for (int index : indexes) {
             ReentrantLock lock = stripes[index];
@@ -688,7 +879,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         if (!gate.quiesce(quiesceTimeoutMs)) {
             throw new SwapTimeoutException("há operações em curso que não terminaram em " + quiesceTimeoutMs + " ms");
         }
-        long clockBefore = clock.get();
+        long clockBefore = versionClock.get();
+        long indexBefore = sequencer.lastIndex();
         try {
             try {
                 db.syncWal();
@@ -712,8 +904,17 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             }
             reopen();
             synchronized (versionGate) {
-                clock.set(Math.max(clockBefore, clock.get()));
+                versionClock.set(Math.max(clockBefore, versionClock.get()));
             }
+            // a história mudou: o relógio segue em frente e o índice ganha um buraco antes do próximo lote
+            CommitWatermark restored = readPosition();
+            hlc.observe(restored.stamp());
+            try {
+                db.delete(CLEAN_KEY); // marca do fechamento que validou a base preparada
+            } catch (RocksDBException e) {
+                throw new RuntimeException(e);
+            }
+            breakTimeline(Math.max(indexBefore, restored.index()));
             return replaced;
         } finally {
             gate.resume();
@@ -724,7 +925,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         try {
             openDatabase(directory.toString(), true);
             synchronized (versionGate) {
-                clock.set(Math.max(clock.get(), db.getLatestSequenceNumber()));
+                versionClock.set(Math.max(versionClock.get(), db.getLatestSequenceNumber()));
             }
         } catch (Exception e) {
             throw new RuntimeException(Messages.get("rocksdb_open_failed", directory.toString()), e);
@@ -737,7 +938,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     @Override
     public long currentVersion() {
         synchronized (versionGate) {
-            return inFlight.isEmpty() ? clock.get() : inFlight.first() - 1;
+            return inFlight.isEmpty() ? versionClock.get() : inFlight.first() - 1;
         }
     }
 
@@ -888,6 +1089,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 syncThread.join(1000);
             }
             try {
+                db.put(writeOptions, CLEAN_KEY, longToBytes(db.getLatestSequenceNumber() + 1));
                 db.syncWal();
             } catch (RocksDBException ignored) {
                 // o fechamento segue; o WAL já está no sistema operacional
