@@ -85,7 +85,9 @@ O cliente precisa seguir o contrato de repetição: repetir quando a escrita **c
 
 O redirecionamento `307` de escrita aponta, por padrão, para o endereço do Raft. Para clientes HTTP seguirem o redirecionamento, informe `AXON_CLUSTER_HTTP_PEERS` (por exemplo `n1=http://10.0.0.1:8000,n2=http://10.0.0.2:8000`).
 
-**Limite na atualização a partir da 0.10.x:** o líder antigo não sabe transferir o cargo. O último passo causa uma eleição, e escritas em curso naquele instante podem ficar sem desfecho.
+**Limite na atualização a partir da 0.10.x:** o líder antigo não sabe transferir o cargo, e a versão antiga não tem drenagem. O último passo causa uma eleição, e escritas em curso naquele instante podem ficar sem desfecho. Veja também o risco descrito em [Falha de versões mistas](#falha-de-versões-mistas).
+
+**Conexões que não são HTTP:** uma conexão WebSocket continua aberta no nó drenado. Escritas passam a receber `NOT_LEADER` com o líder novo, e a conexão cai quando o processo para: o cliente precisa reconectar. Uma transação explícita aberta no líder durante a transferência recebe `NOT_LEADER` no `COMMIT` e precisa ser refeita.
 
 **Extensão para a E3:** a drenagem passa a percorrer os grupos em que o nó é líder.
 
@@ -95,9 +97,13 @@ O roteiro `scripts/raft-gates/mixed_versions.py` falhou uma vez: com dois nós n
 
 **Causa.** O protocolo antigo não informa o termo de cada entrada: quem recebe grava a entrada com o termo da requisição. Quando o líder antigo acaba de ser eleito e precisa reenviar uma entrada de um mandato anterior, o seguidor a grava com o termo novo. Na entrada seguinte o líder informa como anterior o termo verdadeiro, o seguidor recusa, o líder volta uma posição, o seguidor aceita sem mudar nada e o ciclo se repete para sempre. Como o líder antigo só confirma com entradas do mandato atual, o cluster para. Só acontece quando o seguidor não tinha a última entrada no momento da eleição, por isso a intermitência.
 
-**Correção.** O seguidor novo sabe que uma entrada gravada com o termo da requisição veio deste líder. Se o líder informa um termo anterior menor para ela, o seguidor corrige o termo e segue. Um reenvio do mesmo conteúdo não trunca o que veio depois.
+**Correção.** Uma entrada gravada com o termo do líder atual veio dele. Se ele informa um termo anterior menor para ela, o seguidor novo aceita e segue, **sem mudar o termo gravado**. Uma primeira tentativa, que rebaixava o termo, foi descartada: nas rodadas no ambiente de testes ela fez o cluster misto perder escritas confirmadas, porque um nó com o termo rebaixado perde a eleição para um membro antigo com menos dados.
+
+O seguidor novo também troca a entrada quando o líder antigo a reescreveu: a 0.10.1 apaga uma escrita sem quórum e grava outra no mesmo índice e mandato, e antes o seguidor ficava com a apagada.
 
 O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível: se acontecer durante a atualização, reinicie o líder antigo travado.
+
+**Risco que continua na atualização a partir da 0.10.x.** O protocolo antigo não carrega o termo das entradas, e a escolha do líder depende dele. Um cluster que mistura as duas versões herda as falhas de segurança do protocolo antigo, que nenhum nó novo consegue corrigir sozinho. Enquanto as rodadas do cluster misto não passarem sem perda, trate a atualização a partir da 0.10.x como **parada programada**: pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova.
 
 ## Testes de caos
 
@@ -143,6 +149,24 @@ A **época** separa histórias diferentes: um cluster restaurado reaproveita ín
 Copie o diretório para os dados de cada nó (ou restaure em cada nó: o resultado é o mesmo), com o diretório do Raft vazio, e suba o cluster.
 
 O RPO (Recovery Point Objective, perda tolerada) é o intervalo de arquivamento somado ao fechamento do segmento (no máximo 30 segundos).
+
+Um instante só é alcançável se os segmentos provarem que não falta escrita até ele. Num cluster parado, a prova vai até a última escrita: para voltar ao estado mais novo, use `latest`.
+
+### Roteiro de arquivamento e restauração
+
+Em cada nó, com `AXON_PITR=on` no servidor e as variáveis `AXON_S3_ENDPOINT`, `AXON_S3_BUCKET`, `AXON_S3_ACCESS` e `AXON_S3_SECRET` no ambiente (e `AXON_S3_ENCRYPT_KEY` para cifrar):
+
+```bash
+java -cp "lib/*" com.axonbase.core.dr.DrTool watch --store s3 --epoch e1 --node n1 --backups /data/db/.physical-backups --journal /data/db/.pitr-journal
+```
+
+Tire backups físicos num seguidor ou learner (`POST /admin/v1/backups/physical`), no intervalo da sua política. Para restaurar:
+
+```bash
+java -cp "lib/*" com.axonbase.core.dr.DrTool restore --store s3 --epoch e1 --target /data/novo --work /data/trabalho --at 2026-01-31T14:32:10Z
+```
+
+Suba cada nó com os dados em `/data/novo` (ou uma cópia dele) e sem diretório do Raft, e arquive o cluster novo numa época nova.
 
 **Extensão para a E3:** o layout já separa os grupos. A restauração de vários shards repete o passo por grupo com o mesmo instante, e o manifesto de cluster da E3 entra ao lado de `groups/`.
 

@@ -2,7 +2,7 @@
 
 A restauração a um instante, ou PITR (Point-In-Time Recovery), devolve a base ao estado que ela tinha numa hora escolhida. O motor combina duas peças: um [backup físico](backup-fisico.md) tirado antes do instante e o **journal**, um arquivo que registra cada lote confirmado com um carimbo de tempo. Restaurar a um instante é restaurar o backup e reaplicar os lotes do journal até lá.
 
-Vale para nó único com armazenamento RocksDB (a base de dados embutida do AxonBase). Em cluster o journal fica desligado: a API (Application Programming Interface) responde 409 a quem tenta restaurar, importar ou apagar segmentos.
+Vale para nó único com armazenamento RocksDB (a base de dados embutida do AxonBase). Em cluster, cada nó arquiva os lotes confirmados no próprio journal, e a restauração a um instante é a do [exercício de recuperação de desastre](operacao-e-resiliencia.md#recuperação-de-desastre): a API (Application Programming Interface) responde 409 a quem tenta restaurar, importar ou apagar segmentos, e a lista de janelas vem vazia.
 
 ## Ligar
 
@@ -171,7 +171,7 @@ Depois de uma **queda** do motor ou de uma **restauração** (física ou a um in
 
 - O instante é o do relógio do servidor: a exatidão em relação à hora real é a do NTP dele. Pedir ao segundo é seguro.
 - Um salto grande de relógio não quebra a ordem dos carimbos, mas faz o instante pedido deixar de corresponder à hora real.
-- Em cluster o PITR ainda não existe: falta o backup de cluster com a posição do log e o carimbo de cada lote aplicado (E3 do plano de escala).
+- Em cluster o PITR não se faz com o servidor no ar: ele reconstrói um cluster novo a partir do arquivamento (veja [operacao-e-resiliencia.md](operacao-e-resiliencia.md)). Vários shards dependem da E3 do plano de escala.
 - O `kill -9` não perde dado confirmado da base, mas encerra a linha do tempo: os instantes posteriores à queda pedem um backup novo. O desligamento normal do servidor não encerra.
 
 ## Medidas
