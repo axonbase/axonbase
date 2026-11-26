@@ -38,6 +38,10 @@ O orçamento é de processador: enquanto houver trabalho transacional recente, a
 
 Vagas mais fila nunca passam da metade do limite de requisições de dados do HTTP, para a fila analítica não ocupar as vagas das transacionais.
 
+Numa varredura paralela, o grupo de threads de leitura é dividido entre todas as consultas. A pausa devida pelo trabalho feito nele é cobrada da thread da própria consulta, para não segurar as varreduras das outras.
+
+Um valor mal escrito em `AXON_QOS*`, `AXON_CLUSTER_HTTP_PEERS` ou `AXON_DRAIN_*` derruba o processo na partida, antes de abrir a porta ou entrar no cluster.
+
 As métricas `axe_qos_*` mostram consultas em execução e em fila por classe, admitidas, recusadas por motivo, rebaixadas, tempo contido e o histograma de duração por classe.
 
 Para cargas analíticas pesadas, a recomendação continua sendo um learner (veja [cluster-raft.md](cluster-raft.md)): o QoS protege o nó que atende os dois tipos.
@@ -51,7 +55,7 @@ Para cargas analíticas pesadas, a recomendação continua sendo um learner (vej
 O líder passa o cargo sem esperar o prazo de eleição:
 
 1. Segura as escritas novas e espera as que estão em curso terminarem.
-2. Segura propostas no log e espera o alvo ter todas as entradas, com tudo aplicado no líder.
+2. Segura propostas no log e espera o alvo ter todas as entradas, com tudo aplicado no líder e quem escreveu já respondido.
 3. Manda ao alvo o pedido de eleição imediata (`TIMEOUT_NOW`, a extensão do artigo do Raft).
 4. Quando enxerga o novo líder, solta as escritas seguradas. Elas recebem `NOT_LEADER` sem terem sido executadas, e o cliente repete no novo líder.
 
@@ -59,7 +63,7 @@ Se algo falhar no prazo, o líder solta as escritas e continua no cargo. O alvo 
 
 ### Drenar um nó
 
-`POST /admin/v1/cluster/drain` leva o nó a `DRAINING`: o `/ready` passa a responder `503`, o líder transfere o cargo, o nó deixa de disputar eleições (continua votando), espera `AXON_DRAIN_GRACE_MS` para o balanceador perceber e depois as requisições de dados terminarem. Aí o estado é `DRAINED` e o processo pode ser parado. `GET` consulta o estado e `DELETE` desfaz. Com `AXON_DRAIN_ON_SHUTDOWN=true`, o desligamento normal do processo drena antes de parar.
+`POST /admin/v1/cluster/drain` leva o nó a `DRAINING`: o `/ready` passa a responder `503`, o líder transfere o cargo, o nó deixa de disputar eleições (continua votando), espera `AXON_DRAIN_GRACE_MS` para o balanceador perceber e depois as requisições de dados terminarem. Se o nó receber o cargo durante a espera, transfere de novo. Aí o estado é `DRAINED` e o processo pode ser parado. `GET` consulta o estado e `DELETE` desfaz. Com `AXON_DRAIN_ON_SHUTDOWN=true`, o desligamento normal do processo drena antes de parar.
 
 `GET /admin/v1/cluster/health` devolve versão, protocolo, papel, prontidão, estado de drenagem, índice aplicado e, no líder, o atraso e o protocolo de cada membro.
 
@@ -81,7 +85,7 @@ Antes de atualizar um nó, confira que:
 
 ### O que significa "sem erro visível ao cliente"
 
-O cliente precisa seguir o contrato de repetição: repetir quando a escrita **certamente não aconteceu** (`NOT_LEADER`, redirecionamento `307`, sem quórum recusado antes de gravar, recusa do QoS, `503` de nó drenando e conexão recusada antes de enviar) e nunca repetir às cegas um desfecho desconhecido. Com esse contrato, a atualização entre versões que transferem a liderança não deve produzir erro nenhum.
+O cliente precisa seguir o contrato de repetição: repetir quando a escrita **certamente não aconteceu** (`NOT_LEADER`, redirecionamento `307`, sem quórum recusado antes de gravar, recusa do QoS, `503` de nó drenando e conexão recusada antes de enviar) e nunca repetir às cegas um desfecho desconhecido. Há uma exceção: um comando que já chamou um serviço externo (embeddings, provedor de IA ou banco remoto) e perdeu a liderança antes de confirmar devolve erro comum, sem redirecionamento, porque repetir faria a chamada outra vez. Com esse contrato, a atualização entre versões que transferem a liderança não deve produzir erro nenhum.
 
 O redirecionamento `307` de escrita aponta, por padrão, para o endereço do Raft. Para clientes HTTP seguirem o redirecionamento, informe `AXON_CLUSTER_HTTP_PEERS` (por exemplo `n1=http://10.0.0.1:8000,n2=http://10.0.0.2:8000`).
 
@@ -97,11 +101,29 @@ O roteiro `scripts/raft-gates/mixed_versions.py` falhou uma vez: com dois nós n
 
 **Causa.** O protocolo antigo não informa o termo de cada entrada: quem recebe grava a entrada com o termo da requisição. Quando o líder antigo acaba de ser eleito e precisa reenviar uma entrada de um mandato anterior, o seguidor a grava com o termo novo. Na entrada seguinte o líder informa como anterior o termo verdadeiro, o seguidor recusa, o líder volta uma posição, o seguidor aceita sem mudar nada e o ciclo se repete para sempre. Como o líder antigo só confirma com entradas do mandato atual, o cluster para. Só acontece quando o seguidor não tinha a última entrada no momento da eleição, por isso a intermitência.
 
-**Correção.** Uma entrada gravada com o termo do líder atual veio dele. Se ele informa um termo anterior menor para ela, o seguidor novo aceita e segue, **sem mudar o termo gravado**. Uma primeira tentativa, que rebaixava o termo, foi descartada: nas rodadas no ambiente de testes ela fez o cluster misto perder escritas confirmadas, porque um nó com o termo rebaixado perde a eleição para um membro antigo com menos dados.
+**Correção do laço.** Uma entrada gravada com o termo do líder atual veio dele. Se ele informa um termo anterior menor para ela, o seguidor novo aceita e segue, **sem mudar o termo gravado**. Uma primeira tentativa, que rebaixava o termo, foi descartada: nas rodadas no ambiente de testes ela fez o cluster misto perder escritas confirmadas, porque um nó com o termo rebaixado perde a eleição para um membro antigo com menos dados.
 
-O seguidor novo também troca a entrada quando o líder antigo a reescreveu: a 0.10.1 apaga uma escrita sem quórum e grava outra no mesmo índice e mandato, e antes o seguidor ficava com a apagada.
+**Outras falhas do cluster misto, também corrigidas no nó novo:**
+
+| Comportamento da 0.10.1 | O que o nó novo faz |
+|---|---|
+| o líder apaga uma escrita sem quórum e grava outra no mesmo índice e mandato | o seguidor troca a entrada pela reescrita |
+| o líder envia um snapshot com o estado aplicado e o índice do fim do log | o seguidor que já tem dados recusa o snapshot cujo marcador aponta outro índice |
+| o batimento do líder informa um índice de commit sem dizer de que entrada fala | o seguidor só confirma entradas gravadas com o mandato desse líder |
+| o reenvio de uma entrada antiga carrega o commit atual | o seguidor só confirma até o índice conferido naquele pedido |
+| o seguidor responde que aceitou uma entrada que não gravou | o líder novo não conta essa resposta para o quórum e abre um mandato novo |
 
 O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível: se acontecer durante a atualização, reinicie o líder antigo travado.
+
+**O que o ambiente de testes mostrou.** Cada rodada é uma execução do roteiro de versões mistas, da 0.10.1 para a versão indicada.
+
+| Versão testada | Resultado |
+|---|---|
+| `12f5c46`, base sem correção | 30 rodadas, 15 falhas (as examinadas são o cluster parado) |
+| `0ee8798`, só o laço e a troca da entrada | 30 rodadas: 27 boas, 2 com uma escrita perdida num nó, 1 parada |
+| com as quatro últimas linhas da tabela acima | ainda sem resultado |
+
+A perda de uma linha em `0ee8798` é explicada pelo snapshot, e a parada pela resposta de entrada não gravada. As duas explicações só ficam confirmadas quando as rodadas novas passarem.
 
 **Risco que continua na atualização a partir da 0.10.x.** O protocolo antigo não carrega o termo das entradas, e a escolha do líder depende dele. Um cluster que mistura as duas versões herda as falhas de segurança do protocolo antigo, que nenhum nó novo consegue corrigir sozinho. Enquanto as rodadas do cluster misto não passarem sem perda, trate a atualização a partir da 0.10.x como **parada programada**: pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova.
 
@@ -125,15 +147,15 @@ DR (Disaster Recovery) é a volta depois de perder o cluster inteiro. As peças 
 
 ### Journal em cluster
 
-Com `AXON_PITR=on`, cada nó do cluster passa a arquivar os lotes confirmados, em ordem de índice do log e com o carimbo do líder (relógio híbrido, HLC, Hybrid Logical Clock). A marca d'água de um nó é o último lote confirmado que ele arquivou. Um nó que recebe o estado por snapshot fica com um buraco, que outro nó cobre. A restauração a um instante pela API administrativa continua exclusiva do nó único.
+Com `AXON_PITR=on`, cada nó do cluster passa a arquivar os lotes confirmados, em ordem de índice do log e com o carimbo do líder (relógio híbrido, HLC, Hybrid Logical Clock). A marca d'água de um nó é o último lote confirmado que ele arquivou. Ao voltar de uma queda, o nó reentrega ao journal o que aplicou depois do último lote arquivado e que o log ainda guarda. Um nó que recebe o estado por snapshot, ou que já descartou esse trecho do log, fica com um buraco, que outro nó cobre. A restauração a um instante pela API administrativa continua exclusiva do nó único.
 
 ### Arquivamento
 
-A ferramenta `com.axonbase.core.dr.DrTool` copia para o armazenamento os backups físicos e os segmentos fechados do journal de um nó. Rode-a ao lado de cada nó, em intervalo (`watch`). Cada backup só conta depois do seu descritor, gravado por último.
+A ferramenta `com.axonbase.core.dr.DrTool` copia para o armazenamento os segmentos fechados do journal e os backups físicos de um nó, nessa ordem, e uma falha num dos dois não impede o outro. Rode-a ao lado de cada nó, em intervalo (`watch`). Sem `watch`, ela sai com 1 se alguma parte falhar. Cada backup só conta depois do seu descritor, gravado por último.
 
 ```text
 <prefixo>/<época>/groups/<grupo>/backups/<nó>/files/...
-<prefixo>/<época>/groups/<grupo>/backups/<nó>/descriptors/<id>.json
+<prefixo>/<época>/groups/<grupo>/backups/<nó>/descriptors/<número>-<carimbo físico>-<carimbo lógico>
 <prefixo>/<época>/groups/<grupo>/journal/<nó>/seg-*.axj
 ```
 
@@ -141,7 +163,7 @@ A **época** separa histórias diferentes: um cluster restaurado reaproveita ín
 
 ### Restauração
 
-1. Escolhe o backup mais novo cujo carimbo não passe do instante pedido.
+1. Escolhe o backup mais novo cujo carimbo não passe do instante pedido. Se a base dele já contiver escritas posteriores ao instante, tenta o anterior.
 2. Baixa o backup e os segmentos de todos os nós.
 3. Restaura o backup e reaplica o journal em ordem de índice, juntando os nós, até o instante. Um índice que falta em todos interrompe a restauração, com o último instante alcançável na mensagem.
 4. Grava o ponto do log e apaga a lista antiga de membros, e entrega um diretório pronto.
