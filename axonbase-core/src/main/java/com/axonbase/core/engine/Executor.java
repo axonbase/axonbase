@@ -2168,12 +2168,12 @@ public final class Executor {
      */
     private Set<String> hnswCandidates(Database db, String table, Catalog.IndexDef index,
                                        AxonValue query, int efSearch) {
-        int top = maxLevel(db, table, index);
-        String entry = entryAt(db, table, index.name(), top);
+        GraphTop top = graphTop(db, table, index);
+        String entry = top.entry();
         if (entry == null) {
             return new LinkedHashSet<>();
         }
-        for (int level = top; level > 0; level--) {
+        for (int level = top.level(); level > 0; level--) {
             List<Neighbor> near = searchLevel(db, table, index, level, entry, query, 1);
             if (!near.isEmpty()) {
                 entry = near.get(0).key();
@@ -6809,10 +6809,11 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
     private void linkHnsw(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector) {
         String key = rid.key().keyString();
         int nodeTop = randomLevel();
-        int topExisting = maxLevel(db, rid.table(), index);
-        int top = Math.max(nodeTop, topExisting);
         // a entrada do nível mais alto é lida antes de o nó novo aparecer no grafo, para que ele não se ache a si mesmo
-        String entry = topExisting >= 0 ? entryAt(db, rid.table(), index.name(), topExisting) : null;
+        GraphTop current = graphTop(db, rid.table(), index);
+        int topExisting = current.level();
+        int top = Math.max(nodeTop, topExisting);
+        String entry = current.entry();
         for (int level = 0; level <= top; level++) {
             records(db).put(vhPresenceKey(db, rid.table(), index.name(), level, key), new byte[0]);
         }
@@ -6870,6 +6871,7 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
      */
     private void unlinkHnsw(Database db, RecordId rid, Catalog.IndexDef index) {
         String key = rid.key().keyString();
+        boolean removed = false;
         for (int level = 0; level < 64; level++) {
             String presence = vhPresenceKey(db, rid.table(), index.name(), level, key);
             boolean present = records(db).get(presence).isPresent();
@@ -6877,15 +6879,81 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             if (!present && edges.isEmpty()) {
                 break;
             }
+            List<String> neighbors = new ArrayList<>(edges.size());
             for (String edge : edges) {
                 String neighbor = edge.substring(edge.lastIndexOf('|') + 1);
                 records(db).delete(edge);
                 records(db).delete(vhNodePrefix(db, rid.table(), index.name(), level, neighbor) + key);
+                neighbors.add(neighbor);
             }
             if (present) {
                 records(db).delete(presence);
             }
+            reconnectNeighbors(db, rid.table(), index, level, neighbors);
+            removed = true;
         }
+        if (removed) {
+            graphTop(db, rid.table(), index);
+        }
+    }
+
+    /**
+     * Mantém ligados entre si os vizinhos de um nó retirado. Sem isso, o nó que fazia a ponte levaria junto o único
+     * caminho até parte do grafo, e nem a busca nem as inserções voltariam a chegar lá. Cada vizinho precisa alcançar
+     * o seguinte por uma aresta direta ou por um vizinho em comum; só quando não alcança os dois são ligados.
+     */
+    private void reconnectNeighbors(Database db, String table, Catalog.IndexDef index, int level,
+                                    List<String> neighbors) {
+        if (neighbors.size() < 2) {
+            return;
+        }
+        Set<String> previousLinks = linksOf(db, table, index, level, neighbors.get(0));
+        for (int i = 1; i < neighbors.size(); i++) {
+            String previous = neighbors.get(i - 1);
+            String node = neighbors.get(i);
+            Set<String> links = linksOf(db, table, index, level, node);
+            if (!links.contains(previous) && java.util.Collections.disjoint(links, previousLinks)) {
+                records(db).put(vhNodePrefix(db, table, index.name(), level, node) + previous, new byte[0]);
+                records(db).put(vhNodePrefix(db, table, index.name(), level, previous) + node, new byte[0]);
+                links.add(previous);
+            }
+            previousLinks = links;
+        }
+    }
+
+    /** Vizinhos de um nó num nível. */
+    private Set<String> linksOf(Database db, String table, Catalog.IndexDef index, int level, String node) {
+        Set<String> links = new HashSet<>();
+        for (String edge : records(db).keysWithPrefix(vhNodePrefix(db, table, index.name(), level, node))) {
+            links.add(edge.substring(edge.lastIndexOf('|') + 1));
+        }
+        return links;
+    }
+
+    /** Maior nível do grafo HNSW que ainda tem nó, com a entrada dele; nível -1 e entrada nula no grafo vazio. */
+    private record GraphTop(int level, String entry) {
+    }
+
+    /**
+     * O nível mais alto só guarda os nós criados desde que ele surgiu. Quando todos saem, o contador desce aqui:
+     * partindo de um nível vazio a busca não acharia nada, e os nós inseridos depois ficariam sem aresta alguma.
+     */
+    private GraphTop graphTop(Database db, String table, Catalog.IndexDef index) {
+        int stored = maxLevel(db, table, index);
+        for (int level = stored; level >= 0; level--) {
+            String entry = entryAt(db, table, index.name(), level);
+            if (entry != null) {
+                if (level < stored) {
+                    records(db).put(vhTopKey(db, table, index.name()),
+                        Integer.toString(level).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                return new GraphTop(level, entry);
+            }
+        }
+        if (stored >= 0) {
+            records(db).delete(vhTopKey(db, table, index.name()));
+        }
+        return new GraphTop(-1, null);
     }
 
     /** Sorteia o nível topo de um novo nó (probabilidade e^-L por camada). */
