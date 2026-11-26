@@ -182,6 +182,8 @@ class LeadershipTransferTest {
 
         for (int i = 0; i < 300; i++) {
             raced.transfer(null, 1_000);
+            // dá a quem esperava a chance de entrar antes da próxima transferência
+            Thread.sleep(1);
         }
         stop.set(true);
         for (CompletableFuture<Void> writer : writers) {
