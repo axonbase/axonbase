@@ -191,6 +191,8 @@ AXON_GATE_TOKEN=troque-por-um-segredo axon-gates/run.sh gate3 --nodes 10.0.0.2,1
 
 Todas as linhas de resultado começam com `GATE1`, `GATE2` ou `GATE3`, então `grep '^GATE'` filtra a saída. O comando sai com 1 quando um portão reprova.
 
+Nenhum portão injeta falha, então cada um conta as eleições abertas durante a medida e reprova se houver alguma (`GATEn RESULT elections=`). A carga do portão 3 retoma no líder da vez se ele mudar, pulando o que já foi gravado, e a troca continua reprovando. O agente não grava a linha de cada requisição atendida com sucesso; eventos do cluster, recusas e erros continuam no log.
+
 No portão 1 o modo vale explicitamente para o armazenamento **e** para o log Raft de cada nó: o caso `always` sincroniza os dois a cada escrita, e o caso `batch`, nenhum. As variáveis `AXON_STORAGE_SYNC` e `AXON_RAFT_LOG_SYNC` no ambiente dos agentes não mudam a comparação, e cada linha `GATE1` informa `storage=` e `raft_log=`.
 
 O portão 1 escreve de dentro do processo do líder, em dois cenários: `raw` confirma lotes direto no consenso, e `sql` faz `CREATE` pelo motor. O portão 2 usa o `/sql` por HTTP e só mede depois que cada nó tem exatamente a quantidade de linhas carregada. Cada resposta é conferida: só conta a que traz a linha pedida, e qualquer erro, resposta vazia ou conteúdo diferente reprova o portão (`errors=` na linha do veredito). O gerador usa o mesmo número de clientes HTTP com um nó e com três. O portão 3 tira o backup físico num seguidor, o nó novo baixa os arquivos pelo agente, restaura, entra como learner e compara uma amostra de 5000 linhas por SHA-256 (Secure Hash Algorithm 256). O tempo total inclui backup, transferência, restauração e o alcance do log.

@@ -16,6 +16,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -41,6 +42,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
 
@@ -100,6 +102,7 @@ public final class RaftGateNode {
             System.exit(2);
         }
         int offset = Integer.parseInt(options.getOrDefault("offset", "0"));
+        System.setOut(withoutServedRequests(System.out));
         RaftGateNode node = new RaftGateNode(options.get("id"), options.get("advertise"),
             Files.createDirectories(Path.of(options.get("data"))), offset, token);
         HttpServer control = HttpServer.create(new InetSocketAddress(CONTROL_PORT + offset), 64);
@@ -108,6 +111,21 @@ public final class RaftGateNode {
         control.start();
         System.out.println("GATE agent id=" + node.id + " control=" + (CONTROL_PORT + offset));
         Thread.currentThread().join();
+    }
+
+    /**
+     * A saída do nó sem a linha de cada requisição atendida com sucesso: sob carga era um gigabyte por nó, gravado
+     * no meio da medida. Recusas, erros e os eventos do cluster continuam saindo.
+     */
+    private static PrintStream withoutServedRequests(OutputStream out) {
+        return new PrintStream(out, true, StandardCharsets.UTF_8) {
+            @Override
+            public void println(String line) {
+                if (line == null || !line.contains("\"event\":\"http_request\"") || !line.contains("\"status\":200")) {
+                    super.println(line);
+                }
+            }
+        };
     }
 
     static Map<String, String> options(String[] args, int from) {
@@ -227,14 +245,14 @@ public final class RaftGateNode {
 
     private synchronized String status() {
         if (backend == null) {
-            return "role=STOPPED ready=false commit=0 last=0";
+            return "role=STOPPED ready=false commit=0 last=0 elections=0";
         }
         if (cluster == null) {
-            return "role=SOLO ready=true commit=0 last=0";
+            return "role=SOLO ready=true commit=0 last=0 elections=0";
         }
         return "role=" + cluster.role() + " ready=" + cluster.status().ready() + " commit=" + cluster.commitIndex()
             + " last=" + cluster.lastIndex() + " snapshot_bytes=" + cluster.snapshotBytes()
-            + " need_backup=" + cluster.learnersNeedingBackup().size();
+            + " need_backup=" + cluster.learnersNeedingBackup().size() + " elections=" + cluster.electionsStarted();
     }
 
     private synchronized ClusterRuntime leader() {
@@ -246,25 +264,46 @@ public final class RaftGateNode {
 
     // ---- carga ----
 
+    /**
+     * Grava a base neste líder. Se uma escrita falha (o líder mudou, por exemplo), para e responde
+     * {@code complete=false}; o controlador repete no líder da vez, que pula os lotes que já tem.
+     */
     private String load(double gigabytes) throws Exception {
         ClusterRuntime leader = leader();
+        RocksDbBackend store = backend;
         long rows = (long) (gigabytes * (1L << 30) / LOAD_VALUE_BYTES);
         long started = System.nanoTime();
         AtomicLong next = new AtomicLong();
+        AtomicLong written = new AtomicLong();
+        AtomicLong skipped = new AtomicLong();
+        AtomicReference<String> stopped = new AtomicReference<>();
         ExecutorService pool = Executors.newFixedThreadPool(8);
         List<Future<?>> tasks = new ArrayList<>();
         for (int t = 0; t < 8; t++) {
             tasks.add(pool.submit(() -> {
-                for (long first = next.getAndAdd(LOAD_ROWS_PER_BATCH); first < rows;
+                for (long first = next.getAndAdd(LOAD_ROWS_PER_BATCH); first < rows && stopped.get() == null;
                      first = next.getAndAdd(LOAD_ROWS_PER_BATCH)) {
+                    long end = Math.min(rows, first + LOAD_ROWS_PER_BATCH);
+                    // O lote entra inteiro: com a última linha aqui, uma tentativa anterior já o gravou.
+                    if (store.get("base-" + (end - 1)).isPresent()) {
+                        skipped.addAndGet(end - first);
+                        continue;
+                    }
                     SplittableRandom random = new SplittableRandom(first);
                     Map<String, byte[]> puts = new LinkedHashMap<>();
-                    for (long row = first; row < Math.min(rows, first + LOAD_ROWS_PER_BATCH); row++) {
+                    for (long row = first; row < end; row++) {
                         byte[] value = new byte[LOAD_VALUE_BYTES];
                         random.nextBytes(value);
                         puts.put("base-" + row, value);
                     }
-                    leader.confirm(id, new CommittedBatch("load-" + first, puts, Set.of()));
+                    try {
+                        leader.confirm(id, new CommittedBatch("load-" + first + "-" + started, puts, Set.of()));
+                        written.addAndGet(end - first);
+                    } catch (RuntimeException notConfirmed) {
+                        if (stopped.compareAndSet(null, notConfirmed.toString())) {
+                            notConfirmed.printStackTrace();
+                        }
+                    }
                 }
             }));
         }
@@ -275,7 +314,10 @@ public final class RaftGateNode {
         } finally {
             pool.shutdownNow();
         }
-        return String.format("GATE3 load gigabytes=%.2f rows=%d seconds=%.0f", gigabytes, rows, seconds(started));
+        String error = stopped.get();
+        return String.format("GATE3 load node=%s gigabytes=%.2f rows=%d written=%d skipped=%d seconds=%.0f complete=%b%s",
+            id, gigabytes, rows, written.get(), skipped.get(), seconds(started), error == null,
+            error == null ? "" : " error=" + error);
     }
 
     private String measureWrites(int writers, int seconds, int warmup, String scenario) throws Exception {
