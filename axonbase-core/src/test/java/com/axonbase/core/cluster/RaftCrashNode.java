@@ -13,9 +13,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Um nó de cluster num processo próprio, para o teste de queda. Enquanto lidera, escreve chaves únicas e
- * imprime {@code ACK <chave>} depois que cada uma foi confirmada; a cada 50 ms imprime o seu estado. Lê
- * {@code stop} (para de escrever) e {@code exit} da entrada padrão.
+ * Um nó de cluster num processo próprio, para os testes de queda e de caos. Enquanto lidera, escreve chaves únicas
+ * e imprime {@code ACK <chave>} depois que cada uma foi confirmada; a cada 50 ms imprime o seu estado. Lê
+ * {@code stop} (para de escrever), {@code load <n>} (grava n entradas grandes se lidera), {@code backup <dir>} (tira
+ * um backup físico, imprimindo {@code BACKUP start} e {@code BACKUP done}) e {@code exit} da entrada padrão.
  *
  * <p>Argumentos: id, diretório, porta, portas dos outros membros separadas por vírgula, modo de sync,
  * número de escritores.</p>
@@ -73,11 +74,42 @@ public final class RaftCrashNode {
             for (String line = in.readLine(); line != null && !line.equals("exit"); line = in.readLine()) {
                 if (line.equals("stop")) {
                     writing.set(false);
+                } else if (line.startsWith("load ")) {
+                    load(node, id, Integer.parseInt(line.substring(5)));
+                } else if (line.startsWith("backup ")) {
+                    Path target = Path.of(line.substring(7));
+                    Thread.ofPlatform().daemon().start(() -> backup(backend, target));
                 }
             }
             running.set(false);
         }
         System.exit(0);
+    }
+
+    /** Entradas de 256 KiB, para um backup demorar o bastante para ser interrompido. */
+    private static void load(ClusterRuntime node, String id, int entries) {
+        java.util.Random random = new java.util.Random(entries);
+        for (int i = 0; i < entries; i++) {
+            byte[] value = new byte[256 * 1024];
+            random.nextBytes(value);
+            try {
+                node.confirm(id, new CommittedBatch("load-" + i, java.util.Map.of("big-" + i, value),
+                    java.util.Set.of()));
+            } catch (RuntimeException notLeading) {
+                return;
+            }
+        }
+        say("LOADED " + entries);
+    }
+
+    private static void backup(RocksDbBackend backend, Path target) {
+        try (com.axonbase.core.storage.PhysicalBackups backups =
+                 com.axonbase.core.storage.PhysicalBackups.open(target)) {
+            say("BACKUP start");
+            say("BACKUP done " + backups.create(backend).id());
+        } catch (RuntimeException failure) {
+            say("BACKUP failed " + failure);
+        }
     }
 
     private static synchronized void say(String line) {
