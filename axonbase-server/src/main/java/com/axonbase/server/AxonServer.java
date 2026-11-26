@@ -69,6 +69,7 @@ public final class AxonServer {
     private volatile boolean metricsRequireAuth;
     private volatile com.axonbase.core.backup.S3SyncManager backups;
     private volatile com.axonbase.core.journal.PitrJournal pitr;
+    private volatile com.axonbase.core.qos.WorkloadGovernor workload;
     private final EventBus events = new EventBus();
     private final java.util.concurrent.ScheduledExecutorService ticker =
         Executors.newSingleThreadScheduledExecutor(r -> {
@@ -310,7 +311,7 @@ public final class AxonServer {
                         (jakarta.servlet.http.HttpServletResponse) response;
                     resp.setHeader("Access-Control-Allow-Origin", config.corsOrigins());
                     resp.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-                    resp.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Axon-Ns, Axon-Db, Axon-Role-Cap, X-Request-Id, X-Correlation-Id");
+                    resp.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Axon-Ns, Axon-Db, Axon-Role-Cap, Axon-Workload, X-Request-Id, X-Correlation-Id");
                     resp.setHeader("Access-Control-Allow-Credentials", "true");
                     if ("OPTIONS".equalsIgnoreCase(((jakarta.servlet.http.HttpServletRequest) request).getMethod())) {
                         resp.setStatus(204);
@@ -484,6 +485,21 @@ public final class AxonServer {
 
     com.axonbase.core.cluster.ClusterRuntime clusterRuntime() {
         return clusterRuntime;
+    }
+
+    /**
+     * Liga a prioridade por tipo de carga (QoS) quando as variáveis {@code AXON_QOS*} pedem. As vagas analíticas são
+     * dimensionadas pelo número de requisições de dados que este servidor atende ao mesmo tempo.
+     */
+    public void qos(java.util.function.Function<String, String> env) {
+        var settings = com.axonbase.core.qos.QosSettings.from(env, Runtime.getRuntime().availableProcessors(),
+            AdmissionControl.limitFor(config.httpThreads()));
+        this.workload = settings.enabled() ? new com.axonbase.core.qos.WorkloadGovernor(settings) : null;
+        ds.workloadGovernor(workload);
+    }
+
+    com.axonbase.core.qos.WorkloadGovernor workload() {
+        return workload;
     }
 
     /** Liga o journal de PITR a este servidor (API, métricas e restauração a um instante). */
@@ -860,6 +876,7 @@ public final class AxonServer {
               .append("axe_backup_runs_total{result=\"success\"} ").append(bk == null ? 0 : bk.runsOk()).append("\n")
               .append("axe_backup_runs_total{result=\"failure\"} ").append(bk == null ? 0 : bk.runsFailed()).append("\n");
             PitrMetrics.append(sb, pitr, ds);
+            QosMetrics.append(sb, workload);
             if (metricsPerDatabase) {
                 sb.append("# TYPE axe_db_keys gauge\n");
                 for (var db : ds.allDatabases()) {
@@ -1145,9 +1162,11 @@ public final class AxonServer {
             AxonValue result = null;
             String error = null;
             boolean outcomeUnknown = false;
+            Throwable failure = null;
             long startedNanos = System.nanoTime();
             ActivityRegistry.Running run = activity.begin(ActivityRegistry.userOf(s), s.namespace(), s.database(), body,
                 "http", req.getRemoteAddr(), null, s);
+            run.handle().requestWorkload(req.getHeader("Axon-Workload"));
             if (config.queryTimeout() > 0) {
                 Future<AxonValue> future = queryExecutor.submit(() -> executeTracked(run, body, s));
                 try {
@@ -1158,6 +1177,7 @@ public final class AxonServer {
                     future.cancel(true);
                     error = Messages.get("query_timeout");
                 } catch (Exception e) {
+                    failure = e.getCause();
                     error = e.getCause() instanceof RuntimeException re ? re.getMessage() : e.getMessage();
                     outcomeUnknown = e.getCause() instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
@@ -1165,6 +1185,7 @@ public final class AxonServer {
                 try {
                     result = executeTracked(run, body, s);
                 } catch (RuntimeException e) {
+                    failure = e;
                     error = e.getMessage();
                     outcomeUnknown = e instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
@@ -1173,6 +1194,8 @@ public final class AxonServer {
             metrics.query(System.nanoTime() - startedNanos, error != null);
             if (outcomeUnknown) {
                 outcomeUnknown(resp, error);
+            } else if (RetryableRefusals.overloaded(resp, failure)) {
+                return;
             } else if (error != null) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(error) + "\"}");
             } else {
@@ -1199,7 +1222,15 @@ public final class AxonServer {
             if (requireAuthenticated(s, resp) || refusedRead(req, resp)) {
                 return;
             }
-            AxonValue rows = ds.execute("SELECT * FROM " + table, s, null);
+            AxonValue rows;
+            try {
+                rows = ds.execute("SELECT * FROM " + table, s, null);
+            } catch (com.axonbase.common.AxonError refused) {
+                if (RetryableRefusals.overloaded(resp, refused)) {
+                    return;
+                }
+                throw refused;
+            }
             json(resp, 200, AxonJson.write(rows));
         }
 

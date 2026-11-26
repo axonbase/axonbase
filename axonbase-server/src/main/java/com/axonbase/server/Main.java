@@ -165,6 +165,7 @@ public final class Main {
 
         AxonServer server = AxonServer.start(ds, secret, config);
         server.pitr(journal);
+        server.qos(System::getenv);
         if (cluster != null) {
             server.clusterStatus(cluster);
         }
