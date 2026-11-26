@@ -1398,18 +1398,40 @@ public final class Datastore {
         if (coordinator == null) {
             tx.commit();
         } else {
-            // Precondições primeiro, replicação depois, aplicação por último. Validar
-            // após o consenso acusaria conflito com a própria escrita que acabou de ser
-            // aplicada ao state machine.
+            commitReplicated(coordinator, session, tx);
+        }
+        session.tx(null);
+        backend.flush();
+        // As notificações retidas durante a transação só saem agora, depois do quórum.
+        session.flushLive();
+    }
+
+    /**
+     * Precondições primeiro, replicação depois, aplicação por último. Validar após o consenso acusaria conflito
+     * com a própria escrita que acabou de ser aplicada ao state machine.
+     *
+     * <p>As travas por chave valem da validação até a aplicação: transações que tocam chaves diferentes correm
+     * juntas (e dividem o fsync do log), e duas sobre a mesma chave se enfileiram, de modo que a segunda valida
+     * contra o que a primeira escreveu.</p>
+     */
+    private void commitReplicated(CommitCoordinator coordinator, Session session, Transaction tx) {
+        try (KeyLocks.Held held = replicationLocks.lock(tx.touchedKeys())) {
+            long validation;
+            try {
+                validation = coordinator.beginValidation();
+            } catch (RuntimeException unavailable) {
+                cancelSession(session);
+                throw unavailable;
+            }
             tx.validate();
             String transactionId = java.util.UUID.randomUUID().toString();
-            // Registrar antes de confirmar: o listener do consenso é chamado de dentro
-            // de confirm() e precisa reconhecer o batch como local para não duplicar
-            // as notificações que esta sessão já vai entregar no flushLive.
+            // Registrar antes de confirmar: o listener do consenso precisa reconhecer o batch
+            // como local para não duplicar as notificações que esta sessão já vai entregar no
+            // flushLive.
             markLocalOrigin(transactionId);
             try {
                 coordinator.confirm(clusterNodeId, new CommittedBatch(transactionId,
-                    tx.stagedWrites(), tx.stagedDeletes()));
+                    tx.stagedWrites(), tx.stagedDeletes()), validation);
             } catch (RuntimeException notConfirmed) {
                 consumeLocalOrigin(transactionId);
                 // Sem confirmação a transação morre aqui. Deixá-la aberta faria a própria
@@ -1417,13 +1439,15 @@ public final class Datastore {
                 cancelSession(session);
                 throw notConfirmed;
             }
-            tx.commitValidated();
+            if (coordinator.appliesTo(backend)) {
+                tx.finishApplied();
+            } else {
+                tx.commitValidated();
+            }
         }
-        session.tx(null);
-        backend.flush();
-        // As notificações retidas durante a transação só saem agora, depois do quórum.
-        session.flushLive();
     }
+
+    private final KeyLocks replicationLocks = new KeyLocks();
 
     private volatile String engineVersion;
 

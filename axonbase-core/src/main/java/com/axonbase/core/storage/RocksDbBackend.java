@@ -95,6 +95,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     private final QuiesceGate gate = new QuiesceGate();
     private final SyncMode syncMode;
     private final WriteOptions writeOptions;
+    /** Para lotes que o log replicado já torna duráveis. */
+    private final WriteOptions unsyncedOptions;
     private final DBOptions dbOptions;
     private final ColumnFamilyOptions cfOptions;
     private final LRUCache blockCache;
@@ -137,6 +139,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         this.bloom = new BloomFilter(10, false);
         this.cfOptions = defaultCfOptions(budget, blockCache, bloom);
         this.writeOptions = new WriteOptions().setSync(syncMode == SyncMode.ALWAYS);
+        this.unsyncedOptions = new WriteOptions().setSync(false);
         try {
             Path dir = Path.of(directory);
             // IDENTITY nem sempre existe (um diretório restaurado pelo BackupEngine só traz CURRENT, MANIFEST e OPTIONS)
@@ -532,16 +535,37 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                        Set<String> readPrefixes) {
         gate.enter();
         try {
-            commitGated(expectedVersions, puts, deletes, readPrefixes);
+            commitGated(expectedVersions, puts, deletes, readPrefixes, writeOptions);
         } finally {
             gate.exit();
         }
     }
 
+    @Override
+    public boolean durable() {
+        return true;
+    }
+
+    @Override
+    public void applyReplicated(Map<String, byte[]> puts, Set<String> deletes) {
+        gate.enter();
+        try {
+            commitGated(Map.of(), puts, deletes, Set.of(), unsyncedOptions);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    @Override
+    public void syncDurable() {
+        syncWal();
+    }
+
     private void commitGated(Map<String, Long> expectedVersions,
                              Map<String, byte[]> puts,
                              Set<String> deletes,
-                             Set<String> readPrefixes) {
+                             Set<String> readPrefixes,
+                             WriteOptions options) {
         boolean exclusive = !readPrefixes.isEmpty();
         var lock = exclusive ? rangeLock.writeLock() : rangeLock.readLock();
         lock.lock();
@@ -573,7 +597,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                     batch.put(dataHandle, raw, entry.getValue());
                     batch.put(versionsHandle, raw, longToBytes(version++));
                 }
-                write(batch);
+                write(batch, options);
             } catch (RocksDBException e) {
                 throw new RuntimeException(e);
             } finally {
@@ -601,7 +625,11 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     }
 
     private void write(WriteBatch batch) throws RocksDBException {
-        db.write(writeOptions, batch);
+        write(batch, writeOptions);
+    }
+
+    private void write(WriteBatch batch, WriteOptions options) throws RocksDBException {
+        db.write(options, batch);
         if (syncMode == SyncMode.BATCH) {
             dirty.set(true);
         }
@@ -896,6 +924,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             if (versionsHandle != null) versionsHandle.close();
             if (db != null) db.close();
             writeOptions.close();
+            unsyncedOptions.close();
             cfOptions.close();
             dbOptions.close();
             blockCache.close();

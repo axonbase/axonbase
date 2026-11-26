@@ -9,6 +9,24 @@ public interface VersionedKvBackend extends KvBackend {
 
     long versionOf(String key);
 
+    /** O conteúdo sobrevive a um reinício do processo, sem precisar ser reconstruído de fora. */
+    default boolean durable() {
+        return false;
+    }
+
+    /**
+     * Grava um lote já confirmado pelo consenso, atômico, sem esperar disco: a durabilidade é a do log
+     * replicado até o próximo {@link #syncDurable()}.
+     */
+    default void applyReplicated(java.util.Map<String, byte[]> puts, java.util.Set<String> deletes) {
+        commit(java.util.Map.of(), puts, deletes);
+    }
+
+    /** Leva ao disco tudo que já foi gravado. */
+    default void syncDurable() {
+        flush();
+    }
+
     /**
      * Maior versão já atribuída a uma chave. Serve de marca d'água para backup incremental:
      * chaves alteradas depois dela têm versão maior. Backends sem contador devolvem 0, e o

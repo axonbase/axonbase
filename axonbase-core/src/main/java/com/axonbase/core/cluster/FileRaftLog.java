@@ -45,7 +45,8 @@ public final class FileRaftLog implements AutoCloseable {
     private final List<LogSegment> segments = new ArrayList<>();
     /** Segura o fsync fora do monitor; quem fecha ou apaga arquivos também precisa dela. */
     private final ReentrantLock syncLock = new ReentrantLock();
-    private final LinkedHashMap<Long, byte[]> cache = new LinkedHashMap<>(256, 0.75f, true);
+    /** Entradas recentes: os bytes para a replicação e, depois da primeira leitura, o lote já decodificado. */
+    private final LinkedHashMap<Long, Cached> cache = new LinkedHashMap<>(256, 0.75f, true);
     private long cachedBytes;
     private long baseIndex;
     private long baseTerm;
@@ -83,9 +84,23 @@ public final class FileRaftLog implements AutoCloseable {
 
     // ---- escrita ----
 
+    private static final class Cached {
+        final byte[] payload;
+        Entry decoded;
+
+        Cached(byte[] payload, Entry decoded) {
+            this.payload = payload;
+            this.decoded = decoded;
+        }
+    }
+
     /** Acrescenta a entrada. Não faz fsync. */
-    public void append(Entry entry) {
+    public synchronized void append(Entry entry) {
         appendEncoded(entry.index(), entry.term(), RaftPayload.encode(entry.batch()));
+        Cached cached = cache.get(entry.index());
+        if (cached != null) {
+            cached.decoded = entry;
+        }
     }
 
     /** Acrescenta uma entrada cujo lote já está codificado. Não faz fsync. */
@@ -240,17 +255,15 @@ public final class FileRaftLog implements AutoCloseable {
     }
 
     /** A entrada, ou {@code null} se foi compactada ou ainda não existe. */
-    public Entry entry(long index) {
-        long term;
-        byte[] payload;
-        synchronized (this) {
-            if (index <= baseIndex || index > lastIndex()) {
-                return null;
-            }
-            term = termAt(index);
-            payload = payload(index);
+    public synchronized Entry entry(long index) {
+        if (index <= baseIndex || index > lastIndex()) {
+            return null;
         }
-        return new Entry(index, term, RaftPayload.decode(payload));
+        Cached cached = load(index);
+        if (cached.decoded == null) {
+            cached.decoded = new Entry(index, termAt(index), RaftPayload.decode(cached.payload));
+        }
+        return cached.decoded;
     }
 
     /** Bytes do lote como foram gravados, ou {@code null} se a entrada não está disponível. */
@@ -258,7 +271,7 @@ public final class FileRaftLog implements AutoCloseable {
         if (index <= baseIndex || index > lastIndex()) {
             return null;
         }
-        return payload(index).clone();
+        return load(index).payload.clone();
     }
 
     /** Todas as entradas disponíveis. Lê o log inteiro; para diagnóstico e testes. */
@@ -325,31 +338,31 @@ public final class FileRaftLog implements AutoCloseable {
         return segments.get(low);
     }
 
-    private byte[] payload(long index) {
-        byte[] cached = cache.get(index);
+    private Cached load(long index) {
+        Cached cached = cache.get(index);
         if (cached != null) {
             return cached;
         }
         try {
-            byte[] read = segmentOf(index).read(index);
-            remember(index, read);
-            return read;
+            return remember(index, segmentOf(index).read(index));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
-    private void remember(long index, byte[] payload) {
+    private Cached remember(long index, byte[] payload) {
+        Cached added = new Cached(payload, null);
         if (payload.length > cacheLimit) {
-            return;
+            return added;
         }
-        byte[] replaced = cache.put(index, payload);
-        cachedBytes += payload.length - (replaced == null ? 0 : replaced.length);
-        Iterator<Map.Entry<Long, byte[]>> eldest = cache.entrySet().iterator();
+        Cached replaced = cache.put(index, added);
+        cachedBytes += payload.length - (replaced == null ? 0 : replaced.payload.length);
+        Iterator<Map.Entry<Long, Cached>> eldest = cache.entrySet().iterator();
         while (cachedBytes > cacheLimit && eldest.hasNext()) {
-            cachedBytes -= eldest.next().getValue().length;
+            cachedBytes -= eldest.next().getValue().payload.length;
             eldest.remove();
         }
+        return added;
     }
 
     private void forgetFrom(long index) {
@@ -361,11 +374,11 @@ public final class FileRaftLog implements AutoCloseable {
     }
 
     private void forget(java.util.function.LongPredicate obsolete) {
-        Iterator<Map.Entry<Long, byte[]>> entries = cache.entrySet().iterator();
+        Iterator<Map.Entry<Long, Cached>> entries = cache.entrySet().iterator();
         while (entries.hasNext()) {
-            Map.Entry<Long, byte[]> next = entries.next();
+            Map.Entry<Long, Cached> next = entries.next();
             if (obsolete.test(next.getKey())) {
-                cachedBytes -= next.getValue().length;
+                cachedBytes -= next.getValue().payload.length;
                 entries.remove();
             }
         }
