@@ -34,10 +34,30 @@ public final class TcpRaftCommitCoordinator implements CommitCoordinator {
     }
 
     @Override
-    public synchronized long confirm(String nodeId, CommittedBatch batch) {
+    public long confirm(String nodeId, CommittedBatch batch) {
         if (runtime != null) {
+            // Sem trava aqui: escritas concorrentes precisam chegar juntas ao runtime para dividir o fsync.
             return runtime.confirm(nodeId, batch);
         }
+        return confirmDirectly(nodeId, batch);
+    }
+
+    @Override
+    public long beginValidation() {
+        return runtime == null ? 0 : runtime.beginValidation();
+    }
+
+    @Override
+    public long confirm(String nodeId, CommittedBatch batch, long validation) {
+        return runtime == null ? confirmDirectly(nodeId, batch) : runtime.confirm(nodeId, batch, validation);
+    }
+
+    @Override
+    public boolean appliesTo(com.axonbase.core.storage.KvBackend backend) {
+        return runtime != null && runtime.appliesTo(backend);
+    }
+
+    private synchronized long confirmDirectly(String nodeId, CommittedBatch batch) {
         if (!node.equals(nodeId)) {
             throw new NotLeaderException(node);
         }

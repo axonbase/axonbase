@@ -14,6 +14,8 @@ O log de escrita antecipada (WAL, Write-Ahead Log) do RocksDB fica sempre ligado
 
 Uma queda apenas do processo do banco não perde nada em nenhum dos três modos, porque o WAL é gravado antes da confirmação.
 
+Em cluster, o log do consenso tem configuração própria, `AXON_RAFT_LOG_SYNC` (`always` por padrão, ou `batch`), descrita em [cluster-raft.md](cluster-raft.md).
+
 No macOS o fsync completo (`F_FULLFSYNC`) custa cerca de 19 ms. Por isso `always` mede 50 operações por segundo com uma thread e 192 com oito. Em Linux o custo costuma ser bem menor, mas a medida ainda não foi feita. Escolha `always` quando a janela zero de perda for obrigatória e a vazão de escrita for baixa.
 
 ## O que mudou no caminho de escrita e de leitura
@@ -106,7 +108,7 @@ O arquivo guarda as métricas brutas e as normalizadas, o número de núcleos e 
 
 - Os comandos que leem varreduras com leitura fantasma em transações explícitas ou no cluster ainda serializam, como o monitor antigo.
 - Um comando muito grande guarda suas escritas em memória até o fim, proporcionalmente ao tamanho.
-- O ganho multi-nó (grupo de commit no Raft, leituras em seguidores, múltiplos grupos Raft) não faz parte desta versão.
+- O grupo de commit no Raft e as leituras em seguidores são da fase E2 (seção abaixo e [cluster-raft.md](cluster-raft.md)). Múltiplos grupos Raft ficam para a E3.
 
 ## Índice criado em segundo plano
 
@@ -148,3 +150,92 @@ e as mesmas mexidas reaplicadas na referência. Dois runs, ambos verdes:
 
 O número de entradas e as 2000 sondas ficaram idênticos aos do índice criado antes da carga, e a duplicata
 em `UNIQUE` abortou sem deixar entradas nem marcador. Para repetir: `-Daxon.gate.index=true`.
+
+## Portões do cluster (fase E2)
+
+Os três portões de desempenho do Raft rodam em máquinas separadas: três nós e um gerador de carga (o portão 3 usa também a máquina do nó novo, que pode ser o próprio gerador). Cada máquina precisa de Java 21.
+
+### Como rodar
+
+Na máquina com o código, gere o pacote e copie `target/raft-gates/axon-gates.tar.gz` para todas:
+
+```bash
+scripts/raft-gates/run.sh bundle
+```
+
+Em cada nó, e no nó novo, suba o agente uma vez (o `--id` é diferente em cada máquina e o token é o mesmo em todas):
+
+```bash
+AXON_GATE_TOKEN=troque-por-um-segredo axon-gates/run.sh node --id n1 --advertise 10.0.0.2 --data /mnt/ssd/axon-gates
+```
+
+No gerador de carga, um comando por portão:
+
+```bash
+AXON_GATE_TOKEN=troque-por-um-segredo axon-gates/run.sh gate1 --nodes 10.0.0.2,10.0.0.3,10.0.0.4
+```
+
+```bash
+AXON_GATE_TOKEN=troque-por-um-segredo axon-gates/run.sh gate2 --nodes 10.0.0.2,10.0.0.3,10.0.0.4
+```
+
+```bash
+AXON_GATE_TOKEN=troque-por-um-segredo axon-gates/run.sh gate3 --nodes 10.0.0.2,10.0.0.3,10.0.0.4 --new 10.0.0.5
+```
+
+| Portão | Meta | Parâmetros (padrão) | Linha do veredito |
+|---|---|---|---|
+| 1, escrita em grupo | com 64 escritores, o caso `always` com pelo menos 60% da vazão do caso `batch` | `--writers 8,64,256`, `--seconds 30`, `--rounds 3`, `--warmup 10` | `GATE1 RESULT` (`PASS` ou `FAIL` só para 64; os demais saem como `INFO`) |
+| 2, leitura em seguidores | 3 nós com pelo menos 2,5 vezes a vazão de leitura de 1 nó | `--rows 100000`, `--connections 192`, `--seconds 30`, `--rounds 3` | `GATE2 RESULT` (o veredito usa a leitura sem consistência pedida) |
+| 3, nó novo | entrar num cluster de 10 GB em menos de 15 minutos sem pausar as escritas por mais de 1 segundo | `--gb 10`, `--rate 1000` escritas por segundo, `--baseline 60`, `--source follower` ou `leader`, `--mode batch` | `GATE3 RESULT` |
+
+Todas as linhas de resultado começam com `GATE1`, `GATE2` ou `GATE3`, então `grep '^GATE'` filtra a saída. O comando sai com 1 quando um portão reprova.
+
+No portão 1 o modo vale explicitamente para o armazenamento **e** para o log Raft de cada nó: o caso `always` sincroniza os dois a cada escrita, e o caso `batch`, nenhum. As variáveis `AXON_STORAGE_SYNC` e `AXON_RAFT_LOG_SYNC` no ambiente dos agentes não mudam a comparação, e cada linha `GATE1` informa `storage=` e `raft_log=`.
+
+O portão 1 escreve de dentro do processo do líder, em dois cenários: `raw` confirma lotes direto no consenso, e `sql` faz `CREATE` pelo motor. O portão 2 usa o `/sql` por HTTP. O portão 3 tira o backup físico num seguidor, o nó novo baixa os arquivos pelo agente, restaura, entra como learner e compara uma amostra de 5000 linhas por SHA-256 (Secure Hash Algorithm 256). O tempo total inclui backup, transferência, restauração e o alcance do log.
+
+Portas em cada nó: 8100 (controle), 8000 (HTTP) e 9000 (Raft). O agente recria a base quando mandado e o servidor dele sobe sem autenticação: use apenas numa rede isolada. Cada subida cria um diretório novo em `--data` e nada é apagado, então reserve disco (o portão 3 guarda a base em cada nó, o backup e a cópia no nó novo). Um endereço pode levar um deslocamento de portas (`127.0.0.1+11000`) para ensaiar numa só máquina.
+
+O teste opcional `RaftWriteGateTest` mede o portão 1 com os três nós num processo e num disco só. Rode-o apenas numa máquina Linux dedicada:
+
+```bash
+mvn -pl axonbase-core -am -Daxon.gate.raft=true -Daxon.gate.raft.writers=8,64,256 -Dtest=RaftWriteGateTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+### Subir um cluster de três nós com o servidor de verdade
+
+A imagem sai do `Dockerfile` da raiz (`docker build -t axonbase .`). Cada nó precisa de:
+
+| Variável | Exemplo no nó 1 |
+|---|---|
+| `AXON_CLUSTER_ID` | `producao` (igual em todos) |
+| `AXON_NODE_ID` | `n1` (diferente em cada um) |
+| `AXON_RAFT_BIND` | `10.0.0.2:9000` (endereço que os outros usam) |
+| `AXON_RAFT_PEERS` | `10.0.0.3:9000,10.0.0.4:9000` |
+| `AXON_SECRET` e `AXON_ROOT_PASSWORD` | segredos próprios, obrigatórios fora do endereço local |
+| `AXON_STORAGE_SYNC` | opcional, `batch` por padrão |
+
+Portas: 8000 (HTTP) e 9000 (Raft). A imagem só declara a 8000, então publique a 9000 também (ou use a rede do host). Use `--path /data/db` com um volume em `/data`: o diretório do Raft é o caminho da base mais `.raft`, e com o padrão `--path /data` ele fica fora do volume. Informe os endereços dos membros por IP (Internet Protocol): um nome que não resolve na subida do processo não é resolvido de novo.
+
+### Medidas locais (apenas informativas)
+
+Feitas num Mac compartilhado com a carga do sistema entre 20 e 600, em Docker Desktop (12 CPUs, 8 GB). **Não valem como veredito** de nenhum portão: a decisão do dono é medir em máquinas dedicadas.
+
+Portão 1, três nós num contêiner e num disco, 12 segundos por cenário, melhor das três rodadas (a de menor carga):
+
+| Cenário e escritores | `always` (ops/s) | `batch` (ops/s) | razão |
+|---|---|---|---|
+| `raw`, 8 | 994 | 2.365 | 42% |
+| `raw`, 64 | 2.407 | 5.754 | 42% |
+| `raw`, 256 | 2.111 | 5.349 | 39% |
+| `sql`, 8 | 1.053 | 3.870 | 27% |
+| `sql`, 64 | 1.970 | 5.736 | 34% |
+| `sql`, 256 | 2.192 | 5.480 | 40% |
+
+Na rodada anterior, com 64 escritores, a razão foi de 30% (`raw`) e 28% (`sql`). **A meta de 60% não foi atingida nesta máquina.**
+
+Portão 2, um nó contra três, 2 CPUs por nó, 96 conexões, duas rodadas: o nó único fez 582 e 295 leituras por segundo, e os três juntos 160 e 122. **A meta não foi atingida**, com o hospedeiro sem CPU livre: o ensaio funcional posterior, com pouquíssimos dados, deu o resultado oposto (4,1 vezes), o que mostra que estes números dependem do ambiente.
+
+Portão 3: o de 10 GB não foi medido (não havia disco para as cópias). O ensaio com 50 MB entrou em 6,8 s, com maior pausa entre escritas de 75 ms e amostra idêntica.
+

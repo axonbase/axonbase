@@ -56,6 +56,7 @@ public final class AxonServer {
     private final TrustStoreRegistry trustStores;
     private final CertificateChallengeService certificateChallenges = new CertificateChallengeService();
     private volatile com.axonbase.core.cluster.ClusterStatusProvider clusterStatus;
+    private static final String READ_CONSISTENCY_HEADER = "Axon-Read-Consistency";
     private volatile com.axonbase.core.cluster.ClusterRuntime clusterRuntime;
     private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicLong inflight = new java.util.concurrent.atomic.AtomicLong();
@@ -285,6 +286,16 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new ImportServlet()), "/import");
         ctx.addServlet(new ServletHolder(new GraphQLServlet(ds, this::withNames, requireAuth)), "/graphql");
         ctx.addServlet(new ServletHolder(new McpServlet(ds, this::withNames, requireAuth)), "/mcp/*");
+        // GraphQL e MCP também leem: num nó que não é o líder valem o limite de defasagem e o cabeçalho.
+        jakarta.servlet.Filter readBarrier = (request, response, chain) -> {
+            if (!refusedRead((HttpServletRequest) request, (HttpServletResponse) response)) {
+                chain.doFilter(request, response);
+            }
+        };
+        for (String path : new String[] {"/graphql", "/mcp/*"}) {
+            ctx.addFilter(asyncFilter(readBarrier), path,
+                java.util.EnumSet.of(jakarta.servlet.DispatcherType.REQUEST));
+        }
         JettyWebSocketServletContainerInitializer.configure(ctx, (sc, wsContainer) -> {});
         ctx.addServlet(new ServletHolder(ws), "/rpc/ws/*");
 
@@ -537,7 +548,10 @@ public final class AxonServer {
         this.clusterStatus = provider == null
             ? com.axonbase.core.cluster.ClusterStatusProvider.Status::local : provider;
         this.clusterRuntime = provider instanceof com.axonbase.core.cluster.ClusterRuntime rt ? rt : null;
-        dispatchers.forEach(dispatcher -> dispatcher.clusterStatus(() -> clusterStatus.status()));
+        dispatchers.forEach(dispatcher -> {
+            dispatcher.clusterStatus(() -> clusterStatus.status());
+            dispatcher.readBarrier(consistency -> clusterStatus.awaitRead(consistency));
+        });
         lastLeader = clusterStatus.status().leader();
         var previous = leaderWatch;
         if (previous != null) {
@@ -571,6 +585,40 @@ public final class AxonServer {
             + esc(status.leader()) + "\",\"leader_address\":\"\",\"detail\":\""
             + esc(Messages.get("server_no_leader")) + "\"}");
         return true;
+    }
+
+    /**
+     * Aplica a consistência pedida no cabeçalho {@code Axon-Read-Consistency} ou, num nó que não é o líder, o
+     * limite de defasagem configurado.
+     *
+     * @return {@code true} quando a resposta de erro já foi escrita
+     */
+    private boolean refusedRead(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        com.axonbase.core.cluster.ReadConsistency wanted;
+        try {
+            wanted = com.axonbase.core.cluster.ReadConsistency.parse(req.getHeader(READ_CONSISTENCY_HEADER));
+        } catch (IllegalArgumentException invalid) {
+            json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(invalid.getMessage()) + "\"}");
+            return true;
+        }
+        var status = clusterStatus.status();
+        if (wanted == null && status.isLeader()) {
+            return false;
+        }
+        try {
+            clusterStatus.awaitRead(wanted);
+            return false;
+        } catch (com.axonbase.core.cluster.StaleReadException stale) {
+            json(resp, 503, "{\"status\":\"ERR\",\"kind\":\"STALE_READ\",\"leader\":\"" + esc(status.leader())
+                + "\",\"leader_address\":\"" + esc(status.leaderAddress()) + "\",\"detail\":\""
+                + esc(stale.getMessage()) + "\"}");
+            return true;
+        }
+    }
+
+    /** A escrita pode ter acontecido: nem 2xx nem a resposta de erro comum, para o cliente não repetir às cegas. */
+    private void outcomeUnknown(HttpServletResponse resp, String detail) throws IOException {
+        json(resp, 504, "{\"status\":\"UNKNOWN\",\"kind\":\"OUTCOME_UNKNOWN\",\"detail\":\"" + esc(detail) + "\"}");
     }
 
     private boolean requireAuthenticated(Session session, HttpServletResponse resp) throws IOException {
@@ -1079,18 +1127,24 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             String body = readBody(req);
-            // Só um nó que não é o líder precisa saber se a instrução escreve (para redirecionar); no líder ou sem
-            // cluster isso custaria um parse a mais em toda requisição.
-            if (!clusterStatus.status().isLeader() && com.axonbase.core.engine.Datastore.isMutation(body)
-                && redirectWrites(req, resp)) {
+            // Só um nó que não é o líder (para redirecionar) ou um pedido de consistência precisam saber se a
+            // instrução escreve; fora disso custaria um parse a mais em toda requisição.
+            boolean follower = !clusterStatus.status().isLeader();
+            boolean classify = follower || req.getHeader(READ_CONSISTENCY_HEADER) != null;
+            boolean mutation = classify && com.axonbase.core.engine.Datastore.isMutation(body);
+            if (follower && mutation && redirectWrites(req, resp)) {
                 return;
             }
             Session s = withNames(req);
             if (requireAuthenticated(s, resp)) {
                 return;
             }
+            if (classify && !mutation && refusedRead(req, resp)) {
+                return;
+            }
             AxonValue result = null;
             String error = null;
+            boolean outcomeUnknown = false;
             long startedNanos = System.nanoTime();
             ActivityRegistry.Running run = activity.begin(ActivityRegistry.userOf(s), s.namespace(), s.database(), body,
                 "http", req.getRemoteAddr(), null, s);
@@ -1105,17 +1159,21 @@ public final class AxonServer {
                     error = Messages.get("query_timeout");
                 } catch (Exception e) {
                     error = e.getCause() instanceof RuntimeException re ? re.getMessage() : e.getMessage();
+                    outcomeUnknown = e.getCause() instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
             } else {
                 try {
                     result = executeTracked(run, body, s);
                 } catch (RuntimeException e) {
                     error = e.getMessage();
+                    outcomeUnknown = e instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
             }
             activity.end(run, error != null, run.handle().cancelled());
             metrics.query(System.nanoTime() - startedNanos, error != null);
-            if (error != null) {
+            if (outcomeUnknown) {
+                outcomeUnknown(resp, error);
+            } else if (error != null) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(error) + "\"}");
             } else {
                 json(resp, 200, AxonJson.write(result));
@@ -1138,7 +1196,7 @@ public final class AxonServer {
         protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             String table = tablePath(req);
             Session s = withNames(req);
-            if (requireAuthenticated(s, resp)) {
+            if (requireAuthenticated(s, resp) || refusedRead(req, resp)) {
                 return;
             }
             AxonValue rows = ds.execute("SELECT * FROM " + table, s, null);
@@ -1157,8 +1215,11 @@ public final class AxonServer {
             }
             AxonValue data = AxonJson.parseDocument(readBody(req));
             String sql = "CREATE " + table + " CONTENT " + AxonJson.write(data);
-            AxonValue out = ds.execute(sql, s, null);
-            json(resp, 200, AxonJson.write(out));
+            try {
+                json(resp, 200, AxonJson.write(ds.execute(sql, s, null)));
+            } catch (com.axonbase.core.cluster.CommitOutcomeUnknownException unknown) {
+                outcomeUnknown(resp, unknown.getMessage());
+            }
         }
     }
 

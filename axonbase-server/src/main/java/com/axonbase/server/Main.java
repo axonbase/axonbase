@@ -84,6 +84,20 @@ public final class Main {
             return;
         }
 
+        // Réplica de leitura: recebe o log, não vota. A base pode vir de um backup físico de um membro.
+        boolean learner = "true".equalsIgnoreCase(System.getenv("AXON_RAFT_LEARNER"));
+        String bootstrapBackup = System.getenv("AXON_RAFT_BOOTSTRAP_BACKUP");
+        if (learner && (config.clusterId().isBlank() || path.equals("memory"))) {
+            throw new IllegalArgumentException(Messages.get("server_learner_requires"));
+        }
+        if (learner && bootstrapBackup != null && !bootstrapBackup.isBlank()) {
+            String directory = path.startsWith("rocksdb:") ? path.substring(8) : path;
+            com.axonbase.core.cluster.LearnerBootstrap
+                .restore(java.nio.file.Path.of(bootstrapBackup.trim()), java.nio.file.Path.of(directory))
+                .ifPresent(applied -> System.out.println(
+                    Messages.get("server_learner_restored", applied.index(), bootstrapBackup.trim())));
+        }
+
         KvBackend backend = switch (path) {
             case "memory" -> new MemoryBackend();
             case String s when s.startsWith("rocksdb:") -> new RocksDbBackend(s.substring(8));
@@ -134,6 +148,9 @@ public final class Main {
             }
             ClusterConfig clusterConfig = ClusterConfig.parse(config.nodeId(), config.clusterId(),
                 config.raftBind(), config.raftPeers());
+            if (learner) {
+                clusterConfig = clusterConfig.asLearner();
+            }
             cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
                 (VersionedKvBackend) backend);
         }

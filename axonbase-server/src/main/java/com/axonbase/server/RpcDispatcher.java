@@ -2,8 +2,11 @@ package com.axonbase.server;
 
 import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterStatusProvider;
+import com.axonbase.core.cluster.CommitOutcomeUnknownException;
 import com.axonbase.core.cluster.NotLeaderException;
 import com.axonbase.core.cluster.QuorumUnavailableException;
+import com.axonbase.core.cluster.ReadConsistency;
+import com.axonbase.core.cluster.StaleReadException;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
@@ -37,6 +40,12 @@ public final class RpcDispatcher {
     public static final int NOT_LEADER = -32010;
     /** Código JSON-RPC de "sem maioria para confirmar a escrita". */
     public static final int NO_QUORUM = -32011;
+    /** A escrita pode ou não ter sido confirmada: consultar antes de repetir. Diferente de uma falha. */
+    public static final int OUTCOME_UNKNOWN = -32013;
+    /** Este nó não atende a leitura com a consistência pedida. */
+    public static final int STALE_READ = -32012;
+    /** Métodos que leem dados e por isso passam pela barreira de leitura num cluster. */
+    private static final Set<String> READ_METHODS = Set.of("query", "select", "kv_get", "kv_scan");
     /** Código JSON-RPC de "protocolo incompatível" (comparte -32600 da invalid request). */
     public static final int PROTOCOL_MISMATCH = -32600;
 
@@ -68,6 +77,7 @@ public final class RpcDispatcher {
     private volatile ActivityRegistry activity;
     private volatile Supplier<ClusterStatusProvider.Status> clusterStatus =
         ClusterStatusProvider.Status::local;
+    private volatile java.util.function.Consumer<ReadConsistency> readBarrier = consistency -> { };
 
     public RpcDispatcher(Datastore ds) {
         this(ds, null, false, 0);
@@ -106,6 +116,37 @@ public final class RpcDispatcher {
         this.clusterStatus = status == null ? ClusterStatusProvider.Status::local : status;
     }
 
+    /** Espera o nó poder atender uma leitura; sem cluster não há o que esperar. */
+    public void readBarrier(java.util.function.Consumer<ReadConsistency> barrier) {
+        this.readBarrier = barrier == null ? consistency -> { } : barrier;
+    }
+
+    /**
+     * Aplica a consistência pedida no campo {@code consistency} (ou o padrão do nó).
+     *
+     * @return o erro a devolver, ou {@code null} quando a leitura pode seguir
+     */
+    private String awaitRead(AxonValue id, Map<String, AxonValue> request, ClusterStatusProvider.Status cluster) {
+        AxonValue requested = request.get("consistency");
+        ReadConsistency wanted;
+        try {
+            wanted = ReadConsistency.parse(requested != null && requested.isString() ? requested.asString() : null);
+        } catch (IllegalArgumentException invalid) {
+            return rpcError(id, -32602, invalid.getMessage());
+        }
+        if (wanted == null && cluster.isLeader()) {
+            return null;
+        }
+        try {
+            readBarrier.accept(wanted);
+            return null;
+        } catch (StaleReadException stale) {
+            return "{\"id\":" + idJson(id) + ",\"error\":{\"code\":" + STALE_READ + ",\"message\":\""
+                + esc(stale.getMessage()) + "\",\"kind\":\"STALE_READ\",\"leader\":\"" + esc(cluster.leader())
+                + "\",\"leader_address\":\"" + esc(cluster.leaderAddress()) + "\"}}";
+        }
+    }
+
     /**
      * Decide se a chamada muda estado replicado.
      *
@@ -142,6 +183,11 @@ public final class RpcDispatcher {
             + ",\"message\":\"" + esc(detail) + "\",\"kind\":\"NOT_LEADER\",\"leader\":\""
             + esc(leader == null ? "" : leader) + "\",\"leader_address\":\""
             + esc(address == null ? "" : address) + "\"}}";
+    }
+
+    private static String outcomeUnknownError(AxonValue id, String detail) {
+        return "{\"id\":" + idJson(id) + ",\"error\":{\"code\":" + OUTCOME_UNKNOWN + ",\"message\":\""
+            + esc(detail) + "\",\"kind\":\"OUTCOME_UNKNOWN\"}}";
     }
 
     private boolean authRequired() {
@@ -312,6 +358,8 @@ public final class RpcDispatcher {
             return ds.execute(sql, session, Map.of());
         } catch (NotLeaderException moved) {
             throw new WriteRedirect(notLeaderError(id, moved.leader(), moved.leaderAddress()));
+        } catch (CommitOutcomeUnknownException unknown) {
+            throw new WriteRedirect(outcomeUnknownError(id, unknown.getMessage()));
         } catch (QuorumUnavailableException noQuorum) {
             throw new WriteRedirect(rpcError(id, NO_QUORUM, noQuorum.getMessage()));
         }
@@ -450,6 +498,12 @@ public final class RpcDispatcher {
             && (session.auth() == null || !authorizedForSession(session))) {
             return rpcError(id, -32003, Messages.get("auth_required"));
         }
+        if (READ_METHODS.contains(method) && !isWrite(method, obj)) {
+            String refused = awaitRead(id, obj, cluster);
+            if (refused != null) {
+                return refused;
+            }
+        }
         AxonValue result = null;
         String error = null;
         int errorCode = -32003;
@@ -507,6 +561,9 @@ public final class RpcDispatcher {
                 } catch (NotLeaderException moved) {
                     failed = true;
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (CommitOutcomeUnknownException unknown) {
+                    failed = true;
+                    return outcomeUnknownError(id, unknown.getMessage());
                 } catch (QuorumUnavailableException noQuorum) {
                     failed = true;
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());
@@ -721,6 +778,9 @@ public final class RpcDispatcher {
                 } catch (NotLeaderException moved) {
                     ds.cancelSession(session);
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (CommitOutcomeUnknownException unknown) {
+                    ds.cancelSession(session);
+                    return outcomeUnknownError(id, unknown.getMessage());
                 } catch (QuorumUnavailableException noQuorum) {
                     ds.cancelSession(session);
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());

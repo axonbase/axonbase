@@ -231,6 +231,7 @@ public final class EmbeddingClient {
             for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
                 long wait = baseWaitMillis << (attempt - 1);
                 try {
+                    com.axonbase.core.engine.ExternalCalls.record();
                     HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
                     int status = response.statusCode();
                     if (status >= 200 && status < 300) {

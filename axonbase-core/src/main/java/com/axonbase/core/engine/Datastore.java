@@ -29,9 +29,7 @@ import com.axonbase.value.AxonValue;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -80,8 +78,10 @@ public final class Datastore {
      * Transações cuja notificação já saiu pela sessão que as originou. O batch volta
      * pelo listener do consenso e não deve gerar um segundo evento.
      */
-    private final Deque<String> locallyOriginated = new ArrayDeque<>();
-    private static final int ORIGINATED_MEMORY = 256;
+    /** Lotes confirmados por este nó e ainda não entregues pelo consenso. */
+    private final java.util.LinkedHashSet<String> locallyOriginated = new java.util.LinkedHashSet<>();
+    /** Só protege um coordenador que nunca entrega; com group commit centenas ficam em voo ao mesmo tempo. */
+    private static final int ORIGINATED_MEMORY = 100_000;
 
     // Operation audit configuration
     private boolean auditEnabled;
@@ -779,7 +779,7 @@ public final class Datastore {
 
     private void markLocalOrigin(String transactionId) {
         synchronized (locallyOriginated) {
-            locallyOriginated.addLast(transactionId);
+            locallyOriginated.add(transactionId);
             while (locallyOriginated.size() > ORIGINATED_MEMORY) {
                 locallyOriginated.removeFirst();
             }
@@ -884,29 +884,61 @@ public final class Datastore {
     // ------------------------------------------------------------------
 
     public AxonValue execute(String sql, Session session, Map<String, AxonValue> vars) {
-        boolean implicitClusterTransaction = commitCoordinator != null && !session.inTransaction()
-            && isMutation(sql);
-        if (implicitClusterTransaction) {
-            beginSession(session);
+        if (commitCoordinator != null && !session.inTransaction() && isMutation(sql)) {
+            return autocommit(session, () -> {
+                var exec = new Executor(this);
+                exec.rawSql = sql;
+                return exec.execute(AxonQl.parse(sql), session, vars);
+            });
         }
-        try {
-            Query query = AxonQl.parse(sql);
-            var exec = new Executor(this);
-            exec.rawSql = sql;
-            AxonValue result = exec.execute(query, session, vars);
-            if (implicitClusterTransaction) {
+        Query query = AxonQl.parse(sql);
+        var exec = new Executor(this);
+        exec.rawSql = sql;
+        AxonValue result = exec.execute(query, session, vars);
+        if (!query.statements().stream().allMatch(st -> st instanceof Statement.Select
+            || st instanceof Statement.Explain || st instanceof Statement.Info)) {
+            // só escrita precisa ir ao disco; um SELECT não pode pagar o flush do RocksDB (a escrita já está no WAL)
+            backend.flush();
+        }
+        return result;
+    }
+
+    /** Tentativas de um comando avulso no cluster quando outro confirma antes sobre as mesmas chaves. */
+    private static final int AUTOCOMMIT_ATTEMPTS = 100;
+
+    /**
+     * Executa um comando avulso numa transação implícita de cluster. Um conflito na confirmação não é um erro do
+     * cliente: nada foi gravado, então o comando é refeito sobre o estado novo, como no nó único, onde ele não
+     * enxergaria conflito. Transações explícitas devolvem o conflito para quem as abriu, e também o comando que
+     * fez uma chamada para fora do banco ({@link ExternalCalls}).
+     */
+    private <T> T autocommit(Session session, java.util.function.Supplier<T> work) {
+        for (int attempt = 1; ; attempt++) {
+            beginSession(session);
+            boolean committing = false;
+            long outbound = ExternalCalls.count();
+            try {
+                T result = work.get();
+                committing = true;
                 commitSession(session);
-            } else if (!query.statements().stream().allMatch(st -> st instanceof Statement.Select
-                || st instanceof Statement.Explain || st instanceof Statement.Info)) {
-                // só escrita precisa ir ao disco; um SELECT não pode pagar o flush do RocksDB (a escrita já está no WAL)
-                backend.flush();
+                return result;
+            } catch (VersionConflictException conflict) {
+                if (session.inTransaction()) {
+                    cancelSession(session);
+                }
+                // Um comando que chamou para fora não é refeito: a chamada aconteceria de novo.
+                if (!committing || attempt >= AUTOCOMMIT_ATTEMPTS || ExternalCalls.count() != outbound) {
+                    throw conflict;
+                }
+                // Espera curta e sorteada para os concorrentes não voltarem todos juntos.
+                java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
+                    .nextLong(1_000_000L * Math.min(attempt, 10)));
+            } catch (RuntimeException e) {
+                if (session.inTransaction()) {
+                    cancelSession(session);
+                }
+                throw e;
             }
-            return result;
-        } catch (RuntimeException e) {
-            if (implicitClusterTransaction && session.inTransaction()) {
-                cancelSession(session);
-            }
-            throw e;
         }
     }
 
@@ -1398,18 +1430,40 @@ public final class Datastore {
         if (coordinator == null) {
             tx.commit();
         } else {
-            // Precondições primeiro, replicação depois, aplicação por último. Validar
-            // após o consenso acusaria conflito com a própria escrita que acabou de ser
-            // aplicada ao state machine.
+            commitReplicated(coordinator, session, tx);
+        }
+        session.tx(null);
+        backend.flush();
+        // As notificações retidas durante a transação só saem agora, depois do quórum.
+        session.flushLive();
+    }
+
+    /**
+     * Precondições primeiro, replicação depois, aplicação por último. Validar após o consenso acusaria conflito
+     * com a própria escrita que acabou de ser aplicada ao state machine.
+     *
+     * <p>As travas por chave valem da validação até a aplicação: transações que tocam chaves diferentes correm
+     * juntas (e dividem o fsync do log), e duas sobre a mesma chave se enfileiram, de modo que a segunda valida
+     * contra o que a primeira escreveu.</p>
+     */
+    private void commitReplicated(CommitCoordinator coordinator, Session session, Transaction tx) {
+        try (KeyLocks.Held held = replicationLocks.lock(tx.touchedKeys())) {
+            long validation;
+            try {
+                validation = coordinator.beginValidation();
+            } catch (RuntimeException unavailable) {
+                cancelSession(session);
+                throw unavailable;
+            }
             tx.validate();
             String transactionId = java.util.UUID.randomUUID().toString();
-            // Registrar antes de confirmar: o listener do consenso é chamado de dentro
-            // de confirm() e precisa reconhecer o batch como local para não duplicar
-            // as notificações que esta sessão já vai entregar no flushLive.
+            // Registrar antes de confirmar: o listener do consenso precisa reconhecer o batch
+            // como local para não duplicar as notificações que esta sessão já vai entregar no
+            // flushLive.
             markLocalOrigin(transactionId);
             try {
                 coordinator.confirm(clusterNodeId, new CommittedBatch(transactionId,
-                    tx.stagedWrites(), tx.stagedDeletes()));
+                    tx.stagedWrites(), tx.stagedDeletes()), validation);
             } catch (RuntimeException notConfirmed) {
                 consumeLocalOrigin(transactionId);
                 // Sem confirmação a transação morre aqui. Deixá-la aberta faria a própria
@@ -1417,13 +1471,15 @@ public final class Datastore {
                 cancelSession(session);
                 throw notConfirmed;
             }
-            tx.commitValidated();
+            if (coordinator.appliesTo(backend)) {
+                tx.finishApplied();
+            } else {
+                tx.commitValidated();
+            }
         }
-        session.tx(null);
-        backend.flush();
-        // As notificações retidas durante a transação só saem agora, depois do quórum.
-        session.flushLive();
     }
+
+    private final KeyLocks replicationLocks = new KeyLocks();
 
     private volatile String engineVersion;
 
@@ -1569,24 +1625,12 @@ public final class Datastore {
      * nun nó con consenso, para que o write viaxe no log replicado.
      */
     private <T> T withKvWrite(Session session, java.util.function.Supplier<T> work) {
-        boolean implicit = commitCoordinator != null && !session.inTransaction();
-        if (implicit) {
-            beginSession(session);
+        if (commitCoordinator != null && !session.inTransaction()) {
+            return autocommit(session, work);
         }
-        try {
-            T result = work.get();
-            if (implicit) {
-                commitSession(session);
-            } else {
-                backend.flush();
-            }
-            return result;
-        } catch (RuntimeException e) {
-            if (implicit && session.inTransaction()) {
-                cancelSession(session);
-            }
-            throw e;
-        }
+        T result = work.get();
+        backend.flush();
+        return result;
     }
 
     private static void requireWritable(Session s) {

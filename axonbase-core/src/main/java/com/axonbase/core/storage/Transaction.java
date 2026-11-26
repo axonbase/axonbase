@@ -174,6 +174,20 @@ public final class Transaction implements KvBackend {
         }
     }
 
+    /** Chaves lidas, escritas ou apagadas: as que decidem se outra transação conflita com esta. */
+    public java.util.Set<String> touchedKeys() {
+        java.util.Set<String> keys = new java.util.HashSet<>(readVersions.keySet());
+        keys.addAll(staged.keySet());
+        keys.addAll(deleted);
+        return keys;
+    }
+
+    /** Fecha a transação cujas escritas já foram aplicadas ao backend pelo consenso. */
+    public void finishApplied() {
+        ensureOpen();
+        finish();
+    }
+
     /**
      * Aplica o staged sen revalidar as precondicións e pecha a transacción.
      *

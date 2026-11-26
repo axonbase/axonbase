@@ -9,6 +9,15 @@ public interface ClusterStatusProvider {
     Status status();
 
     /**
+     * Espera o nó poder atender uma leitura com a consistência pedida ({@code null} usa o padrão do nó).
+     * Um nó único sempre pode.
+     *
+     * @throws StaleReadException quando o nó não alcança a consistência a tempo
+     */
+    default void awaitRead(ReadConsistency consistency) {
+    }
+
+    /**
      * Retrato observável do nó.
      *
      * @param nodeId        identificador deste nó

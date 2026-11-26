@@ -122,6 +122,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     private final QuiesceGate gate = new QuiesceGate();
     private final SyncMode syncMode;
     private final WriteOptions writeOptions;
+    /** Para lotes que o log replicado já torna duráveis. */
+    private final WriteOptions unsyncedOptions;
     private final DBOptions dbOptions;
     private final ColumnFamilyOptions cfOptions;
     private final LRUCache blockCache;
@@ -179,6 +181,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         this.cfOptions = defaultCfOptions(budget, blockCache, bloom);
         this.writeOptions = new WriteOptions().setSync(syncMode == SyncMode.ALWAYS);
         this.ceilingOptions = new WriteOptions();
+        this.unsyncedOptions = new WriteOptions().setSync(false);
         try {
             Path dir = Path.of(directory);
             // IDENTITY nem sempre existe (um diretório restaurado pelo BackupEngine só traz CURRENT, MANIFEST e OPTIONS)
@@ -546,7 +549,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             try (WriteBatch batch = new WriteBatch()) {
                 batch.delete(dataHandle, raw);
                 batch.put(versionsHandle, raw, longToBytes(ticket.firstVersion));
-                write(batch, ticket, stripeIndex(raw));
+                write(batch, ticket, stripeIndex(raw), writeOptions);
                 deliver(ticket, Map.of(), Set.of(key));
             } finally {
                 sequencer.end(ticket);
@@ -567,7 +570,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         try (WriteBatch batch = new WriteBatch()) {
             batch.put(dataHandle, raw, value);
             batch.put(versionsHandle, raw, longToBytes(ticket.firstVersion));
-            write(batch, ticket, stripeIndex(raw));
+            write(batch, ticket, stripeIndex(raw), writeOptions);
             deliver(ticket, Map.of(key, value), Set.of());
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
@@ -584,16 +587,37 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                        Set<String> readPrefixes) {
         gate.enter();
         try {
-            commitGated(expectedVersions, puts, deletes, readPrefixes);
+            commitGated(expectedVersions, puts, deletes, readPrefixes, writeOptions);
         } finally {
             gate.exit();
         }
     }
 
+    @Override
+    public boolean durable() {
+        return true;
+    }
+
+    @Override
+    public void applyReplicated(Map<String, byte[]> puts, Set<String> deletes) {
+        gate.enter();
+        try {
+            commitGated(Map.of(), puts, deletes, Set.of(), unsyncedOptions);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    @Override
+    public void syncDurable() {
+        syncWal();
+    }
+
     private void commitGated(Map<String, Long> expectedVersions,
                              Map<String, byte[]> puts,
                              Set<String> deletes,
-                             Set<String> readPrefixes) {
+                             Set<String> readPrefixes,
+                             WriteOptions options) {
         boolean exclusive = !readPrefixes.isEmpty();
         var lock = exclusive ? rangeLock.writeLock() : rangeLock.readLock();
         lock.lock();
@@ -630,7 +654,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                     batch.put(dataHandle, raw, entry.getValue());
                     batch.put(versionsHandle, raw, longToBytes(version++));
                 }
-                write(batch, ticket, slot);
+                write(batch, ticket, slot, options);
                 deliver(ticket, puts, deletes);
             } catch (RocksDBException e) {
                 throw new RuntimeException(e);
@@ -663,15 +687,20 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
      * Grava o lote. Só durante uma cópia física a posição dele vai junto, numa chave por faixa de trava (assim uma
      * escrita concorrente nunca regrava um valor maior com um menor). O chamador tem a trava da faixa {@code slot}.
      */
-    private void write(WriteBatch batch, CommitSequencer.Ticket ticket, int slot) throws RocksDBException {
+    private void write(WriteBatch batch, CommitSequencer.Ticket ticket, int slot, WriteOptions options)
+            throws RocksDBException {
         if (ticket.recordPosition) {
             batch.put(hlcSlots[slot], CommitSequencer.encode(ticket.stamp, ticket.index));
         }
-        write(batch);
+        write(batch, options);
     }
 
     private void write(WriteBatch batch) throws RocksDBException {
-        db.write(writeOptions, batch);
+        write(batch, writeOptions);
+    }
+
+    private void write(WriteBatch batch, WriteOptions options) throws RocksDBException {
+        db.write(options, batch);
         if (syncMode == SyncMode.BATCH) {
             dirty.set(true);
         }
@@ -1352,6 +1381,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             });
             ceilingOptions.close();
             writeOptions.close();
+            unsyncedOptions.close();
             cfOptions.close();
             dbOptions.close();
             blockCache.close();
