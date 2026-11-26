@@ -145,6 +145,77 @@ class RaftLegacyLeaderTest {
         }
     }
 
+    /** Um seguidor com as entradas "a" e "b" confirmadas no mandato 1. */
+    private static void confirmTwoEntries(RaftNode follower) {
+        assertTrue(append(follower, 1, 1, 0, 0, batch("a")).accepted());
+        assertTrue(append(follower, 1, 2, 1, 1, batch("b")).accepted());
+        heartbeat(follower, 1, 2);
+        assertEquals(2, follower.commitIndex());
+    }
+
+    @Test
+    @DisplayName("líder antigo com o log curto não recebe aceite para gravar por cima do que já foi confirmado")
+    void shortLogLeaderCannotOverwriteConfirmedEntries() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            confirmTwoEntries(follower);
+            // A 0.10.1 apaga o log ao receber um snapshot e pode liderar assim: escreve em índices já confirmados.
+            assertFalse(append(follower, 3, 2, 1, 2, batch("nova")).accepted(),
+                "o aceite faria o líder confirmar uma escrita que ninguém aplica");
+
+            assertTrue(follower.stateMachine().get("b").isPresent());
+            assertTrue(follower.stateMachine().get("nova").isEmpty());
+            assertTrue(append(follower, 3, 2, 1, 2, batch("b")).accepted(), "o reenvio legítimo continua aceito");
+        }
+    }
+
+    @Test
+    @DisplayName("snapshot antigo com índice já passado não conta como entregue")
+    void staleLegacySnapshotIsRefused() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            confirmTwoEntries(follower);
+
+            assertFalse(snapshot(follower, 1, Map.of("z", "z".getBytes(StandardCharsets.UTF_8))).accepted());
+
+            assertEquals(2, follower.commitIndex());
+            assertTrue(follower.stateMachine().get("b").isPresent());
+        }
+    }
+
+    private static RaftWire.Response vote(RaftNode voter, long term, String candidate, long lastIndex,
+                                          long lastTerm) {
+        return voter.handle(new RaftWire.Request(RaftWire.VOTE, "g", term, candidate, lastIndex, 0,
+            RaftPayload.vote(lastIndex, lastTerm)));
+    }
+
+    @Test
+    @DisplayName("não vota em quem tem o log menor que o que este nó já aplicou, mesmo com termo maior no fim")
+    void refusesCandidateThatLacksConfirmedEntries() throws Exception {
+        try (RaftNode voter = new RaftNode("n2", dir, new MemoryBackend())) {
+            confirmTwoEntries(voter);
+
+            assertFalse(vote(voter, 5, "curto", 1, 4).accepted());
+            assertTrue(vote(voter, 5, "completo", 2, 4).accepted());
+        }
+    }
+
+    @Test
+    @DisplayName("estado gravado pela 0.10.1 depois do marcador vale mais que o marcador")
+    void legacyStateNewerThanTheMarkerWins() throws Exception {
+        // O nó antigo recebeu um snapshot com o marcador, aplicou mais entradas sem atualizá-lo e apagou o log.
+        java.nio.file.Files.writeString(dir.resolve("raft.state"),
+            "term=4\nvoted_for=\napplied_index=6\npeers=\n");
+        try (var backend = new com.axonbase.core.storage.RocksDbBackend(dir.resolve("db").toString())) {
+            backend.applyReplicated(Map.of(RaftApplier.APPLIED_KEY, RaftApplier.marker(1, 1)), Set.of());
+
+            try (RaftNode node = new RaftNode("n2", dir, backend)) {
+                assertEquals(6, node.commitIndex());
+                assertEquals(6, node.lastIndex());
+                assertEquals(6, RaftApplier.applied(backend).orElseThrow().index());
+                assertFalse(vote(node, 7, "curto", 5, 6).accepted());
+            }
+        }
+    }
+
     @Test
     @DisplayName("o batimento do líder antigo não confirma uma cauda que não veio dele")
     void heartbeatDoesNotCommitUncheckedTail() throws Exception {
