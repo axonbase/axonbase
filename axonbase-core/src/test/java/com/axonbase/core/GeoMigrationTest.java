@@ -205,6 +205,51 @@ class GeoMigrationTest {
     }
 
     @Test
+    @DisplayName("queda no meio da limpeza do índice antigo deixa o marcador: o binário antigo ainda o refaz")
+    void crashDuringPurgeKeepsTheMarker() throws InterruptedException {
+        MemoryBackend inner = loaded(100);
+        toLegacy(inner);
+        HookBackend backend = new HookBackend(inner);
+        backend.beforeDelete = key -> {
+            if (key.startsWith("SP|")) {
+                throw new IndexBuilder.Crash();
+            }
+        };
+        new Datastore(backend);
+        assertTrue(IndexBuilder.awaitAll(60_000));
+        assertTrue(inner.get("IXB|test|dev|g|g_pos").isPresent(), "sem marcador, o 0.10 usaria um índice pela metade");
+        assertTrue(inner.get("SHV|test|dev|g|g_pos").isEmpty());
+        assertRebuilds(() -> new Datastore(inner));
+    }
+
+    @Test
+    @DisplayName("recarga do catálogo no meio da construção faz recomeçar, sem marcar um índice pela metade")
+    void catalogReloadDuringBuildRestarts() throws InterruptedException {
+        MemoryBackend backend = loaded(700);
+        toLegacy(backend);
+        java.util.concurrent.atomic.AtomicInteger chunks = new java.util.concurrent.atomic.AtomicInteger();
+        CountDownLatch paused = new CountDownLatch(1);
+        CountDownLatch go = new CountDownLatch(1);
+        IndexBuilder.chunkHook(() -> {
+            if (chunks.incrementAndGet() == 2) {
+                paused.countDown();
+                try {
+                    go.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        Datastore ds = new Datastore(backend);
+        assertTrue(paused.await(30, TimeUnit.SECONDS));
+        ds.reloadFromBackend();
+        go.countDown();
+        assertTrue(IndexBuilder.awaitAll(60_000));
+        assertTrue(chunks.get() >= 4, "não recomeçou: " + chunks.get() + " blocos");
+        assertCurrent(ds);
+    }
+
+    @Test
     @DisplayName("índice em dia não é reconstruído ao reabrir")
     void currentIndexIsKept() {
         MemoryBackend backend = loaded(50);

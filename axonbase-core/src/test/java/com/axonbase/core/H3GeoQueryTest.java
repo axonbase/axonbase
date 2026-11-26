@@ -168,6 +168,68 @@ class H3GeoQueryTest {
     }
 
     @Test
+    @DisplayName("mais próximos com várias condições ligadas por AND aplicam todas antes do LIMIT")
+    void nearestWithSeveralConditions() throws InterruptedException {
+        List<double[]> points = GeoTestData.points(8).subList(0, 700);
+        Datastore ds = tables(new Datastore(new MemoryBackend()), Moment.BEFORE_DATA, points);
+        for (double[] center : List.of(points.get(0), points.get(350), new double[] {-46.64, -23.55})) {
+            String query = " WHERE n > 300 AND status = 'x' ORDER BY geo::distance(pos, "
+                + point(center[0], center[1]) + ") LIMIT 8";
+            assertEquals(ns(ds, "SELECT n FROM h" + query), ns(ds, "SELECT n FROM g" + query), query);
+        }
+    }
+
+    @Test
+    @DisplayName("raio ou centro que dependem da linha não usam o índice")
+    void rowDependentRadiusOrCenter() {
+        Datastore ds = new Datastore(new MemoryBackend());
+        ds.createDatabase("test", "dev");
+        run(ds, "DEFINE TABLE g SCHEMALESS; DEFINE TABLE h SCHEMALESS; " + INDEX);
+        for (String table : List.of("g", "h")) {
+            run(ds, "CREATE " + table + ":1 CONTENT {n: 1, alcance: 5000, destino: 0, pos: " + point(0, 0.02) + "}");
+            run(ds, "CREATE " + table + ":2 CONTENT {n: 2, alcance: 10, destino: 0, pos: " + point(0, 0.002) + "}");
+        }
+        for (String where : List.of(
+            " WHERE geo::distance(pos, " + point(0, 0) + ") <= math::max([alcance, 500])",
+            " WHERE geo::distance(pos, geometry::point(destino, 0)) <= 500")) {
+            assertEquals("FULL_SCAN", strategy(ds, "SELECT n FROM g" + where), where);
+            assertEquals(sortedNs(ds, "SELECT n FROM h" + where), sortedNs(ds, "SELECT n FROM g" + where), where);
+        }
+    }
+
+    @Test
+    @DisplayName("mais próximos dentro de uma transação varrem a tabela, sem segurar faixas enormes do índice")
+    void nearestInsideTransactionScans() throws InterruptedException {
+        List<double[]> points = GeoTestData.points(9).subList(0, 200);
+        Datastore ds = tables(new Datastore(new MemoryBackend()), Moment.BEFORE_DATA, points);
+        String order = " ORDER BY geo::distance(pos, " + point(-46.64, -23.55) + ") LIMIT 5";
+        Session s = GeoTestData.session();
+        ds.execute("BEGIN", s, null);
+        assertEquals("FULL_SCAN",
+            ds.execute("EXPLAIN SELECT n FROM g" + order, s, null).asObject().get("strategy").asString());
+        assertEquals(ds.execute("SELECT VALUE n FROM h" + order, s, null),
+            ds.execute("SELECT VALUE n FROM g" + order, s, null));
+        ds.execute("CANCEL", s, null);
+        assertEquals("GEO_KNN", strategy(ds, "SELECT n FROM g" + order));
+    }
+
+    @Test
+    @DisplayName("coordenadas no formato marcado do dump de exportação entram no índice")
+    void taggedDecimalCoordinates() {
+        Datastore ds = new Datastore(new MemoryBackend());
+        ds.createDatabase("test", "dev");
+        run(ds, "DEFINE TABLE g SCHEMALESS; DEFINE TABLE h SCHEMALESS; " + INDEX);
+        String pos = "{type: 'Point', coordinates: [{\"$decimal\": \"-46.5\"}, {\"$decimal\": \"-23.5\"}]}";
+        run(ds, "CREATE g:1 CONTENT {n: 1, pos: " + pos + "}");
+        run(ds, "CREATE h:1 CONTENT {n: 1, pos: " + pos + "}");
+        String where = " WHERE geo::distance(pos, " + point(-46.5, -23.5) + ") <= 100";
+        assertEquals(List.of(1L), ns(ds, "SELECT n FROM h" + where));
+        assertEquals(List.of(1L), ns(ds, "SELECT n FROM g" + where));
+        assertEquals(List.of(1L), ns(ds, "SELECT n FROM g ORDER BY geo::distance(pos, "
+            + point(-46.5, -23.5) + ") LIMIT 1"));
+    }
+
+    @Test
     @DisplayName("registro com chave contendo barra vertical e vírgula é achado e apagado")
     void awkwardRecordKeys() {
         Datastore ds = new Datastore(new MemoryBackend());
