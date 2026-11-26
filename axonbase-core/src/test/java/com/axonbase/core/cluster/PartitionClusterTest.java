@@ -57,6 +57,33 @@ class PartitionClusterTest {
         return rows.asArray().stream().map(r -> r.asObject().get("who").asString()).sorted().toList();
     }
 
+    /**
+     * O que veio do log. Cada motor grava ao subir, só na própria base, o marcador {@code EKM|} da migração de arestas;
+     * um nó cujo motor sobe já com dados o tem e o líder não.
+     */
+    private static Map<String, String> replicated(ClusterRuntime node) {
+        Map<String, String> data = ClusterHarness.data(node);
+        data.keySet().removeIf(key -> key.startsWith("EKM|"));
+        return data;
+    }
+
+    private static void awaitSameData(ClusterRuntime leader, ClusterRuntime other) {
+        Map<String, String> expected = replicated(leader);
+        try {
+            ClusterHarness.await("nó " + other.config().nodeId() + " diferente do líder", 30_000,
+                () -> replicated(other).equals(expected));
+        } catch (AssertionError stillDifferent) {
+            Map<String, String> actual = replicated(other);
+            java.util.Set<String> keys = new java.util.TreeSet<>(expected.keySet());
+            keys.addAll(actual.keySet());
+            keys.removeIf(key -> java.util.Objects.equals(expected.get(key), actual.get(key)));
+            throw new AssertionError(stillDifferent.getMessage() + "; chaves diferentes: "
+                + keys.stream().limit(20).map(k -> k.replace('\0', '/')
+                    + (expected.containsKey(k) ? "" : " (só no nó)")
+                    + (actual.containsKey(k) ? "" : " (só no líder)")).toList());
+        }
+    }
+
     private static void event(Datastore ds, String id, int day) {
         ds.execute("CREATE events:" + id + " CONTENT {at: d\"2026-11-0" + day + "T10:00:00Z\", who: \"" + id + "\"}",
             session(), null);
@@ -94,11 +121,7 @@ class PartitionClusterTest {
             assertEquals(1, report.movedCold());
             assertEquals(0, report.failures());
             cluster.awaitConverged();
-            Map<String, String> expected = ClusterHarness.data(leaderNode);
-            for (ClusterRuntime node : cluster.nodes()) {
-                ClusterHarness.await("nó diferente do líder: " + node.config().nodeId(), 10_000,
-                    () -> ClusterHarness.data(node).equals(expected));
-            }
+            cluster.nodes().forEach(node -> awaitSameData(leaderNode, node));
             assertEquals(List.of("bia", "caio"), who(follower, "events"));
             assertEquals(List.of("new"), who(follower, "sessions"));
         }
@@ -124,9 +147,7 @@ class PartitionClusterTest {
             ClusterRuntime back = cluster.start(id);
             Datastore follower = datastore(back);
 
-            Map<String, String> expected = ClusterHarness.data(leaderNode);
-            ClusterHarness.await("seguidor não alcançou o líder", 30_000,
-                () -> ClusterHarness.data(back).equals(expected));
+            awaitSameData(leaderNode, back);
             ClusterHarness.await("catálogo do seguidor atrasado", 10_000, () -> {
                 follower.reloadFromBackend();
                 return who(follower, "events").equals(List.of("bia", "volta"));
