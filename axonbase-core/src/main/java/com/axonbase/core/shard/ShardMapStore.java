@@ -1,5 +1,7 @@
 package com.axonbase.core.shard;
 
+import com.axonbase.core.hlc.ClockDriftException;
+import com.axonbase.core.hlc.HybridClock;
 import com.axonbase.core.storage.VersionConflictException;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
@@ -82,6 +84,19 @@ public final class ShardMapStore {
         } catch (VersionConflictException lost) {
             return false;
         }
+    }
+
+    /** O mesmo plano de controle, com as mensagens levando (e adiantando) o relógio de quem o usa. */
+    public ShardMapStore stampedBy(HybridClock source) {
+        return new ShardMapStore(request -> {
+            ShardReply reply = meta.execute(request.withStamp(source.now()));
+            try {
+                source.receive(reply.stamp());
+            } catch (ClockDriftException drift) {
+                // o alerta já saiu pelo relógio
+            }
+            return reply;
+        });
     }
 
     /** Aplica a mudança sobre o mapa mais novo, refazendo quando outro grava no meio. */

@@ -67,6 +67,7 @@ public final class ShardCodec {
                 text(out, SlotRange.format(filter.ranges()));
             }
             stamp(out, request.stamp());
+            out.writeBoolean(request.system());
         });
     }
 
@@ -90,8 +91,9 @@ public final class ShardCodec {
                 String field = readText(in);
                 filter = new SlotFilter(table, field, SlotRange.parse(readText(in)));
             }
-            return new ShardRequest(namespace, database, sql, vars, atomic, partial, filter, readStamp(in),
-                authorization);
+            HlcTimestamp stamp = readStamp(in);
+            return new ShardRequest(namespace, database, sql, vars, atomic, partial, filter, stamp, authorization,
+                in.readBoolean());
         });
     }
 

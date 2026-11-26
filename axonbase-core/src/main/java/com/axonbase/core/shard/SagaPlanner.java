@@ -46,6 +46,10 @@ final class SagaPlanner {
     }
 
     AxonValue finish(ShardMap map, GatewaySession session, String name, String correlationId, boolean cancel) {
+        if (cancel) {
+            // a compensação grava no shard que registrou o passo: com o slot em movimento, gravaria no lugar errado
+            GatewayRules.requireNoMigration(map);
+        }
         GatewaySession.Saga saga = new GatewaySession.Saga(name, correlationId);
         List<String> open = new ArrayList<>(running(map, session, saga));
         if (open.isEmpty()) {
@@ -120,6 +124,7 @@ final class SagaPlanner {
     }
 
     private static String target(GatewaySession.Saga saga) {
+        GatewayRules.requireIdentifier(saga.name());
         return saga.name() + " WITH CORRELATION " + quoted(saga.correlationId());
     }
 
@@ -139,6 +144,7 @@ final class SagaPlanner {
 
     /** O estado da saga no shard, ou {@code null} se ele não a conhece. */
     private String state(ShardMap map, GatewaySession session, String shard, GatewaySession.Saga saga) {
+        GatewayRules.requireIdentifier(saga.name());
         String text = "SHOW SAGA TRANSACTION " + saga.name() + " " + quoted(saga.correlationId());
         AxonValue reply = context.send(map, Plan.Part.of(shard, text), session, false);
         if (!reply.isObject()) {

@@ -141,8 +141,10 @@ public final class ShardGateway implements AutoCloseable {
             case Statement.Insert insert -> creates.insert(map, session, piece, insert);
             case Statement.Update update -> mutations.update(map, session, piece, update);
             case Statement.Delete delete -> mutations.delete(map, session, piece, delete);
-            case Statement.Relate relate -> mutations.relate(map, session, piece, relate.from(), relate.to());
-            case Statement.Unrelate unrelate -> mutations.relate(map, session, piece, unrelate.from(), unrelate.to());
+            case Statement.Relate relate ->
+                mutations.relate(map, session, piece, relate.from(), relate.kind(), relate.to());
+            case Statement.Unrelate unrelate ->
+                mutations.relate(map, session, piece, unrelate.from(), unrelate.kind(), unrelate.to());
             case Statement.Live live -> throw ShardException.refused("cross_live");
             case Statement.Kill kill -> throw ShardException.refused("cross_live");
             default -> {
@@ -181,6 +183,10 @@ public final class ShardGateway implements AutoCloseable {
         List<String> done = new ArrayList<>();
         for (Plan.Part part : parts) {
             try {
+                if (!done.isEmpty() && maps.reload().epoch() != map.epoch()) {
+                    // o plano vale para a época em que foi feito: o que falta poderia cair no shard antigo
+                    throw new ShardException(ShardException.Code.STALE_MAP, ShardMessages.get("map_changed"));
+                }
                 replies.add(context.send(map, part, session, false));
                 done.add(part.shard());
             } catch (RuntimeException e) {
@@ -253,15 +259,15 @@ public final class ShardGateway implements AutoCloseable {
                 script.append(piece.text()).append(";\n");
                 continue;
             }
+            if (statement instanceof Statement.Let) {
+                // o valor decidiria o shard das instruções seguintes, e o gateway não o conhece
+                throw ShardException.refused("txn_let");
+            }
             if (statement instanceof Statement.Use || statement instanceof Statement.Begin
                 || DdlPlanner.isDefinition(statement)) {
                 throw ShardException.refused("txn_statement");
             }
-            Plan plan = statement instanceof Statement.Let ? null : plan(map, session, piece);
-            if (plan == null) {
-                script.append(piece.text()).append(";\n");
-                continue;
-            }
+            Plan plan = plan(map, session, piece);
             if (plan.parts().size() != 1 || plan.parts().get(0).partial()
                 || shard != null && !shard.equals(plan.parts().get(0).shard())) {
                 throw ShardException.refused("txn_multi_shard");
@@ -301,14 +307,14 @@ public final class ShardGateway implements AutoCloseable {
     }
 
     private AxonValue let(ShardMap map, GatewaySession session, ScriptStatements.Piece piece, Statement.Let let) {
-        StatementScan scan = StatementScan.of(let.value());
         AxonValue value;
-        if (scan.subquery() || scan.graph() || scan.program()) {
+        if (GatewayExpressions.local(let.value(), session.vars().keySet())) {
+            value = context.evaluate(let.value(), session);
+        } else {
+            // o resto é calculado por um shard, com a autorização do cliente
             GatewayRules.requireHomeOnly(map, session, let);
             value = context.send(map, Plan.Part.of(map.home().id(), piece.text() + ";\nRETURN $" + let.name()),
                 session, false);
-        } else {
-            value = context.evaluate(let.value(), session);
         }
         session.vars().put(let.name(), value);
         return AxonValue.nul();

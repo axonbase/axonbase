@@ -9,6 +9,7 @@ import com.axonbase.core.shard.ShardGateway;
 import com.axonbase.core.shard.ShardInfo;
 import com.axonbase.core.shard.ShardMap;
 import com.axonbase.core.shard.ShardMapStore;
+import com.axonbase.core.shard.ShardMessages;
 import com.axonbase.core.shard.ShardMover;
 import com.axonbase.core.shard.SlotRange;
 import com.axonbase.core.shard.backup.ClusterBackup;
@@ -44,6 +45,7 @@ public final class GatewayServer implements AutoCloseable {
 
     /** Carimbo do relógio híbrido que o cliente devolve para preservar a ordem entre gateways. */
     private static final String CLOCK_HEADER = "Axon-HLC";
+    private static final String ROLE_CAP_HEADER = "Axon-Role-Cap";
     private static final int MAX_BODY = 16 << 20;
 
     /**
@@ -130,6 +132,10 @@ public final class GatewayServer implements AutoCloseable {
         if (!"POST".equals(req.getMethod())) {
             resp.setStatus(405);
             return;
+        }
+        if (req.getHeader(ROLE_CAP_HEADER) != null) {
+            // ignorar o teto daria ao cliente mais do que ele pediu
+            throw new ShardException(ShardException.Code.REFUSED, ShardMessages.get("role_cap"));
         }
         String script = body(req);
         observe(req.getHeader(CLOCK_HEADER));

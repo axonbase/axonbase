@@ -33,7 +33,7 @@ final class MutationPlanner {
         String table = StatementScan.tableOf(target).orElse(null);
         String field = table == null ? null : map.shardKey(GatewayRules.key(session, table)).orElse(null);
         if (field == null) {
-            requireUnshardedTarget(map, session, target);
+            GatewayRules.requireNamedSource(map, context, session, target);
             GatewayRules.requireHomeOnly(map, session, piece.statement());
             return Plan.write(map.home().id(), piece.text());
         }
@@ -43,8 +43,7 @@ final class MutationPlanner {
         if (byRecordId && field.equals("id")) {
             values = List.of(context.evaluate(target, session));
         } else {
-            Optional<List<AxonValue>> restriction =
-                ShardRouting.restriction(condition, field, expr -> context.evaluate(expr, session));
+            Optional<List<AxonValue>> restriction = context.restriction(condition, field, session);
             if (restriction.isPresent()) {
                 values = restriction.get();
             }
@@ -54,7 +53,9 @@ final class MutationPlanner {
         requireKeyUnchanged(session, table, field, data, values);
         List<String> owners = slots == null ? map.shardIds() : GatewayRules.owners(map, slots);
         if (upsert) {
-            owners = List.of(upsertOwner(map, session, table, field, data, byRecordId, slots, owners));
+            String owner = upsertOwner(map, session, table, field, data, byRecordId, slots, owners);
+            requireFreeId(map, session, table, field, target, data, owner);
+            owners = List.of(owner);
         }
         if (slots == null) {
             GatewayRules.requireNoMigration(map);
@@ -107,7 +108,21 @@ final class MutationPlanner {
         if (created == null || !slots.contains(SlotHash.ofValue(created))) {
             throw ShardException.refused("shard_key_required", table, field);
         }
+        GatewayRules.requireStorableKey(created);
         return map.ownerOf(SlotHash.ofValue(created));
+    }
+
+    /** Um UPSERT por outro campo cria com o id escolhido: ele não pode existir em outro shard. */
+    private void requireFreeId(ShardMap map, GatewaySession session, String table, String field, Expr target,
+                               Statement.Data data, String owner) {
+        if (field.equals("id")) {
+            return;
+        }
+        AxonValue id = target instanceof Expr.RecordId ? context.evaluate(target, session)
+            : creates.dataField(session, data, "id");
+        if (id != null) {
+            creates.requireUnusedId(map, session, table, id, owner);
+        }
     }
 
     private void requireKeyUnchanged(GatewaySession session, String table, String field, Statement.Data data,
@@ -117,7 +132,9 @@ final class MutationPlanner {
         }
         if (data instanceof Statement.Data.Patch patch) {
             AxonValue operations = context.evaluate(patch.patch(), session);
-            if (operations.isArray() && operations.asArray().stream().anyMatch(op -> touches(op, field))) {
+            // um objeto no lugar da lista é mesclado ao registro pelo motor
+            if (operations.isArray() && operations.asArray().stream().anyMatch(op -> touches(op, field))
+                || operations.isObject() && operations.asObject().containsKey(field)) {
                 throw ShardException.refused("shard_key_immutable", table, field);
             }
             return;
@@ -163,9 +180,12 @@ final class MutationPlanner {
         return false;
     }
 
-    Plan relate(ShardMap map, GatewaySession session, ScriptStatements.Piece piece, Expr from, Expr to) {
+    Plan relate(ShardMap map, GatewaySession session, ScriptStatements.Piece piece, Expr from, Expr kind, Expr to) {
+        for (Expr end : new Expr[] {from, kind, to}) {
+            GatewayRules.requireNoLink(map, end);
+        }
         if (GatewayRules.databaseSharded(map, session)) {
-            for (Expr end : new Expr[] {from, to}) {
+            for (Expr end : new Expr[] {from, kind, to}) {
                 if (end == null) {
                     continue;
                 }
@@ -175,14 +195,7 @@ final class MutationPlanner {
                 }
             }
         }
+        GatewayRules.requireHomeOnly(map, session, piece.statement());
         return Plan.write(map.home().id(), piece.text());
-    }
-
-    private void requireUnshardedTarget(ShardMap map, GatewaySession session, Expr target) {
-        if (target instanceof Expr.Ident || target instanceof Expr.RecordId || target instanceof Expr.Qualified
-            || !GatewayRules.databaseSharded(map, session)) {
-            return;
-        }
-        throw ShardException.refused("target_unknown");
     }
 }

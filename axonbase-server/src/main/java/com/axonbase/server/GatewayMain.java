@@ -61,9 +61,12 @@ public final class GatewayMain {
                 Duration.ofMillis(number(env, "AXON_GATEWAY_DEADLINE_MS", 15_000)), explicit.equals("check"));
         }
 
-        /** Quanto a movimentação de slots espera: duas validades do mapa mais o tempo de uma requisição. */
+        /**
+         * Quanto a movimentação de slots espera: duas validades do mapa mais o tempo de duas requisições (a que um
+         * gateway começou com o mapa antigo, com a nova tentativa que ela ainda pode fazer dentro do prazo).
+         */
         Duration propagation() {
-            return mapTtl.multipliedBy(2).plus(deadline);
+            return mapTtl.multipliedBy(2).plus(deadline.multipliedBy(2));
         }
 
         /** {@code s0=http://a:8000,http://b:8000;s1=http://c:8000} */

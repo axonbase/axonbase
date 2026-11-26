@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * Descobre, só pelo texto, quais valores da chave de shard uma condição admite. Vale uma igualdade ou um
@@ -19,17 +20,19 @@ final class ShardRouting {
     }
 
     /**
+     * @param known    diz se quem chama consegue calcular a expressão
      * @param constant calcula uma expressão que não depende da base (literal, parâmetro, record id, lista)
      * @return os valores admitidos para {@code field}, ou vazio quando a condição não a restringe
      */
-    static Optional<List<AxonValue>> restriction(Expr condition, String field, Function<Expr, AxonValue> constant) {
+    static Optional<List<AxonValue>> restriction(Expr condition, String field, Predicate<Expr> known,
+                                                 Function<Expr, AxonValue> constant) {
         if (!(condition instanceof Expr.Binary binary)) {
             return Optional.empty();
         }
         return switch (binary.op()) {
             case AND -> {
-                Optional<List<AxonValue>> left = restriction(binary.left(), field, constant);
-                Optional<List<AxonValue>> right = restriction(binary.right(), field, constant);
+                Optional<List<AxonValue>> left = restriction(binary.left(), field, known, constant);
+                Optional<List<AxonValue>> right = restriction(binary.right(), field, known, constant);
                 // as duas partes valem ao mesmo tempo: serve a mais estreita
                 if (left.isEmpty()) {
                     yield right;
@@ -37,11 +40,11 @@ final class ShardRouting {
                 yield right.isEmpty() || left.get().size() <= right.get().size() ? left : right;
             }
             case EQ, EQ_EXACT -> {
-                Optional<AxonValue> value = isField(binary.left(), field) ? value(binary.right(), constant)
-                    : isField(binary.right(), field) ? value(binary.left(), constant) : Optional.empty();
+                Optional<AxonValue> value = isField(binary.left(), field) ? value(binary.right(), known, constant)
+                    : isField(binary.right(), field) ? value(binary.left(), known, constant) : Optional.empty();
                 yield value.map(List::of);
             }
-            case INSIDE -> isField(binary.left(), field) ? values(binary.right(), constant) : Optional.empty();
+            case INSIDE -> isField(binary.left(), field) ? values(binary.right(), known, constant) : Optional.empty();
             default -> Optional.empty();
         };
     }
@@ -62,16 +65,17 @@ final class ShardRouting {
         };
     }
 
-    private static Optional<AxonValue> value(Expr expr, Function<Expr, AxonValue> constant) {
-        if (!isConstant(expr)) {
+    private static Optional<AxonValue> value(Expr expr, Predicate<Expr> known, Function<Expr, AxonValue> constant) {
+        if (!isConstant(expr) || !known.test(expr)) {
             return Optional.empty();
         }
         AxonValue value = constant.apply(expr);
         return routable(value) ? Optional.of(value) : Optional.empty();
     }
 
-    private static Optional<List<AxonValue>> values(Expr expr, Function<Expr, AxonValue> constant) {
-        if (!isConstant(expr)) {
+    private static Optional<List<AxonValue>> values(Expr expr, Predicate<Expr> known,
+                                                    Function<Expr, AxonValue> constant) {
+        if (!isConstant(expr) || !known.test(expr)) {
             return Optional.empty();
         }
         AxonValue list = constant.apply(expr);

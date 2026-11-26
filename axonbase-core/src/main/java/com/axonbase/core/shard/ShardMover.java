@@ -2,14 +2,18 @@ package com.axonbase.core.shard;
 
 import com.axonbase.core.hlc.ClockDriftException;
 import com.axonbase.core.hlc.HybridClock;
+import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.function.Function;
 
 /**
@@ -17,12 +21,16 @@ import java.util.function.Function;
  * trocar o dono, esperar, apagar da origem e encerrar. Uma queda em qualquer ponto se resolve com {@link #resume()}.
  *
  * <p>A segurança depende de duas condições: todo acesso passa por um gateway, e a espera ({@code propagation}) é maior
- * que a validade do mapa nos gateways somada ao tempo máximo de uma requisição. Rode um movimentador por vez.</p>
+ * que a validade do mapa nos gateways somada ao tempo máximo de uma requisição. Uma execução que assume a movimentação
+ * tira a anterior, que para antes do passo seguinte.</p>
  */
 public final class ShardMover {
 
     private static final int BATCH = 500;
     private static final String ROWS = "__axon_rows";
+    private static final String SAGA_NAMESPACE = "system";
+    private static final String SAGA_DATABASE = "saga";
+    private static final String SAGA_TABLE = "saga";
 
     private final ShardMapStore store;
     private final Function<ShardInfo, ShardClient> clients;
@@ -35,7 +43,7 @@ public final class ShardMover {
      */
     public ShardMover(ShardMapStore store, Function<ShardInfo, ShardClient> clients, Duration propagation,
                       HybridClock clock) {
-        this.store = store;
+        this.store = store.stampedBy(clock);
         this.clients = clients;
         this.propagation = propagation;
         this.clock = clock;
@@ -49,8 +57,23 @@ public final class ShardMover {
             throw ShardException.refused("shard_map_invalid", "shard repetido: " + shard.id());
         }
         ShardClient target = clients.apply(shard);
-        AxonValue definitions = send(client(map, map.home().id()), ShardRequest.definitions());
-        for (AxonValue item : definitions.asArray()) {
+        replicate(client(map, map.home().id()), target);
+        ShardMap added = store.update(current -> current.withShard(shard));
+        // uma definição feita por um gateway que ainda não via o shard novo chega nesta segunda passada
+        settle();
+        replicate(client(map, map.home().id()), target);
+        return added;
+    }
+
+    /** Aplica no destino as definições do shard base que ele ainda não tem. */
+    private void replicate(ShardClient home, ShardClient target) {
+        List<AxonValue> wanted = send(home, ShardRequest.definitions()).asArray();
+        Set<String> present = new HashSet<>();
+        send(target, ShardRequest.definitions()).asArray().forEach(item -> present.add(AxonJson.write(item)));
+        for (AxonValue item : wanted) {
+            if (present.contains(AxonJson.write(item))) {
+                continue;
+            }
             Map<String, AxonValue> command = item.asObject();
             String namespace = emptyToNull(command.get("ns").asString());
             String database = emptyToNull(command.get("db").asString());
@@ -59,7 +82,6 @@ public final class ShardMover {
             send(target, ShardRequest.of(namespace, database,
                 definition.isEmpty() ? "INFO FOR DATABASE" : definition));
         }
-        return store.update(current -> current.withShard(shard));
     }
 
     /** Move as faixas (de um mesmo dono) para o destino. Repetir a mesma chamada retoma de onde parou. */
@@ -67,6 +89,7 @@ public final class ShardMover {
         ShardMap map = store.require();
         if (map.migration().isEmpty()) {
             ShardMap next = map.startMigration(ranges, target);
+            requireNoOpenSaga(map, next.migration().orElseThrow().source());
             if (!store.compareAndSet(map.epoch(), next)) {
                 throw new ShardException(ShardException.Code.STALE_MAP,
                     ShardMessages.get("shard_map_invalid", "o mapa mudou; repita"));
@@ -80,57 +103,108 @@ public final class ShardMover {
         return resume();
     }
 
-    /** Leva a movimentação em curso até o fim. */
+    /** Leva a movimentação em curso até o fim, tomando o lugar de quem a conduzia. */
     public ShardMap resume() {
-        ShardMap map = store.require();
+        String runner = UUID.randomUUID().toString();
+        ShardMap map = claim(runner, null);
         ShardMap.Migration migration = migration(map);
         if (migration.phase() == ShardMap.MigrationPhase.COPY) {
             settle();
+            requireSagasClosed(map, runner);
             for (Map.Entry<ShardMap.TableKey, String> table : map.tables().entrySet()) {
-                copy(map, migration, table.getKey(), table.getValue());
+                copy(map, runner, table.getKey(), table.getValue());
             }
-            map = store.update(current -> current.migration().orElseThrow().phase() == ShardMap.MigrationPhase.COPY
-                ? current.switchOwner() : current);
+            map = store.update(current -> owned(current, runner, ShardMap.MigrationPhase.COPY).switchOwner());
         }
         settle();
         for (Map.Entry<ShardMap.TableKey, String> table : map.tables().entrySet()) {
+            owned(store.require(), runner, ShardMap.MigrationPhase.CLEANUP);
             delete(map, migration.source(), table.getKey(), table.getValue(), migration.ranges());
         }
-        return store.update(ShardMap::finishMigration);
+        return store.update(current -> owned(current, runner, ShardMap.MigrationPhase.CLEANUP).finishMigration());
     }
 
     /** Desiste antes da troca de dono: apaga a cópia do destino. */
     public ShardMap abort() {
-        ShardMap map = store.require();
-        ShardMap.Migration migration = migration(map);
-        if (migration.phase() != ShardMap.MigrationPhase.COPY) {
-            throw ShardException.refused("shard_map_invalid", "o dono já mudou: retome a movimentação");
-        }
+        String runner = UUID.randomUUID().toString();
+        ShardMap map = claim(runner, ShardMap.MigrationPhase.COPY);
+        // quem conduzia antes pode ter um comando a caminho: ele chega durante a espera
         settle();
-        // a cópia sai antes de o filtro das leituras sair
-        for (Map.Entry<ShardMap.TableKey, String> table : map.tables().entrySet()) {
-            delete(map, migration.target(), table.getKey(), table.getValue(), migration.ranges());
-        }
-        return store.update(ShardMap::abortMigration);
+        return discard(map, runner);
     }
 
-    private void copy(ShardMap map, ShardMap.Migration migration, ShardMap.TableKey table, String field) {
+    /** Apaga a cópia do destino e encerra a movimentação. */
+    private ShardMap discard(ShardMap map, String runner) {
+        ShardMap.Migration migration = migration(map);
+        // a cópia sai antes de o filtro das leituras sair
+        for (Map.Entry<ShardMap.TableKey, String> table : map.tables().entrySet()) {
+            owned(store.require(), runner, ShardMap.MigrationPhase.COPY);
+            delete(map, migration.target(), table.getKey(), table.getValue(), migration.ranges());
+        }
+        return store.update(current -> owned(current, runner, ShardMap.MigrationPhase.COPY).abortMigration());
+    }
+
+    private ShardMap claim(String runner, ShardMap.MigrationPhase required) {
+        return store.update(current -> {
+            ShardMap.Migration migration = migration(current);
+            if (required != null && migration.phase() != required) {
+                throw ShardException.refused("shard_map_invalid", "o dono já mudou: retome a movimentação");
+            }
+            return current.withRunner(runner);
+        });
+    }
+
+    /** O mapa, se a movimentação ainda é desta execução e está na fase esperada. */
+    private static ShardMap owned(ShardMap map, String runner, ShardMap.MigrationPhase phase) {
+        boolean mine = map.migration()
+            .filter(m -> m.runner().equals(runner) && m.phase() == phase).isPresent();
+        if (!mine) {
+            throw new ShardException(ShardException.Code.STALE_MAP, ShardMessages.get("move_superseded"));
+        }
+        return map;
+    }
+
+    /** Uma saga aberta antes do anúncio pode ter passos que a compensação desfaria no dono antigo. */
+    private void requireSagasClosed(ShardMap map, String runner) {
+        try {
+            requireNoOpenSaga(map, migration(map).source());
+        } catch (ShardException open) {
+            if (open.code() == ShardException.Code.REFUSED) {
+                discard(map, runner);
+            }
+            throw open;
+        }
+    }
+
+    private void requireNoOpenSaga(ShardMap map, String shard) {
+        ShardClient source = client(map, shard);
+        AxonValue ledger = send(source, ShardRequest.of(SAGA_NAMESPACE, SAGA_DATABASE, "INFO FOR DATABASE"));
+        // consultar uma tabela que não existe a criaria
+        if (!GatewayRules.mentions(ledger, SAGA_TABLE)) {
+            return;
+        }
+        AxonValue open = send(source, ShardRequest.of(SAGA_NAMESPACE, SAGA_DATABASE,
+            "SELECT * FROM " + SAGA_TABLE + " WHERE status = 'RUNNING' LIMIT 1"));
+        if (open.isArray() && !open.asArray().isEmpty()) {
+            throw ShardException.refused("move_saga_open", shard);
+        }
+    }
+
+    private void copy(ShardMap map, String runner, ShardMap.TableKey table, String field) {
+        ShardMap.Migration migration = migration(map);
         // sobras de uma tentativa anterior saem antes, para os índices do destino não contarem duas vezes
+        owned(store.require(), runner, ShardMap.MigrationPhase.COPY);
         delete(map, migration.target(), table, field, migration.ranges());
         SlotFilter filter = new SlotFilter(table.table(), field, migration.ranges());
         ShardClient target = client(map, migration.target());
         List<AxonValue> source = read(client(map, migration.source()), table, filter);
-        List<AxonValue> batch = new ArrayList<>(BATCH);
-        for (AxonValue item : source) {
-            batch.add(insertable(item));
-            if (batch.size() == BATCH) {
-                insert(target, table, batch);
-                batch = new ArrayList<>(BATCH);
-            }
+        for (int from = 0; from < source.size(); from += BATCH) {
+            owned(store.require(), runner, ShardMap.MigrationPhase.COPY);
+            insert(target, table, source.subList(from, Math.min(from + BATCH, source.size()))
+                .stream().map(ShardMover::insertable).toList());
         }
-        if (!batch.isEmpty()) {
-            insert(target, table, batch);
-        }
+        // sem o lugar, o destino já pode ter sido esvaziado por quem o assumiu
+        owned(store.require(), runner, ShardMap.MigrationPhase.COPY);
         verify(table, source, read(target, table, filter));
     }
 
@@ -190,8 +264,9 @@ public final class ShardMover {
             .orElseThrow(() -> ShardException.refused("shard_unknown", shardId)));
     }
 
+    /** Tudo o que o movimentador envia é manutenção: sem permissões de tabela nem Data Rules. */
     private AxonValue send(ShardClient shard, ShardRequest request) {
-        ShardReply reply = shard.execute(request.withStamp(clock.now()));
+        ShardReply reply = shard.execute(request.asSystem().withStamp(clock.now()));
         try {
             clock.receive(reply.stamp());
         } catch (ClockDriftException drift) {

@@ -81,6 +81,9 @@ class ShardAdminHttpTest {
                 assertEquals(405, call(port, "GET", "/admin/backup/create", "", "Authorization", ADMIN).statusCode());
                 assertEquals(401, call(port, "GET", "/shard/v1/map", "").statusCode());
                 assertEquals(405, call(port, "GET", "/sql", "").statusCode());
+                HttpResponse<String> capped = call(port, "POST", "/sql", "SELECT * FROM t", "Axon-Ns", "n",
+                    "Axon-Db", "d", "Axon-Role-Cap", "viewer");
+                assertEquals(400, capped.statusCode(), capped.body());
 
                 // sem journal nos nós, o backup diz o que falta
                 HttpResponse<String> backup =
@@ -132,7 +135,7 @@ class ShardAdminHttpTest {
             "s0=http://a,http://b;s1=http://c", "AXON_GATEWAY_EXPLICIT_IDS", "check"));
         assertEquals(List.of("http://a", "http://b"), config.meta());
         assertTrue(config.checkExplicitIds());
-        assertEquals(19_000, config.propagation().toMillis());
+        assertEquals(34_000, config.propagation().toMillis());
     }
 
     @Test

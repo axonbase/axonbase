@@ -6,6 +6,7 @@ import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.RaftOptions;
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.shard.ShardRequest;
 import com.axonbase.core.journal.JournalOptions;
 import com.axonbase.core.shard.backup.ShardBackupNode;
 import com.axonbase.core.shard.backup.ShardJournalHooks;
@@ -171,6 +172,43 @@ class ShardGatewayHttpTest {
             hooks.close();
             backend.close();
         }
+    }
+
+    @Test
+    void manutencaoDosShardsExigeAdministradorRoot() throws Exception {
+        Datastore datastore = Datastore.memory();
+        Session setup = Session.create();
+        setup.namespace("n");
+        setup.database("d");
+        datastore.execute("DEFINE USER dba ON DATABASE PASSWORD \"pw\" ROLES admin", setup, null);
+        AxonServer server = AxonServer.startRandomPort(datastore, "segredo-de-teste", "root", "pw", true);
+        try {
+            String database = new com.axonbase.server.auth.AuthService("segredo-de-teste",
+                new com.axonbase.server.auth.UserStore(datastore.authCatalog()))
+                .signin("dba", "pw", "n", "d", null);
+            String root = AxonJson.parseDocument(post(server.port(), "/signin",
+                "{\"user\":\"root\",\"pass\":\"pw\"}", Map.of()).body()).asObject().get("token").asString();
+            ShardRequest plain = ShardRequest.of("n", "d", "SELECT * FROM t");
+            ShardRequest definitions = ShardRequest.of("n", "d", ShardRequest.DEFINITIONS);
+
+            assertEquals(200, execute(server, plain, database));
+            assertEquals(403, execute(server, plain.asSystem(), database));
+            assertEquals(403, execute(server, definitions, database));
+            assertEquals(403, post(server.port(), "/shard/v1/backup/status", "{}",
+                scope("Authorization", "Bearer " + database)).statusCode());
+            assertEquals(200, execute(server, plain.asSystem(), root));
+            assertEquals(200, execute(server, definitions, root));
+        } finally {
+            server.stop();
+        }
+    }
+
+    private static int execute(AxonServer server, ShardRequest request, String token) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(
+                URI.create("http://127.0.0.1:" + server.port() + "/shard/v1/execute"))
+            .POST(HttpRequest.BodyPublishers.ofByteArray(com.axonbase.core.shard.ShardCodec.encode(request)));
+        scope("Authorization", "Bearer " + token).forEach(builder::header);
+        return HTTP.send(builder.build(), HttpResponse.BodyHandlers.ofString()).statusCode();
     }
 
     @Test

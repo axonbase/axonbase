@@ -243,6 +243,32 @@ class ClusterBackupTest {
     }
 
     @Test
+    void instanteDepoisDeUmaMovimentacaoERecusadoEOCorteContinuaValendo() {
+        try (Fleet original = fleet(2, 1)) {
+            for (int i = 0; i < 20; i++) {
+                original.sql("CREATE passo:" + i + " SET n = " + i);
+            }
+            String atCut = original.snapshot();
+            ClusterManifest manifest = original.backups.create();
+            new com.axonbase.core.shard.ShardMover(original.store, info -> original.cluster.client(info.id()),
+                Duration.ofMillis(500), HybridClock.system())
+                .move(List.of(new com.axonbase.core.shard.SlotRange(0, 511)), "s1");
+            HlcTimestamp instant = original.backups.barrier();
+            original.backups.barrier();
+            original.backups.sealJournals(manifest);
+
+            PitrException moved = assertThrows(PitrException.class,
+                () -> ClusterRestore.restore(manifest, instant, sources(manifest), dir.resolve("movido")));
+
+            assertTrue(moved.getMessage().contains("slots"), moved.getMessage());
+            assertTrue(empty(dir.resolve("movido")));
+            try (Fleet restored = restore(manifest, null, "antes-de-mover", 1)) {
+                assertEquals(atCut, restored.snapshot());
+            }
+        }
+    }
+
+    @Test
     void naoHaBackupDuranteUmaMovimentacao() {
         try (Fleet original = fleet(2, 1)) {
             original.store.update(map -> map.startMigration(

@@ -4,6 +4,7 @@ import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HybridClock;
+import com.axonbase.core.security.AuthCatalog;
 import com.axonbase.core.security.Authz;
 import com.axonbase.core.shard.ShardCodec;
 import com.axonbase.core.shard.ShardException;
@@ -87,9 +88,10 @@ final class ShardNodeServlet extends HttpServlet {
             refuse(resp, 403, "namespace ou banco diferente do autorizado");
             return;
         }
-        if (requireAuth && ShardRequest.DEFINITIONS.equals(request.sql())
-            && !Authz.atLeast(session.auth(), Authz.Role.ADMIN)) {
-            refuse(resp, 403, "as definições exigem o papel admin");
+        // as definições valem para todo o nó, e o modo de sistema ignora permissões: só root
+        boolean maintenance = request.system() || ShardRequest.DEFINITIONS.equals(request.sql());
+        if (requireAuth && maintenance && !rootAdmin(session)) {
+            refuse(resp, 403, "a manutenção dos shards exige um administrador root");
             return;
         }
         try {
@@ -109,8 +111,8 @@ final class ShardNodeServlet extends HttpServlet {
             refuse(resp, 401, "autenticação obrigatória");
             return;
         }
-        if (requireAuth && !Authz.atLeast(session.auth(), Authz.Role.ADMIN)) {
-            refuse(resp, 403, "o backup exige o papel admin");
+        if (requireAuth && !rootAdmin(session)) {
+            refuse(resp, 403, "o backup exige um administrador root");
             return;
         }
         BackupMember node = backup.get();
@@ -134,6 +136,11 @@ final class ShardNodeServlet extends HttpServlet {
         } catch (RuntimeException e) {
             send(resp, ShardHttp.failure(e));
         }
+    }
+
+    private static boolean rootAdmin(Session session) {
+        return Authz.atLeast(session.auth(), Authz.Role.ADMIN)
+            && Authz.scope(session.auth()) == AuthCatalog.Scope.ROOT;
     }
 
     private static void refuse(HttpServletResponse resp, int status, String message) throws IOException {

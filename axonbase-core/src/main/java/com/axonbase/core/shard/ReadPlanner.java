@@ -10,6 +10,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Stream;
 
 /** {@code SELECT} e {@code EXPLAIN}: um shard quando a chave está na consulta, todos quando não está. */
 final class ReadPlanner {
@@ -58,13 +60,12 @@ final class ReadPlanner {
             requireHomeSelect(map, session, select, table);
             return Optional.empty();
         }
-        requireDistributable(select, table);
+        requireDistributable(session, select, table);
         List<AxonValue> values = null;
         if (select.from() instanceof Expr.RecordId && field.equals("id")) {
             values = List.of(context.evaluate(select.from(), session));
         } else {
-            Optional<List<AxonValue>> restriction =
-                ShardRouting.restriction(select.cond(), field, expr -> context.evaluate(expr, session));
+            Optional<List<AxonValue>> restriction = context.restriction(select.cond(), field, session);
             if (restriction.isPresent()) {
                 values = restriction.get();
             }
@@ -80,7 +81,7 @@ final class ReadPlanner {
         return Optional.of(new Route(table, field, owners.isEmpty() ? List.of(map.home().id()) : owners));
     }
 
-    private static void requireDistributable(Statement.Select select, String table) {
+    private static void requireDistributable(GatewaySession session, Statement.Select select, String table) {
         if (!select.joins().isEmpty()) {
             throw ShardException.refused("cross_join", table);
         }
@@ -91,17 +92,31 @@ final class ReadPlanner {
             throw ShardException.refused("cross_time_travel", table);
         }
         GatewayRules.requireSelfContained(select, table);
+        requireMergeable(session, select);
+    }
+
+    /** O que o gateway calcula ao juntar as partes precisa dar o mesmo fora do shard. */
+    private static void requireMergeable(GatewaySession session, Statement.Select select) {
+        Set<String> vars = session.vars().keySet();
+        boolean window = GatewayExpressions.local(select.start(), vars)
+            && GatewayExpressions.local(select.limit(), vars);
+        boolean groups = !GatewayExpressions.aggregates(select)
+            || Stream.of(select.fields(), select.group() == null ? List.<Expr>of() : select.group(),
+                    select.orders().stream().map(Statement.OrderTerm::field).toList())
+                .flatMap(List::stream).allMatch(expr -> GatewayExpressions.overRow(expr, vars))
+            && GatewayExpressions.overRow(select.having(), vars);
+        if (!window || !groups) {
+            throw ShardException.refused("not_local");
+        }
     }
 
     private void requireHomeSelect(ShardMap map, GatewaySession session, Statement.Select select, String table) {
+        GatewayRules.requireNoLink(map, select.from());
         if (!GatewayRules.databaseSharded(map, session)) {
             return;
         }
-        if (table == null && select.from() instanceof Expr.Param) {
-            AxonValue value = context.evaluate(select.from(), session);
-            if (value.isRecordId() && GatewayRules.sharded(map, session, value.asRecordId().table())) {
-                throw ShardException.refused("target_unknown");
-            }
+        if (!(select.from() instanceof Expr.SubQuery)) {
+            GatewayRules.requireNamedSource(map, context, session, select.from());
         }
         if (!select.fetch().isEmpty()) {
             throw ShardException.refused("cross_fetch", table == null ? "-" : table);

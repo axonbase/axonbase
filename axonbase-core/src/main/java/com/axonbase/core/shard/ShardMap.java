@@ -34,8 +34,12 @@ public final class ShardMap {
         CLEANUP
     }
 
-    /** Uma movimentação de slots em curso (no máximo uma). */
-    public record Migration(List<SlotRange> ranges, String source, String target, MigrationPhase phase) {
+    /**
+     * Uma movimentação de slots em curso (no máximo uma). {@code runner} identifica a execução que a conduz: quem
+     * perde esse lugar para outra para antes do próximo passo.
+     */
+    public record Migration(List<SlotRange> ranges, String source, String target, MigrationPhase phase,
+                            String runner) {
         public Migration {
             ranges = List.copyOf(ranges);
         }
@@ -134,6 +138,8 @@ public final class ShardMap {
     }
 
     public ShardMap withTable(TableKey table, String field) {
+        GatewayRules.requireIdentifier(table.table());
+        GatewayRules.requireIdentifier(field);
         Map<TableKey, String> next = new TreeMap<>(tables);
         next.put(table, field);
         return new ShardMap(epoch + 1, shards, owner, next, migration);
@@ -175,7 +181,7 @@ public final class ShardMap {
             throw ShardException.refused("shard_map_invalid", "os slots já são do destino");
         }
         return new ShardMap(epoch + 1, shards, owner, tables,
-            new Migration(ranges, source, target, MigrationPhase.COPY));
+            new Migration(ranges, source, target, MigrationPhase.COPY, ""));
     }
 
     /** Passa os slots ao destino; a movimentação entra na limpeza. */
@@ -187,7 +193,17 @@ public final class ShardMap {
             Arrays.fill(next, range.from(), range.to() + 1, target);
         }
         return new ShardMap(epoch + 1, shards, next, tables,
-            new Migration(migration.ranges(), migration.source(), migration.target(), MigrationPhase.CLEANUP));
+            new Migration(migration.ranges(), migration.source(), migration.target(), MigrationPhase.CLEANUP,
+                migration.runner()));
+    }
+
+    /** Entrega a movimentação em curso a uma execução. */
+    public ShardMap withRunner(String runner) {
+        if (migration == null) {
+            throw ShardException.refused("shard_map_invalid", "não há movimentação em curso");
+        }
+        return new ShardMap(epoch + 1, shards, owner, tables,
+            new Migration(migration.ranges(), migration.source(), migration.target(), migration.phase(), runner));
     }
 
     public ShardMap finishMigration() {
@@ -242,6 +258,7 @@ public final class ShardMap {
             entry.put("source", AxonValue.str(migration.source()));
             entry.put("target", AxonValue.str(migration.target()));
             entry.put("phase", AxonValue.str(migration.phase().name()));
+            entry.put("runner", AxonValue.str(migration.runner()));
             out.put("migration", AxonValue.object(entry));
         }
         return AxonValue.object(out);
@@ -267,6 +284,8 @@ public final class ShardMap {
             Map<TableKey, String> tables = new TreeMap<>();
             for (AxonValue item : in.get("tables").asArray()) {
                 Map<String, AxonValue> table = item.asObject();
+                GatewayRules.requireIdentifier(table.get("table").asString());
+                GatewayRules.requireIdentifier(table.get("field").asString());
                 tables.put(new TableKey(table.get("ns").asString(), table.get("db").asString(),
                     table.get("table").asString()), table.get("field").asString());
             }
@@ -276,7 +295,7 @@ public final class ShardMap {
                 Map<String, AxonValue> entry = pending.asObject();
                 migration = new Migration(SlotRange.parse(entry.get("slots").asString()),
                     entry.get("source").asString(), entry.get("target").asString(),
-                    MigrationPhase.valueOf(entry.get("phase").asString()));
+                    MigrationPhase.valueOf(entry.get("phase").asString()), entry.get("runner").asString());
             }
             return new ShardMap(in.get("epoch").asLong(), shards, owner, tables, migration);
         } catch (ShardException e) {

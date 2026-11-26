@@ -6,6 +6,7 @@ import com.axonbase.parser.ast.Statement;
 import java.lang.reflect.RecordComponent;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
@@ -22,6 +23,10 @@ final class StatementScan {
     private boolean graph;
     private boolean match;
     private boolean program;
+    private boolean block;
+    private final Set<String> identifiers = new LinkedHashSet<>();
+    private final Set<String> calls = new LinkedHashSet<>();
+    private boolean unnamedTarget;
 
     private StatementScan() {
     }
@@ -59,6 +64,32 @@ final class StatementScan {
         return program;
     }
 
+    /** Há um bloco {@code { ... }}: instruções dentro de uma expressão, que podem escrever em qualquer tabela. */
+    boolean block() {
+        return block;
+    }
+
+    /** Os nomes simples citados, como os campos de um predicado. */
+    Set<String> identifiers() {
+        return identifiers;
+    }
+
+    /** Os nomes das funções chamadas, em minúsculas. */
+    Set<String> calls() {
+        return calls;
+    }
+
+    /** Há uma escrita cujo alvo não é o nome de uma tabela nem um record id. */
+    boolean unnamedTarget() {
+        return unnamedTarget;
+    }
+
+    private void target(Expr target) {
+        if (tableOf(target).isEmpty()) {
+            unnamedTarget = true;
+        }
+    }
+
     /** A tabela de uma origem simples ({@code t} ou {@code t:chave}). */
     static Optional<String> tableOf(Expr source) {
         if (source instanceof Expr.Ident ident) {
@@ -79,9 +110,17 @@ final class StatementScan {
             return;
         }
         boolean nested = inSubquery;
-        if (node instanceof Expr.SubQuery) {
+        if (node instanceof Expr.SubQuery sub) {
             subquery = true;
             nested = true;
+            if (sub.query().statements().stream().anyMatch(st -> !(st instanceof Statement.Select))) {
+                // uma escrita dentro da subconsulta não diz o que toca pela origem
+                opaqueSubquery = true;
+            }
+        } else if (node instanceof Expr.Block) {
+            block = true;
+        } else if (node instanceof Expr.Ident ident) {
+            identifiers.add(ident.name());
         } else if (node instanceof Statement.Select select && inSubquery) {
             source(select.from());
             select.joins().forEach(join -> source(join.source()));
@@ -90,8 +129,17 @@ final class StatementScan {
             graph = true;
         } else if (node instanceof Expr.Binary binary && binary.op() == Expr.BinaryOp.MATCH) {
             match = true;
-        } else if (node instanceof Expr.Call call && call.name().startsWith("fn::")) {
-            program = true;
+        } else if (node instanceof Expr.Call call) {
+            calls.add(call.name().toLowerCase(Locale.ROOT));
+            program |= call.name().startsWith("fn::");
+        } else if (node instanceof Statement.Insert insert) {
+            identifiers.add(insert.table());
+        } else if (node instanceof Statement.Create create) {
+            target(create.target());
+        } else if (node instanceof Statement.Update update) {
+            target(update.target());
+        } else if (node instanceof Statement.Delete delete) {
+            target(delete.target());
         } else if (node instanceof Statement.CallProgram) {
             program = true;
         }

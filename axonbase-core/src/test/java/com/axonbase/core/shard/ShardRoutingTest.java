@@ -21,7 +21,7 @@ class ShardRoutingTest {
     }
 
     private static Optional<List<AxonValue>> restriction(String condition) {
-        return ShardRouting.restriction(where(condition), "k", expr -> switch (expr) {
+        return ShardRouting.restriction(where(condition), "k", expr -> true, expr -> switch (expr) {
             case Expr.Literal literal -> literal.value();
             case Expr.ArrayLit array -> AxonValue.array(array.items().stream()
                 .map(item -> ((Expr.Literal) item).value()).toList());
@@ -49,7 +49,7 @@ class ShardRoutingTest {
             "k = NONE", "k = '2026-11-26T10:00:00Z'", "NOT (k = 'a')", "k INSIDE [1, total]")) {
             assertTrue(restriction(condition).isEmpty(), condition);
         }
-        assertTrue(ShardRouting.restriction(null, "k", expr -> AxonValue.num(1)).isEmpty());
+        assertTrue(ShardRouting.restriction(null, "k", expr -> true, expr -> AxonValue.num(1)).isEmpty());
     }
 
     @Test

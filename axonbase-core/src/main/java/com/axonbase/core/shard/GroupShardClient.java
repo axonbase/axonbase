@@ -39,6 +39,9 @@ public final class GroupShardClient implements ShardClient {
         while (true) {
             List<ShardMember> current = members.get();
             for (int attempt = 0; attempt < current.size(); attempt++) {
+                if (last != null && System.nanoTime() - limit >= 0) {
+                    break;
+                }
                 // a troca compara o contador, não a posição: a lista muda de tamanho quando um nó cai
                 int turn = preferred.get();
                 try {

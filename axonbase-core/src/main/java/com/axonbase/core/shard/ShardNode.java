@@ -1,10 +1,12 @@
 package com.axonbase.core.shard;
 
 import com.axonbase.core.Session;
+import com.axonbase.core.catalog.Catalog;
 import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.ReadConsistency;
 import com.axonbase.core.control.ControlCommand;
+import com.axonbase.core.engine.Database;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HybridClock;
 import com.axonbase.parser.AxonQl;
@@ -46,19 +48,28 @@ public final class ShardNode implements ShardMember {
     /**
      * @param session sessão já autenticada pelo transporte; o namespace e o banco vêm da requisição
      */
-    public ShardReply execute(ShardRequest request, Session session) {
+    public ShardReply execute(ShardRequest request, Session caller) {
+        // manutenção roda sem usuário: o transporte já conferiu que a credencial é root
+        Session session = request.system() ? Session.create() : caller;
         clock.receive(request.stamp());
         boolean definitions = ShardRequest.DEFINITIONS.equals(request.sql());
+        boolean permissions = ShardRequest.PERMISSIONS.equals(request.sql());
+        if (permissions && !request.system()) {
+            throw ShardException.refused("system_only");
+        }
         if (cluster != null) {
             if (cluster.role() != ClusterRole.LEADER) {
                 throw cluster.notLeader();
             }
-            if (definitions || !Datastore.isMutation(request.sql())) {
+            if (definitions || permissions || !Datastore.isMutation(request.sql())) {
                 cluster.awaitRead(ReadConsistency.LINEARIZABLE);
             }
         }
         if (definitions) {
             return new ShardReply(definitions(), clock.now());
+        }
+        if (permissions) {
+            return new ShardReply(AxonValue.bool(hasPermissions(request)), clock.now());
         }
         session.namespace(request.namespace());
         session.database(request.database());
@@ -80,6 +91,13 @@ public final class ShardNode implements ShardMember {
             out.add(AxonValue.object(item));
         }
         return AxonValue.array(out);
+    }
+
+    private boolean hasPermissions(ShardRequest request) {
+        Database database = datastore.findDatabase(request.namespace(), request.database());
+        AxonValue table = request.vars().get("table");
+        Catalog.TableDef def = database == null || table == null ? null : database.catalog().table(table.asString());
+        return def != null && GatewayRules.restricts(def.permissions());
     }
 
     private AxonValue run(ShardRequest request, Session session) {

@@ -14,13 +14,17 @@ import java.util.Map;
  * @param filter        slots que o shard pode devolver (só durante uma movimentação), ou {@code null}
  * @param stamp         carimbo do relógio híbrido de quem envia
  * @param authorization cabeçalho {@code Authorization} do cliente, repassado ao shard; {@code null} sem autenticação
+ * @param system        operação de manutenção: sem permissões de tabela nem Data Rules, só para credencial root
  */
 public record ShardRequest(String namespace, String database, String sql, Map<String, AxonValue> vars,
                            boolean atomic, boolean partial, SlotFilter filter, HlcTimestamp stamp,
-                           String authorization) {
+                           String authorization, boolean system) {
 
     /** Pede as definições do catálogo, na ordem em que podem ser reaplicadas (para subir um shard novo). */
     public static final String DEFINITIONS = "__axon_definitions";
+
+    /** Pergunta se a tabela da variável {@code table} tem {@code PERMISSIONS}; exige o modo de sistema. */
+    public static final String PERMISSIONS = "__axon_permissions";
 
     public ShardRequest {
         vars = vars == null ? Map.of() : java.util.Collections.unmodifiableMap(new LinkedHashMap<>(vars));
@@ -28,7 +32,8 @@ public record ShardRequest(String namespace, String database, String sql, Map<St
     }
 
     public static ShardRequest of(String namespace, String database, String sql) {
-        return new ShardRequest(namespace, database, sql, Map.of(), false, false, null, HlcTimestamp.NONE, null);
+        return new ShardRequest(namespace, database, sql, Map.of(), false, false, null, HlcTimestamp.NONE, null,
+            false);
     }
 
     public static ShardRequest definitions() {
@@ -36,27 +41,33 @@ public record ShardRequest(String namespace, String database, String sql, Map<St
     }
 
     public ShardRequest withSql(String text) {
-        return new ShardRequest(namespace, database, text, vars, atomic, partial, filter, stamp, authorization);
+        return new ShardRequest(namespace, database, text, vars, atomic, partial, filter, stamp, authorization,
+            system);
     }
 
     public ShardRequest withVars(Map<String, AxonValue> values) {
-        return new ShardRequest(namespace, database, sql, values, atomic, partial, filter, stamp, authorization);
+        return new ShardRequest(namespace, database, sql, values, atomic, partial, filter, stamp, authorization,
+            system);
     }
 
     /** A mesma requisição, rodando o script inteiro numa transação ({@code atomic}). */
     public ShardRequest asAtomic() {
-        return new ShardRequest(namespace, database, sql, vars, true, partial, filter, stamp, authorization);
+        return new ShardRequest(namespace, database, sql, vars, true, partial, filter, stamp, authorization, system);
     }
 
     public ShardRequest partial(SlotFilter slots) {
-        return new ShardRequest(namespace, database, sql, vars, atomic, true, slots, stamp, authorization);
+        return new ShardRequest(namespace, database, sql, vars, atomic, true, slots, stamp, authorization, system);
     }
 
     public ShardRequest withStamp(HlcTimestamp value) {
-        return new ShardRequest(namespace, database, sql, vars, atomic, partial, filter, value, authorization);
+        return new ShardRequest(namespace, database, sql, vars, atomic, partial, filter, value, authorization, system);
     }
 
     public ShardRequest withAuthorization(String header) {
-        return new ShardRequest(namespace, database, sql, vars, atomic, partial, filter, stamp, header);
+        return new ShardRequest(namespace, database, sql, vars, atomic, partial, filter, stamp, header, system);
+    }
+
+    public ShardRequest asSystem() {
+        return new ShardRequest(namespace, database, sql, vars, atomic, partial, filter, stamp, authorization, true);
     }
 }

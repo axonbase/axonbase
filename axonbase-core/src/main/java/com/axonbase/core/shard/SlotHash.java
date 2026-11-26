@@ -2,6 +2,7 @@ package com.axonbase.core.shard;
 
 import com.axonbase.value.AxonValue;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -16,6 +17,8 @@ public final class SlotHash {
 
     private static final long FNV_OFFSET = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
+    private static final int MAX_NUMERIC_TEXT = 64;
+    private static final int MAX_NUMERIC_SCALE = 1000;
 
     private SlotHash() {
     }
@@ -44,7 +47,30 @@ public final class SlotHash {
         return text(id);
     }
 
-    static int ofText(String text) {
+    /**
+     * O motor trata número e texto numérico como iguais ({@code 7 = "007"}): os dois precisam cair no mesmo slot, então
+     * o texto numérico é reduzido à forma decimal.
+     */
+    private static String canonical(String text) {
+        if (text.isEmpty() || text.length() > MAX_NUMERIC_TEXT) {
+            return text;
+        }
+        char first = text.charAt(0);
+        if (!Character.isDigit(first) && first != '-' && first != '+' && first != '.') {
+            return text;
+        }
+        try {
+            BigDecimal number = new BigDecimal(text);
+            // um expoente enorme viraria um texto de milhões de zeros
+            return Math.abs((long) number.scale()) > MAX_NUMERIC_SCALE ? text
+                : number.stripTrailingZeros().toPlainString();
+        } catch (NumberFormatException notANumber) {
+            return text;
+        }
+    }
+
+    static int ofText(String raw) {
+        String text = canonical(raw);
         long hash = FNV_OFFSET;
         for (byte b : text.getBytes(StandardCharsets.UTF_8)) {
             hash ^= b & 0xff;

@@ -24,8 +24,8 @@ O espaço de chaves é dividido em **4096 slots**. O slot de um registro é um h
 
 | Chave | Texto usado no hash |
 |---|---|
-| número | decimal sem zeros à direita (`1` e `1.0` são o mesmo slot) |
-| texto, UUID (Universally Unique Identifier) | o próprio texto |
+| número ou texto numérico | decimal sem zeros à direita (`1`, `1.0` e `"001"` são o mesmo slot, porque o motor os trata como iguais) |
+| outro texto, UUID (Universally Unique Identifier) | o próprio texto |
 | `SHARD BY id` | a parte da chave do record id (`pedido:42` usa `42`) |
 | campo com record id | o texto completo (`cliente:5`) |
 
@@ -50,6 +50,10 @@ DEFINE TABLE evento SHARD BY id
 
 Pelo gateway:
 
+- os nomes da tabela e do campo de shard usam só letras, números e `_`;
+- `SHARD BY` exige credencial root, porque a conferência de tabela vazia ignora permissões;
+- o campo de shard aceita só os tipos `string`, `int`, `number`, `decimal` ou nenhum, sem `VALUE`;
+- a tabela não pode ter `PERMISSIONS`, evento, Data Rule que use o campo de shard, nem ser citada por um evento de outra tabela;
 - a tabela precisa estar vazia quando recebe `SHARD BY` (dados já gravados ficariam no shard base);
 - o campo de shard não pode ser trocado depois;
 - todo `DEFINE`, `DROP`, `ALTER` e `REMOVE` é repetido em **todos** os shards, em ordem. Se um falhar, o gateway informa quais receberam e a instrução pode ser repetida.
@@ -66,7 +70,7 @@ O gateway decide pelo texto da instrução, sem consultar dados:
 | `SELECT` sem a chave de shard | todos (consulta espalhada) |
 | `CREATE` e `INSERT` | o shard da chave de cada registro |
 
-Valores aceitos para rotear são literais, parâmetros e expressões sem acesso à base. Com `SHARD BY id` e um `CREATE` ou `INSERT` sem id, o gateway gera o id antes de enviar.
+Valores aceitos para rotear são literais, parâmetros, record ids e listas deles. Com `SHARD BY id` e um `CREATE` ou `INSERT` sem id, o gateway gera o id antes de enviar.
 
 ## Consultas em vários shards
 
@@ -93,8 +97,16 @@ O gateway recusa, com uma mensagem que diz o motivo, em vez de devolver um resul
 | `DEFINE EVENT`, campo com `REFERENCES` | rodariam só contra os dados do próprio shard |
 | `CALL`, `fn::`, `IF` com corpo de escrita | o programa rodaria num shard só |
 | índice `UNIQUE` sem o campo de shard | a unicidade só vale dentro de um shard |
+| blocos `{ }` | as instruções de dentro escapariam das recusas |
+| `PERMISSIONS` em tabela dividida | a cópia de uma movimentação deixaria registros para trás |
+| `LET` dentro de `BEGIN` | o gateway não saberia o valor que decide o shard |
+| cabeçalho `Axon-Role-Cap` | o gateway não o aplica, e ignorá-lo daria mais poder do que o pedido |
 
-Numa base que tenha ao menos uma tabela dividida, `FETCH`, travessia de grafo, chamadas de programa e subconsultas que leiam uma tabela dividida são recusados também nas tabelas do shard base.
+Numa base que tenha ao menos uma tabela dividida, `FETCH`, travessia de grafo, blocos, chamadas de programa e subconsultas que leiam uma tabela dividida são recusados também nas tabelas do shard base. A origem de um `SELECT`, `CREATE`, `UPDATE` ou `DELETE` precisa dizer a tabela pelo texto: o nome, um record id ou uma variável com um record id de tabela sem `SHARD BY`. Links para outra base são recusados quando o conjunto tem alguma tabela dividida. Um campo alcançado por um record link que aponte para uma tabela dividida (`SELECT ref.total FROM cidade`) **não** é recusado e vem vazio.
+
+### O que o gateway calcula sozinho
+
+O gateway calcula localmente só expressões puras: literais, variáveis definidas pelo cliente, operadores e funções que não leem dados, sessão nem executam instruções. Um `LET` com qualquer outra coisa é enviado ao shard base, com a credencial do cliente. Nos dados de um `INSERT`, na chave de um `CREATE`, em `START`, `LIMIT` e nas colunas de grupos de uma consulta espalhada, uma expressão não pura (por exemplo `$auth` ou `record::exists`) é recusada.
 
 ## Escrita
 
@@ -104,6 +116,8 @@ Numa base que tenha ao menos uma tabela dividida, `FETCH`, travessia de grafo, c
 - **Outras escritas em mais de um shard:** só dentro de uma saga. Fora dela são recusadas.
 - **`UPSERT`:** precisa cair num shard só, e os dados precisam trazer a chave de shard.
 - **Chave de shard é imutável:** um `UPDATE` que a mude é recusado. Para mudar, apague e crie de novo, numa saga.
+- **Chave numérica é inteira:** um valor fracionário na chave é recusado, porque a conversão de tipo mudaria o shard.
+- **Escrita em vários shards:** o gateway relê o mapa antes de cada shard seguinte e para, informando quem gravou, se a época mudou.
 - **Record id explícito em tabela dividida por outro campo:** recusado por padrão, porque dois shards poderiam guardar o mesmo id. `AXON_GATEWAY_EXPLICIT_IDS=check` consulta todos os shards antes de criar. A consulta não é atômica: duas criações simultâneas do mesmo id com chaves de shard diferentes passam as duas. Quem precisa de id único e escolhido usa `SHARD BY id`.
 
 ### Transações e sagas
@@ -119,7 +133,7 @@ CREATE pedido SET cliente_id = 'bia', total = 20;
 COMMIT SAGA transferencia WITH CORRELATION 'p-1';
 ```
 
-Cada shard registra os próprios passos. `COMMIT` e `CANCEL` vão a todos os shards em que a saga está aberta, então qualquer gateway consegue terminar uma saga que outro começou. `CANCEL` compensa cada shard. A saga **não é atômica**: leitores veem estados intermediários, e uma queda no meio deixa a saga aberta até alguém concluí-la ou cancelá-la. `INSERT` dentro de saga é recusado porque a saga nativa não registra os passos dele.
+Cada shard registra os próprios passos. `COMMIT` e `CANCEL` vão a todos os shards em que a saga está aberta, então qualquer gateway consegue terminar uma saga que outro começou. `CANCEL` compensa cada shard e é recusado durante uma movimentação de slots. A saga **não é atômica**: leitores veem estados intermediários, e uma queda no meio deixa a saga aberta até alguém concluí-la ou cancelá-la. `INSERT` dentro de saga é recusado porque a saga nativa não registra os passos dele.
 
 ## Carimbo de tempo entre shards
 
@@ -130,8 +144,8 @@ Toda mensagem entre gateway e shard leva o carimbo do relógio híbrido, o HLC (
 Mover slots do shard de origem para o de destino:
 
 1. **Anunciar:** o mapa recebe a movimentação (fase de cópia). Os gateways passam a recusar escritas nos slots em movimento, com um erro que pode ser repetido, e escritas em vários shards.
-2. **Esperar** o prazo de validade do mapa somado ao tempo máximo de uma requisição.
-3. **Copiar** os registros dos slots para o destino e conferir as contagens.
+2. **Esperar** duas validades do mapa somadas a dois tempos máximos de requisição.
+3. **Copiar** os registros dos slots para o destino e conferir o conteúdo.
 4. **Trocar o dono:** o mapa passa a apontar o destino (fase de limpeza).
 5. **Esperar** de novo, **apagar** os registros da origem e **encerrar** a movimentação.
 
@@ -139,7 +153,13 @@ As leituras seguem durante todo o processo. Enquanto há movimentação, cada sh
 
 Cada passo fica gravado no mapa. Uma queda no meio se resolve repetindo a movimentação, que continua de onde parou. Antes da troca de dono dá para desistir, o que apaga a cópia do destino.
 
-**Pré-condições:** todo acesso passa pelo gateway (escrever direto num shard fura a proteção), e nenhuma escrita dura mais que o tempo máximo configurado.
+Uma movimentação não começa enquanto o shard de origem tiver saga aberta, porque a compensação gravaria no dono antigo. Como toda saga é aberta também no shard base, mover slots dele exige que não haja saga nenhuma aberta.
+
+Cada execução (mover, retomar ou desistir) registra no mapa quem conduz a movimentação. Quem perde esse lugar para antes do passo seguinte, então dois operadores não apagam as duas cópias.
+
+A cópia, a conferência e a limpeza rodam em modo de manutenção, sem usuário, para que Data Rules e máscaras não deixem registros para trás.
+
+**Pré-condições:** todo acesso passa pelo gateway (escrever direto num shard fura a proteção), e nenhuma escrita dura mais que o tempo máximo configurado. A proteção é por tempo, não por uma trava no shard: uma requisição que ultrapasse esse limite (processo pausado, rede que entrega muito depois) pode gravar no dono antigo.
 
 ## Falhas
 
@@ -175,6 +195,7 @@ Restaurar a um instante `T`, igual ou posterior ao corte do manifesto:
 - cada shard parte do backup físico e reaplica, em ordem de índice, os lotes com carimbo até `T`;
 - o journal precisa ter, sem falhas, todos os índices desde o backup até uma entrada **posterior** a `T`, que prova que nada ficou de fora. Uma barreira periódica mantém essa prova em shards sem escrita;
 - ou todos os shards ficam preparados ou nenhum;
+- se os slots mudaram de dono entre o backup e `T`, ou havia movimentação em `T`, a restauração é recusada: o shard que recebeu os registros pode não estar no manifesto. Faça um backup novo depois de cada movimentação;
 - a base preparada perde a posição do Raft. Cada membro do shard recebe a mesma cópia e começa com o diretório do Raft vazio.
 
 O resultado é consistente para tudo que é causalmente relacionado. Uma saga não é atômica entre shards, então o corte pode cair no meio dela.
@@ -183,7 +204,7 @@ O resultado é consistente para tudo que é causalmente relacionado. Uma saga n�
 
 ### Nós de shard
 
-Cada shard é um cluster comum (veja [cluster-raft.md](cluster-raft.md)). O gateway usa a rota interna `/shard/v1/` dos nós, servida por HTTP (HyperText Transfer Protocol) com a mesma autenticação do `/sql`. Para o backup do cluster, ligue o journal em cada nó:
+Cada shard é um cluster comum (veja [cluster-raft.md](cluster-raft.md)). O gateway usa a rota interna `/shard/v1/` dos nós, servida por HTTP (HyperText Transfer Protocol) com a mesma autenticação do `/sql`. As operações de manutenção (definições, movimentação, conferências de `SHARD BY` e backup) exigem um administrador root. Para o backup do cluster, ligue o journal em cada nó:
 
 | Variável | Padrão | O que faz |
 |---|---|---|

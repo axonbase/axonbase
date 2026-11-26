@@ -1,12 +1,18 @@
 package com.axonbase.core.shard;
 
+import com.axonbase.parser.AxonQl;
+import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonValue;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Pattern;
+import java.util.Set;
 
 /**
  * Definições: repetidas em todos os shards, um de cada vez, para o catálogo ser o mesmo em qualquer um. O
@@ -14,7 +20,10 @@ import java.util.regex.Pattern;
  */
 final class DdlPlanner {
 
-    private static final Pattern FIELD = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    /** Tipos cuja conversão não muda o slot: o hash trata número e texto numérico como iguais. */
+    private static final Set<String> KEY_TYPES = Set.of("", "any", "string", "int", "number", "decimal");
+    private static final List<String> CHECKED_DEFINITIONS =
+        List.of("DEFINE EVENT", "CREATE EVENT", "CREATE DATA RULE");
 
     private final GatewayContext context;
     private final ShardMapStore store;
@@ -22,7 +31,7 @@ final class DdlPlanner {
 
     DdlPlanner(GatewayContext context, ShardMapStore store, ShardMapCache maps) {
         this.context = context;
-        this.store = store;
+        this.store = store.stampedBy(context.clock);
         this.maps = maps;
     }
 
@@ -65,13 +74,20 @@ final class DdlPlanner {
                 index.unique());
             case Statement.CreateIndex index -> checkIndex(map, session, index.name(), index.table(), index.columns(),
                 index.unique());
-            case Statement.DefineEvent event -> refuseOnSharded(map, session, event.table(), "cross_event");
-            case Statement.CreateEvent event -> refuseOnSharded(map, session, event.table(), "cross_event");
+            case Statement.DefineEvent event ->
+                checkEvent(map, session, event.table(), event.when(), event.then());
+            case Statement.CreateEvent event ->
+                checkEvent(map, session, event.table(), event.when(), event.then());
             case Statement.DefineField field -> {
-                if (field.references() != null) {
-                    refuseOnSharded(map, session, field.table(), "cross_reference");
-                }
+                checkColumn(map, session, field.table(), field.name(), field.type(), field.valueExpr() != null);
+                checkReference(map, session, field.table(), field.references());
             }
+            case Statement.CreateTable table -> table.columns().forEach(column ->
+                checkColumn(map, session, table.name(), column.name(), column.type(), false));
+            case Statement.AlterTable alter -> alter.operations()
+                .forEach(operation -> checkOperation(map, session, alter.name(), operation));
+            case Statement.CreateDataRule rule -> keys(map, session).forEach((table, key) ->
+                requireKeyOutsideRule(rule, key));
             default -> {
             }
         }
@@ -79,6 +95,9 @@ final class DdlPlanner {
 
     private void checkTable(ShardMap map, GatewaySession session, Statement.DefineTable table) {
         String current = map.shardKey(GatewayRules.key(session, table.name())).orElse(null);
+        if (GatewayRules.restricts(table.permissions()) && (current != null || table.shardBy() != null)) {
+            throw ShardException.refused("sharded_permissions", table.name());
+        }
         if (current != null) {
             if (!current.equals(table.shardBy())) {
                 throw ShardException.refused("shard_key_fixed", table.name(), current);
@@ -91,31 +110,36 @@ final class DdlPlanner {
         if (session.namespace() == null || session.database() == null) {
             throw ShardException.refused("scope_required");
         }
-        if (!FIELD.matcher(table.shardBy()).matches()) {
-            throw ShardException.refused("shard_key_name", table.shardBy());
-        }
+        GatewayRules.requireIdentifier(table.name());
+        GatewayRules.requireIdentifier(table.shardBy());
+        // as definições primeiro: PERMISSIONS esconderiam registros da conferência de tabela vazia
+        checkExistingDefinitions(map, session, table.name(), table.shardBy());
         for (String shard : map.shardIds()) {
             // só uma tabela conhecida pode ter registros; consultar uma desconhecida a criaria
-            AxonValue database = context.send(map, Plan.Part.of(shard, "INFO FOR DATABASE"), session, false);
-            if (!mentions(database, table.name())) {
+            AxonValue database = context.sendSystem(map, shard, session, "INFO FOR DATABASE");
+            if (!GatewayRules.mentions(database, table.name())) {
                 continue;
             }
-            AxonValue rows = context.send(map,
-                Plan.Part.of(shard, "SELECT * FROM " + table.name() + " LIMIT 1"), session, false);
+            AxonValue rows = context.sendSystem(map, shard, session, "SELECT * FROM " + table.name() + " LIMIT 1");
             if (rows.isArray() && !rows.asArray().isEmpty()) {
                 throw ShardException.refused("shard_table_not_empty", table.name());
             }
         }
-        checkExistingDefinitions(map, session, table.name(), table.shardBy());
     }
 
     /** Definições anteriores que passariam a valer só dentro de um shard. */
     private void checkExistingDefinitions(ShardMap map, GatewaySession session, String table, String field) {
-        AxonValue database = context.send(map, Plan.Part.of(map.home().id(), "INFO FOR DATABASE"), session, false);
-        if (!mentions(database, table)) {
+        String home = map.home().id();
+        checkOtherDefinitions(map, session, table, field);
+        AxonValue database = context.sendSystem(map, home, session, "INFO FOR DATABASE");
+        if (!GatewayRules.mentions(database, table)) {
             return;
         }
-        AxonValue info = context.send(map, Plan.Part.of(map.home().id(), "INFO FOR TABLE " + table), session, false);
+        if (context.sendSystem(map, home, session, ShardRequest.PERMISSIONS,
+            Map.of("table", AxonValue.str(table))).asBool()) {
+            throw ShardException.refused("sharded_permissions", table);
+        }
+        AxonValue info = context.sendSystem(map, home, session, "INFO FOR TABLE " + table);
         Map<String, AxonValue> out = info.asObject();
         AxonValue indexes = out.get("indexes");
         if (indexes != null && indexes.isObject()) {
@@ -132,21 +156,114 @@ final class DdlPlanner {
         if (events != null && events.isObject() && !events.asObject().isEmpty()) {
             throw ShardException.refused("cross_event", table);
         }
+        AxonValue fields = out.get("fields");
+        AxonValue key = fields == null || !fields.isObject() ? null : fields.asObject().get(field);
+        if (key != null) {
+            AxonValue type = key.asObject().get("type");
+            requireKeyType(table, field, type == null || !type.isString() ? null : type.asString());
+        }
     }
 
-    /** O nome da tabela aparece em {@code INFO FOR DATABASE}, em qualquer das formas que ele usa. */
-    private static boolean mentions(AxonValue database, String table) {
-        if (!database.isObject()) {
-            return false;
+    /** Eventos de qualquer tabela que citem a nova, e Data Rules que usem a chave dela. */
+    private void checkOtherDefinitions(ShardMap map, GatewaySession session, String table, String field) {
+        AxonValue definitions = context.sendSystem(map, map.home().id(), session, ShardRequest.DEFINITIONS);
+        for (AxonValue item : definitions.asArray()) {
+            Map<String, AxonValue> command = item.asObject();
+            String text = command.get("definition").asString();
+            if (!command.get("ns").asString().equals(session.namespace())
+                || !command.get("db").asString().equals(session.database())
+                || CHECKED_DEFINITIONS.stream().noneMatch(p -> text.regionMatches(true, 0, p, 0, p.length()))) {
+                continue;
+            }
+            for (Statement statement : AxonQl.parse(text).statements()) {
+                if (statement instanceof Statement.CreateDataRule rule) {
+                    requireKeyOutsideRule(rule, field);
+                } else if (StatementScan.of(statement).identifiers().contains(table)) {
+                    throw ShardException.refused("cross_event", table);
+                }
+            }
         }
-        AxonValue tables = database.asObject().get("tables");
-        if (tables == null) {
-            return false;
+    }
+
+    /** As chaves das tabelas divididas da base da sessão. */
+    private static Map<String, String> keys(ShardMap map, GatewaySession session) {
+        Map<String, String> keys = new LinkedHashMap<>();
+        map.tables().forEach((table, key) -> {
+            if (table.namespace().equals(session.namespace()) && table.database().equals(session.database())) {
+                keys.put(table.table(), key);
+            }
+        });
+        return keys;
+    }
+
+    /** Uma Data Rule grava na criação os valores que compara: na chave, mudaria o shard do registro. */
+    private static void requireKeyOutsideRule(Statement.CreateDataRule rule, String key) {
+        if (StatementScan.of(rule.predicate()).identifiers().contains(key)) {
+            throw ShardException.refused("shard_key_rule", rule.name(), key);
         }
-        if (tables.isObject()) {
-            return tables.asObject().containsKey(table);
+    }
+
+    private static void requireKeyType(String table, String field, String type) {
+        String name = type == null ? "" : type.trim().toLowerCase(Locale.ROOT);
+        if (name.startsWith("option<") && name.endsWith(">")) {
+            name = name.substring("option<".length(), name.length() - 1);
         }
-        return tables.isArray() && tables.asArray().stream().anyMatch(t -> t.isString() && t.asString().equals(table));
+        if (!KEY_TYPES.contains(name)) {
+            throw ShardException.refused("shard_key_type", table, field);
+        }
+    }
+
+    private void checkColumn(ShardMap map, GatewaySession session, String table, String column, String type,
+                             boolean computed) {
+        String key = map.shardKey(GatewayRules.key(session, table)).orElse(null);
+        if (key == null || !key.equals(column)) {
+            return;
+        }
+        if (computed) {
+            throw ShardException.refused("shard_key_type", table, column);
+        }
+        requireKeyType(table, column, type);
+    }
+
+    private void checkOperation(ShardMap map, GatewaySession session, String table, Statement.AlterOp operation) {
+        switch (operation) {
+            case Statement.AddColumn add -> {
+                checkColumn(map, session, table, add.name(), add.type(), false);
+                checkReference(map, session, table, add.references());
+            }
+            case Statement.ModifyColumn modify -> checkColumn(map, session, table, modify.name(), modify.type(), false);
+            case Statement.DropColumn drop -> {
+                if (map.shardKey(GatewayRules.key(session, table)).filter(drop.name()::equals).isPresent()) {
+                    throw ShardException.refused("shard_key_immutable", table, drop.name());
+                }
+            }
+        }
+    }
+
+    private void checkReference(ShardMap map, GatewaySession session, String table, String references) {
+        if (references != null) {
+            refuseOnSharded(map, session, table, "cross_reference");
+            refuseOnSharded(map, session, references, "cross_reference");
+        }
+    }
+
+    /** Um evento roda no shard de quem o disparou: não pode estar numa tabela dividida nem escrever numa. */
+    private void checkEvent(ShardMap map, GatewaySession session, String table, Expr when, List<Statement> then) {
+        refuseOnSharded(map, session, table, "cross_event");
+        if (!GatewayRules.databaseSharded(map, session)) {
+            return;
+        }
+        StatementScan scan = StatementScan.of(then);
+        Set<String> named = new LinkedHashSet<>(scan.identifiers());
+        named.addAll(StatementScan.of(Arrays.asList(when)).identifiers());
+        for (String sharded : keys(map, session).keySet()) {
+            if (named.contains(sharded)) {
+                throw ShardException.refused("cross_event", sharded);
+            }
+        }
+        if (scan.unnamedTarget()) {
+            throw ShardException.refused("target_unknown");
+        }
     }
 
     private void checkIndex(ShardMap map, GatewaySession session, String name, String table, List<String> columns,

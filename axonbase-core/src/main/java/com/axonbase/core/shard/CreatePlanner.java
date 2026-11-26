@@ -26,7 +26,7 @@ final class CreatePlanner {
         String table = StatementScan.tableOf(create.target()).orElse(null);
         String field = table == null ? null : map.shardKey(GatewayRules.key(session, table)).orElse(null);
         if (field == null) {
-            requireKnownTarget(map, session, create.target());
+            GatewayRules.requireNamedSource(map, context, session, create.target());
             GatewayRules.requireHomeOnly(map, session, create);
             return Plan.write(map.home().id(), piece.text());
         }
@@ -44,6 +44,7 @@ final class CreatePlanner {
         if (value == null) {
             throw ShardException.refused("shard_key_required", table, field);
         }
+        GatewayRules.requireStorableKey(value);
         int slot = SlotHash.ofValue(value);
         GatewayRules.requireSettled(map, List.of(slot));
         if (!field.equals("id") && chosen != null) {
@@ -93,6 +94,7 @@ final class CreatePlanner {
                 if (value == null) {
                     throw ShardException.refused("shard_key_required", table, field);
                 }
+                GatewayRules.requireStorableKey(value);
                 slot = SlotHash.ofValue(value);
                 if (id != null) {
                     requireUnusedId(map, session, table, id, map.ownerOf(slot));
@@ -155,16 +157,6 @@ final class CreatePlanner {
         return List.of();
     }
 
-    private void requireKnownTarget(ShardMap map, GatewaySession session, Expr target) {
-        if (!(target instanceof Expr.Param) || !GatewayRules.databaseSharded(map, session)) {
-            return;
-        }
-        AxonValue value = context.evaluate(target, session);
-        if (!value.isRecordId() || GatewayRules.sharded(map, session, value.asRecordId().table())) {
-            throw ShardException.refused("target_unknown");
-        }
-    }
-
     private AxonValue recordKey(GatewaySession session, Expr key) {
         return engineKey(context.evaluate(key, session));
     }
@@ -210,7 +202,7 @@ final class CreatePlanner {
      * Numa tabela dividida por um campo, dois shards poderiam guardar o mesmo record id. Por padrão o id escolhido é
      * recusado; com a checagem ligada, todos os outros shards são consultados antes (sem atomicidade).
      */
-    private void requireUnusedId(ShardMap map, GatewaySession session, String table, AxonValue id, String owner) {
+    void requireUnusedId(ShardMap map, GatewaySession session, String table, AxonValue id, String owner) {
         if (!context.options.checkExplicitIds()) {
             throw ShardException.refused("explicit_id", table);
         }

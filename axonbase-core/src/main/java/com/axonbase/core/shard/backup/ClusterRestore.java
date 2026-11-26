@@ -1,11 +1,16 @@
 package com.axonbase.core.shard.backup;
 
 import com.axonbase.core.cluster.RaftApplier;
+import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HlcTimestamp;
 import com.axonbase.core.journal.JournalRecord;
 import com.axonbase.core.journal.JournalSegments;
 import com.axonbase.core.journal.PitrException;
 import com.axonbase.core.journal.SegmentInfo;
+import com.axonbase.core.shard.ShardMap;
+import com.axonbase.core.shard.ShardMapStore;
+import com.axonbase.core.shard.ShardMessages;
+import com.axonbase.core.shard.ShardNode;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.RocksDbBackend;
 
@@ -80,6 +85,10 @@ public final class ClusterRestore {
                 staging.add(prepared);
                 out.put(shard.shard(), prepare(shard, sources.get(shard.shard()), prepared, instant));
             }
+            String home = manifest.map().home().id();
+            if (out.containsKey(home)) {
+                requireSameLayout(manifest, destination.resolve(home + ".restoring"));
+            }
             for (ClusterManifest.ShardBackup shard : manifest.shards()) {
                 Files.move(destination.resolve(shard.shard() + ".restoring"), destination.resolve(shard.shard()),
                     StandardCopyOption.ATOMIC_MOVE);
@@ -91,6 +100,25 @@ public final class ClusterRestore {
         } finally {
             if (!done) {
                 staging.forEach(ClusterRestore::deleteTree);
+            }
+        }
+    }
+
+    /**
+     * Slots que mudaram de dono depois do backup podem ter ido para um shard que o manifesto não tem: restaurar
+     * perderia esses registros sem aviso. O mapa restaurado no shard base diz se isso aconteceu até o instante.
+     */
+    private static void requireSameLayout(ClusterManifest manifest, Path home) {
+        try (RocksDbBackend db = new RocksDbBackend(home.toString(), RocksDbBackend.SyncMode.OFF)) {
+            ShardNode node = new ShardNode(new Datastore(db), null, db.clock());
+            ShardMap restored = new ShardMapStore(node::handle).require();
+            ShardMap expected = manifest.map();
+            boolean same = restored.migration().isEmpty() && restored.shardIds().equals(expected.shardIds())
+                && expected.shardIds().stream().allMatch(id -> restored.slotsOf(id).equals(expected.slotsOf(id)));
+            if (!same) {
+                throw new PitrException(PitrException.Reason.BAD_JOURNAL, ShardMessages.get("restore_map",
+                    "os slots mudaram de dono entre o backup e o instante pedido; restaure um instante anterior à "
+                        + "movimentação ou use um backup feito depois dela"));
             }
         }
     }

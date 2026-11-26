@@ -66,7 +66,8 @@ class ShardCodecTest {
     @Test
     void requisicaoVoltaInteiraComACredencialDoCabecalho() {
         ShardRequest sent = new ShardRequest("n", null, "SELECT * FROM t", Map.of("a", AxonValue.num(1)), true, true,
-            new SlotFilter("t", "k", List.of(new SlotRange(0, 9))), new HlcTimestamp(10, 1), "Bearer nao-vai-no-corpo");
+            new SlotFilter("t", "k", List.of(new SlotRange(0, 9))), new HlcTimestamp(10, 1), "Bearer nao-vai-no-corpo",
+            true);
 
         byte[] body = ShardCodec.encode(sent);
         ShardRequest read = ShardCodec.decodeRequest(body, "Bearer outro");

@@ -11,7 +11,9 @@ import com.axonbase.parser.ast.Expr;
 import com.axonbase.value.AxonValue;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
@@ -70,8 +72,42 @@ final class GatewayContext {
         }
     }
 
+    /** Calcula no gateway uma expressão que não depende de dados (veja {@link GatewayExpressions}). */
     AxonValue evaluate(Expr expr, GatewaySession session) {
+        if (!GatewayExpressions.local(expr, session.vars().keySet())) {
+            throw ShardException.refused("not_local");
+        }
         return new Executor(scratch).evaluate(expr, scope(session));
+    }
+
+    /**
+     * Os valores de chave que a condição admite, calculados no gateway. Uma comparação com algo que só o shard sabe
+     * (como {@code $auth}) não restringe: a instrução vai a todos.
+     */
+    Optional<List<AxonValue>> restriction(Expr condition, String field, GatewaySession session) {
+        return ShardRouting.restriction(condition, field,
+            expr -> GatewayExpressions.local(expr, session.vars().keySet()), expr -> evaluate(expr, session));
+    }
+
+    /**
+     * Uma operação de manutenção do próprio gateway: o shard a executa sem permissões de tabela nem Data Rules, e só a
+     * aceita de uma credencial root.
+     */
+    AxonValue sendSystem(ShardMap map, String shard, GatewaySession session, String text) {
+        return sendSystem(map, shard, session, text, Map.of());
+    }
+
+    AxonValue sendSystem(ShardMap map, String shard, GatewaySession session, String text,
+                         Map<String, AxonValue> vars) {
+        // as definições e as perguntas ao catálogo não são de um banco
+        boolean global = ShardRequest.DEFINITIONS.equals(text);
+        ShardRequest request = ShardRequest.of(global ? null : session.namespace(),
+                global ? null : session.database(), text)
+            .withVars(vars)
+            .withAuthorization(session.authorization()).asSystem();
+        ShardReply reply = client(map, shard).execute(request.withStamp(clock.now()));
+        observe(reply.stamp());
+        return reply.value();
     }
 
     /** Uma sessão local com o banco e as variáveis do cliente, para avaliar expressões no gateway. */
