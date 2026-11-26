@@ -53,7 +53,7 @@ A lista de partições fica em **chaves de dados**, não no plano de controle. A
 
 `<início>` é o começo da faixa em milissegundos, com 19 dígitos, de modo que a ordem das chaves é a ordem do tempo.
 
-Estados: `HOT` (local, lê e grava), `FREEZING` (indo para a camada fria, só leitura), `COLD` (no armazenamento de objetos, só leitura) e `THAWING` (voltando, só leitura).
+Estados: `HOT` (local, lê e grava), `FREEZING` (indo para a camada fria, só leitura), `COLD` (no armazenamento de objetos, só leitura) e `THAWING` (voltando, só leitura). `ALTER PARTITION ... TO HOT` também **fixa** a partição como local: o prazo de `COLD AFTER` não a leva de volta até um `TO COLD`.
 
 ## Formato das chaves
 
@@ -116,6 +116,10 @@ Uma thread de manutenção (`PartitionMaintenance`) roda a cada 10 segundos (`AX
 
 Na escrita, o TTL custa um `put` pequeno a mais no mesmo lote, sem leitura extra.
 
+Cada lote do TTL é uma transação: se outra escrita mudar uma das linhas no meio, o lote inteiro é desfeito e tentado na rodada seguinte. O commit do lote não confere leitura fantasma, para não parar as demais escritas. Por isso um `RELATE` criado no mesmo instante em que a linha vence pode deixar uma aresta apontando para a linha removida, como já acontece com um `DELETE` avulso concorrente.
+
+Linhas de partição fria não vencem pelo TTL: ficam na fila até a partição voltar. Para descartar dados frios, use `RETENTION`.
+
 ## Camada fria
 
 ### Armazenamento de objetos
@@ -134,6 +138,8 @@ Um objeto por partição, **imutável**, de nome único: `parts/<ns>/<db>/<tabel
 
 Uma queda entre os passos deixa a partição em `FREEZING`, com os dados locais intactos; a rodada seguinte recomeça. A volta (`THAWING`) grava os registros e o estado `HOT` num lote só.
 
+Um objeto vai até 2 GB sem compressão. Uma partição maior que isso não é movida (a manutenção registra a falha e ela fica em `FREEZING` até um `TO HOT`): use um `INTERVAL` menor. A volta da camada fria monta um lote com a partição inteira em memória.
+
 ### Cache
 
 O objeto lido é guardado em disco (`AXON_COLD_CACHE_DIR`), com limite de tamanho (`AXON_COLD_CACHE_MB`, 1024) e descarte do menos usado, o LRU (Least Recently Used). A leitura é transparente. Se o armazenamento de objetos estiver fora, a consulta que precisa dele falha com erro claro: nunca devolve resultado incompleto.
@@ -145,10 +151,10 @@ O objeto lido é guardado em disco (`AXON_COLD_CACHE_DIR`), com limite de tamanh
 O que precisa ser garantido é que o objeto referenciado continue existindo. São duas proteções:
 
 - **Bloqueio (hold):** um documento no próprio armazenamento de objetos (`holds/<nome>.json`) lista objetos que não podem ser apagados.
-  - backup físico: um bloqueio por backup, solto quando a retenção apaga o backup;
+  - backup físico: um bloqueio por backup, sem prazo. Quando a retenção local apaga o backup, o bloqueio passa a valer por mais 35 dias, porque uma cópia dele pode estar guardada fora do servidor (o MinIO do Enterprise);
   - backup lógico: um bloqueio com validade de 35 dias (`AXON_COLD_LOGICAL_HOLD_DAYS`), porque o motor não sabe quando o arquivo é apagado;
   - motor em uso: cada motor publica as referências da sua base viva, o que protege uma cópia restaurada que compartilhe o armazenamento.
-- **Carência:** um objeto sem nenhuma referência só é apagado depois de `AXON_COLD_GC_GRACE_DAYS` (35, o máximo da retenção do PITR). A coleta de lixo (GC, Garbage Collection) marca o objeto como órfão na primeira vez em que o vê assim e apaga depois da carência, se ele continuar sem referência. Isso cobre o PITR para instantes anteriores à remoção da partição.
+- **Carência:** um objeto sem nenhuma referência só é apagado depois de `AXON_COLD_GC_GRACE_DAYS` (35, o máximo da retenção do PITR; com o journal ligado, nunca menos que `AXON_PITR_RETENTION_DAYS`). A coleta de lixo (GC, Garbage Collection) marca o objeto como órfão na primeira vez em que o vê assim e apaga depois da carência, se ele continuar sem referência. Isso cobre o PITR para instantes anteriores à remoção da partição.
 
 Se não for possível gravar o bloqueio, o backup **falha**. Um restore confere se os objetos referenciados existem e recusa a troca de base se faltar algum.
 
@@ -168,6 +174,37 @@ Nada muda no formato. Restaurar a um instante anterior à remoção de uma parti
 - Um nó de versão anterior grava a marca como uma chave qualquer e **não apaga a faixa**, divergindo dos demais. Só defina partições depois que todos os nós estiverem atualizados. O mesmo vale para voltar de versão.
 - O formato do lote, do log Raft e do journal não muda.
 - A definição nova no plano de controle é ignorada por um nó antigo.
+
+## Configuração
+
+| Variável | Padrão | O que faz |
+|---|---|---|
+| `AXON_PARTITION_MAINTENANCE_SECONDS` | 10 | intervalo da manutenção; 0 desliga |
+| `AXON_TTL_BATCH` | 200 | linhas por lote do TTL |
+| `AXON_TTL_MAX_PER_RUN` | 20000 | teto de linhas do TTL por rodada |
+| `AXON_COLD_DIR` | desligado | camada fria num diretório |
+| `AXON_COLD_S3` | desligado | camada fria num bucket (não definir junto com o anterior) |
+| `AXON_COLD_CACHE_DIR` | temporário do sistema | onde o cache guarda os objetos abertos |
+| `AXON_COLD_CACHE_MB` | 1024 | teto do cache |
+| `AXON_COLD_GC_GRACE_DAYS` | 35 | carência antes de apagar um objeto órfão |
+| `AXON_COLD_GC_INTERVAL_SECONDS` | 3600 | intervalo da coleta de lixo |
+| `AXON_COLD_LOGICAL_HOLD_DAYS` | 35 | validade do bloqueio de backup lógico e de backup físico apagado |
+
+Um restore físico ou a um instante recusa a troca de base com `409 COLD_MISSING` quando falta um objeto, e um backup responde `409 COLD_HOLD_FAILED` quando não consegue bloquear.
+
+## Portões
+
+Opt-in, numa máquina dedicada. Os parâmetros (`axon.gate.e4.rows`, `smallRows`, `maxDropMillis`, `writers`, `seconds`, `backlog`, `maxP99Increase`, `coldRows`, `dir`) têm os padrões descritos na classe `E4PartitionGateTest`.
+
+```bash
+mvn -q -pl axonbase-core -am test -Daxon.gate.e4=true -Dtest=E4PartitionGateTest -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+| Portão | Como mede | Meta padrão |
+|---|---|---|
+| apagar partição de 1 milhão de linhas | tempo do `DROP PARTITION`, ao lado de uma de 10 mil | até 500 ms |
+| TTL sem degradar a escrita | p99 (o tempo abaixo do qual ficam 99% das escritas) com o TTL removendo, contra o p99 sem TTL | até 20% acima |
+| restore com camada fria | objetos lidos durante o restore, e a contagem de linhas depois | nenhum download no restore |
 
 ## Fora desta versão
 
