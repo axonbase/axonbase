@@ -2,6 +2,7 @@ package com.axonbase.server;
 
 import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterConfig;
+import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.RaftOptions;
 import com.axonbase.core.engine.Datastore;
@@ -139,6 +140,11 @@ class ShardGatewayHttpTest {
         server.clusterStatus(runtime);
         server.shardBackup(new ShardBackupNode(runtime, backend, hooks, dir.resolve("backups"),
             Duration.ofSeconds(30)));
+        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        while (runtime.role() != ClusterRole.LEADER || !runtime.status().ready()) {
+            assertTrue(System.nanoTime() < deadline, "o nó não virou líder");
+            Thread.sleep(20);
+        }
         try (GatewayServer gateway = GatewayMain.start(GatewayMain.Config.from(environment(List.of(server))))) {
             sql(gateway, "DEFINE TABLE pedido SHARD BY cliente");
             sql(gateway, "CREATE pedido SET cliente = 'ana', total = 1");

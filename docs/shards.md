@@ -191,6 +191,9 @@ Transformar um cluster existente em vários shards não redistribui dados de tab
 
 ## Limites conhecidos
 
+- O gateway atende só `/sql`, por HTTP (HyperText Transfer Protocol). Os SDKs (Software Development Kits) que usam RPC (Remote Procedure Call) sobre WebSocket, o `/table`, o `/graphql` e o `/mcp` ainda não passam por ele.
+- O tráfego do gateway chega a cada nó por um endereço só: deixe `AXON_RATE_LIMIT` desligado nos shards, ou alto.
+- Funções AxonPL chamadas sem o prefixo `fn::` rodam em cada shard contra os dados dele.
 - A movimentação copia os registros de cada tabela de uma vez, em memória, e depende do prazo de validade do mapa em vez de uma trava no shard.
 - O gateway não divide nem junta shards sozinho: a movimentação é pedida pelo operador.
 - Uma consulta espalhada traz até `START + LIMIT` linhas de cada shard.
