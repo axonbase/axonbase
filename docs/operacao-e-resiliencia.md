@@ -97,13 +97,13 @@ O redirecionamento `307` de escrita aponta, por padrão, para o endereço do Raf
 
 ## Defeito na 0.10.1 e anteriores: escrita confirmada sem gravar
 
-**Situação:** achado pela leitura do código. A prova automática (`scripts/raft-gates/LegacyQuorumLoss.java`) ainda não tem resultado no ambiente de testes. Não é um problema de atualização: acontece num cluster só com a versão antiga. O mesmo caminho existe na 0.4.0, na 0.8.0, na 0.9.2, na 0.10.0 e na 0.10.1.
+**Situação:** confirmado. A prova automática (`scripts/raft-gates/LegacyQuorumLoss.java`, commit `17bea4d`) rodou no ambiente de testes: contra a 0.10.1, cinco escritas confirmadas não ficaram em nenhum nó; contra esta versão, todas ficaram. O código das versões anteriores foi só lido, não executado. Não é um problema de atualização: acontece num cluster só com a versão antiga. O mesmo caminho existe na 0.4.0, na 0.8.0, na 0.9.2, na 0.10.0 e na 0.10.1.
 
 **O que acontece.** Quando uma escrita falha por falta de quórum (basta os seguidores não responderem a tempo), o líder descarta a entrada do arquivo do log, mas não da memória. Na escrita seguinte ele encontra a entrada velha no índice, não grava a nova e confirma ao cliente. O log deixa de crescer e **todas** as escritas seguintes desse líder são confirmadas e perdidas, até o processo reiniciar.
 
 **Mitigação para quem roda essas versões.** Reinicie o nó que respondeu falta de quórum, antes de ele voltar a receber escritas. As escritas já perdidas não são recuperadas.
 
-**Esta versão** usa outro log e não herda o caminho. A prova, compilada contra ela, deve sair com `PROVA RESULT OK`.
+**Esta versão** usa outro log e não herda o caminho. A prova, compilada contra ela, sai com `PROVA RESULT OK`.
 
 ```bash
 javac -cp "$CLASSPATH_DA_VERSAO" -d out scripts/raft-gates/LegacyQuorumLoss.java
@@ -149,13 +149,13 @@ O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível
 | `9b53841`, com diagnóstico | 60 rodadas: 58 boas, 1 com 427 escritas perdidas, 1 parada ainda no cluster antigo |
 | `238e9a1`, com todas as defesas | 60 rodadas: 55 boas, 4 com 207 a 440 escritas perdidas por líder antigo, 1 com uma escrita ausente num nó antigo |
 
-As perdas grandes são compatíveis com o [defeito da versão antiga](#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar): numa rodada com diagnóstico, as escritas perdidas foram confirmadas por um líder antigo com o log vazio. A prova determinística ainda precisa rodar.
+As perdas grandes vêm do [defeito da versão antiga](#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar): nas rodadas com diagnóstico, as escritas perdidas foram confirmadas por um líder antigo com o log vazio. O cluster só com a 0.10.1 travou nas 33 rodadas lidas, antes de chegar à conferência.
 
 **Um caso em que a líder era nova.** Em `238e9a1`, uma escrita confirmada pela líder nova ficou fora de um seguidor antigo; os outros dois nós a guardam. Pelos registros, o outro seguidor antigo não a gravou (a líder não contou a resposta dele), então o voto que fechou o quórum veio de um nó antigo que já se dizia aplicado naquele índice, com o log vazio, e por isso nunca a aplicou. Se a líder caísse naquele instante, a escrita se perderia. Como esse nó chegou a esse estado não foi determinado, e o nó novo não tem como perceber: o protocolo antigo não informa o índice aplicado.
 
 **Conclusão.** A atualização um nó de cada vez a partir da 0.10.x não pode ser garantida: enquanto um nó antigo participar do quórum, os defeitos dele atingem o cluster. As defesas do nó novo reduzem a exposição, mas não a eliminam.
 
-**Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Ainda sem resultado.
+**Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Resultado parcial: 17 execuções lidas, todas aprovadas, sem perda causada pela troca e sem divergência; numa delas a versão antiga já tinha perdido 413 escritas antes da parada.
 
 **Recomendação para a atualização a partir da 0.10.x:** parada programada. Pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova. Um nó antigo pode já estar diferente dos outros antes da parada, por causa dos próprios defeitos: compare o conteúdo e, havendo diferença, refaça os nós divergentes a partir do que tiver os dados completos.
 
