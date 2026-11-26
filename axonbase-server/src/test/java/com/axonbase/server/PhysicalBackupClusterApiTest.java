@@ -67,6 +67,12 @@ class PhysicalBackupClusterApiTest {
                     assertEquals(409, restore.statusCode(), any + " " + restore.body());
                     assertEquals(409, send("PUT", api + "/files?source=outro&path=meta/1", token).statusCode());
                     assertEquals(409, send("DELETE", api + "/imports/outro", token).statusCode());
+                    // o journal não existe em cluster: nada de importar nem apagar segmentos
+                    String journal = base + "/admin/v1/backups/journal";
+                    String segment = journal + "/segments/seg-001790000000000-0000000000.axj";
+                    assertEquals(409, send("PUT", segment + "?source=outro", token).statusCode(), any.name());
+                    assertEquals(409, send("DELETE", segment + "?source=outro", token).statusCode(), any.name());
+                    assertEquals(409, send("DELETE", journal + "/imports/outro", token).statusCode(), any.name());
                 }
                 role.set(ClusterRole.FOLLOWER);
                 assertEquals(200, send("DELETE", api + "?keep=1", token).statusCode());

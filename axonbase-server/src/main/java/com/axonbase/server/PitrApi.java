@@ -238,6 +238,7 @@ final class PitrApi {
 
     private static void writeSegment(AxonServer srv, String name, HttpServletRequest req, HttpServletResponse resp)
             throws IOException {
+        PhysicalBackupApi.requireStandalone(srv);
         RocksDbBackend rocks = PhysicalBackupApi.rocks(srv);
         String source = req.getParameter("source");
         if (source == null || source.isBlank()) {
@@ -261,6 +262,7 @@ final class PitrApi {
 
     private static void deleteSegment(AxonServer srv, String name, HttpServletRequest req, HttpServletResponse resp)
             throws IOException {
+        PhysicalBackupApi.requireStandalone(srv);
         RocksDbBackend rocks = PhysicalBackupApi.rocks(srv);
         String source = req.getParameter("source");
         Path file = segmentFile(srv, rocks, source, name);
@@ -273,6 +275,7 @@ final class PitrApi {
     }
 
     private static void deleteImport(AxonServer srv, String source, HttpServletResponse resp) throws IOException {
+        PhysicalBackupApi.requireStandalone(srv);
         RocksDbBackend rocks = PhysicalBackupApi.rocks(srv);
         root(srv, rocks, source, true);
         JournalSegments.deleteImport(root(srv, rocks, null, false), source);

@@ -111,7 +111,7 @@ final class PhysicalBackupApi {
     }
 
     /** Restaurar ou importar mexeria na base de um membro por fora do consenso. */
-    private static void requireStandalone(AxonServer srv) {
+    static void requireStandalone(AxonServer srv) {
         if (clustered(srv)) {
             throw new AdminV1Servlet.ApiError(409, "CONFLICT", Messages.get("physical_cluster_restore"));
         }
