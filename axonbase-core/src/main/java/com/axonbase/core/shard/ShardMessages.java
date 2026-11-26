@@ -144,6 +144,10 @@ final class ShardMessages {
         entry("txn_multi_shard",
             "o bloco BEGIN precisa cair num shard só; entre shards use uma saga",
             "a BEGIN block must reach a single shard; use a saga across shards"),
+        entry("shard_signin", "não deu para entrar em %s: %s", "could not sign in to %s: %s"),
+        entry("move_verification",
+            "a cópia de %s não confere: %s registros na origem e %s no destino",
+            "the copy of %s does not match: %s records on the source and %s on the target"),
         entry("partial_select",
             "o modo parcial aceita exatamente um SELECT",
             "partial mode takes exactly one SELECT"));

@@ -4,6 +4,7 @@ import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.ReadConsistency;
+import com.axonbase.core.control.ControlCommand;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HybridClock;
 import com.axonbase.parser.AxonQl;
@@ -11,8 +12,10 @@ import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonValue;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Executa as mensagens do gateway num nó de shard. Só o líder atende, e leituras são linearizáveis, então o gateway lê
@@ -45,18 +48,38 @@ public final class ShardNode implements ShardMember {
      */
     public ShardReply execute(ShardRequest request, Session session) {
         clock.receive(request.stamp());
+        boolean definitions = ShardRequest.DEFINITIONS.equals(request.sql());
         if (cluster != null) {
             if (cluster.role() != ClusterRole.LEADER) {
                 throw cluster.notLeader();
             }
-            if (!Datastore.isMutation(request.sql())) {
+            if (definitions || !Datastore.isMutation(request.sql())) {
                 cluster.awaitRead(ReadConsistency.LINEARIZABLE);
             }
+        }
+        if (definitions) {
+            return new ShardReply(definitions(), clock.now());
         }
         session.namespace(request.namespace());
         session.database(request.database());
         AxonValue value = request.atomic() && cluster == null ? transaction(request, session) : run(request, session);
         return new ShardReply(value, clock.now());
+    }
+
+    /** O plano de controle do nó: cada definição com o banco dela, na ordem de reaplicação. */
+    private AxonValue definitions() {
+        List<AxonValue> out = new ArrayList<>();
+        for (ControlCommand command : datastore.controlSnapshot().commands()) {
+            if (command.kind() == ControlCommand.Kind.JKS) {
+                continue;
+            }
+            Map<String, AxonValue> item = new LinkedHashMap<>();
+            item.put("ns", AxonValue.str(command.namespace()));
+            item.put("db", AxonValue.str(command.database()));
+            item.put("definition", AxonValue.str(command.definition()));
+            out.add(AxonValue.object(item));
+        }
+        return AxonValue.array(out);
     }
 
     private AxonValue run(ShardRequest request, Session session) {

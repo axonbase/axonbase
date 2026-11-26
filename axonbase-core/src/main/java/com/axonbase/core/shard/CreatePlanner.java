@@ -33,7 +33,7 @@ final class CreatePlanner {
             return Plan.write(map.home().id(), piece.text());
         }
         GatewayRules.requireSelfContained(create, table);
-        AxonValue explicit = create.target() instanceof Expr.RecordId id ? recordKey(session, table, id.key()) : null;
+        AxonValue explicit = create.target() instanceof Expr.RecordId id ? recordKey(session, id.key()) : null;
         AxonValue chosen = explicit != null ? explicit : dataField(session, create.data(), "id");
         String text = piece.text();
         AxonValue key = chosen;
@@ -42,11 +42,11 @@ final class CreatePlanner {
             key = AxonValue.str(generated);
             text = withKey(piece, create, table, generated);
         }
-        AxonValue value = field.equals("id") ? key : dataField(session, create.data(), field);
+        AxonValue value = field.equals("id") ? engineKey(key) : dataField(session, create.data(), field);
         if (value == null) {
             throw ShardException.refused("shard_key_required", table, field);
         }
-        int slot = GatewayRules.slot(field, table, value);
+        int slot = SlotHash.ofValue(value);
         GatewayRules.requireSettled(map, List.of(slot));
         if (!field.equals("id") && chosen != null) {
             requireUnusedId(map, session, table, chosen, map.ownerOf(slot));
@@ -89,7 +89,7 @@ final class CreatePlanner {
                     id = AxonValue.str(newKey());
                     row.put("id", id);
                 }
-                slot = SlotHash.ofId(table, id);
+                slot = SlotHash.ofValue(engineKey(id));
             } else {
                 AxonValue value = row.get(field);
                 if (value == null) {
@@ -167,9 +167,8 @@ final class CreatePlanner {
         }
     }
 
-    private AxonValue recordKey(GatewaySession session, String table, Expr key) {
-        AxonValue value = context.evaluate(key, session);
-        return value.isRecordId() ? AxonValue.str(SlotHash.idText(table, value)) : value;
+    private AxonValue recordKey(GatewaySession session, Expr key) {
+        return engineKey(context.evaluate(key, session));
     }
 
     /** O valor que os dados gravam num campo, quando está escrito neles; {@code null} se o campo não aparece. */
@@ -217,7 +216,7 @@ final class CreatePlanner {
         if (!context.options.checkExplicitIds()) {
             throw ShardException.refused("explicit_id", table);
         }
-        AxonValue key = bareKey(table, id);
+        AxonValue key = engineKey(id);
         String query = "SELECT * FROM " + table + ":" + GatewayRules.keyLiteral(key);
         for (String shard : map.shardIds()) {
             if (shard.equals(owner)) {
@@ -225,7 +224,7 @@ final class CreatePlanner {
             }
             AxonValue found = context.send(map, Plan.Part.of(shard, query), session, false);
             if (found.isObject() || found.isArray() && !found.asArray().isEmpty()) {
-                throw ShardException.refused("id_exists", table + ":" + SlotHash.idText(table, id), shard);
+                throw ShardException.refused("id_exists", table + ":" + GatewayRules.keyLiteral(key), shard);
             }
         }
     }
@@ -238,8 +237,11 @@ final class CreatePlanner {
         return "g" + UUID.randomUUID().toString().replace("-", "");
     }
 
-    /** A chave de um id escrito como record id, texto {@code tabela:chave} ou a própria chave, sem perder o tipo. */
-    private static AxonValue bareKey(String table, AxonValue id) {
+    /**
+     * A chave que o motor grava para um id escrito nos dados ou no alvo: a chave de um record id, um número inteiro, ou
+     * o texto como está (um texto {@code tabela:x} vira a chave inteira, como no nó único).
+     */
+    private static AxonValue engineKey(AxonValue id) {
         if (id.isRecordId()) {
             Object key = id.asRecordId().key();
             if (key instanceof AxonValue value) {
@@ -247,7 +249,7 @@ final class CreatePlanner {
             }
             return key instanceof Long number ? AxonValue.num(number) : AxonValue.str(String.valueOf(key));
         }
-        return id.isString() ? AxonValue.str(SlotHash.idText(table, id)) : id;
+        return id.isNumber() ? AxonValue.num(id.asLong()) : id;
     }
 
     /** Escreve a chave gerada no texto, logo depois do nome da tabela, e confere o resultado. */

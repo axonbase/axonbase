@@ -261,6 +261,9 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new AdminTrustStoreServlet()), "/admin/truststores");
         ctx.addServlet(new ServletHolder(new CertificateLoginServlet()), "/certificate/login/*");
         ctx.addServlet(new ServletHolder(new ShardMoveServlet()), "/admin/shard/move");
+        // rota interna do gateway de shards (docs/shards.md)
+        ctx.addServlet(new ServletHolder(new ShardNodeServlet(ds, this::withNames, requireAuth, () -> clusterRuntime)),
+            "/shard/v1/*");
         ServletHolder adminV1 = new ServletHolder(new AdminV1Servlet(this));
         adminV1.setAsyncSupported(true);
         adminV1.getRegistration().setMultipartConfig(new jakarta.servlet.MultipartConfigElement(

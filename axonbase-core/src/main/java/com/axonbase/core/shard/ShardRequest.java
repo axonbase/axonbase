@@ -19,6 +19,9 @@ public record ShardRequest(String namespace, String database, String sql, Map<St
                            boolean atomic, boolean partial, SlotFilter filter, HlcTimestamp stamp,
                            String authorization) {
 
+    /** Pede as definições do catálogo, na ordem em que podem ser reaplicadas (para subir um shard novo). */
+    public static final String DEFINITIONS = "__axon_definitions";
+
     public ShardRequest {
         vars = vars == null ? Map.of() : java.util.Collections.unmodifiableMap(new LinkedHashMap<>(vars));
         stamp = stamp == null ? HlcTimestamp.NONE : stamp;
@@ -26,6 +29,10 @@ public record ShardRequest(String namespace, String database, String sql, Map<St
 
     public static ShardRequest of(String namespace, String database, String sql) {
         return new ShardRequest(namespace, database, sql, Map.of(), false, false, null, HlcTimestamp.NONE, null);
+    }
+
+    public static ShardRequest definitions() {
+        return of(null, null, DEFINITIONS);
     }
 
     public ShardRequest withSql(String text) {

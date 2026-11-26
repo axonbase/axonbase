@@ -33,6 +33,10 @@ public final class Main {
             return;
         }
         String cmd = args[0];
+        if ("gateway".equals(cmd)) {
+            GatewayMain.run(System.getenv());
+            return;
+        }
         if (!"start".equals(cmd)) {
             System.err.println(Messages.get("cli_unknown_command", cmd));
             usage();
