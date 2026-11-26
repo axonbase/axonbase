@@ -91,7 +91,7 @@ class HnswGraphRepairTest {
             create(ds, s, i, (i % 12) / 11.0, (i / 12) / 9.0);
         }
 
-        // o nível mais alto só tem os nós criados desde que ele surgiu: apagando de trás para a frente ele esvazia
+        // os níveis de cima têm poucos nós: apagando de trás para a frente, o mais alto esvazia mais de uma vez
         for (int i = rows - 1; i > 0; i--) {
             ds.execute("DELETE p:" + i, s, null);
             assertEquals(Math.min(10, i), found(ds, s, 10).size(), "busca depois de apagar p:" + i);

@@ -2174,13 +2174,13 @@ public final class Executor {
             return new LinkedHashSet<>();
         }
         for (int level = top.level(); level > 0; level--) {
-            List<Neighbor> near = searchLevel(db, table, index, level, entry, query, 1);
+            List<Neighbor> near = searchLevel(db, table, index, level, List.of(entry), query, 1);
             if (!near.isEmpty()) {
                 entry = near.get(0).key();
             }
         }
         Set<String> out = new LinkedHashSet<>();
-        for (Neighbor candidate : searchLevel(db, table, index, 0, entry, query, Math.max(1, efSearch))) {
+        for (Neighbor candidate : searchLevel(db, table, index, 0, List.of(entry), query, Math.max(1, efSearch))) {
             out.add(candidate.key());
         }
         return out;
@@ -2304,20 +2304,26 @@ public final class Executor {
     }
 
     /**
-     * Busca greedy num nível: devolve até <code>ef</code> candidatos ordenados pela
-     * menor distância, usando as arestas persistidas VH|...|<nivel>|<key>|<vizinho>.
+     * Busca greedy num nível a partir de um ou mais pontos de entrada: devolve até <code>ef</code> candidatos
+     * ordenados pela menor distância, usando as arestas persistidas VH|...|<nivel>|<key>|<vizinho>.
      */
     private List<Neighbor> searchLevel(Database db, String table, Catalog.IndexDef index, int level,
-                                       String entry, AxonValue query, int ef) {
+                                       List<String> entries, AxonValue query, int ef) {
         PriorityQueue<Neighbor> candidates = new PriorityQueue<>(
             Comparator.comparingDouble(Neighbor::distance));
         PriorityQueue<Neighbor> results = new PriorityQueue<>(
             java.util.Comparator.comparingDouble(Neighbor::distance).reversed());
         Set<String> visited = new HashSet<>();
-        double start = vectorNodeDistance(db, table, index, entry, query);
-        visited.add(entry);
-        candidates.add(new Neighbor(entry, start));
-        results.add(new Neighbor(entry, start));
+        for (String entry : entries) {
+            if (visited.add(entry)) {
+                Neighbor start = new Neighbor(entry, vectorNodeDistance(db, table, index, entry, query));
+                candidates.add(start);
+                results.add(start);
+            }
+        }
+        while (results.size() > ef) {
+            results.poll();
+        }
         while (!candidates.isEmpty()) {
             Neighbor current = candidates.poll();
             Neighbor furthest = results.peek();
@@ -6802,60 +6808,60 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
     }
 
     /**
-     * Insere o vetor no grafo HNSW multicamado. O nível do novo nó é sorteado
-     * com probabilidade {@code e^-L}; em cada nível ele é ligado aos vizinhos
-     * mais próximos (limite {@code M}), com entrada global preservada na busca.
+     * Insere o vetor no grafo HNSW multicamado. O nó entra só do nível 0 até o nível sorteado para ele, de modo que
+     * os níveis de cima ficam esparsos e levam a busca depressa para perto do alvo. Em cada nível em que entra, ele é
+     * ligado aos vizinhos mais próximos (limite {@code M}).
      */
     private void linkHnsw(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector) {
         String key = rid.key().keyString();
-        int nodeTop = randomLevel();
+        int maxLinks = Math.max(4, index.hnswM());
+        int efConstruction = Math.max(Math.max(16, index.hnswEfc()), maxLinks * 2);
+        int nodeTop = randomLevel(maxLinks);
         // a entrada do nível mais alto é lida antes de o nó novo aparecer no grafo, para que ele não se ache a si mesmo
         GraphTop current = graphTop(db, rid.table(), index);
         int topExisting = current.level();
-        int top = Math.max(nodeTop, topExisting);
-        String entry = current.entry();
-        for (int level = 0; level <= top; level++) {
+        for (int level = 0; level <= nodeTop; level++) {
             records(db).put(vhPresenceKey(db, rid.table(), index.name(), level, key), new byte[0]);
         }
-        if (top > topExisting) {
+        if (nodeTop > topExisting) {
             records(db).put(vhTopKey(db, rid.table(), index.name()),
-                Integer.toString(top).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                Integer.toString(nodeTop).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
-        int maxLinks = Math.max(4, index.hnswM());
-        int efConstruction = Math.max(Math.max(16, index.hnswEfc()), maxLinks * 2);
         // Inserção HNSW: desce do nível mais alto seguindo a busca no grafo e liga o nó aos mais próximos de cada
         // nível. O custo depende de efConstruction e M, não do número de nós do índice.
         hnswDistances = new java.util.HashMap<>();
         try {
-            linkLevels(db, rid, index, vector, key, top, topExisting, entry, maxLinks, efConstruction);
+            linkLevels(db, rid, index, vector, key, nodeTop, topExisting, current.entry(), maxLinks, efConstruction);
         } finally {
             hnswDistances = null;
         }
     }
 
-    private void linkLevels(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector, String key, int top,
-                            int topExisting, String entry, int maxLinks, int efConstruction) {
-        for (int level = top; level >= 0; level--) {
+    private void linkLevels(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector, String key,
+                            int nodeTop, int topExisting, String entry, int maxLinks, int efConstruction) {
+        // acima do nível do nó a busca só aproxima o ponto de entrada
+        for (int level = topExisting; level > nodeTop; level--) {
+            List<Neighbor> near = searchLevel(db, rid.table(), index, level, List.of(entry), vector, 1);
+            if (!near.isEmpty()) {
+                entry = near.get(0).key();
+            }
+        }
+        // o nível de baixo parte de todos os candidatos achados no de cima, não só do mais próximo: assim a busca
+        // cobre regiões vizinhas que ainda não têm caminho curto entre si, e o nó novo passa a ligá-las
+        List<String> entries = entry == null ? List.of() : List.of(entry);
+        for (int level = nodeTop; level >= 0; level--) {
             List<Neighbor> nearest = List.of();
-            if (entry != null && level <= topExisting) {
-                // o nível 0 usa a largura cheia; nos de cima basta a vizinhança (os nós estão em todos os níveis)
-                nearest = searchLevel(db, rid.table(), index, level, entry, vector,
-                    level == 0 ? efConstruction : Math.max(maxLinks, 8));
+            if (!entries.isEmpty() && level <= topExisting) {
+                nearest = searchLevel(db, rid.table(), index, level, entries, vector, efConstruction).stream()
+                    .filter(nb -> !nb.key().equals(key) && nb.distance() != Double.MAX_VALUE).toList();
             }
             int linkLimit = level == 0 ? maxLinks : Math.max(2, maxLinks / 2);
-            int linked = 0;
-            for (Neighbor nb : nearest) {
-                if (nb.key().equals(key) || nb.distance() == Double.MAX_VALUE) {
-                    continue;
-                }
-                if (linked == 0) {
-                    entry = nb.key();
-                }
-                if (linked++ >= linkLimit) {
-                    break;
-                }
+            for (Neighbor nb : nearest.subList(0, Math.min(linkLimit, nearest.size()))) {
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, key) + nb.key(), new byte[0]);
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, nb.key()) + key, new byte[0]);
+            }
+            if (!nearest.isEmpty()) {
+                entries = nearest.stream().map(Neighbor::key).toList();
             }
             String entryKey = vhEntryKey(db, rid.table(), index.name(), level);
             if (records(db).get(entryKey).isEmpty()) {
@@ -6956,13 +6962,10 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         return new GraphTop(-1, null);
     }
 
-    /** Sorteia o nível topo de um novo nó (probabilidade e^-L por camada). */
-    private int randomLevel() {
-        int level = 0;
-        while (level < 24 && java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.3678794412) {
-            level++;
-        }
-        return level;
+    /** Sorteia o nível topo de um nó novo: de cada nível para o seguinte sobe cerca de 1 em cada {@code M} nós. */
+    private int randomLevel(int links) {
+        double draw = 1d - java.util.concurrent.ThreadLocalRandom.current().nextDouble();
+        return (int) Math.min(24d, -Math.log(draw) / Math.log(links));
     }
 
     private record Neighbor(String key, double distance) {

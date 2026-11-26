@@ -525,12 +525,17 @@ class OnlineIndexBuildTest {
         return "{v: [" + ((i % 40) / 39.0) + ", " + ((i / 40 % 40) / 39.0) + "], n: " + i + "}";
     }
 
-    private static java.util.List<String> nearest(Datastore ds) {
+    /** Distância exata do vetor de {@code vec(n)} ao centro, o alvo da consulta. */
+    private static double distanceToCentre(long n) {
+        return Math.hypot((n % 40) / 39.0 - 0.5, (n / 40 % 40) / 39.0 - 0.5);
+    }
+
+    private static java.util.List<Long> nearest(Datastore ds) {
         AxonValue rows = ds.execute(
             "SELECT VALUE n FROM t ORDER BY vector::distance::euclidean(v, [0.5, 0.5]) LIMIT 10", session(), null);
-        java.util.List<String> out = new ArrayList<>();
+        java.util.List<Long> out = new ArrayList<>();
         for (AxonValue r : rows.asArray()) {
-            out.add(render(r));
+            out.add(r.asLong());
         }
         return out;
     }
@@ -590,12 +595,24 @@ class OnlineIndexBuildTest {
         assertEquals(indexEntries(before, plain).keySet().stream().filter(k -> k.startsWith("VX|")).count(),
             indexEntries(after, plain).keySet().stream().filter(k -> k.startsWith("VX|")).count());
         assertFalse(allKeys(after).keySet().stream().anyMatch(k -> k.startsWith("IXB|")));
-        // vizinhos iguais aos do índice criado antes (o grafo pode diferir, o top-10 sobre 2 dimensões não)
-        java.util.List<String> expected = nearest(before);
-        java.util.List<String> got = nearest(after);
-        long hit = got.stream().filter(expected::contains).count();
-        // o índice é aproximado e o grafo depende da ordem das escritas concorrentes: 8 de 10 já aparece em 1 de 5 execuções
-        assertTrue(hit >= 7, "recall " + hit + "/10, esperado " + expected + " obtido " + got);
+        // vizinhos conferidos contra o cálculo exato sobre as linhas vivas. Há oito linhas empatadas para seis vagas,
+        // então vale qualquer linha tão perto quanto a décima, e não uma lista fixa de ids
+        Set<Long> alive = new TreeSet<>();
+        for (long i = 0; i < n; i++) {
+            if (i >= 300 || i % 3 != 0) {
+                alive.add(i);
+            }
+        }
+        for (long i = 0; i < 100; i++) {
+            alive.add(n + 7 * i);
+        }
+        double tenth = alive.stream().mapToDouble(OnlineIndexBuildTest::distanceToCentre).sorted().skip(9)
+            .findFirst().orElseThrow();
+        java.util.List<Long> got = nearest(after);
+        long hit = got.stream().distinct()
+            .filter(v -> alive.contains(v) && distanceToCentre(v) <= tenth + 1e-9).count();
+        // o índice é aproximado: tolera um vizinho trocado
+        assertTrue(hit >= 9, "recall " + hit + "/10, décima distância " + tenth + ", obtido " + got);
         // linhas escritas durante a construção são encontradas; as apagadas não aparecem
         assertEquals(0, rows(after.execute("SELECT * FROM t WHERE id = t:0", session(), null)));
         assertEquals(1, rows(after.execute("SELECT * FROM t WHERE id = t:" + (n + 50), session(), null)));

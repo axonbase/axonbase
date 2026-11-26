@@ -3,6 +3,7 @@ package com.axonbase.core;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.value.AxonValue;
 import com.axonbase.value.AxonJson;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -74,6 +75,45 @@ class HnswRecallTest {
         ds.execute("DELETE point:0", s, null);
         AxonValue after = ds.execute("SELECT VALUE id FROM point ORDER BY vector::distance::euclidean(v, [0.1, 0.1]) LIMIT 1", s, null);
         assertEquals("point:1", idText(after.asArray().get(0)));
+    }
+
+    @Test
+    @DisplayName("linhas inseridas na ordem textual das chaves, como na construção em segundo plano, mantêm o recall")
+    void recallSurvivesInsertionInTextualKeyOrder() {
+        Datastore ds = datastore();
+        Session s = session();
+        ds.execute("DEFINE INDEX vec ON TABLE grid COLUMNS v HNSW DIMENSION 2 DIST euclidean M 12 EFC 64 EFS 256",
+            s, null);
+        int n = 1500;
+        // 0, 1, 10, 100, 1000, 1001...: cada faixa cai longe da anterior na grade
+        List<Integer> order = java.util.stream.IntStream.range(0, n).boxed()
+            .sorted(java.util.Comparator.comparing(String::valueOf)).toList();
+        for (int i : order) {
+            double[] v = gridPoint(i);
+            ds.execute("CREATE grid:" + i + " CONTENT { n: " + i + ", v: [" + v[0] + ", " + v[1] + "] }", s, null);
+        }
+
+        List<String> bad = new ArrayList<>();
+        for (int gx = 0; gx < 10; gx++) {
+            for (int gy = 0; gy < 10; gy++) {
+                double[] query = {(gx + 0.5) / 10, (gy + 0.5) / 10};
+                double tenth = java.util.stream.IntStream.range(0, n)
+                    .mapToDouble(i -> dist(gridPoint(i), query)).sorted().skip(9).findFirst().orElseThrow();
+                AxonValue rows = ds.execute("SELECT VALUE n FROM grid ORDER BY vector::distance::euclidean(v, ["
+                    + query[0] + ", " + query[1] + "]) LIMIT 10", s, null);
+                // empates de distância contam como acerto
+                long hit = rows.asArray().stream()
+                    .filter(r -> dist(gridPoint((int) r.asLong()), query) <= tenth + 1e-9).count();
+                if (hit < 9) {
+                    bad.add("[" + query[0] + ", " + query[1] + "]=" + hit);
+                }
+            }
+        }
+        assertTrue(bad.isEmpty(), "consultas com menos de 9 dos 10 vizinhos: " + bad);
+    }
+
+    private double[] gridPoint(int i) {
+        return new double[]{(i % 40) / 39.0, (i / 40) / 39.0};
     }
 
     private String idText(AxonValue v) {
