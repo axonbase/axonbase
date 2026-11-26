@@ -34,6 +34,8 @@ final class LeanHttpConnection implements Closeable {
     private int position;
     private int limit;
     private boolean closing;
+    private long answered;
+    private long answeredAtNanos;
 
     /**
      * @param url     endereço do nó, como {@code http://host:porta}
@@ -66,9 +68,19 @@ final class LeanHttpConnection implements Closeable {
         byte[] request = new byte[prefix.length + content.length];
         System.arraycopy(prefix, 0, request, 0, prefix.length);
         System.arraycopy(content, 0, request, prefix.length, content.length);
-        out.write(request);
-        out.flush();
-        return read();
+        try {
+            out.write(request);
+            out.flush();
+            Response response = read();
+            answered++;
+            answeredAtNanos = System.nanoTime();
+            return response;
+        } catch (IOException failure) {
+            // Sem reenvio: um servidor que fecha uma conexão em uso é uma falha, e estes dois números a explicam.
+            long idle = answered == 0 ? 0 : (System.nanoTime() - answeredAtNanos) / 1_000_000L;
+            throw new IOException(failure.getMessage() + " (conexão com " + answered + " respostas, a última há "
+                + idle + " ms)", failure);
+        }
     }
 
     private Response read() throws IOException {

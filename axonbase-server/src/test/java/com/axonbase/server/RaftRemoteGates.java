@@ -80,6 +80,7 @@ public final class RaftRemoteGates {
 
     public static void main(String[] args) throws Exception {
         Locale.setDefault(Locale.ROOT);
+        RaftReadGateBenchmark.closeIdleConnectionsBeforeTheServers();
         String token = System.getenv("AXON_GATE_TOKEN");
         Map<String, String> options = RaftGateNode.options(args, 1);
         if (args.length == 0 || token == null || token.isBlank() || !options.containsKey("nodes")) {
