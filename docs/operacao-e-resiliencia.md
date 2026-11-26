@@ -77,7 +77,11 @@ Antes de atualizar um nó, confira que:
 
 `GET /admin/v1/cluster/upgrade-check?target=<versão>&members=<versões>` aplica essas regras.
 
+Essas regras dizem quem consegue conversar, não que a troca seja segura. **A partir da 0.10.x, use a [parada total](#falha-de-versões-mistas)**, mesmo que a verificação responda que a atualização é permitida.
+
 ### Roteiro
+
+Vale entre versões que transferem a liderança (a partir desta).
 
 1. Confira a saúde: todos prontos, atraso zero, versões compatíveis.
 2. Atualize os seguidores, um de cada vez: drene, pare, suba a versão nova, espere ficar pronto e alcançar o líder.
@@ -89,7 +93,9 @@ O cliente precisa seguir o contrato de repetição: repetir quando a escrita **c
 
 O redirecionamento `307` de escrita aponta, por padrão, para o endereço do Raft. Para clientes HTTP seguirem o redirecionamento, informe `AXON_CLUSTER_HTTP_PEERS` (por exemplo `n1=http://10.0.0.1:8000,n2=http://10.0.0.2:8000`).
 
-**Limite na atualização a partir da 0.10.x:** o líder antigo não sabe transferir o cargo, e a versão antiga não tem drenagem. O último passo causa uma eleição, e escritas em curso naquele instante podem ficar sem desfecho. Veja também o risco descrito em [Falha de versões mistas](#falha-de-versões-mistas).
+**A partir da 0.10.x** este roteiro não vale: o líder antigo não sabe transferir o cargo, a versão antiga não tem drenagem e os defeitos dela podem perder escritas confirmadas enquanto ela participa do quórum. Veja [Falha de versões mistas](#falha-de-versões-mistas).
+
+**O que foi medido:** o reinício um nó de cada vez de um cluster só desta versão, derrubando também o líder, passou em 60 rodadas sem perda, sem parada e sem anomalia. Os dois lados eram a mesma versão: a troca entre duas versões novas diferentes ainda não existe para medir.
 
 **Conexões que não são HTTP:** uma conexão WebSocket continua aberta no nó drenado. Escritas passam a receber `NOT_LEADER` com o líder novo, e a conexão cai quando o processo para: o cliente precisa reconectar. Uma transação explícita aberta no líder durante a transferência recebe `NOT_LEADER` no `COMMIT` e precisa ser refeita.
 
