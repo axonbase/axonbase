@@ -3755,7 +3755,15 @@ return score;
         // Redefinir o mesmo UNIQUE é idempotente: só um índice novo precisa olhar os dados.
         if (!((di.unique() && !sameUnique) || advanced)) {
             if (previous != null && previous.geo()) {
-                purgeIndexEntries(db, di.table(), previous);
+                // o GEO deixa marcador e entradas: saem junto com a troca, sem escrita no meio
+                java.util.concurrent.locks.Lock swap = db.indexLock().writeLock();
+                swap.lock();
+                try {
+                    purgeIndexEntries(db, di.table(), previous);
+                    def.indexes().put(di.name(), newIndex);
+                } finally {
+                    swap.unlock();
+                }
             }
             def.indexes().put(di.name(), newIndex);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
