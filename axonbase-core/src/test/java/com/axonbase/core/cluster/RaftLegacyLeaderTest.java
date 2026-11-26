@@ -146,6 +146,24 @@ class RaftLegacyLeaderTest {
     }
 
     @Test
+    @DisplayName("o batimento do líder antigo não confirma uma cauda que não veio dele")
+    void heartbeatDoesNotCommitUncheckedTail() throws Exception {
+        try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
+            assertTrue(append(follower, 1, 1, 0, 0, batch("a")).accepted());
+            // Escrita do líder anterior que nunca se confirmou: o líder novo tem outra no índice 2.
+            assertTrue(append(follower, 1, 2, 1, 1, batch("sobra")).accepted());
+
+            heartbeat(follower, 3, 2);
+
+            assertEquals(1, follower.commitIndex());
+            assertTrue(follower.stateMachine().get("sobra").isEmpty());
+            assertTrue(append(follower, 3, 2, 1, 2, batch("certa")).accepted());
+            assertEquals(2, follower.commitIndex());
+            assertTrue(follower.stateMachine().get("certa").isPresent());
+        }
+    }
+
+    @Test
     @DisplayName("entrada que o líder antigo reescreveu no mesmo mandato é trocada")
     void rewrittenEntryReplacesTheStoredOne() throws Exception {
         try (RaftNode follower = new RaftNode("n2", dir, new MemoryBackend())) {
