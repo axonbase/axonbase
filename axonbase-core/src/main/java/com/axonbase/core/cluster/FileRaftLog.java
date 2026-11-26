@@ -113,60 +113,69 @@ public final class FileRaftLog implements AutoCloseable {
         return new CommittedBatch(tx, puts, deletes);
     }
 
+    /**
+     * Relê o log do começo: cada entrada completa é mantida e a primeira incompleta (cauda cortada por uma queda
+     * no meio da escrita) é descartada junto com o que vier depois, truncando o arquivo nesse ponto.
+     */
     private void recover() throws IOException {
         if (!Files.exists(path)) return;
         byte[] raw = Files.readAllBytes(path);
         ByteBuffer buf = ByteBuffer.wrap(raw);
-        int pos;
-        long lastValid = -1;
+        int validEnd = 0;
         while (buf.remaining() >= 16) {
-            pos = buf.position();
-            long index = buf.getLong(); long term = buf.getLong();
-            if (buf.remaining() < 2) break;
-            short txLen = buf.getShort();
-            if (buf.remaining() < txLen) break;
-            buf.position(buf.position() + txLen);
-            if (buf.remaining() < 4) break;
-            int dels = buf.getInt();
-            boolean trunc = false;
-            for (int i = 0; i < dels; i++) {
-                if (buf.remaining() < 2) { trunc = true; break; }
-                short kLen = buf.getShort();
-                if (buf.remaining() < kLen) { trunc = true; break; }
-                buf.position(buf.position() + kLen);
+            int start = buf.position();
+            Entry entry;
+            try {
+                long index = buf.getLong();
+                long term = buf.getLong();
+                entry = new Entry(index, term, readBatchChecked(buf));
+            } catch (java.nio.BufferUnderflowException | NegativeArraySizeException e) {
+                buf.position(start);
+                break;
             }
-            if (trunc) break;
-            if (buf.remaining() < 4) break;
-            int count = buf.getInt();
-            for (int i = 0; i < count; i++) {
-                if (buf.remaining() < 2) { trunc = true; break; }
-                short kLen = buf.getShort();
-                if (buf.remaining() < kLen) { trunc = true; break; }
-                buf.position(buf.position() + kLen);
-                if (buf.remaining() < 4) { trunc = true; break; }
-                int vLen = buf.getInt();
-                if (buf.remaining() < vLen) { trunc = true; break; }
-                buf.position(buf.position() + vLen);
-            }
-            if (trunc) break;
-            lastValid = pos;
+            entries.add(entry);
+            byIndex.put(entry.index(), entry);
+            validEnd = buf.position();
         }
-        if (lastValid >= 0) {
-            buf.position((int) lastValid);
-            while (buf.remaining() >= 8) {
-                pos = buf.position();
-                long index = buf.getLong(); long term = buf.getLong();
-                if (buf.remaining() < 2) { buf.position(pos); break; }
-                CommittedBatch batch = readBatch(buf);
-                entries.add(new Entry(index, term, batch));
-                byIndex.put(index, entries.getLast());
-            }
-            if (buf.position() < raw.length) {
-                try (FileChannel ch = FileChannel.open(path, StandardOpenOption.WRITE)) {
-                    ch.truncate(buf.position());
-                }
+        if (validEnd < raw.length) {
+            try (FileChannel ch = FileChannel.open(path, StandardOpenOption.WRITE)) {
+                ch.truncate(validEnd);
             }
         }
+    }
+
+    /** Como {@link #readBatch}, mas sem alocar antes de saber que os bytes existem. */
+    private static CommittedBatch readBatchChecked(ByteBuffer buf) {
+        short txLen = buf.getShort();
+        if (txLen < 0 || buf.remaining() < txLen) throw new java.nio.BufferUnderflowException();
+        byte[] txRaw = new byte[txLen];
+        buf.get(txRaw);
+        String tx = new String(txRaw, java.nio.charset.StandardCharsets.UTF_8);
+        int dels = buf.getInt();
+        if (dels < 0 || dels > buf.remaining()) throw new java.nio.BufferUnderflowException();
+        java.util.Set<String> deletes = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < dels; i++) {
+            short kLen = buf.getShort();
+            if (kLen < 0 || buf.remaining() < kLen) throw new java.nio.BufferUnderflowException();
+            byte[] kRaw = new byte[kLen];
+            buf.get(kRaw);
+            deletes.add(new String(kRaw, java.nio.charset.StandardCharsets.UTF_8));
+        }
+        int count = buf.getInt();
+        if (count < 0 || count > buf.remaining()) throw new java.nio.BufferUnderflowException();
+        Map<String, byte[]> puts = new LinkedHashMap<>();
+        for (int i = 0; i < count; i++) {
+            short kLen = buf.getShort();
+            if (kLen < 0 || buf.remaining() < kLen) throw new java.nio.BufferUnderflowException();
+            byte[] kRaw = new byte[kLen];
+            buf.get(kRaw);
+            int vLen = buf.getInt();
+            if (vLen < 0 || buf.remaining() < vLen) throw new java.nio.BufferUnderflowException();
+            byte[] value = new byte[vLen];
+            buf.get(value);
+            puts.put(new String(kRaw, java.nio.charset.StandardCharsets.UTF_8), value);
+        }
+        return new CommittedBatch(tx, puts, deletes);
     }
     @Override public void close() throws IOException { if (channel != null) channel.close(); }
     public record Entry(long index, long term, CommittedBatch batch) { }
