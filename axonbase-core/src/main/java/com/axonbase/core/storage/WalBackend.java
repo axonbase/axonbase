@@ -386,7 +386,8 @@ public final class WalBackend implements VersionedKvBackend {
         }
         for (String prefix : readPrefixes) {
             for (String key : keysWithPrefix(prefix)) {
-                if (expectedVersions.containsKey(key) || puts.containsKey(key) || deletes.contains(key)) {
+                if (expectedVersions.containsKey(key) || puts.containsKey(key) || deletes.contains(key)
+                    || RangeDelete.in(puts).stream().anyMatch(r -> r.contains(key))) {
                     continue;
                 }
                 throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);

@@ -2,11 +2,13 @@ package com.axonbase.core.partition;
 
 import com.axonbase.core.Session;
 import com.axonbase.core.catalog.Database;
+import com.axonbase.core.catalog.TtlSpec;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.partition.cold.BloomFilter;
 import com.axonbase.core.partition.cold.ColdObject;
 import com.axonbase.core.storage.RangeDelete;
 import com.axonbase.core.storage.Transaction;
+import com.axonbase.value.AxonJson;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -18,14 +20,20 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
 /**
  * Leva uma partição para a camada fria e a traz de volta. Cada passo é um commit comum, e uma queda no meio deixa a
  * partição num estado que a rodada seguinte retoma, com os dados locais intactos.
  *
+ * <p>Toda decisão relê o descritor registrando a leitura: se alguém o mudar até o commit, nada é gravado. Nenhum
+ * objeto é apagado aqui, porque outro nó (ou uma base restaurada) pode estar usando o mesmo armazenamento: o que
+ * sobra fica para a coleta de lixo.</p>
+ *
  * <ol>
- *   <li>congelar: o estado vira {@code FREEZING}, com o nome do objeto reservado, e nenhuma escrita entra mais;</li>
+ *   <li>congelar: o estado vira {@code FREEZING}, com um nome de objeto novo a cada tentativa, e nenhuma escrita entra
+ *   mais;</li>
  *   <li>enviar: grava o objeto, baixa de volta e compara, sem segurar trava alguma;</li>
  *   <li>trocar: num lote só, apaga os registros locais por faixa e passa o descritor a {@code COLD}.</li>
  * </ol>
@@ -33,9 +41,12 @@ import java.util.function.Function;
 final class ColdMover {
 
     private final Datastore ds;
+    private final BooleanSupplier stopping;
 
-    ColdMover(Datastore ds) {
+    /** @param stopping {@code true} quando o motor está desligando: nada mais é gravado */
+    ColdMover(Datastore ds, BooleanSupplier stopping) {
         this.ds = ds;
+        this.stopping = stopping;
     }
 
     /** @return {@code true} quando a partição terminou na camada fria */
@@ -47,8 +58,11 @@ final class ColdMover {
         String key = frozen.get().object();
         try {
             Upload upload = upload(db, table, start, key);
-            boolean switched = change(db, table, start, tx -> {
-                PartitionDescriptor current = PartitionStore.read(db, tx, table, start).orElse(null);
+            if (stopping.getAsBoolean()) {
+                return false;
+            }
+            return change(db, table, start, tx -> {
+                PartitionDescriptor current = PartitionStore.track(db, tx, table, start).orElse(null);
                 if (current == null || current.state() != PartitionDescriptor.State.FREEZING
                     || !key.equals(current.object())) {
                     return false; // alguém desistiu ou removeu a partição durante o envio
@@ -62,10 +76,6 @@ final class ColdMover {
                 changes.apply(db, table, tx);
                 return true;
             });
-            if (!switched) {
-                ds.coldTier().store().delete(key);
-            }
-            return switched;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -78,8 +88,12 @@ final class ColdMover {
             return false;
         }
         ColdObject.Reader reader = ds.coldTier().cache().open(thawing.object());
+        if (stopping.getAsBoolean()) {
+            return false;
+        }
+        TtlSpec ttl = db.catalog().ttl(table);
         return change(db, table, start, tx -> {
-            PartitionDescriptor current = PartitionStore.read(db, tx, table, start).orElse(null);
+            PartitionDescriptor current = PartitionStore.track(db, tx, table, start).orElse(null);
             if (current == null || current.state() != PartitionDescriptor.State.THAWING
                 || !thawing.object().equals(current.object())) {
                 return false;
@@ -87,6 +101,11 @@ final class ColdMover {
             String prefix = PartitionKeys.partitionPrefix(db.ns(), db.db(), table, start);
             reader.scan("", (recordKey, value) -> {
                 tx.putBlind(prefix + recordKey, value);
+                // um TTL definido enquanto a partição estava fria ainda não conhece estas linhas
+                if (ttl != null) {
+                    PartitionedKv.expiryOf(ttl, AxonJson.decode(value)).ifPresent(expiry -> tx.putBlind(
+                        PartitionKeys.ttlKey(db.ns(), db.db(), table, expiry, recordKey), new byte[0]));
+                }
                 return true;
             });
             PartitionChanges changes = new PartitionChanges();
@@ -97,20 +116,17 @@ final class ColdMover {
         });
     }
 
-    /** Deixa a partição {@code FREEZING} com o nome do objeto reservado, ou vazio se ela não está para congelar. */
+    /** Deixa a partição {@code FREEZING} com um nome de objeto novo, ou vazio se ela não está para congelar. */
     private Optional<PartitionDescriptor> reserve(Database db, String table, long start) {
         PartitionDescriptor now = PartitionStore.read(db, db.records(), table, start).orElse(null);
         if (now == null || now.coldData()) {
             return Optional.empty();
         }
-        if (now.state() == PartitionDescriptor.State.FREEZING && now.object() != null) {
-            return Optional.of(now);
-        }
         String key = "parts/" + db.ns() + "/" + db.db() + "/" + table + "/" + PartitionKeys.pad(start) + "-"
             + UUID.randomUUID() + ".axc";
         PartitionDescriptor reserved = now.freezing(key);
         boolean saved = change(db, table, start, tx -> {
-            PartitionDescriptor current = PartitionStore.read(db, tx, table, start).orElse(null);
+            PartitionDescriptor current = PartitionStore.track(db, tx, table, start).orElse(null);
             if (!now.equals(current)) {
                 return false;
             }

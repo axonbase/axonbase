@@ -238,18 +238,32 @@ public final class Executor {
         if (!(direct instanceof com.axonbase.core.storage.RocksDbBackend rocks)) {
             return runStatementUnbatched(s);
         }
-        com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
-        batch = mine;
-        try {
-            AxonValue result = runStatementUnbatched(s);
-            batch = null;
-            mine.commit();
-            return result;
-        } finally {
-            batch = null;
-            mine.discard();
+        for (int attempt = 1; ; attempt++) {
+            com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
+            batch = mine;
+            long outbound = ExternalCalls.count();
+            try {
+                AxonValue result = runStatementUnbatched(s);
+                batch = null;
+                mine.commit();
+                return result;
+            } catch (com.axonbase.core.storage.VersionConflictException conflict) {
+                // só um lote com condições (tabela particionada) conflita. Nada foi gravado, então refaz sobre o
+                // estado novo, a menos que o statement já tenha chamado para fora
+                if (!mine.conditional() || attempt >= CONDITIONAL_ATTEMPTS || ExternalCalls.count() != outbound) {
+                    throw conflict;
+                }
+                java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
+                    .nextLong(1_000_000L * Math.min(attempt, 10)));
+            } finally {
+                batch = null;
+                mine.discard();
+            }
         }
     }
+
+    /** Tentativas de um statement avulso quando outro confirma antes sobre as mesmas linhas particionadas. */
+    private static final int CONDITIONAL_ATTEMPTS = 100;
 
     private AxonError errorStmt(String message) {
         return AxonError.internal(message);

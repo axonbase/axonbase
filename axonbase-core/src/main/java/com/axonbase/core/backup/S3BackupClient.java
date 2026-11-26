@@ -126,7 +126,7 @@ public final class S3BackupClient implements RemoteBackupStore {
     /** Envia o arquivo em fluxo, com o tamanho declarado, sem carregá-lo na memória. */
     @Override
     public void uploadFile(String bucket, String key, java.nio.file.Path file) throws java.io.IOException {
-        HttpURLConnection conn = open("PUT", bucket, key, null);
+        HttpURLConnection conn = withTimeouts(open("PUT", bucket, key, null));
         conn.setDoOutput(true);
         conn.setFixedLengthStreamingMode(java.nio.file.Files.size(file));
         try (OutputStream out = conn.getOutputStream()) {
@@ -144,7 +144,7 @@ public final class S3BackupClient implements RemoteBackupStore {
     /** Baixa o objeto em fluxo; {@code false} quando não existe. */
     @Override
     public boolean downloadFile(String bucket, String key, java.nio.file.Path target) throws java.io.IOException {
-        HttpURLConnection conn = open("GET", bucket, key, null);
+        HttpURLConnection conn = withTimeouts(open("GET", bucket, key, null));
         int status = conn.getResponseCode();
         if (status == 404) {
             return false;
@@ -235,6 +235,13 @@ public final class S3BackupClient implements RemoteBackupStore {
     // ------------------------------------------------------------------
     // conexão e autenticação
     // ------------------------------------------------------------------
+
+    /** Um armazenamento mudo não pode prender para sempre quem lê ou envia um objeto. */
+    private static HttpURLConnection withTimeouts(HttpURLConnection conn) {
+        conn.setConnectTimeout(30_000);
+        conn.setReadTimeout(120_000);
+        return conn;
+    }
 
     private static String encodeQuery(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");

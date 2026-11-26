@@ -10,6 +10,8 @@ import com.axonbase.core.catalog.TtlSpec;
 import com.axonbase.core.control.ControlCommand;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.storage.KvBackend;
+import com.axonbase.core.storage.Transaction;
+import com.axonbase.core.storage.VersionConflictException;
 import com.axonbase.parser.Render;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.parser.ast.PartitionCommand;
@@ -115,7 +117,47 @@ public record PartitionRunner(Datastore ds, Session session, Database db, KvBack
                 });
             }
             register.run();
+            if (existing == null && records instanceof Transaction tx) {
+                publishOnCommit(tx, d.table());
+            }
             return AxonValue.nul();
+        });
+    }
+
+    /**
+     * Numa transação a definição só vale no commit: até lá as outras sessões não escrevem na tabela, e o commit,
+     * sozinho, confere que ela continua vazia.
+     */
+    private void publishOnCommit(Transaction tx, String table) {
+        db.catalog().pendingPartitioning(table, tx);
+        tx.guard("define:" + db.ns() + "|" + db.db() + "|" + table, new Transaction.CommitGuard() {
+            @Override
+            public boolean exclusive() {
+                return true;
+            }
+
+            @Override
+            public Transaction.Held enter() {
+                Lock lock = db.indexLock().writeLock();
+                lock.lock();
+                String prefix = PartitionKeys.tablePrefix(db.ns(), db.db(), table);
+                boolean[] found = {false};
+                for (String lead : List.of("n", "s", "x", PartitionKeys.MARK)) {
+                    db.records().scanPrefix(prefix + lead, key -> {
+                        found[0] = true;
+                        return false;
+                    });
+                }
+                if (found[0]) {
+                    lock.unlock();
+                    throw new VersionConflictException(Messages.get("partition_requires_empty", table), prefix);
+                }
+                return () -> {
+                    // com a transação confirmada, vale para todos; se ela falhou, o catálogo já foi refeito
+                    db.catalog().publishPartitioning(table, tx);
+                    lock.unlock();
+                };
+            }
         });
     }
 
@@ -138,7 +180,7 @@ public record PartitionRunner(Datastore ds, Session session, Database db, KvBack
             List<PartitionDescriptor> targets = new ArrayList<>();
             for (PartitionDescriptor p : PartitionStore.list(db, records, d.table())) {
                 boolean selected = d.at() != null ? p.start() <= instant && instant < p.end() : p.end() <= instant;
-                if (selected) {
+                if (selected && PartitionStore.track(db, records, d.table(), p.start()).isPresent()) {
                     targets.add(p);
                 }
             }
@@ -161,6 +203,7 @@ public record PartitionRunner(Datastore ds, Session session, Database db, KvBack
         return exclusive(() -> {
             PartitionDescriptor partition = PartitionStore.list(db, records, m.table()).stream()
                 .filter(p -> p.start() <= instant && instant < p.end()).findFirst()
+                .flatMap(p -> PartitionStore.track(db, records, m.table(), p.start()))
                 .orElseThrow(() -> AxonError.internal(Messages.get("partition_none_found", m.table(),
                     Instant.ofEpochMilli(instant))));
             PartitionDescriptor next = m.cold() ? partition.requestCold() : partition.requestHot();
@@ -254,7 +297,7 @@ public record PartitionRunner(Datastore ds, Session session, Database db, KvBack
         if (insideWrite) {
             throw AxonError.internal(Messages.get("partition_in_write"));
         }
-        if (records instanceof com.axonbase.core.storage.Transaction) {
+        if (records instanceof Transaction) {
             return work.get();
         }
         Lock lock = db.indexLock().writeLock();

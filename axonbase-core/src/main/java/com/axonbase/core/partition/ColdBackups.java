@@ -74,15 +74,15 @@ public final class ColdBackups {
         Hold pending = new Hold(ds, "pending-" + UUID.randomUUID(),
             System.currentTimeMillis() + PENDING.toMillis());
         PhysicalBackups.Info info = backups.create(rocks);
-        pending.complete();
-        if (!pending.objects.isEmpty()) {
-            try {
+        try {
+            pending.complete();
+            if (!pending.objects.isEmpty()) {
                 put(ds, physicalPrefix(backupDir) + info.id(), pending.objects, ColdHolds.NEVER);
-            } catch (AxonError e) {
-                backups.delete(info.id()); // um backup sem bloqueio poderia perder os objetos depois
-                throw e;
+                release(ds, pending.name);
             }
-            release(ds, pending.name);
+        } catch (AxonError e) {
+            backups.delete(info.id()); // um backup sem bloqueio poderia perder os objetos depois
+            throw e;
         }
         return info;
     }

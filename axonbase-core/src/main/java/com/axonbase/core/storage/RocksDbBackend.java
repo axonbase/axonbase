@@ -657,7 +657,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                 }
             }
             for (String prefix : readPrefixes) {
-                checkPhantoms(prefix, expectedVersions, puts, deletes);
+                checkPhantoms(prefix, expectedVersions, puts, deletes, ranges);
             }
             int n = puts.size() + deletes.size();
             if (n == 0) {
@@ -706,11 +706,13 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     }
 
     private void checkPhantoms(String prefix, Map<String, Long> expectedVersions,
-                               Map<String, byte[]> puts, Set<String> deletes) {
+                               Map<String, byte[]> puts, Set<String> deletes, List<RangeDelete.Range> ranges) {
         try (Scan scan = new Scan(dataHandle, utf8(prefix))) {
             while (scan.it.isValid()) {
                 String key = new String(scan.it.key(), StandardCharsets.UTF_8);
-                if (!expectedVersions.containsKey(key) && !puts.containsKey(key) && !deletes.contains(key)) {
+                // o que o próprio commit apaga por faixa não é leitura fantasma
+                if (!expectedVersions.containsKey(key) && !puts.containsKey(key) && !deletes.contains(key)
+                    && ranges.stream().noneMatch(r -> r.contains(key))) {
                     throw new VersionConflictException(Messages.get("storage_phantom_read", prefix, key), key);
                 }
                 scan.it.next();

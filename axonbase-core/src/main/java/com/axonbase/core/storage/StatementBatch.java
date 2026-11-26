@@ -27,6 +27,8 @@ public final class StatementBatch implements KvBackend {
     private final TreeMap<String, byte[]> staged = new TreeMap<>();
     private final Set<String> deleted = new HashSet<>();
     private final List<Runnable> afterCommit = new ArrayList<>();
+    /** Versões que precisam continuar iguais no commit; vazio no caso comum, de escrita cega. */
+    private final Map<String, Long> expected = new java.util.concurrent.ConcurrentHashMap<>();
 
     public StatementBatch(VersionedKvBackend base) {
         this.base = base;
@@ -35,6 +37,24 @@ public final class StatementBatch implements KvBackend {
     /** Backend sobre o qual esta camada grava. */
     public VersionedKvBackend base() {
         return base;
+    }
+
+    /**
+     * Exige que a chave continue como está agora: o commit falha com conflito se outra escrita a mudar antes. Chame
+     * antes de ler a chave. Vale a primeira versão registrada.
+     */
+    public void expect(String key) {
+        expected.computeIfAbsent(key, base::versionOf);
+    }
+
+    /** Como {@link #expect(String)}, com a versão lida antes pelo chamador. Vale a primeira registrada. */
+    public void expect(String key, long version) {
+        expected.putIfAbsent(key, version);
+    }
+
+    /** O lote tem condições, e por isso o commit pode falhar com conflito. */
+    public boolean conditional() {
+        return !expected.isEmpty();
     }
 
     /** Ação a executar só depois que o lote foi gravado (ex.: notificações de live query). */
@@ -169,11 +189,14 @@ public final class StatementBatch implements KvBackend {
 
     /** Grava tudo num lote atômico e roda as ações pós-commit. Sem escritas, não toca o backend. */
     public void commit() {
-        if (!staged.isEmpty() || !deleted.isEmpty()) {
-            base.commit(Map.of(), staged, deleted, Set.of());
+        // as condições valem mesmo sem escrita: um UPDATE que não achou a linha porque ela estava mudando de partição
+        // precisa conflitar e ser refeito
+        if (!staged.isEmpty() || !deleted.isEmpty() || !expected.isEmpty()) {
+            base.commit(Map.copyOf(expected), staged, deleted, Set.of());
         }
         staged.clear();
         deleted.clear();
+        expected.clear();
         List<Runnable> actions = List.copyOf(afterCommit);
         afterCommit.clear();
         for (Runnable action : actions) {
@@ -186,5 +209,6 @@ public final class StatementBatch implements KvBackend {
         staged.clear();
         deleted.clear();
         afterCommit.clear();
+        expected.clear();
     }
 }

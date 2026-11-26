@@ -146,6 +146,44 @@ class RangeDeleteTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"memory", "rocks"})
+    @DisplayName("transação: depois da marca a faixa some, e o que foi gravado antes dela não sobrevive")
+    void transaction_masksDroppedRange(String kind) {
+        VersionedKvBackend db = open(kind);
+        try {
+            seed(db);
+            Transaction tx = new Transaction(db);
+            tx.put("t\u0000p1\u0000z", bytes("antes da marca"));
+            tx.put(RangeDelete.key(RANGE), RangeDelete.value(RANGE));
+
+            assertTrue(tx.get("t\u0000p1\u0000a").isEmpty());
+            assertTrue(tx.peek("t\u0000p1\u0000b").isEmpty());
+            assertEquals(List.of("t\u0000p0\u0000a", "t\u0000p2\u0000a"), tx.keysWithPrefix("t\u0000"));
+            tx.put("t\u0000p1\u0000c", bytes("depois da marca"));
+            assertEquals(List.of("t\u0000p1\u0000c"), tx.keysWithPrefix("t\u0000p1\u0000"));
+            tx.commit();
+
+            assertEquals(List.of("t\u0000p0\u0000a", "t\u0000p1\u0000c", "t\u0000p2\u0000a"), rows(db));
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    @DisplayName("lote de statement: a condição vale mesmo sem escrita")
+    void statementBatch_checksExpectationsWithoutWrites() {
+        try (RocksDbBackend db = new RocksDbBackend(tmp.resolve("db").toString(), RocksDbBackend.SyncMode.OFF)) {
+            db.put("k", bytes("1"));
+            StatementBatch batch = new StatementBatch(db);
+            batch.expect("k");
+            db.put("k", bytes("2"));
+
+            assertTrue(batch.conditional());
+            assertThrows(VersionConflictException.class, batch::commit);
+        }
+    }
+
     @Test
     @DisplayName("transação: leitura sem registro e gravação cega não geram conflito")
     void transaction_peekAndBlindPut() {

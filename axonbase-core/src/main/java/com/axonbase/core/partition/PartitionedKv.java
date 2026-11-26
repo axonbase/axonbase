@@ -8,15 +8,19 @@ import com.axonbase.core.catalog.RecordId;
 import com.axonbase.core.catalog.TtlSpec;
 import com.axonbase.core.storage.ColumnarIndex;
 import com.axonbase.core.storage.KvBackend;
+import com.axonbase.core.storage.StatementBatch;
 import com.axonbase.core.storage.Transaction;
+import com.axonbase.core.storage.VersionConflictException;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.function.BiPredicate;
 import java.util.function.Predicate;
 
@@ -79,13 +83,17 @@ public final class PartitionedKv implements KvBackend {
         }
         long start = startOf(spec, rid.table(), record);
         String recordKey = rid.key().keyString();
+        // lida antes de procurar o id: uma partição criada depois disso pode ter o mesmo id
+        Long generationSeen = generated ? null : generationVersion(rid.table());
         if (!generated) {
+            guardUnseenId(rid.table(), recordKey);
             Found current = locate(rid.table(), recordKey);
             if (current != null) {
                 requireWritable(rid.table(), current.partition());
             }
         }
-        ensureWritable(rid.table(), spec, start);
+        // quem procurou um id existente e cria uma partição precisa que ninguém tenha criado outra no meio
+        ensureWritable(rid.table(), spec, start, generationSeen);
         context.target(id(rid.table(), recordKey), start, generated);
     }
 
@@ -154,6 +162,9 @@ public final class PartitionedKv implements KvBackend {
 
     private void scan(Address address, boolean withValues, BiPredicate<String, byte[]> visitor) {
         String table = address.table();
+        if (address.kind() == Kind.UNIQUE && base instanceof Transaction tx) {
+            guardUnseenValue(tx, table, address);
+        }
         TimeRange range = address.kind() == Kind.RECORD || address.kind() == Kind.TABLE
             ? context.range(rangeKey(db, table)) : TimeRange.ALL;
         boolean[] stopped = {false};
@@ -179,6 +190,18 @@ public final class PartitionedKv implements KvBackend {
                 return;
             }
         }
+    }
+
+    /** Numa transação: o valor único não pode aparecer numa partição criada depois desta procura. */
+    private void guardUnseenValue(Transaction tx, String table, Address address) {
+        PartitionGuard.unseen(tx, db, table, table + "|" + address.tail(), starts(table), (committed, partition) -> {
+            boolean[] found = {false};
+            committed.scanPrefix(physicalIndex(address, partition.start()), key -> {
+                found[0] = !tx.isDropped(key);
+                return !found[0];
+            });
+            return found[0];
+        });
     }
 
     private void scanLocal(Address address, PartitionDescriptor partition, boolean withValues,
@@ -279,7 +302,9 @@ public final class PartitionedKv implements KvBackend {
         String recordKey = address.tail();
         long start = startOf(spec, table, AxonJson.decode(value));
         String id = id(table, recordKey);
-        Found previous = context.takeFresh(id) ? null : locate(table, recordKey);
+        boolean fresh = context.takeFresh(id);
+        Long generationSeen = fresh ? null : generationVersion(table);
+        Found previous = fresh ? null : locate(table, recordKey);
         if (previous != null && previous.partition().start() != start) {
             // o campo da partição mudou: a linha se muda
             long old = previous.partition().start();
@@ -287,7 +312,7 @@ public final class PartitionedKv implements KvBackend {
             guard(table, old, false);
             base.delete(physicalRecord(table, old, recordKey));
         }
-        ensureWritable(table, spec, start);
+        ensureWritable(table, spec, start, generationSeen);
         base.put(physicalRecord(table, start, recordKey), value);
         context.target(id, start, false);
         context.located(id, start);
@@ -349,8 +374,18 @@ public final class PartitionedKv implements KvBackend {
         return spec.startOf(value.asInstant().toEpochMilli());
     }
 
-    /** Cria a partição se faltar e exige que ela aceite escrita. */
-    private void ensureWritable(String table, PartitionSpec spec, long start) {
+    /**
+     * Cria a partição se faltar e exige que ela aceite escrita.
+     *
+     * @param generationSeen num statement que procurou nas partições antes de escrever, a versão da geração antes
+     *                       da procura; senão {@code null}
+     */
+    private void ensureWritable(String table, PartitionSpec spec, long start, Long generationSeen) {
+        Object owner = db.catalog().pendingOwner(table);
+        if (owner != null && owner != base) {
+            // outra transação está particionando a tabela: a escrita espera o desfecho
+            throw new VersionConflictException(Messages.get("partition_changed", table), table);
+        }
         Optional<PartitionDescriptor> existing = PartitionStore.read(db, base, table, start);
         if (existing.isPresent()) {
             requireWritable(table, existing.get());
@@ -361,6 +396,9 @@ public final class PartitionedKv implements KvBackend {
             throw AxonError.internal(Messages.get("partition_limit", table, PartitionStore.MAX_PARTITIONS));
         }
         guard(table, start, true);
+        if (generationSeen != null && base instanceof StatementBatch batch) {
+            batch.expect(PartitionKeys.generationKey(db.ns(), db.db(), table), generationSeen);
+        }
         PartitionStore.save(db, base, table, PartitionDescriptor.hot(start, start + spec.intervalMillis()));
     }
 
@@ -375,6 +413,28 @@ public final class PartitionedKv implements KvBackend {
         if (base instanceof Transaction tx) {
             PartitionGuard.writing(tx, db, table, start, created);
         }
+    }
+
+    /** A versão atual da geração da tabela, ou {@code null} fora de um lote de statement. */
+    private Long generationVersion(String table) {
+        return base instanceof StatementBatch batch
+            ? batch.base().versionOf(PartitionKeys.generationKey(db.ns(), db.db(), table)) : null;
+    }
+
+    /** Numa transação: o id não pode aparecer numa partição criada por outra escrita depois desta procura. */
+    private void guardUnseenId(String table, String recordKey) {
+        if (base instanceof Transaction tx) {
+            PartitionGuard.unseen(tx, db, table, id(table, recordKey), starts(table), (committed, partition) -> {
+                String key = physicalRecord(table, partition.start(), recordKey);
+                return !tx.isDropped(key) && committed.get(key).isPresent();
+            });
+        }
+    }
+
+    private Set<Long> starts(String table) {
+        Set<Long> starts = new HashSet<>();
+        PartitionStore.list(db, base, table).forEach(p -> starts.add(p.start()));
+        return starts;
     }
 
     private Found locate(String table, String recordKey) {
@@ -406,9 +466,14 @@ public final class PartitionedKv implements KvBackend {
     }
 
     private Found lookIn(String table, PartitionDescriptor partition, String recordKey) {
+        String physical = physicalRecord(table, partition.start(), recordKey);
+        if (!partition.coldData() && base instanceof StatementBatch batch) {
+            // a linha pode mudar de partição: o commit confere que cada lugar olhado continua igual
+            batch.expect(physical);
+        }
         Optional<byte[]> value = partition.coldData()
             ? cold.get(db, base, table, partition, recordKey)
-            : base.get(physicalRecord(table, partition.start(), recordKey));
+            : base.get(physical);
         return value.map(v -> new Found(partition, v)).orElse(null);
     }
 

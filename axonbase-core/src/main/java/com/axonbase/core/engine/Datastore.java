@@ -1216,6 +1216,7 @@ public final class Datastore {
     /** Restaura um {@link #backupCluster()}: limpa tudo e reconstrói. */
     public void restoreCluster(String dump) {
         try {
+            requireColdObjects(new java.io.BufferedReader(new java.io.StringReader(dump)));
             restoreCluster(new java.io.BufferedReader(new java.io.StringReader(dump)));
         } catch (java.io.IOException e) {
             throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
@@ -1373,6 +1374,10 @@ public final class Datastore {
         if (!BackupFormat.isV2(file)) {
             try (java.io.BufferedReader reader = java.nio.file.Files.newBufferedReader(file,
                 java.nio.charset.StandardCharsets.UTF_8)) {
+                requireColdObjects(reader);
+            }
+            try (java.io.BufferedReader reader = java.nio.file.Files.newBufferedReader(file,
+                java.nio.charset.StandardCharsets.UTF_8)) {
                 return new RestoreResult(restoreCluster(reader), 1, 0L, "legacy");
             }
         }
@@ -1409,6 +1414,33 @@ public final class Datastore {
         BackupFormat.Segment last = segments.get(segments.size() - 1);
         return new RestoreResult(applied[0], segments.size(), last.version(),
             segments.size() == 1 && last.full() ? "full" : "chain");
+    }
+
+    /** O mesmo para o formato antigo, linha a linha, antes de {@link #restoreCluster} limpar a base. */
+    private void requireColdObjects(java.io.BufferedReader dump) throws java.io.IOException {
+        java.util.Base64.Decoder b64 = java.util.Base64.getDecoder();
+        Map<String, String> cold = new java.util.HashMap<>();
+        String line;
+        while ((line = dump.readLine()) != null) {
+            int tab = line.indexOf('\t');
+            if (tab <= 0) {
+                continue;
+            }
+            String key = line.substring(0, tab);
+            if (key.startsWith(com.axonbase.core.partition.PartitionKeys.DESCRIPTORS)) {
+                var partition = com.axonbase.core.partition.PartitionDescriptor
+                    .decode(b64.decode(line.substring(tab + 1)));
+                if (partition.coldData()) {
+                    cold.put(key, partition.object());
+                } else {
+                    cold.remove(key);
+                }
+            } else if (DELETE_MARK.equals(key)) {
+                cold.remove(new String(b64.decode(line.substring(tab + 1)),
+                    java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+        com.axonbase.core.partition.ColdBackups.requireObjects(this, cold.values());
     }
 
     /** Antes de apagar a base: os objetos frios que o backup referencia precisam existir. */

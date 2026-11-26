@@ -2,10 +2,13 @@ package com.axonbase.core.partition;
 
 import com.axonbase.common.Messages;
 import com.axonbase.core.catalog.Database;
+import com.axonbase.core.storage.KvBackend;
 import com.axonbase.core.storage.Transaction;
 import com.axonbase.core.storage.VersionConflictException;
 
 import java.time.Instant;
+import java.util.Set;
+import java.util.function.BiPredicate;
 import java.util.concurrent.locks.Lock;
 
 /**
@@ -28,12 +31,13 @@ final class PartitionGuard {
         tx.guard("write:" + key, new Transaction.CommitGuard() {
             @Override
             public boolean exclusive() {
-                return false;
+                // criar partição muda o conjunto que as outras transações conferem: o commit corre sozinho
+                return created;
             }
 
             @Override
             public Transaction.Held enter() {
-                Lock lock = db.indexLock().readLock();
+                Lock lock = created ? db.indexLock().writeLock() : db.indexLock().readLock();
                 lock.lock();
                 var current = db.records().get(key).map(PartitionDescriptor::decode);
                 boolean valid = current.map(PartitionDescriptor::writable).orElse(created);
@@ -41,6 +45,37 @@ final class PartitionGuard {
                     lock.unlock();
                     throw new VersionConflictException(Messages.get("partition_changed",
                         table + " " + Instant.ofEpochMilli(start)), key);
+                }
+                return lock::unlock;
+            }
+        });
+    }
+
+    /**
+     * A transação procurou algo nas partições que existiam (um id, um valor único) e não pode confirmar se isso
+     * aparecer numa partição que não existia quando procurou, criada por outra escrita.
+     *
+     * @param seen    começos das partições procuradas
+     * @param present procura na partição, na base confirmada
+     */
+    static void unseen(Transaction tx, Database db, String table, String id, Set<Long> seen,
+                       BiPredicate<KvBackend, PartitionDescriptor> present) {
+        tx.guard("seen:" + id, new Transaction.CommitGuard() {
+            @Override
+            public boolean exclusive() {
+                return false;
+            }
+
+            @Override
+            public Transaction.Held enter() {
+                Lock lock = db.indexLock().readLock();
+                lock.lock();
+                for (PartitionDescriptor partition : PartitionStore.list(db, db.records(), table)) {
+                    if (!seen.contains(partition.start()) && present.test(db.records(), partition)) {
+                        lock.unlock();
+                        throw new VersionConflictException(Messages.get("partition_changed",
+                            table + " " + Instant.ofEpochMilli(partition.start())), id);
+                    }
                 }
                 return lock::unlock;
             }

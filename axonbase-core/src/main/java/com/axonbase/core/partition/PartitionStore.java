@@ -75,6 +75,14 @@ public final class PartitionStore {
         return peek(kv, PartitionKeys.descriptorKey(db.ns(), db.db(), table, start)).map(PartitionDescriptor::decode);
     }
 
+    /**
+     * Lê o descritor registrando a leitura: numa transação, o commit falha se ele mudar até lá. Para quem vai mudar a
+     * partição.
+     */
+    public static Optional<PartitionDescriptor> track(Database db, KvBackend kv, String table, long start) {
+        return kv.get(PartitionKeys.descriptorKey(db.ns(), db.db(), table, start)).map(PartitionDescriptor::decode);
+    }
+
     /** Grava o descritor e muda a geração da tabela. */
     public static void save(Database db, KvBackend kv, String table, PartitionDescriptor partition) {
         putBlind(kv, PartitionKeys.descriptorKey(db.ns(), db.db(), table, partition.start()), partition.encode());

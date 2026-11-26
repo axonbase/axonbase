@@ -22,6 +22,8 @@ public final class Catalog {
     /** Fora de {@link TableDef}: redefinir a tabela não desfaz a partição nem o TTL dela. */
     private final ConcurrentMap<String, PartitionSpec> partitioning = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, TtlSpec> ttl = new ConcurrentHashMap<>();
+    /** Partições definidas por uma transação que ainda não confirmou: quem as definiu. */
+    private final ConcurrentMap<String, Object> pendingPartitioning = new ConcurrentHashMap<>();
 
     public Catalog() {
     }
@@ -36,6 +38,19 @@ public final class Catalog {
 
     public void partitioning(String table, PartitionSpec spec) {
         partitioning.put(table, spec);
+    }
+
+    /** A transação que está definindo a partição da tabela, ou {@code null}. */
+    public Object pendingOwner(String table) {
+        return pendingPartitioning.get(table);
+    }
+
+    public void pendingPartitioning(String table, Object owner) {
+        pendingPartitioning.put(table, owner);
+    }
+
+    public void publishPartitioning(String table, Object owner) {
+        pendingPartitioning.remove(table, owner);
     }
 
     public TtlSpec ttl(String table) {
@@ -81,6 +96,7 @@ public final class Catalog {
 
     public boolean removeTable(String name) {
         partitioning.remove(name);
+        pendingPartitioning.remove(name);
         ttl.remove(name);
         return tables.remove(name) != null;
     }

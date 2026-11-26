@@ -119,6 +119,8 @@ public final class PartitionMaintenance implements AutoCloseable {
     /** Até onde a fila de vencimentos de cada tabela já foi percorrida. */
     private final Map<String, String> cursors = new ConcurrentHashMap<>();
     private long rounds;
+    /** Separado do monitor da rodada: fechar não pode esperar um envio demorado para começar a parar. */
+    private final Object lifecycle = new Object();
     private long lastCollection = Long.MIN_VALUE;
     private volatile boolean closed;
     private ScheduledExecutorService scheduler;
@@ -130,24 +132,26 @@ public final class PartitionMaintenance implements AutoCloseable {
     }
 
     /** Começa a rodar em segundo plano. Com intervalo zero não faz nada. */
-    public synchronized PartitionMaintenance start() {
-        if (scheduler != null || closed || options.interval().isZero()) {
+    public PartitionMaintenance start() {
+        synchronized (lifecycle) {
+            if (scheduler != null || closed || options.interval().isZero()) {
+                return this;
+            }
+            scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "axon-partition-maintenance");
+                t.setDaemon(true);
+                return t;
+            });
+            long millis = Math.max(1, options.interval().toMillis());
+            scheduler.scheduleWithFixedDelay(() -> {
+                try {
+                    runOnce();
+                } catch (RuntimeException e) {
+                    log("partition_maintenance_failed", "", e);
+                }
+            }, millis, millis, TimeUnit.MILLISECONDS);
             return this;
         }
-        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "axon-partition-maintenance");
-            t.setDaemon(true);
-            return t;
-        });
-        long millis = Math.max(1, options.interval().toMillis());
-        scheduler.scheduleWithFixedDelay(() -> {
-            try {
-                runOnce();
-            } catch (RuntimeException e) {
-                log("partition_maintenance_failed", "", e);
-            }
-        }, millis, millis, TimeUnit.MILLISECONDS);
-        return this;
     }
 
     /** Uma rodada completa agora. A falha numa tabela não impede as outras. */
@@ -167,7 +171,7 @@ public final class PartitionMaintenance implements AutoCloseable {
             }));
             db.catalog().ttlTables().forEach((table, ttl) -> attempt(tally, db, table, () -> {
                 tally.backfilled += backfill(db, table, ttl);
-                tally.expired += expire(db, table, ttl, now);
+                expire(tally, db, table, ttl, now);
             }));
         }
         collectGarbage(tally, now);
@@ -181,7 +185,7 @@ public final class PartitionMaintenance implements AutoCloseable {
         if (!tier.configured()) {
             return;
         }
-        ColdMover mover = new ColdMover(ds);
+        ColdMover mover = new ColdMover(ds, () -> closed);
         for (PartitionDescriptor partition : PartitionStore.list(db, db.records(), table)) {
             if (closed) {
                 return;
@@ -237,7 +241,9 @@ public final class PartitionMaintenance implements AutoCloseable {
         return inTransaction(db, (session, tx) -> {
             PartitionChanges changes = new PartitionChanges();
             List<PartitionDescriptor> expired = PartitionStore.list(db, tx, table).stream()
-                .filter(p -> p.end() <= limit).toList();
+                .filter(p -> p.end() <= limit
+                    && PartitionStore.track(db, tx, table, p.start()).isPresent())
+                .toList();
             if (!expired.isEmpty()) {
                 expired.forEach(p -> changes.drop(db, table, p.start()));
                 changes.apply(db, table, tx);
@@ -295,11 +301,10 @@ public final class PartitionMaintenance implements AutoCloseable {
         return total;
     }
 
-    private int expire(Database db, String table, TtlSpec ttl, long now) {
+    private void expire(Tally tally, Database db, String table, TtlSpec ttl, long now) {
         String prefix = PartitionKeys.ttlPrefix(db.ns(), db.db(), table);
         String id = db.ns() + "|" + db.db() + "|" + table;
         int examined = 0;
-        int expired = 0;
         while (!closed && examined < options.ttlMaxPerRun()) {
             int limit = Math.min(options.ttlBatch(), options.ttlMaxPerRun() - examined);
             List<String> due = new ArrayList<>();
@@ -313,12 +318,38 @@ public final class PartitionMaintenance implements AutoCloseable {
             if (due.isEmpty()) {
                 break;
             }
-            expired += expireBatch(db, table, ttl, prefix, due, now);
+            try {
+                tally.expired += expireBatch(db, table, ttl, prefix, due, now);
+            } catch (RuntimeException batchFailed) {
+                expireOneByOne(tally, db, table, ttl, prefix, due, now);
+            }
             examined += due.size();
             cursors.put(id, due.get(due.size() - 1) + "\u0000");
             pause();
         }
-        return expired;
+    }
+
+    /**
+     * Um lote que falhou (um evento que recusa uma linha, ou uma escrita concorrente) é refeito linha a linha, para
+     * uma só não parar a fila. A que falhar fica e é tentada de novo na próxima releitura da fila.
+     */
+    private void expireOneByOne(Tally tally, Database db, String table, TtlSpec ttl, String prefix,
+                                List<String> due, long now) {
+        RuntimeException last = null;
+        for (String entry : due) {
+            if (closed) {
+                return;
+            }
+            try {
+                tally.expired += expireBatch(db, table, ttl, prefix, List.of(entry), now);
+            } catch (RuntimeException e) {
+                tally.failures++;
+                last = e;
+            }
+        }
+        if (last != null) {
+            log("partition_ttl_rows_failed", db.ns() + "." + db.db() + "." + table, last);
+        }
     }
 
     private static long expiryIn(String prefix, String key) {
@@ -412,14 +443,16 @@ public final class PartitionMaintenance implements AutoCloseable {
     public void close() {
         closed = true;
         ScheduledExecutorService running;
-        synchronized (this) {
+        synchronized (lifecycle) {
             running = scheduler;
             scheduler = null;
         }
         if (running != null) {
             running.shutdown();
             try {
-                running.awaitTermination(30, TimeUnit.SECONDS);
+                if (!running.awaitTermination(30, TimeUnit.SECONDS)) {
+                    running.shutdownNow(); // um envio preso não grava mais nada: ele confere {@code closed} depois
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
