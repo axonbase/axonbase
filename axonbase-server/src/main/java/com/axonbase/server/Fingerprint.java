@@ -1,8 +1,9 @@
 package com.axonbase.server;
 
 /**
- * Forma normalizada de uma instrução, sem os valores: literais de texto e números viram {@code ?} e listas repetidas
- * colapsam. Duas consultas que só diferem nos valores têm o mesmo fingerprint, e ele não carrega dados pessoais.
+ * Forma normalizada de uma instrução, sem os valores: literais de texto, números e chaves de registro
+ * ({@code tabela:chave}) viram {@code ?} e listas repetidas colapsam. Duas consultas que só diferem nos valores têm o
+ * mesmo fingerprint, e ele não carrega dados pessoais.
  *
  * <p>Roda em toda requisição, então é um percurso único sobre o texto (as quatro expressões regulares de antes eram
  * o maior custo de CPU do caminho de uma leitura por id).</p>
@@ -10,6 +11,8 @@ package com.axonbase.server;
 public final class Fingerprint {
 
     static final int MAX_CHARS = 300;
+    private static final char OPEN_ANGLE = '⟨';
+    private static final char CLOSE_ANGLE = '⟩';
 
     private Fingerprint() {}
 
@@ -27,6 +30,14 @@ public final class Fingerprint {
                 int end = endOfString(sql, i, c);
                 if (end > 0) {
                     tmp.append('?');
+                    i = end;
+                    continue;
+                }
+            } else if (c == ':' && i > 0 && endsName(sql.charAt(i - 1))) {
+                // chave de registro: sem isto cada id lido seria uma consulta diferente
+                int end = endOfRecordKey(sql, i + 1);
+                if (end > 0) {
+                    tmp.append(":?");
                     i = end;
                     continue;
                 }
@@ -99,6 +110,29 @@ public final class Fingerprint {
 
     private static boolean isWord(char c) {
         return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    /** Pode ser o último caractere do nome de tabela antes de {@code :chave}; o segundo {@code ':'} de {@code ::} não. */
+    private static boolean endsName(char c) {
+        return isWord(c) || c == '`' || c == CLOSE_ANGLE;
+    }
+
+    /** Fim (exclusivo) da chave de registro que começa em {@code start}: nome, {@code `...`} ou {@code ⟨...⟩}; ou -1. */
+    private static int endOfRecordKey(String s, int start) {
+        int n = s.length();
+        if (start >= n) {
+            return -1;
+        }
+        char first = s.charAt(start);
+        if (first == '`' || first == OPEN_ANGLE) {
+            int close = s.indexOf(first == '`' ? '`' : CLOSE_ANGLE, start + 1);
+            return close < 0 ? -1 : close + 1;
+        }
+        int i = start;
+        while (i < n && isWord(s.charAt(i))) {
+            i++;
+        }
+        return i == start ? -1 : i;
     }
 
     /** Fim (exclusivo) do texto entre aspas que começa em {@code start}, ou -1 se não fecha. */
