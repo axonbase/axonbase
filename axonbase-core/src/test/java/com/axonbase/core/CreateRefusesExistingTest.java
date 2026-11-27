@@ -77,16 +77,17 @@ class CreateRefusesExistingTest {
     }
 
     @Test
-    @DisplayName("UPSERT cujo WHERE não casa regrava o registro sem deixar entradas antigas nos índices")
-    void upsertReplacementKeepsIndexesRight() {
+    @DisplayName("UPSERT cujo WHERE não casa deixa o registro e os índices como estavam")
+    void upsertWithFalseWhereKeepsTheRecord() {
         run("DEFINE INDEX email ON TABLE p COLUMNS email UNIQUE");
         run("CREATE p:1 SET email = 'a@x', nome = 'A'");
 
-        run("UPSERT p:1 CONTENT {email: 'b@x', nome: 'B'} WHERE nome = 'ninguem'");
+        AxonValue written = run("UPSERT p:1 CONTENT {email: 'b@x', nome: 'B'} WHERE nome = 'ninguem'");
 
-        // o e-mail antigo ficou livre
-        run("CREATE p:2 SET email = 'a@x', nome = 'C'");
-        assertEquals("[{\"nome\":\"B\"},{\"nome\":\"C\"}]", rows("p"));
+        assertEquals(0, written.asArray().size());
+        // o e-mail novo não foi ocupado
+        run("CREATE p:2 SET email = 'b@x', nome = 'C'");
+        assertEquals("[{\"nome\":\"A\"},{\"nome\":\"C\"}]", rows("p"));
     }
 
     @Test
