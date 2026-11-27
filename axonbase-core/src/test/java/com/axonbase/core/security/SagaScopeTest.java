@@ -42,6 +42,13 @@ class SagaScopeTest {
         return s;
     }
 
+    /** Todo comando por texto exige um banco selecionado; o alcance continua vindo só dos claims. */
+    private static Session selecting(Session who, String ns, String db) {
+        who.namespace(ns);
+        who.database(db);
+        return who;
+    }
+
     private static Session owner() {
         return as("DATABASE", "app", "main", "operator");
     }
@@ -81,7 +88,7 @@ class SagaScopeTest {
     void outroNamespaceNaoLeNemCancela() {
         openSaga();
 
-        assertRefused(as("NAMESPACE", "loja", null, "admin"), SHOW);
+        assertRefused(selecting(as("NAMESPACE", "loja", null, "admin"), "loja", "main"), SHOW);
         assertRefused(as("DATABASE", "loja", "main", "operator"), CANCEL);
 
         assertEquals(1, records());
@@ -120,11 +127,34 @@ class SagaScopeTest {
 
         AxonValue seen = run(as("DATABASE", "app", "main", "viewer"), SHOW);
         assertTrue(seen.asObject().get("saga").isObject());
-        assertDoesNotThrow(() -> run(as("NAMESPACE", "app", null, "viewer"), SHOW));
-        assertDoesNotThrow(() -> run(as("ROOT", null, null, "admin"), SHOW));
+        assertDoesNotThrow(() -> run(selecting(as("NAMESPACE", "app", null, "viewer"), "app", "outro"), SHOW));
+        assertDoesNotThrow(() -> run(selecting(as("ROOT", null, null, "admin"), "loja", "main"), SHOW));
         assertDoesNotThrow(() -> run(session("system", "saga"), SHOW));
         assertEquals("FAILED", run(owner(), CANCEL).asObject().get("status").asString());
         assertEquals(0, records());
+    }
+
+    @Test
+    void rootENamespaceComOutroBancoSelecionadoCancelam() {
+        openSaga();
+        Session root = selecting(as("ROOT", null, null, "admin"), "loja", "main");
+
+        assertEquals("FAILED", run(root, CANCEL).asObject().get("status").asString());
+        assertEquals(0, records());
+
+        openSecondSaga();
+        Session namespace = selecting(as("NAMESPACE", "app", null, "operator"), "app", "outro");
+
+        assertEquals("FAILED", run(namespace, "CANCEL SAGA pedido WITH CORRELATION 'pedido-43'")
+            .asObject().get("status").asString());
+        assertEquals(0, records());
+    }
+
+    private void openSecondSaga() {
+        Session owner = owner();
+        run(owner, "BEGIN SAGA pedido WITH CORRELATION 'pedido-43'");
+        run(owner, "LET $saga_corr = 'pedido-43'");
+        run(owner, "CREATE segredo:2 SET v = 2");
     }
 
     @Test
