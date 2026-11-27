@@ -29,7 +29,7 @@ Tire um backup antes de atualizar.
 - Uma definição que não possa ser relida passa a ser recusada no momento da gravação. Um nome com crase e `⟩` ao mesmo tempo não é aceito.
 - Nomes que não são simples saem entre crases no catálogo e na exportação.
 - Os métodos `create`, `insert`, `update`, `upsert`, `relate`, `delete`, `select` e `live` do RPC (Remote Procedure Call) aceitam uma única sentença do tipo pedido. Chaves e valores chegam como dados, um identificador com `--` é recusado e as propriedades de aresta do `relate` precisam ter nome simples. A rota `/table` segue a mesma regra e responde 400.
-- Por `DATABASE LINK`, só tabelas com nome simples (letras, números e `_`) são encaminhadas.
+- Por `DATABASE LINK`, só são encaminhados comandos em que os nomes (tabelas, arestas e campos) são simples: letras, números e `_`.
 - Colunas chamadas `check` ou `primary` deixam de impedir o reinício, também em bases já gravadas.
 
 ### Parênteses em condições gravadas

@@ -3967,6 +3967,14 @@ return score;
         } catch (IllegalArgumentException e) {
             throw errorStmt(e.getMessage());
         }
+        // vale para qualquer nome do comando (JOIN, aresta, subconsulta, campo): só o que foi escrito entre crases
+        // traz literal no token
+        for (var token : com.axonbase.parser.token.Lexer.tokenize(axonql)) {
+            if (token.is(com.axonbase.parser.token.TokenType.IDENT) && token.literal() instanceof String quoted
+                && !quoted.matches("[\\p{L}_][\\p{L}\\p{Nd}_]*")) {
+                throw errorStmt("nome não aceito num DATABASE LINK: " + quoted);
+            }
+        }
         return linkClient.query(linkDef, axonql);
     }
 
