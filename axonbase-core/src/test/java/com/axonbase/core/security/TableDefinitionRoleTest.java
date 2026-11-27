@@ -77,7 +77,7 @@ class TableDefinitionRoleTest {
         "ALTER TABLE doc ADD COLUMN titulo STRING",
         "DEFINE FIELD dono ON TABLE doc TYPE string",
         "DEFINE FIELD publico ON TABLE doc TYPE bool DEFAULT true",
-        "CREATE INDEX doc_at ON TABLE doc COLUMNS at",
+        "CREATE INDEX doc_titulo ON TABLE doc COLUMNS titulo",
         "DROP INDEX doc_dono ON TABLE doc",
         "DEFINE TTL ON TABLE doc FIELD at",
         "DEFINE PARTITION ON TABLE livre FIELD at INTERVAL 1d",
