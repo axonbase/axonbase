@@ -103,7 +103,7 @@ Sem o S3 configurado nada disso se aplica. Num cluster, um nó com a base vazia 
 
 **Diferença para a 0.10.x:** nela, qualquer falha era tratada como balde vazio e o servidor subia com a base vazia (ou, depois de uma falha no meio, com a base pela metade no reinício seguinte), e o backup periódico passava a enviar esse estado. Quem subia com o S3 inacessível, com o balde ainda não criado ou com a senha de cifra errada agora precisa corrigir a causa, ou remover as duas variáveis para subir sem o S3.
 
-A restauração pedida pela API administrativa, com o servidor no ar, continua devolvendo erro sem derrubar o processo. Se ela parar no meio, o próximo início com o S3 configurado é recusado. Enquanto a base estiver pela metade, o backup para o S3 (periódico, manual ou do desligamento) falha com essa causa e nada é enviado ao balde. Restaurar de novo um backup bom, com sucesso, libera os backups.
+A restauração pedida pela API administrativa, com o servidor no ar, continua devolvendo erro sem derrubar o processo. Se ela parar no meio, o próximo início com o S3 configurado é recusado. A marca vale para os dois formatos de arquivo, o antigo e o `.axbak` v2. Enquanto a base estiver pela metade, o backup para o S3 (periódico, manual ou do desligamento) falha com essa causa e nada é enviado ao balde. Restaurar de novo um backup bom, com sucesso, libera os backups.
 
 ## O que não está neste formato
 

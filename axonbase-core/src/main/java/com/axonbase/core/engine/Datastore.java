@@ -1479,6 +1479,9 @@ public final class Datastore {
         List<BackupFormat.Segment> segments = BackupFormat.validate(file);
         requireColdObjects(file);
         clearAll();
+        // como no formato antigo: se a aplicação parar no meio, a base fica marcada
+        backend.put(RESTORE_PENDING_KEY, new byte[] {1});
+        backend.flush();
         byte[][] lastCtrl = new byte[1][];
         long[] applied = new long[1];
         BackupFormat.apply(file, new BackupFormat.LineSink() {
@@ -1505,6 +1508,8 @@ public final class Datastore {
             replayControl();
             controlStore.save(controlState, backend);
         }
+        backend.flush();
+        backend.delete(RESTORE_PENDING_KEY);
         backend.flush();
         BackupFormat.Segment last = segments.get(segments.size() - 1);
         return new RestoreResult(applied[0], segments.size(), last.version(),
