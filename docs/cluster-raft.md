@@ -78,6 +78,8 @@ Com um membro votante parado, o líder pode guardar até dez vezes `AXON_RAFT_RE
 
 O diretório do Raft é `.raft` dentro do diretório de dados, e os truststores enviados pela API ficam em `.truststores`. Com o comando padrão da imagem (`--path /data` e um volume em `/data`), os dois ficam no volume.
 
+Ao apagar a base de um nó para repô-lo, apague também o `.raft`: um `rm -rf /data/*` não alcança nomes que começam com ponto, e um nó com o estado do Raft de uma base que sumiu fica diferente dos outros.
+
 Até a 1.0.0-rc1 eles ficavam ao lado do diretório de dados (`<caminho>.raft` e `<caminho>.truststores`). A atualização trata o local antigo assim:
 
 | Situação ao subir | O que o servidor faz |

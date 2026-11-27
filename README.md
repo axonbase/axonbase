@@ -89,6 +89,7 @@ The server refuses to start with the default root password or the default JWT se
 export AXON_ROOT_PASSWORD='choose-a-strong-password'
 export AXON_SECRET="$(openssl rand -hex 32)"
 docker run -d --name axonbase -p 8000:8000 \
+  -v axonbase-data:/data \
   -e AXON_ROOT_PASSWORD -e AXON_SECRET \
   axonbase/axonbase:1.0.0-rc2
 
