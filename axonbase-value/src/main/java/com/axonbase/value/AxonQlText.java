@@ -117,6 +117,12 @@ public final class AxonQlText {
                 default -> value(value);
             };
         }
+        if (key instanceof BigDecimal decimal) {
+            return numberKey(AxonValue.num(decimal));
+        }
+        if (key instanceof Double || key instanceof Float) {
+            return numberKey(AxonValue.num(((Number) key).doubleValue()));
+        }
         if (key instanceof Number number) {
             return numberKey(AxonValue.num(number.longValue()));
         }

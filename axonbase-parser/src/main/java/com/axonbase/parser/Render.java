@@ -654,14 +654,14 @@ public final class Render {
     private static void authScope(StringBuilder sb, Statement.AuthScope scope, String ns, String db) {
         switch (scope) {
             case ROOT -> sb.append("ROOT");
-            case NAMESPACE -> sb.append("NAMESPACE").append(ns == null ? "" : " " + id(ns));
+            case NAMESPACE -> sb.append("NAMESPACE").append(ns == null ? "" : " " + scopeName(ns));
             case DATABASE -> {
                 sb.append("DATABASE");
                 if (ns != null) {
-                    sb.append(" ").append(id(ns));
+                    sb.append(" ").append(scopeName(ns));
                 }
                 if (db != null) {
-                    sb.append(" ").append(id(db));
+                    sb.append(" ").append(scopeName(db));
                 }
             }
         }
@@ -910,8 +910,8 @@ public final class Render {
         switch (p) {
             case Expr.Part.Field f -> sb.append('.').append(id(f.name()));
             case Expr.Part.All ignored -> sb.append(".*");
-            case Expr.Part.First ignored -> sb.append(".$");
-            case Expr.Part.Last ignored -> sb.append(".?");
+            case Expr.Part.First ignored -> sb.append(".?");
+            case Expr.Part.Last ignored -> sb.append(".?:");
             case Expr.Part.Index ix -> {
                 sb.append('[');
                 expr(sb, ix.index());
@@ -1037,6 +1037,11 @@ public final class Render {
     /** Identificador como a AxonQL o relê. */
     private static String id(String name) {
         return AxonQlText.identifier(name);
+    }
+
+    /** Namespace ou banco numa cláusula ON: ali o parser só aceita identificador, então palavra-chave leva crases. */
+    private static String scopeName(String name) {
+        return AxonQlText.KEYWORDS.contains(name.toLowerCase(java.util.Locale.ROOT)) ? "`" + name + "`" : id(name);
     }
 
     private static String path(String dotted) {
