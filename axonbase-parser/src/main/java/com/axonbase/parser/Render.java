@@ -1065,10 +1065,10 @@ public final class Render {
         if (target instanceof Expr.Ident table && AFTER_CREATE.contains(table.name())) {
             return "`" + table.name() + "`";
         }
-        if (target instanceof Expr.RecordId record && record.table() instanceof Expr.Ident table
+        if (target instanceof Expr.RecordId rid && rid.table() instanceof Expr.Ident table
             && AFTER_CREATE.contains(table.name())) {
             StringBuilder sb = new StringBuilder("`").append(table.name()).append("`:");
-            renderRecordKey(sb, record.key());
+            renderRecordKey(sb, rid.key());
             return sb.toString();
         }
         return expr(target);
