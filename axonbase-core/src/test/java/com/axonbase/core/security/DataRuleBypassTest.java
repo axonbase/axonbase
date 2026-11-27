@@ -88,7 +88,7 @@ class DataRuleBypassTest {
         assertFalse(text(ds, "SELECT VALUE cpf FROM o", v()).contains("111"));
         assertFalse(text(ds, "SELECT cpf AS x FROM o", v()).contains("111"));
         assertFalse(text(ds, "SELECT VALUE cpf FROM o:1", v()).contains("111"));
-        assertFalse(text(ds, "SELECT array::group(cpf) AS todos FROM o GROUP ALL", v()).contains("111"));
+        assertFalse(text(ds, "SELECT max(cpf) AS maior FROM o GROUP ALL", v()).contains("111"));
     }
 
     @Test

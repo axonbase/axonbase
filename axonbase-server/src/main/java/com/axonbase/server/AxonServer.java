@@ -1533,6 +1533,12 @@ public final class AxonServer {
             }
             String ns = s.namespace() != null ? s.namespace() : "";
             String db = s.database() != null ? s.database() : "";
+            if (com.axonbase.core.security.Authz.hasDataRules(s.auth())) {
+                // a exportação não aplica o filtro nem a máscara da regra
+                json(resp, 403, "{\"code\":-32002,\"message\":\""
+                    + esc(Messages.get("data_rule_export_refused")) + "\"}");
+                return;
+            }
             String dump = ds.exportDatabase(ns, db);
             resp.setStatus(200);
             resp.setContentType("text/plain");

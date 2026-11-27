@@ -344,7 +344,8 @@ public final class Executor {
         if (target == null) {
             target = emptyDoc();
         }
-        return truthy(evalExprInDoc(cond, target));
+        Document row = target;
+        return truthy(asPolicy(() -> evalExprInDoc(cond, row)));
     }
 
     private Document emptyDoc() {
@@ -601,6 +602,10 @@ public final class Executor {
      * cliente usa depois no KILL e que vem em cada notificação.
      */
     private AxonValue runLive(Statement.Live lv) {
+        if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            // a notificação não passa pelo filtro nem pela máscara
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_live_refused"));
+        }
         Database db = db();
         String table = tableName(lv.select().from());
         if (table.isEmpty()) {
@@ -637,6 +642,10 @@ public final class Executor {
             return;
         }
         for (LiveBus.Subscription sub : subs) {
+            // a sessão pode ter trocado de usuário depois do LIVE SELECT
+            if (sub.owner() != null && com.axonbase.core.security.Authz.hasDataRules(sub.owner().auth())) {
+                continue;
+            }
             Document doc = new Document(rid, candidate);
             AxonValue payload;
             // $auth e $token da consulta são os do assinante, não os de quem escreveu
@@ -1025,7 +1034,8 @@ public final class Executor {
                 sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rId.table(), rId, AxonValue.nul(), "CREATE");
             }
         }
-        return c.only() ? record : AxonValue.array(List.of(record));
+        AxonValue shown = visible(record);
+        return c.only() ? shown : AxonValue.array(List.of(shown));
     }
 
     private AxonValue runCreateViaLink(Statement.Create create, Expr.Qualified target, Expr.RecordId recordId) {
@@ -1059,6 +1069,7 @@ public final class Executor {
         } else if (data.isObject()) {
             records.add(createRecord(db, i.table(), data));
         }
+        records.replaceAll(this::visible);
         return output(i.ret(), AxonValue.array(records));
     }
 
@@ -1091,6 +1102,7 @@ public final class Executor {
         Object idKey = obj.containsKey("id") ? unwrapId(obj.remove("id")) : null;
         AxonValue key = explicitKey != null ? explicitKey : resolveKey(idKey);
         RecordId rid = new RecordId(table, key);
+        refuseHiddenRecord(db, rid);
         obj.put("id", ridAsValue(rid));
         applyFieldSchema(db, table, obj, false);
         injectDataRuleFields(obj);
@@ -1351,6 +1363,7 @@ public final class Executor {
                 results.add(createRecord(db, table, evalData(u.data()), recordKey(rid.key())));
             }
         }
+        results.replaceAll(this::visible);
         return retNone ? AxonValue.none() : AxonValue.array(results);
     }
 
@@ -1424,6 +1437,7 @@ public final class Executor {
                 deleted.add(doc.current());
             }
         }
+        deleted.replaceAll(this::visible);
         return deleted.isEmpty() ? AxonValue.array(List.of()) : AxonValue.array(deleted);
     }
 
@@ -1733,6 +1747,8 @@ public final class Executor {
         int stop = Math.min(docs.size(), start + limit);
         List<AxonValue> out = new ArrayList<>();
         boolean scalarAggregate = false;
+        // as colunas são mascaradas na origem: apelido, SELECT VALUE, ONLY e agregados veem o valor mascarado
+        boolean masking = masksColumns();
         if (aggregating) {
             // FETCH resolve antes da agregación, que traballa sobre todo o conxunto
             if (!sel.fetch().isEmpty()) {
@@ -1742,6 +1758,9 @@ public final class Executor {
             if (aggregation == null) {
                 aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
                 for (Document d : docs) {
+                    if (masking) {
+                        d.setCurrent(applyDataRuleMask(d.current()));
+                    }
                     aggregation.accept(d);
                 }
             }
@@ -1758,6 +1777,9 @@ public final class Executor {
                 if (!sel.fetch().isEmpty() && !joined) {
                     fetchDocs(d, sel.fetch());
                 }
+                if (masking && !joined) {
+                    d.setCurrent(applyDataRuleMask(d.current()));
+                }
                 AxonValue row = joined ? projectJoin(sel, d) : project(sel, d);
                 // FETCH também vale para colunas calculadas (->comprou->produto AS p ... FETCH p)
                 out.add(!sel.fetch().isEmpty() && !joined ? fetchProjected(row, sel.fetch()) : row);
@@ -1766,7 +1788,7 @@ public final class Executor {
         if (scalarAggregate) {
             return out.get(0);
         }
-        if (!sel.only() && !sel.valueOnly()) {
+        if (masking) {
             out.replaceAll(this::applyDataRuleMask);
         }
         if (out.size() == 1 && (sel.only() || (sel.from() != null && isSingleTarget(sel.from())))) {
@@ -1822,11 +1844,17 @@ public final class Executor {
         List<AxonValue> rows = new ArrayList<>();
         for (int i = 0; i < window; i++) {
             Document d = docs.get(i);
+            // as chaves de ordenação usam o valor real: MaskedOrder já recusou o que vazaria coluna mascarada
+            var keys = sortKeys(orders, d);
+            boolean masking = masksColumns();
+            if (masking) {
+                d.setCurrent(applyDataRuleMask(d.current()));
+            }
             AxonValue row = project(sel, d);
-            if (!sel.only() && !sel.valueOnly()) {
+            if (masking) {
                 row = applyDataRuleMask(row);
             }
-            rows.add(ShardPartial.row(d.id().key().keyString(), sortKeys(orders, d), row));
+            rows.add(ShardPartial.row(d.id().key().keyString(), keys, row));
         }
         return ShardPartial.rows(rows);
     }
@@ -1951,6 +1979,7 @@ public final class Executor {
         Catalog.TableDef def = db.catalog().table(table);
         boolean checkPermissions = def != null && def.permissions() != null;
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        boolean masking = masksColumns();
         java.util.function.BiConsumer<GroupAggregation, String> consume = (agg, key) -> {
             Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
             if (doc == null) {
@@ -1959,7 +1988,7 @@ public final class Executor {
             if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
                 return;
             }
-            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+            if (combinedRules != null && !truthy(asPolicy(() -> evalCond(combinedRules, doc)))) {
                 return;
             }
             if (checkPermissions && !allowed(doc, table, "select")) {
@@ -1967,6 +1996,9 @@ public final class Executor {
             }
             if (!sel.fetch().isEmpty()) {
                 fetchDocs(doc, sel.fetch());
+            }
+            if (masking) {
+                doc.setCurrent(applyDataRuleMask(doc.current()));
             }
             agg.accept(doc);
         };
@@ -2117,7 +2149,7 @@ public final class Executor {
             if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
                 return false;
             }
-            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+            if (combinedRules != null && !truthy(asPolicy(() -> evalCond(combinedRules, doc)))) {
                 return false;
             }
             return !checkPermissions || allowed(doc, table, "select");
@@ -2257,7 +2289,9 @@ public final class Executor {
                                     Statement.Join join, String outerTable) {
         String outerKey = lastFieldName(join.left());
         String innerKey = lastFieldName(join.right());
-        List<Document> inner = dbDocs(db, join.source());
+        List<Document> inner = new ArrayList<>(dbDocs(db, join.source()));
+        applyDataRulesFilter(inner);
+        boolean masking = masksColumns();
         List<Document> out = new ArrayList<>();
         for (Document lo : outer) {
             AxonValue ok = fieldValue(lo.current(), outerKey);
@@ -2267,7 +2301,8 @@ public final class Executor {
             for (Document li : inner) {
                 AxonValue ik = fieldValue(li.current(), innerKey);
                 if (!unspecified(ik) && ok.equals(ik)) {
-                    out.add(flattenJoin(outerTable, lo, innerTable, li));
+                    out.add(flattenJoin(outerTable, masking ? masked(lo) : lo,
+                        innerTable, masking ? masked(li) : li));
                 }
             }
         }
@@ -3714,7 +3749,14 @@ return score;
     private AxonValue fetchOne(AxonValue.RecordId rid) {
         try {
             Document doc = loadDoc(db(), new RecordId(rid.table(), rid.key() instanceof AxonValue ? (AxonValue) rid.key() : keyOf(rid.key())));
-            return doc != null ? doc.current() : null;
+            if (doc == null) {
+                return null;
+            }
+            if (evaluatingPolicy.get() != null || !com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+                return doc.current();
+            }
+            // acesso por id e FETCH: registro oculto não aparece e o visível vem mascarado
+            return dataRuleFilter(doc) ? applyDataRuleMask(doc.current()) : null;
         } catch (Exception e) {
             return null;
         }
@@ -5226,11 +5268,29 @@ return score;
         List<Expr> predicates = new ArrayList<>();
         for (String name : dataRuleNames(auth)) {
             Catalog.DataRuleDef def = db.catalog().dataRule(name);
-            if (def == null) continue;
+            // regra que não existe neste banco nega: liberar tornaria um nome errado em acesso total
+            if (def == null) return DENY_ALL;
             if (lacksParameterValue(def.predicate())) return DENY_ALL;
             predicates.add(def.predicate());
         }
         return predicates;
+    }
+
+    /** Ligado enquanto o motor avalia regras e permissões: ali a travessia de um link lê o registro como ele é. */
+    private final ThreadLocal<Boolean> evaluatingPolicy = new ThreadLocal<>();
+
+    private AxonValue asPolicy(java.util.function.Supplier<AxonValue> work) {
+        Boolean previous = evaluatingPolicy.get();
+        evaluatingPolicy.set(Boolean.TRUE);
+        try {
+            return work.get();
+        } finally {
+            if (previous == null) {
+                evaluatingPolicy.remove();
+            } else {
+                evaluatingPolicy.set(previous);
+            }
+        }
     }
 
     /** Predicado que não deixa passar linha alguma. */
@@ -5334,7 +5394,7 @@ return score;
     /** Injeta nos campos do novo registro os valores mapeados pelas data rules do usuário. */
     private void injectDataRuleFields(Map<String, AxonValue> obj) {
         for (var entry : dataRuleInjections().entrySet()) {
-            AxonValue value = eval(entry.getValue());
+            AxonValue value = asPolicy(() -> eval(entry.getValue()));
             if (value != null && !value.isNone()) {
                 obj.put(entry.getKey(), value);
             }
@@ -5364,6 +5424,26 @@ return score;
         return result;
     }
 
+    /** O registro devolvido por uma escrita, com as máscaras do usuário. */
+    private AxonValue visible(AxonValue record) {
+        return masksColumns() ? applyDataRuleMask(record) : record;
+    }
+
+    private Document masked(Document d) {
+        return new Document(d.id(), applyDataRuleMask(d.current()));
+    }
+
+    /** CREATE e UPSERT gravam sobre a chave: um registro que a regra esconde não pode ser tocado. */
+    private void refuseHiddenRecord(Database db, RecordId rid) {
+        if (!com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            return;
+        }
+        Document existing = loadDoc(db, rid);
+        if (existing != null && !dataRuleFilter(existing)) {
+            throw errorStmt("permission denied");
+        }
+    }
+
     /** Converte padrão SQL LIKE (com %) para regex. */
     private static String sqlLikeToRegex(String pattern) {
         StringBuilder regex = new StringBuilder("(?i)");
@@ -5386,7 +5466,7 @@ return score;
         if (predicates.isEmpty()) return;
         Expr combined = predicates.size() == 1 ? predicates.get(0)
             : Expr.and(predicates);
-        docs.removeIf(doc -> !truthy(evalCond(combined, doc)));
+        docs.removeIf(doc -> !truthy(asPolicy(() -> evalCond(combined, doc))));
     }
 
     /** Retorna true se o documento passa pelo filtro das Data Rules. */
@@ -5395,7 +5475,7 @@ return score;
         if (predicates.isEmpty()) return true;
         Expr combined = predicates.size() == 1 ? predicates.get(0)
             : Expr.and(predicates);
-        return truthy(evalOnDocument(combined, doc));
+        return truthy(asPolicy(() -> evalOnDocument(combined, doc)));
     }
 
     private Session sagaSession() {
