@@ -37,6 +37,7 @@ public class SagaLedger {
         ds.execute("DEFINE FIELD correlation_id ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD status ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD created_at ON TABLE saga TYPE datetime;", sagaSession(), null);
+        ds.execute("DEFINE FIELD links ON TABLE saga TYPE array;", sagaSession(), null);
         ds.execute("DEFINE INDEX saga_corr ON TABLE saga COLUMNS correlation_id UNIQUE;", sagaSession(), null);
 
         ds.execute("DEFINE TABLE saga_step SCHEMAFULL;", sagaSession(), null);
@@ -58,10 +59,28 @@ public class SagaLedger {
     }
 
     public void beginSaga(String sagaResource, String correlationId) {
+        beginSaga(sagaResource, correlationId, List.of());
+    }
+
+    /** @param links participantes da definição no momento do BEGIN; vazio quando a SAGA não tem definição. */
+    public void beginSaga(String sagaResource, String correlationId, List<String> links) {
+        String participants = com.axonbase.parser.Render.value(
+            AxonValue.array(links.stream().map(AxonValue::str).toList()));
         ds.execute("UPSERT saga:" + escKey(correlationId)
             + " CONTENT {name: \"" + esc(sagaResource)
             + "\", correlation_id: \"" + esc(correlationId)
-            + "\", status: \"RUNNING\", created_at: time::now()}", sagaSession(), null);
+            + "\", links: " + participants
+            + ", status: \"RUNNING\", created_at: time::now()}", sagaSession(), null);
+    }
+
+    /** O registro da transação no ledger, ou {@code null} quando não há nenhuma com essa correlação. */
+    Map<String, AxonValue> transaction(String correlationId) {
+        if (correlationId == null || correlationId.isBlank()) return null;
+        AxonValue result = ds.execute("SELECT * FROM saga:" + escKey(correlationId), sagaSession(), null);
+        if (result.isArray()) {
+            result = result.asArray().isEmpty() ? AxonValue.nul() : result.asArray().get(0);
+        }
+        return result.isObject() ? result.asObject() : null;
     }
 
     public void commitSaga(String sagaResource, String correlationId) {

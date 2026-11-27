@@ -4619,6 +4619,8 @@ return score;
     private AxonValue runCreateSaga(CreateSaga cs) {
         var def = new Datastore.SagaDef(cs.name(), cs.links());
         ds.defineSaga(cs.name(), def);
+        ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.SAGA, "", "", cs.name(),
+            com.axonbase.parser.Render.stmt(cs)));
         return AxonValue.nul();
     }
 
@@ -4744,7 +4746,8 @@ return score;
 
     private AxonValue runBeginSaga(BeginSaga bs) {
         sagaLedger.ensureTables();
-        sagaLedger.beginSaga(bs.name(), bs.correlationId());
+        Datastore.SagaDef definition = ds.saga(bs.name());
+        sagaLedger.beginSaga(bs.name(), bs.correlationId(), definition == null ? List.of() : definition.links());
         coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false);
         return AxonValue.object(Map.of(
             "saga", AxonValue.str(bs.name()),
@@ -4753,28 +4756,44 @@ return score;
         ));
     }
 
-    private AxonValue runCommitSaga(CommitSaga cs) {
-        if (!sagaLedger.isSagaActive(cs.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", cs.correlationId()));
+    /** A transação precisa estar ativa, ter sido aberta com este nome e ainda ter a definição que usou no BEGIN. */
+    private void requireActiveSaga(String name, String correlationId) {
+        Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
+        AxonValue status = record == null ? null : record.get("status");
+        if (status == null || !status.isString() || !"RUNNING".equals(status.asString())) {
+            throw errorStmt(Messages.get("stmt_saga_inactive", correlationId));
         }
+        requireSameSaga(record, name, correlationId);
+    }
+
+    private void requireSameSaga(Map<String, AxonValue> record, String name, String correlationId) {
+        AxonValue opened = record.get("name");
+        if (opened != null && opened.isString() && !opened.asString().equals(name)) {
+            throw errorStmt(Messages.get("stmt_saga_other_name", name, correlationId, opened.asString()));
+        }
+        AxonValue links = record.get("links");
+        // sem a definição, os participantes não seriam avisados e o comando informaria um sucesso falso
+        if (links != null && links.isArray() && !links.asArray().isEmpty() && ds.saga(name) == null) {
+            throw errorStmt(Messages.get("stmt_saga_missing", name));
+        }
+    }
+
+    private AxonValue runCommitSaga(CommitSaga cs) {
+        requireActiveSaga(cs.name(), cs.correlationId());
         coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false);
         sagaLedger.commitSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("COMMITTED")));
     }
 
     private AxonValue runCancelSaga(CancelSaga cs) {
-        if (!sagaLedger.isSagaActive(cs.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", cs.correlationId()));
-        }
+        requireActiveSaga(cs.name(), cs.correlationId());
         coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true);
         sagaLedger.cancelSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
     }
 
     private AxonValue runJoinSaga(JoinSaga js) {
-        if (!sagaLedger.isSagaActive(js.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", js.correlationId()));
-        }
+        requireActiveSaga(js.name(), js.correlationId());
         session.sagaBegin(js.name(), js.correlationId());
         session.vars().set("saga_corr", AxonValue.str(js.correlationId()));
         return AxonValue.object(Map.of("status", AxonValue.str("RUNNING")));
@@ -4795,7 +4814,8 @@ return score;
         if (reverse) {
             java.util.Collections.reverse(links);
         }
-        String statement = action + " SAGA " + sagaName + " WITH CORRELATION '"
+        String quotedName = com.axonbase.parser.Render.sagaName(sagaName);
+        String statement = action + " SAGA " + quotedName + " WITH CORRELATION '"
             + SagaLedger.esc(correlationId) + "'";
         for (String linkName : links) {
             Datastore.DatabaseLinkDef link = ds.databaseLink(session.namespace(), linkName);
@@ -4807,7 +4827,7 @@ return score;
                 // reporting-only records so the orchestrator never compensates them again.
                 if (!"BEGIN".equals(action)) {
                     List<AxonValue> transaction = linkClient.query(link,
-                        "SHOW SAGA TRANSACTION " + sagaName + " '" + SagaLedger.esc(correlationId) + "'");
+                        "SHOW SAGA TRANSACTION " + quotedName + " '" + SagaLedger.esc(correlationId) + "'");
                     if (!transaction.isEmpty() && transaction.get(0).isObject()) {
                         AxonValue steps = transaction.get(0).asObject().get("steps");
                         if (steps != null && steps.isArray()) {
@@ -4992,7 +5012,11 @@ return score;
     }
 
     private AxonValue runDropSaga(Statement.DropSaga d) {
-        this.ds.dropSaga(d.name());
+        if (ds.saga(d.name()) == null) {
+            throw errorStmt(Messages.get("stmt_saga_missing", d.name()));
+        }
+        ds.dropSaga(d.name());
+        ds.removeControl(session, "", "", ControlCommand.Kind.SAGA, d.name());
         return AxonValue.nul();
     }
 

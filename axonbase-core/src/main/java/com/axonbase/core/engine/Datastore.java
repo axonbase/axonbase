@@ -557,6 +557,15 @@ public final class Datastore {
         sagas.remove(sagaName);
     }
 
+    /** Definições de SAGA cujas ligações existem todas neste namespace. As ligações (com credenciais) ficam de fora. */
+    private void appendSagas(StringBuilder sb, String ns) {
+        sagas.values().stream()
+            .filter(saga -> saga.links().stream().allMatch(link -> databaseLink(ns, link) != null))
+            .sorted(java.util.Comparator.comparing(SagaDef::name))
+            .forEach(saga -> sb.append(com.axonbase.parser.Render.stmt(
+                new Statement.CreateSaga(saga.name(), saga.links()))).append(";\n"));
+    }
+
     // ------------------------------------------------------------------
     // plano de controle
     // ------------------------------------------------------------------
@@ -735,6 +744,7 @@ public final class Datastore {
         replaying.set(true);
         try {
             namespaces.clear();
+            sagas.clear();
             authCatalog.clear();
             for (ControlCommand command : snapshot.commands()) {
                 replay(command);
@@ -1171,6 +1181,7 @@ public final class Datastore {
             }
         }
         exportColdRecords(sb, database);
+        appendSagas(sb, ns);
         return sb.toString();
     }
 
