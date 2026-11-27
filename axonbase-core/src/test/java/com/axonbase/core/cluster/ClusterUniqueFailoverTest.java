@@ -99,6 +99,73 @@ class ClusterUniqueFailoverTest {
     }
 
     @Test
+    @DisplayName("UNIQUE com record link: o líder recusa a repetição sem troca de líder")
+    void uniqueRecordLinkRefusesDuplicate() {
+        try (ClusterHarness cluster = start()) {
+            ClusterRuntime leader = cluster.awaitLeader();
+            run(store(leader), "DEFINE TABLE u SCHEMALESS");
+            run(store(leader), "DEFINE INDEX friend ON TABLE u COLUMNS friend UNIQUE");
+            run(store(leader), "CREATE u:1 SET friend = person:1");
+            run(store(leader), "CREATE u:2 SET friend = [person:2, person:3]");
+            run(store(leader), "CREATE u:3 SET friend = { who: person:4 }");
+
+            assertThrows(RuntimeException.class, () -> run(store(leader), "CREATE u:4 SET friend = person:1"));
+            assertThrows(RuntimeException.class, () -> run(store(leader), "CREATE u:5 SET friend = 'person:1'"));
+            assertThrows(RuntimeException.class,
+                () -> run(store(leader), "CREATE u:6 SET friend = [person:2, person:3]"));
+            assertThrows(RuntimeException.class,
+                () -> run(store(leader), "CREATE u:7 SET friend = { who: person:4 }"));
+
+            // regravar sem mudar o link não solta o valor
+            run(store(leader), "UPDATE u:1 SET name = 'x'");
+            assertThrows(RuntimeException.class, () -> run(store(leader), "CREATE u:8 SET friend = person:1"));
+            run(store(leader), "CREATE u:9 SET friend = person:9");
+            assertThrows(RuntimeException.class, () -> run(store(leader), "UPDATE u:9 SET friend = person:1"));
+
+            // trocado o link, o antigo volta a valer
+            run(store(leader), "UPDATE u:1 SET friend = person:5");
+            assertDoesNotThrow(() -> run(store(leader), "CREATE u:10 SET friend = person:1"));
+            assertSameData(cluster, leader);
+        }
+    }
+
+    @Test
+    @DisplayName("UNIQUE construído sobre record links que já existiam recusa a repetição")
+    void uniqueBuiltOverRecordLinksRefusesDuplicate() throws InterruptedException {
+        try (ClusterHarness cluster = start()) {
+            ClusterRuntime leader = cluster.awaitLeader();
+            run(store(leader), "DEFINE TABLE u SCHEMALESS");
+            run(store(leader), "CREATE u:1 SET friend = person:1");
+            run(store(leader), "DEFINE INDEX friend ON TABLE u COLUMNS friend UNIQUE");
+            assertTrue(IndexBuilder.awaitAll(30_000));
+
+            assertThrows(RuntimeException.class, () -> run(store(leader), "CREATE u:2 SET friend = person:1"));
+            assertSameData(cluster, leader);
+        }
+    }
+
+    @Test
+    @DisplayName("PRIMARY KEY com record link: o novo líder recusa a chave repetida")
+    void newLeaderRefusesRepeatedRecordLinkKey() {
+        try (ClusterHarness cluster = start()) {
+            ClusterRuntime first = cluster.awaitLeader();
+            run(store(first), "CREATE TABLE p (owner record PRIMARY KEY)");
+            run(store(first), "CREATE TABLE c (owner record, slot int, PRIMARY KEY (owner, slot))");
+            run(store(first), "CREATE p:1 SET owner = person:1");
+            run(store(first), "CREATE c:1 SET owner = person:1, slot = 1");
+
+            ClusterRuntime next = failover(cluster, first);
+
+            assertThrows(RuntimeException.class, () -> run(store(next), "CREATE p:2 SET owner = person:1"));
+            assertThrows(RuntimeException.class,
+                () -> run(store(next), "CREATE c:2 SET owner = person:1, slot = 1"));
+            assertDoesNotThrow(() -> run(store(next), "CREATE p:3 SET owner = person:2"));
+            assertDoesNotThrow(() -> run(store(next), "CREATE c:3 SET owner = person:1, slot = 2"));
+            assertSameData(cluster, next);
+        }
+    }
+
+    @Test
     @DisplayName("registro gravado sem entrada (líder rc1): o novo líder recusa a chave repetida")
     void newLeaderRefusesKeyWrittenWithoutEntry() {
         try (ClusterHarness cluster = start()) {

@@ -5192,9 +5192,10 @@ return score;
         if (index.unique()) {
             String prefix = uniqueIndexPrefix(db, table, index, current);
             if (prefix != null) {
-                String own = prefix + rid.key().keyString();
-                if (!heldByAnother(db, table, index, prefix, own)) {
-                    records(db).put(own, new byte[0]);
+                String own = rid.key().keyString();
+                List<String> forms = uniqueIndexForms(db, table, index, current);
+                if (!heldByAnother(db, table, index, forms, own, current)) {
+                    records(db).put(prefix + own, new byte[0]);
                     // a mesma chave que a escrita normal grava: o índice construído fica igual ao mantido desde o começo
                     records(db).put(uniqueClaimKey(db, table, index, prefix), new byte[0]);
                 } else {
@@ -7835,15 +7836,15 @@ return score;
             if (contended) {
                 contend(db, next);
             }
-            if (!session.restoring() && records(db).keysWithPrefix(next).stream()
-                .anyMatch(key -> !key.equals(next) && !key.equals(next + own))) {
+            if (!session.restoring() && primaryKeyTaken(db, rid.table(), columns,
+                primaryKeySlots(db, rid.table(), columns, after), own)) {
                 throw errorStmt(Messages.get("stmt_primary_key_violation", rid.table(), String.join(", ", columns)));
             }
         }
-        if (previous != null) {
-            records(db).delete(previous + own);
-            if (contended && records(db).keysWithPrefix(previous).stream().allMatch(previous::equals)) {
-                records(db).delete(previous);
+        for (String slot : primaryKeySlots(db, rid.table(), columns, before)) {
+            records(db).delete(slot + own);
+            if (contended && records(db).keysWithPrefix(slot).stream().allMatch(slot::equals)) {
+                records(db).delete(slot);
             }
         }
         if (next != null) {
@@ -7879,20 +7880,57 @@ return score;
 
     /** O prefixo das entradas de um valor, ou {@code null} quando o registro não tem a chave inteira. */
     private static String primaryKeySlot(Database db, String table, List<String> columns, AxonValue record) {
+        List<String> slots = primaryKeySlots(db, table, columns, record);
+        return slots.isEmpty() ? null : slots.get(0);
+    }
+
+    /**
+     * Os prefixos sob os quais o valor pode ter entradas; vazio quando o registro não tem a chave inteira. O primeiro
+     * é o do valor relido do disco, o único que se grava. Os outros só existem com record link e são os que versões
+     * anteriores derivavam do valor em memória.
+     */
+    private static List<String> primaryKeySlots(Database db, String table, List<String> columns, AxonValue record) {
         if (record == null || !record.isObject()) {
-            return null;
+            return List.of();
         }
-        List<AxonValue> values = new ArrayList<>();
+        List<List<AxonValue>> combinations = List.of(List.of());
         for (String column : columns) {
             AxonValue value = record.asObject().get(column);
             if (value == null || value.isNull() || value.isNone()) {
-                return null;
+                return List.of();
             }
+            AxonValue stored = StoredForm.of(value);
             // 1 e 1.0 são o mesmo valor; 1 e '1' não
-            values.add(AxonValue.str(value.keyString()));
+            List<AxonValue> forms = java.util.stream.Stream.of(stored, StoredForm.withLinks(stored), value)
+                .map(form -> AxonValue.str(form.keyString())).distinct().toList();
+            combinations = combinations.stream()
+                .flatMap(head -> forms.stream().map(form -> java.util.stream.Stream
+                    .concat(head.stream(), java.util.stream.Stream.of(form)).toList()))
+                .toList();
         }
-        return primaryKeyPrefix(db, table) + AxonJson.write(AxonValue.array(columns.stream().map(AxonValue::str)
-            .toList())) + "\u0000" + AxonJson.write(AxonValue.array(values)) + "\u0000";
+        String head = primaryKeyPrefix(db, table) + AxonJson.write(AxonValue.array(columns.stream().map(AxonValue::str)
+            .toList())) + "\u0000";
+        return combinations.stream().map(values -> head + AxonJson.write(AxonValue.array(values)) + "\u0000").toList();
+    }
+
+    /** Outro registro tem o valor, em qualquer das formas de {@link #primaryKeySlots}. */
+    private boolean primaryKeyTaken(Database db, String table, List<String> columns, List<String> slots, String own) {
+        String current = slots.get(0);
+        for (String slot : slots) {
+            for (String key : records(db).keysWithPrefix(slot)) {
+                if (key.equals(slot) || key.equals(slot + own)) {
+                    continue;
+                }
+                // na forma antiga pode sobrar a entrada de um valor que o registro já soltou
+                if (!slot.equals(current) && db.catalog().partitioning(table) == null && !current.equals(
+                    storedKeySlot(records(db), db, table, columns, key.substring(slot.length())))) {
+                    records(db).delete(key);
+                    continue;
+                }
+                return true;
+            }
+        }
+        return false;
     }
 
     /** O prefixo das entradas do valor que o registro gravado sob {@code own} tem agora, ou {@code null}. */
@@ -7966,6 +8004,7 @@ return score;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
             String previousPrefix = uniqueIndexPrefix(db, rid.table(), ix, before);
+            String own = rid.key().keyString();
             if (nextPrefix != null) {
                 // construção retomada por este nó: sem as entradas das linhas antigas não há como conferir um valor
                 if (ds.clustered() && !ix.ready() && ix.resumed() && !session.restoring()
@@ -7973,21 +8012,28 @@ return score;
                     throw errorStmt(Messages.get("stmt_unique_index_building", ix.name()));
                 }
                 // antes de ler: se outra escrita tomar ou soltar o valor no meio, este commit conflita
-                contend(db, uniqueClaimKey(db, rid.table(), ix, nextPrefix));
-                String ownEntry = nextPrefix + rid.key().keyString();
-                if (heldByAnother(db, rid.table(), ix, nextPrefix, ownEntry)) {
+                List<String> forms = uniqueIndexForms(db, rid.table(), ix, after);
+                forms.forEach(form -> contend(db, uniqueClaimKey(db, rid.table(), ix, form)));
+                if (heldByAnother(db, rid.table(), ix, forms, own, after)) {
                     throw AxonError.internal(Messages.get("stmt_unique_index_violation", ix.name()));
                 }
             }
 
             if (previousPrefix != null) {
-                records(db).delete(previousPrefix + rid.key().keyString());
-                if (!previousPrefix.equals(nextPrefix)) {
-                    records(db).delete(uniqueClaimKey(db, rid.table(), ix, previousPrefix));
+                // valor trocado ou apagado: saem as entradas do registro em todas as formas
+                boolean sameValue = java.util.Objects.equals(storedUniquePrefix(db, rid.table(), ix, before),
+                    storedUniquePrefix(db, rid.table(), ix, after));
+                List<String> released = sameValue ? List.of(previousPrefix)
+                    : uniqueIndexForms(db, rid.table(), ix, before);
+                for (String form : released) {
+                    records(db).delete(form + own);
+                    if (!form.equals(nextPrefix)) {
+                        records(db).delete(uniqueClaimKey(db, rid.table(), ix, form));
+                    }
                 }
             }
             if (nextPrefix != null) {
-                records(db).put(nextPrefix + rid.key().keyString(), new byte[0]);
+                records(db).put(nextPrefix + own, new byte[0]);
                 if (!nextPrefix.equals(previousPrefix)) {
                     records(db).put(uniqueClaimKey(db, rid.table(), ix, nextPrefix), new byte[0]);
                 }
@@ -7995,17 +8041,27 @@ return score;
         }
     }
 
-    /** Outro registro tem o valor. Em cluster, entradas que o registro não confirma são apagadas no caminho. */
-    private boolean heldByAnother(Database db, String table, Catalog.IndexDef index, String prefix, String ownEntry) {
+    /**
+     * Outro registro tem o valor, em qualquer das formas de {@link #uniqueIndexForms}. Em cluster, e quando há mais
+     * de uma forma numa escrita atômica, entradas que o registro não confirma são apagadas no caminho.
+     */
+    private boolean heldByAnother(Database db, String table, Catalog.IndexDef index, List<String> forms, String own,
+                                  AxonValue record) {
         boolean held = false;
-        for (String key : records(db).keysWithPrefix(prefix)) {
-            if (key.equals(ownEntry)) {
-                continue;
-            }
-            if (leftoverEntry(db, table, index, prefix, key.substring(prefix.length()))) {
-                records(db).delete(key);
-            } else {
-                held = true;
+        for (String prefix : forms) {
+            for (String key : records(db).keysWithPrefix(prefix)) {
+                String other = key.substring(prefix.length());
+                if (other.equals(own)) {
+                    continue;
+                }
+                // fora de cluster, só confere o dono quando entrada e registro são gravados juntos
+                boolean verifiable = forms.size() > 1 && (rawRecords(db) instanceof Transaction
+                    || rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch);
+                if (leftoverEntry(db, table, index, other, record, verifiable)) {
+                    records(db).delete(key);
+                } else {
+                    held = true;
+                }
             }
         }
         return held;
@@ -8013,10 +8069,14 @@ return score;
 
     /**
      * Um seguidor constrói o índice enquanto aplica o log, e pode sobrar a entrada de um valor que o registro já
-     * soltou. Na dúvida (tabela particionada, id que não se relê da chave) a entrada vale.
+     * soltou; o mesmo vale para as entradas de record link que versões anteriores não apagavam. O valor do dono e o
+     * do registro em escrita são comparados como voltam do disco. Na dúvida (tabela particionada, id que não se relê
+     * da chave) a entrada vale.
      */
-    private boolean leftoverEntry(Database db, String table, Catalog.IndexDef index, String prefix, String other) {
-        if (!ds.clustered() || db.catalog().partitioning(table) != null || other.indexOf('\u0000') >= 0) {
+    private boolean leftoverEntry(Database db, String table, Catalog.IndexDef index, String other, AxonValue record,
+                                  boolean verifiable) {
+        if ((!ds.clustered() && !verifiable) || db.catalog().partitioning(table) != null
+            || other.indexOf('\u0000') >= 0) {
             return false;
         }
         RecordId owner = new RecordId(table, parseKey(other));
@@ -8024,7 +8084,30 @@ return score;
             return false;
         }
         Document doc = loadDoc(db, owner);
-        return doc == null || !prefix.equals(uniqueIndexPrefix(db, table, index, doc.current()));
+        return doc == null || !java.util.Objects.equals(storedUniquePrefix(db, table, index, doc.current()),
+            storedUniquePrefix(db, table, index, record));
+    }
+
+    /** O prefixo do valor como volta do disco: é com ele que dois registros se comparam. */
+    private String storedUniquePrefix(Database db, String table, Catalog.IndexDef index, AxonValue record) {
+        return uniqueIndexPrefix(db, table, index, StoredForm.columns(record, index.columns(), StoredForm::of));
+    }
+
+    /**
+     * Os prefixos sob os quais o valor pode ter entradas: o do valor como veio, o do relido do disco e o de quando
+     * os links dele eram ids em memória. Só diferem com record link (ou número e lista que mudam de texto na volta).
+     * O formato em disco é o de sempre.
+     */
+    private List<String> uniqueIndexForms(Database db, String table, Catalog.IndexDef index, AxonValue record) {
+        String asGiven = uniqueIndexPrefix(db, table, index, record);
+        if (asGiven == null) {
+            return List.of();
+        }
+        AxonValue stored = StoredForm.columns(record, index.columns(), StoredForm::of);
+        return java.util.stream.Stream.of(asGiven, uniqueIndexPrefix(db, table, index, stored),
+                uniqueIndexPrefix(db, table, index,
+                    StoredForm.columns(stored, index.columns(), StoredForm::withLinks)))
+            .distinct().toList();
     }
 
     /**
