@@ -530,6 +530,7 @@ public final class Executor {
     private AxonValue runStatementUnbatched(Statement s) {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
+        requireAllowedInEvent(s);
         authorize(s);
         requireWritableIfNeeded(s);
         return switch (s) {
@@ -637,6 +638,51 @@ public final class Executor {
     /** AxonPL: CREATE/DROP FUNCTION|PROCEDURE|PACKAGE e CALL (a lógica fica em {@code core.pl}). */
     private AxonValue runProgram(Statement s) {
         return ds.programs().run(s, session, this::eval);
+    }
+
+    /**
+     * O corpo de um evento roda com a identidade de quem grava, que pode ter mais poder do que quem pode definir o
+     * evento (um administrador do banco). Por isso ele só lê e grava dados do banco da tabela.
+     */
+    private void requireAllowedInEvent(Statement s) {
+        if (session.eventScope() != null && !allowedInEvent(s)) {
+            throw outsideEventScope();
+        }
+    }
+
+    private static boolean allowedInEvent(Statement s) {
+        if (s instanceof Info info) {
+            return !"root".equals(info.kind()) && !"namespace".equals(info.kind());
+        }
+        return s instanceof Statement.Select || s instanceof Statement.Create || s instanceof Statement.Insert
+            || s instanceof Statement.Update || s instanceof Statement.Delete || s instanceof Statement.Relate
+            || s instanceof Statement.Unrelate || s instanceof Statement.Let || s instanceof Statement.Return
+            || s instanceof Statement.IfElse || s instanceof Statement.ErrorStmt || s instanceof Statement.Explain
+            || s instanceof Statement.CallProgram || s instanceof Statement.DescribeTable
+            || s instanceof Statement.ShowDataRules || s instanceof Statement.Savepoint
+            || s instanceof Statement.Release || s instanceof Statement.RollbackTo;
+    }
+
+    /** Um DATABASE LINK leva a outro servidor: o corpo de um evento não o usa. */
+    private void refuseLinkInEvent() {
+        if (session.eventScope() != null) {
+            throw outsideEventScope();
+        }
+    }
+
+    /** Num corpo de evento, {@code banco.tabela} só vale para o próprio banco, e nunca para um DATABASE LINK. */
+    private void requireInEventScope(String qualifier) {
+        Session.EventScope scope = session.eventScope();
+        if (scope != null && (!qualifier.equals(scope.database())
+            || ds.databaseLink(scope.namespace(), qualifier) != null)) {
+            throw outsideEventScope();
+        }
+    }
+
+    private com.axonbase.common.AxonError outsideEventScope() {
+        Session.EventScope scope = session.eventScope();
+        return new com.axonbase.common.AxonError(-32002,
+            Messages.get("event_scope_refused", scope.namespace() + "/" + scope.database()));
     }
 
     /** Sessão somente leitura: só passam instruções de leitura (subconsultas e blocos também passam por aqui). */
@@ -803,6 +849,13 @@ public final class Executor {
         // o que um evento escreve é escrita nova, mesmo quando quem o disparou está repondo dados
         boolean restoring = session.restoring();
         session.restoring(false);
+        // a condição e o corpo enxergam só o banco da tabela, mesmo quando a escrita veio de outro
+        Session.EventScope outerScope = session.eventScope();
+        String writerNamespace = session.namespace();
+        String writerDatabase = session.database();
+        session.eventScope(new Session.EventScope(db.ns(), db.db()));
+        session.namespace(db.ns());
+        session.database(db.db());
         try {
             for (Catalog.EventDef ev : def.events().values()) {
                 if (ev.then().isEmpty()) {
@@ -817,6 +870,9 @@ public final class Executor {
                 }
             }
         } finally {
+            session.eventScope(outerScope);
+            session.namespace(writerNamespace);
+            session.database(writerDatabase);
             session.restoring(restoring);
             restoreVar("event", prevEvent);
             restoreVar("before", prevBefore);
@@ -1486,6 +1542,7 @@ public final class Executor {
             String sessionNs = session.namespace();
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
+                refuseLinkInEvent();
                 // Saga: capture BEFORE state for remote write
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && qRid == null) {
@@ -1590,6 +1647,7 @@ public final class Executor {
             String sessionNs = session.namespace();
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
+                refuseLinkInEvent();
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && dqRid == null) {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
@@ -3466,6 +3524,7 @@ return score;
      */
     private AxonValue runSelectViaLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q,
                                         Statement.Select sel) {
+        refuseLinkInEvent();
         // Render the SELECT, then replace qualified FROM with unqualified one
         String rendered = com.axonbase.parser.Render.stmt(sel);
         String qualifiedFrom = q.link() + "." + q.table();
@@ -3486,6 +3545,7 @@ return score;
         }
     }
     private List<Document> sourceDocsQualified(Expr.Qualified q) {
+        requireInEventScope(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3521,6 +3581,7 @@ return score;
 
     /** O banco do namespace citado em {@code banco.tabela}, já com a tabela garantida. */
     private Database localQualifiedDatabase(String ns, Expr.Qualified q) {
+        requireInEventScope(q.link());
         Database targetDb = ds.ensureDatabase(session, ns, q.link());
         ensureTable(targetDb, q.table());
         return targetDb;
@@ -3532,6 +3593,7 @@ return score;
      * do link removido e é enviada ao endpoint {@code /sql} do link.
      */
     private AxonValue runWriteViaLink(Expr.Qualified q, String renderedSql) {
+        refuseLinkInEvent();
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3556,6 +3618,7 @@ return score;
 
     /** Resolve a qualified record ID {@code "link"."table":key}. */
     private List<Document> sourceDocsQualifiedRecordId(Expr.Qualified q, Expr.RecordId rid) {
+        requireInEventScope(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -5974,6 +6037,7 @@ return score;
             String table = q.link().equals(ns) ? q.table() : q.link();
             Database targetDb = db();
             if (!q.link().equals(ns)) {
+                requireInEventScope(q.link());
                 targetDb = ds.ensureDatabase(session, ns, q.link());
             }
             String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + table + "\u0000";

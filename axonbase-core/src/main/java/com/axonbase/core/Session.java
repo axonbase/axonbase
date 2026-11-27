@@ -133,6 +133,24 @@ public final class Session {
         return copy;
     }
 
+    /** Banco ao qual o corpo de um evento fica confinado. */
+    public record EventScope(String namespace, String database) {
+    }
+
+    private EventScope eventScope;
+
+    /**
+     * O banco do evento em execução, ou {@code null} fora de um evento. Só o motor liga isto. Vale seja qual for a
+     * identidade da sessão, inclusive a trocada por uma função {@code SECURITY DEFINER}.
+     */
+    public EventScope eventScope() {
+        return eventScope;
+    }
+
+    public void eventScope(EventScope scope) {
+        this.eventScope = scope;
+    }
+
     // ------------------------------------------------------------------
     // transação activa
     // ------------------------------------------------------------------
