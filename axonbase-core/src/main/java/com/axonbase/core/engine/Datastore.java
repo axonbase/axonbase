@@ -2027,6 +2027,7 @@ public final class Datastore {
         try {
             return coordinator.beginValidation();
         } catch (RuntimeException unavailable) {
+            session.keepWrites(); // sem consenso, o ledger também não aceitaria a retirada dos passos
             cancelSession(session);
             throw unavailable;
         }
@@ -2038,7 +2039,6 @@ public final class Datastore {
         session.tx(null);
         session.txControlVersion(-1);
         session.discardLive();
-        session.writesDiscarded();
     }
 
     private void commitGuarded(Session session, Transaction tx, Long validated) {
@@ -2106,7 +2106,8 @@ public final class Datastore {
                 if (!(notConfirmed instanceof VersionConflictException)) {
                     session.keepWrites(); // sem desfecho: a escrita ainda pode valer
                 }
-                cancelSession(session);
+                // num conflito, commitSession executa o descarte depois de soltar as travas
+                rollback(session);
                 throw notConfirmed;
             }
             if (coordinator.appliesTo(backend)) {
@@ -2127,6 +2128,15 @@ public final class Datastore {
     }
 
     public void cancelSession(Session session) {
+        try {
+            rollback(session);
+        } finally {
+            session.writesDiscarded();
+        }
+    }
+
+    /** Desfaz a transação sem executar as ações presas às escritas dela. */
+    private void rollback(Session session) {
         Transaction tx = session.tx();
         long started = session.txControlVersion();
         if (tx != null) {
@@ -2135,7 +2145,6 @@ public final class Datastore {
         }
         session.txControlVersion(-1);
         session.discardLive();
-        session.writesDiscarded();
         // DDL e auth foram aplicados em memória para a própria sessão; se o batch não
         // confirmou, o plano de controle volta ao que está durável no storage. Reconstruir reexecuta todo o
         // plano de controle de todos os bancos, então só se faz quando houve DDL desde o começo da transação.
