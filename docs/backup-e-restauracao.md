@@ -87,6 +87,24 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" --data-binary @cadeia.axbak \
 
 Com o corpo cifrado, os segmentos são cifrados um a um por fora; para montar uma cadeia, decifre, concatene e cifre de novo, ou restaure cada arquivo na ordem pelo orquestrador (o Enterprise monta a cadeia a partir do manifesto).
 
+## Restauração do S3 na subida
+
+Com `AXON_S3_BUCKET` e `AXON_S3_ENDPOINT` configurados, o servidor também pede a restauração: se a base local estiver vazia, ele a refaz a partir dos backups do balde no S3 (Simple Storage Service) antes de atender.
+
+| Situação com o S3 configurado | O que o servidor faz |
+|---|---|
+| base com dados | sobe com ela, sem consultar o balde para restaurar |
+| base vazia e balde sem nenhum backup | sobe com os bancos iniciais (primeira subida) |
+| base vazia e restauração concluída | sobe com os dados restaurados |
+| base vazia e falha ao listar, baixar, decifrar ou aplicar, inclusive por objeto frio sem a camada fria | **não sobe**: mostra a causa e sai com o código 2 |
+| base deixada pela metade por uma restauração que parou no meio | **não sobe**: apague o diretório de dados e suba de novo |
+
+Sem o S3 configurado nada disso se aplica. Num cluster, um nó com a base vazia e o S3 configurado precisa alcançar o balde para subir.
+
+**Diferença para a 0.10.x:** nela, qualquer falha era tratada como balde vazio e o servidor subia com a base vazia (ou, depois de uma falha no meio, com a base pela metade no reinício seguinte), e o backup periódico passava a enviar esse estado. Quem subia com o S3 inacessível, com o balde ainda não criado ou com a senha de cifra errada agora precisa corrigir a causa, ou remover as duas variáveis para subir sem o S3.
+
+A restauração pedida pela API administrativa, com o servidor no ar, continua devolvendo erro sem derrubar o processo. Se ela parar no meio, o próximo início com o S3 configurado é recusado.
+
 ## O que não está neste formato
 
 - Backup físico (arquivos do RocksDB) e restore com troca atômica de diretório ficam para a etapa seguinte do plano.

@@ -140,7 +140,14 @@ public final class Main {
         // backend non-empty and skip the restore).
         if (!config.s3Bucket().isBlank() && !config.s3Endpoint().isBlank()) {
             java.util.function.Supplier<Long> commitIndex = () -> null;
-            restoreAtStartup(ds, backend, new S3SyncManager(ds, config, commitIndex));
+            try {
+                restoreAtStartup(ds, backend, new S3SyncManager(ds, config, commitIndex));
+            } catch (IllegalStateException refused) {
+                // sai antes de abrir porta ou ligar o backup periódico, que gravaria a base incompleta no balde
+                System.err.println(refused.getMessage());
+                System.exit(2);
+                return;
+            }
         } else {
             ds.createDatabase("axonbase", "main");
             ds.createDatabase("app", "main");
@@ -232,21 +239,25 @@ public final class Main {
         Thread.currentThread().join();
     }
 
-    /** Numa base vazia, restaura o que houver no S3; sem restaurar, cria os bancos iniciais. */
+    /**
+     * Chamado só com o S3 configurado, que é como se pede a restauração: numa base vazia, restaura o que houver no
+     * balde; com o balde sem backup, cria os bancos iniciais. Uma base que já tem dados fica como está.
+     *
+     * @throws IllegalStateException se a restauração falha, ou se uma anterior deixou a base pela metade
+     */
     static void restoreAtStartup(Datastore ds, KvBackend backend, S3SyncManager s3) {
-        try {
-            if (backend.keysWithPrefix("").isEmpty()) {
-                boolean restored = s3.restoreFromS3();
-                if (restored) {
-                    System.out.println(Messages.get("server_s3_restored"));
-                } else {
-                    System.out.println(Messages.get("server_s3_empty"));
-                    ds.createDatabase("axonbase", "main");
-                    ds.createDatabase("app", "main");
-                }
-            }
-        } catch (Exception e) {
+        if (ds.restoreInterrupted()) {
+            throw new IllegalStateException(Messages.get("server_s3_restore_interrupted"));
+        }
+        if (!backend.keysWithPrefix("").isEmpty()) {
+            return;
+        }
+        if (s3.restoreAtStartup() == S3SyncManager.StartupRestore.RESTORED) {
+            System.out.println(Messages.get("server_s3_restored"));
+        } else {
             System.out.println(Messages.get("server_s3_empty"));
+            ds.createDatabase("axonbase", "main");
+            ds.createDatabase("app", "main");
         }
     }
 

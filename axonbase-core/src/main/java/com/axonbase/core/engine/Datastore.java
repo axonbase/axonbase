@@ -1275,6 +1275,14 @@ public final class Datastore {
         return sb.toString();
     }
 
+    /** Presente só enquanto {@link #restoreCluster} aplica um dump: se sobrar, a base ficou pela metade. */
+    private static final String RESTORE_PENDING_KEY = "__axon/restore/pending";
+
+    /** Uma restauração de dump parou no meio nesta base (erro ou queda), e ela está incompleta. */
+    public boolean restoreInterrupted() {
+        return backend.get(RESTORE_PENDING_KEY).isPresent();
+    }
+
     /** Restaura um {@link #backupCluster()}: limpa tudo e reconstrói. */
     public void restoreCluster(String dump) {
         try {
@@ -1301,6 +1309,8 @@ public final class Datastore {
             throw AxonError.internal(Messages.get("stmt_cluster_backup_invalid"));
         }
         clearAll();
+        backend.put(RESTORE_PENDING_KEY, new byte[] {1});
+        backend.flush();
         java.util.Base64.Decoder b64 = java.util.Base64.getDecoder();
         boolean restoredControl = false;
         long applied = 0;
@@ -1331,6 +1341,8 @@ public final class Datastore {
             replayControl();
             controlStore.save(controlState, backend);
         }
+        backend.flush();
+        backend.delete(RESTORE_PENDING_KEY);
         backend.flush();
         return applied;
     }

@@ -165,7 +165,7 @@ As perdas grandes vêm do [defeito da versão antiga](#defeito-na-0101-e-anterio
 
 **Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Em `17bea4d`, 30 rodadas com as duas paradas (60 trocas) passaram todas, sem perda causada pela troca e sem divergência. Em duas trocas limpas a versão antiga já tinha perdido 407 e 413 escritas antes da parada.
 
-**Atualização a partir da 0.10.x (decidido pelo dono):** parada total, que a 1.0.0-rc1 pode exigir. Pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova. Um nó antigo pode já estar diferente dos outros antes da parada, por causa dos próprios defeitos: compare o conteúdo e, havendo diferença, refaça os nós divergentes a partir do que tiver os dados completos.
+**Atualização a partir da 0.10.x (decidido pelo dono):** parada total, que a 1.0.0-rc1 pode exigir. Com o S3 configurado, a versão nova [recusa a subida quando a restauração pedida falha](backup-e-restauracao.md#restauração-do-s3-na-subida), em vez de subir com a base vazia. Pare as escritas, espere os três nós ficarem com o mesmo índice, pare os três e suba os três na versão nova. Um nó antigo pode já estar diferente dos outros antes da parada, por causa dos próprios defeitos: compare o conteúdo e, havendo diferença, refaça os nós divergentes a partir do que tiver os dados completos.
 
 ## Testes de caos
 

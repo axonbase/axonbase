@@ -3934,6 +3934,9 @@ return score;
         boolean sameUnique = previous != null && previous.unique() && di.unique()
             && previous.columns().equals(di.columns());
         boolean advanced = di.searchAnalyzer() != null || di.geo() || di.columnar() || di.vectorDimension() != null;
+        // em construção sem ninguém construindo: parou (queda ou camada fria fora), e redefinir é tentar de novo
+        boolean stalled = previous != null && !previous.ready()
+            && !IndexBuilder.running(ds, db.ns(), db.db(), di.table(), di.name());
         String marker = buildMarkerKey(db, di.table(), di.name());
         def.indexFailures().remove(di.name());
         String definition = com.axonbase.parser.Render.stmt(di);
@@ -3955,7 +3958,7 @@ return score;
             return AxonValue.nul();
         }
         // Redefinir o mesmo UNIQUE é idempotente: só um índice novo precisa olhar os dados.
-        if (!((di.unique() && !sameUnique) || advanced)) {
+        if (!((di.unique() && !sameUnique) || advanced || stalled)) {
             if (previous != null && previous.geo()) {
                 // o GEO deixa marcador e entradas: saem junto com a troca, sem escrita no meio
                 java.util.concurrent.locks.Lock swap = exclusiveIndexLock(db);
@@ -3972,6 +3975,8 @@ return score;
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
             return AxonValue.nul();
         }
+        // sem as linhas frias ao alcance, nada é apagado nem registrado
+        ds.coldTier().requireReadable(db, di.table());
         java.util.concurrent.locks.Lock write = db.indexLock().writeLock();
         write.lock();
         try {
@@ -3988,7 +3993,7 @@ return score;
         }
         if (countRows(db, di.table(), db.indexInlineRows() + 1) <= db.indexInlineRows()) {
             // tabela pequena: constrói no próprio comando, e uma duplicata falha aqui, sem registrar nada
-            IndexBuilder.build(ds, this, db.ns(), db.db(), di.table(), di.name(), false);
+            IndexBuilder.build(ds, this, db.ns(), db.db(), di.table(), di.name(), false, stalled);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
         } else {
             control(db, ControlCommand.Kind.INDEX, controlName, definition);

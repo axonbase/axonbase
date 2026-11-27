@@ -1,9 +1,11 @@
 package com.axonbase.core.engine;
 
 import com.axonbase.common.AxonError;
+import com.axonbase.common.Log;
 import com.axonbase.core.Session;
 import com.axonbase.core.catalog.Catalog;
 import com.axonbase.core.catalog.Database;
+import com.axonbase.core.partition.cold.ColdFailure;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +27,9 @@ import java.util.concurrent.locks.Lock;
  * apagado no mesmo lote que grava as chaves de "pronto"; se a construção falha ou é abortada, o índice sai
  * do catálogo e suas entradas são apagadas. Um marcador que sobra de uma queda faz o reinício refazer a
  * construção, então um índice parcial nunca vira pronto.</p>
+ *
+ * <p>Uma falha da camada fria é do ambiente, não dos dados: o índice fica no catálogo, em construção e com o erro
+ * registrado ({@code index_failures}), para o próximo reinício ou uma redefinição tentar de novo.</p>
  */
 public final class IndexBuilder {
 
@@ -86,6 +91,11 @@ public final class IndexBuilder {
         return new BuildKey(ds, ns + "|" + db + "|" + table + "|" + name);
     }
 
+    /** Há uma thread construindo o índice. */
+    static boolean running(Datastore ds, String ns, String dbName, String table, String name) {
+        return RUNNING.containsKey(key(ds, ns, dbName, table, name));
+    }
+
     /** Inicia a construção numa thread própria, a menos que já haja uma para o mesmo índice. */
     static void startAsync(Datastore ds, String ns, String dbName, String table, String name, boolean purgeFirst) {
         BuildKey k = key(ds, ns, dbName, table, name);
@@ -96,11 +106,11 @@ public final class IndexBuilder {
         POOL.execute(() -> {
             try {
                 Executor ex = new Executor(ds).forBuild(new Session(ns, dbName));
-                build(ds, ex, ns, dbName, table, name, purgeFirst);
+                build(ds, ex, ns, dbName, table, name, purgeFirst, true);
             } catch (Crash crash) {
                 // a thread cai sem limpar, como o processo cairia
             } catch (RuntimeException e) {
-                // build() já abortou e registrou a falha
+                // build() já registrou a falha, e abortou ou deixou o índice em construção
             } finally {
                 RUNNING.remove(k);
                 gate.complete(null);
@@ -121,10 +131,12 @@ public final class IndexBuilder {
     /**
      * Roda a construção na thread atual. Em falha, aborta o índice (limpa tudo) e relança o erro.
      *
-     * @param purgeFirst apaga entradas parciais antes de começar (retomada depois de queda)
+     * @param purgeFirst        apaga entradas parciais antes de começar (retomada depois de queda)
+     * @param keepOnColdFailure o índice já estava registrado: uma falha da camada fria o deixa em construção em vez
+     *                          de removê-lo. Falso só para o índice novo construído no próprio comando
      */
     static void build(Datastore ds, Executor ex, String ns, String dbName, String table, String name,
-                      boolean purgeFirst) {
+                      boolean purgeFirst, boolean keepOnColdFailure) {
         try {
             if (purgeFirst) {
                 purge(ds, ex, ns, dbName, table, name);
@@ -146,15 +158,33 @@ public final class IndexBuilder {
         } catch (Crash crash) {
             throw crash;
         } catch (RuntimeException e) {
-            abort(ds, ex, ns, dbName, table, name, e);
+            if (keepOnColdFailure && ColdFailure.caused(e)) {
+                stall(ds, ns, dbName, table, name, e);
+            } else {
+                abort(ds, ex, ns, dbName, table, name, e);
+            }
             throw e;
         }
+    }
+
+    /** Deixa o índice em construção, com o erro à vista. O marcador continua, então o reinício tenta de novo. */
+    private static void stall(Datastore ds, String ns, String dbName, String table, String name,
+                              RuntimeException cause) {
+        Database db = ds.findDatabase(ns, dbName);
+        Catalog.TableDef def = db == null ? null : db.catalog().table(table);
+        if (def != null && def.indexes().containsKey(name)) {
+            def.indexFailures().put(name, String.valueOf(cause.getMessage()));
+        }
+        Log.get(IndexBuilder.class).error("construção do índice " + ns + "." + dbName + "." + table + "." + name
+            + " parada por falha da camada fria; o índice foi mantido em construção: " + cause.getMessage());
     }
 
     private static void purge(Datastore ds, Executor ex, String ns, String dbName, String table, String name) {
         Database db = ds.findDatabase(ns, dbName);
         Catalog.IndexDef index = lookup(db, table, name);
         if (index != null && !index.ready()) {
+            // nada é apagado se as linhas frias não puderem ser relidas
+            ds.coldTier().requireReadable(db, table);
             // as chaves do formato antigo podem ser milhões e ninguém daqui as escreve: saem sem parar as escritas
             ex.dropLegacyGeoEntries(db, table, index);
             Lock w = db.indexLock().writeLock();

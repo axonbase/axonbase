@@ -1,17 +1,18 @@
 package com.axonbase.core.partition;
 
-import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.core.backup.S3BackupClient;
 import com.axonbase.core.catalog.Database;
 import com.axonbase.core.partition.cold.BloomFilter;
 import com.axonbase.core.partition.cold.ColdCache;
+import com.axonbase.core.partition.cold.ColdFailure;
 import com.axonbase.core.partition.cold.ColdHolds;
 import com.axonbase.core.partition.cold.ColdStore;
 import com.axonbase.core.partition.cold.FileSystemColdStore;
 import com.axonbase.core.partition.cold.S3ColdStore;
 import com.axonbase.core.storage.KvBackend;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
@@ -153,7 +154,34 @@ public final class ColdTier implements AutoCloseable {
 
     private void require() {
         if (store == null) {
-            throw AxonError.internal(Messages.get("cold_not_configured"));
+            throw ColdFailure.error(Messages.get("cold_not_configured"));
+        }
+    }
+
+    /**
+     * Antes de mexer num índice: as linhas frias da tabela precisam estar ao alcance, senão a construção apagaria
+     * entradas que não conseguiria refazer. Confere a presença dos objetos, sem baixá-los.
+     *
+     * @throws com.axonbase.common.AxonError marcado com {@link ColdFailure} quando algum não está ao alcance
+     */
+    public void requireReadable(Database db, String table) {
+        if (db.catalog().partitioning(table) == null) {
+            return;
+        }
+        for (PartitionDescriptor partition : PartitionStore.list(db, db.records(), table)) {
+            if (!partition.coldData()) {
+                continue;
+            }
+            require();
+            boolean found;
+            try {
+                found = store.exists(partition.object());
+            } catch (IOException | RuntimeException e) {
+                throw ColdFailure.error(Messages.get("cold_unavailable", partition.object(), e.getMessage()));
+            }
+            if (!found) {
+                throw ColdFailure.error(Messages.get("cold_unavailable", partition.object(), "o objeto não existe"));
+            }
         }
     }
 

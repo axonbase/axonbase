@@ -90,11 +90,11 @@ public final class ColdCache implements AutoCloseable {
             opened = true;
             return entry;
         } catch (ColdObject.CorruptException e) {
-            throw AxonError.internal(Messages.get("cold_corrupted", key));
+            throw ColdFailure.error(Messages.get("cold_corrupted", key));
         } catch (AxonError e) {
-            throw e;
+            throw ColdFailure.mark(e); // inclui o erro do cliente S3
         } catch (IOException | RuntimeException e) {
-            throw AxonError.internal(Messages.get("cold_unavailable", key, e.getMessage()));
+            throw ColdFailure.error(Messages.get("cold_unavailable", key, e.getMessage()));
         } finally {
             delete(compressed);
             if (!opened) {

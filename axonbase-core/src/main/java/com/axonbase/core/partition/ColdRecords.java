@@ -1,8 +1,8 @@
 package com.axonbase.core.partition;
 
-import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.core.catalog.Database;
+import com.axonbase.core.partition.cold.ColdFailure;
 import com.axonbase.core.storage.KvBackend;
 
 import java.util.Optional;
@@ -27,13 +27,13 @@ public interface ColdRecords {
         @Override
         public Optional<byte[]> get(Database db, KvBackend kv, String table, PartitionDescriptor partition,
                                     String recordKey) {
-            throw AxonError.internal(Messages.get("cold_not_configured"));
+            throw ColdFailure.error(Messages.get("cold_not_configured"));
         }
 
         @Override
         public boolean scan(Database db, String table, PartitionDescriptor partition, String keyPrefix,
                             BiPredicate<String, byte[]> visitor) {
-            throw AxonError.internal(Messages.get("cold_not_configured"));
+            throw ColdFailure.error(Messages.get("cold_not_configured"));
         }
     };
 }
