@@ -154,6 +154,13 @@ public final class ProgramService {
             }
         }
         ProgramDef existing = db.programs().get(name);
+        if (!replaying && !administers(session)) {
+            // repetir a definição em vigor não muda nada: nem a versão, nem as datas, nem o dono
+            if (orReplace && repeats(existing, renderable(kind, name, List.of(), params, returns, definer, body))) {
+                return AxonValue.nul();
+            }
+            throw adminRequired();
+        }
         if (existing != null && !replaying) {
             if (!orReplace) {
                 throw new AxonError(-32000, "ja existe " + what(existing.kind()) + " '" + name
@@ -357,7 +364,34 @@ public final class ProgramService {
         return AxonValue.object(keep);
     }
 
+    /**
+     * O corpo de um programa roda com a identidade de quem o chama, inclusive a do root, e uma função pode decidir uma
+     * PERMISSIONS. Por isso criar, substituir e apagar é do administrador cujo escopo cobre o banco. Sessão sem auth é
+     * o modo embutido, o replay ou o servidor sem autenticação.
+     */
+    private static boolean administers(Session session) {
+        AxonValue auth = session.auth();
+        return !Authz.authenticated(auth)
+            || Authz.atLeast(auth, Authz.Role.ADMIN) && Authz.allows(auth, session.namespace(), session.database());
+    }
+
+    private static AxonError adminRequired() {
+        return new AxonError(-32002, Messages.get("auth_role_required", "admin"));
+    }
+
+    /** O texto pedido é o da definição em vigor, sem contar a linha de metadados que a precede. */
+    private static boolean repeats(ProgramDef current, Statement wanted) {
+        if (current == null) {
+            return false;
+        }
+        String definition = current.definition();
+        return definition.substring(definition.indexOf('\n') + 1).equals(Render.stmt(wanted));
+    }
+
     private AxonValue drop(Session session, Statement.DropProgram d) {
+        if (!administers(session)) {
+            throw adminRequired();
+        }
         Database db = ds.requireDatabase(session);
         ProgramDef.Kind kind = ProgramDef.Kind.valueOf(d.kind());
         ProgramDef existing = db.programs().get(d.name());

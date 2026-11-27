@@ -179,7 +179,7 @@ class DefinitionExpressionScopeTest {
     private static void createTrapFunction(Datastore ds) {
         ds.execute("CREATE FUNCTION isca_fn() AS $$ return db.query('SELECT (SELECT VALUE v FROM semente; "
             + "CREATE USER intruso ON ROOT PASSWORD \"Test-pw-1\" ROLES admin) AS a FROM semente') $$",
-            editor(), null);
+            databaseAdmin(), null);
     }
 
     @Test
