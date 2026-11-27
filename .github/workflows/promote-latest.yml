@@ -1,0 +1,33 @@
+name: Promote Latest Image
+
+# Aponta `latest` para uma versão já publicada, inclusive um pré-lançamento. A publicação por tag `v*` nunca move
+# `latest` em pré-lançamento; esta é a única forma de fazê-lo de propósito, por tag própria.
+# A tag latest-vX.Y.Z não casa com o filtro 'v*'.
+
+on:
+  push:
+    tags: ['latest-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate version
+        run: |
+          version=$(<VERSION)
+          test "${GITHUB_REF_NAME}" = "latest-v${version}"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Point latest to the published version
+        run: |
+          docker buildx imagetools inspect "axonbase/axonbase:${VERSION}"
+          docker buildx imagetools create -t axonbase/axonbase:latest "axonbase/axonbase:${VERSION}"
+          docker buildx imagetools inspect axonbase/axonbase:latest
