@@ -1488,11 +1488,11 @@ public final class Executor {
     }
 
     /** O registro que já está sob este id, ou {@code null}. Num lote, o commit confere que ninguém o criou no meio. */
-    private AxonValue existingRecord(Database db, RecordId rid) {
+    private AxonValue existingRecord(Database db, RecordId rid, String storageKey) {
         if (rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
-            pending.expect(rid.storageKey(db.ns(), db.db()));
+            pending.expect(storageKey);
         }
-        Document found = loadDoc(db, rid);
+        Document found = loadDoc(db, rid, storageKey);
         return found == null ? null : found.current();
     }
 
@@ -1574,7 +1574,8 @@ public final class Executor {
         RecordId rid = new RecordId(table, key);
         // um id recém-gerado não existe em lugar algum: não precisa ser procurado
         boolean generated = explicitKey == null && idKey == null;
-        AxonValue previous = generated ? null : existingRecord(db, rid);
+        String storageKey = rid.storageKey(db.ns(), db.db());
+        AxonValue previous = generated ? null : existingRecord(db, rid, storageKey);
         if (previous != null) {
             // antes de pular ou de dizer que existe: sobre um registro oculto pela regra a recusa é sempre a mesma
             refuseHiddenRecord(db, rid);
@@ -1607,7 +1608,7 @@ public final class Executor {
         bindPartition(db, rid, record, generated);
         if (previous == null && !generated && db.catalog().partitioning(table) != null) {
             // numa tabela particionada outra criação pode ter confirmado entre a procura e a escolha da partição
-            previous = existingRecord(db, rid);
+            previous = existingRecord(db, rid, storageKey);
             if (previous != null) {
                 refuseHiddenRecord(db, rid);
             }
@@ -1626,7 +1627,7 @@ public final class Executor {
             recordLocalStep(sagaCorr, db, rid, previous == null ? AxonValue.nul() : previous,
                 previous == null ? "CREATE" : "UPDATE");
         }
-        records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));
+        records(db).put(storageKey, encode(record));
         indexSearch(db, rid, previous, record);
         indexAdvanced(db, rid, previous, record);
         indexColumnar(db, rid, previous, record);
@@ -7560,7 +7561,12 @@ return score;
     }
 
     private Document loadDoc(Database db, RecordId rid) {
-        Optional<byte[]> raw = records(db).get(rid.storageKey(db.ns(), db.db()));
+        return loadDoc(db, rid, rid.storageKey(db.ns(), db.db()));
+    }
+
+    /** Como {@link #loadDoc(Database, RecordId)}, com a chave física que o chamador já calculou. */
+    private Document loadDoc(Database db, RecordId rid, String storageKey) {
+        Optional<byte[]> raw = records(db).get(storageKey);
         if (raw.isEmpty()) {
             return null;
         }
