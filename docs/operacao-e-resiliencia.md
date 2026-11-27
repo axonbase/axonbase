@@ -232,7 +232,7 @@ java -cp "lib/*" com.axonbase.core.dr.DrTool restore --store s3 --epoch e1 --tar
 
 Se a base tiver partições na [camada fria](particoes-e-camada-fria.md), o ambiente do comando precisa de `AXON_COLD_DIR` ou `AXON_COLD_S3` apontando para os objetos dela, que o arquivamento não copia. Sem isso, ou faltando objeto, a restauração falha e não entrega a base.
 
-Suba cada nó com os dados em `/data/novo` (ou uma cópia dele) e sem diretório do Raft, e arquive o cluster novo numa época nova.
+Suba cada nó com os dados em `/data/novo` (ou uma cópia dele) sem o diretório do Raft (apague `.raft` da cópia, se houver), e arquive o cluster novo numa época nova.
 
 **Extensão para a E3:** o layout já separa os grupos. A restauração de vários shards repete o passo por grupo com o mesmo instante, e o manifesto de cluster da E3 entra ao lado de `groups/`.
 

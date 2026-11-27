@@ -74,6 +74,35 @@ O tamanho de uma entrada é a soma das chaves e dos valores gravados (o registro
 
 Com um membro votante parado, o líder pode guardar até dez vezes `AXON_RAFT_RETAIN_ENTRIES` para ele, mesmo além dos 30 minutos. Um membro atrasado além disso recebe o estado inteiro pela rede (snapshot), que é adequado só para bases pequenas.
 
+## Onde fica o estado do Raft, e como atualizar
+
+O diretório do Raft é `.raft` dentro do diretório de dados, e os truststores enviados pela API ficam em `.truststores`. Com o comando padrão da imagem (`--path /data` e um volume em `/data`), os dois ficam no volume.
+
+Até a 1.0.0-rc1 eles ficavam ao lado do diretório de dados (`<caminho>.raft` e `<caminho>.truststores`). A atualização trata o local antigo assim:
+
+| Situação ao subir | O que o servidor faz |
+|---|---|
+| Há estado do Raft só no local antigo | usa o local antigo, sem mover; avisa no log quando ele está fora do diretório de dados |
+| Há estado do Raft nos dois locais | não sobe, para não escolher o errado; deixe só o atual e mova o outro para fora |
+| Há truststores no local antigo | copia para `.truststores` os que ainda não estão lá, sem apagar os originais |
+| A base tem dados e não há estado do Raft | sobe como antes e avisa no log (`raft_state_missing`) |
+
+Instalações fora de contêiner e as que usam `--path /data/db` com volume em `/data` não precisam de passo algum.
+
+### Contêiner com o comando padrão: copiar antes de recriar
+
+Na 1.0.0-rc1 e anteriores, com `--path /data`, o estado está em `/data.raft`, na camada do contêiner. Recriar o contêiner (trocar a imagem, `docker compose up` com outra tag, `down` e `up`) **apaga** esse estado. A versão nova não tem como recuperá-lo, então copie antes, com o contêiner parado e ainda existente:
+
+```bash
+scripts/migrar-estado-docker.sh <contêiner>
+```
+
+O script para o contêiner e copia `/data.raft` para `/data/.raft` e `/data.truststores` para `/data/.truststores`, dentro do volume. Depois troque a imagem e recrie. Da 0.10.x ou anterior, pare os três nós, rode o script em cada um e só então suba os três com a imagem nova. Entre versões novas, faça um nó por vez.
+
+Se a atualização falhar e for preciso voltar à imagem antiga no mesmo contêiner, faça isso antes de recriá-lo. Depois de recriado, a imagem antiga volta a procurar o estado em `/data.raft` e não o encontra.
+
+Se o contêiner antigo já foi removido (`docker compose down`, `docker rm`), o estado do Raft daquele nó se perdeu, como já acontecia nas versões anteriores. A base continua no volume. Não recrie os outros nós: copie o estado deles primeiro e confira se o nó recriado alcança o líder.
+
 ## Leitura em seguidores
 
 Qualquer nó atende leituras. A consistência é pedida por requisição:
