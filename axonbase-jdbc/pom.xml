@@ -27,6 +27,12 @@
       <optional>true</optional>
     </dependency>
     <dependency>
+      <groupId>com.axondatabase</groupId>
+      <artifactId>axonbase-server</artifactId>
+      <version>1.0.0-rc2</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>
