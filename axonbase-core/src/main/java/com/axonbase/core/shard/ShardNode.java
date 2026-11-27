@@ -92,6 +92,11 @@ public final class ShardNode implements ShardMember {
             if (command.kind() == ControlCommand.Kind.JKS) {
                 continue;
             }
+            // o outro shard executa o texto: só vai o que o próprio replay aceitaria
+            if (command.kind() != ControlCommand.Kind.DATABASE
+                && com.axonbase.core.control.ControlGuard.replayable(command).isEmpty()) {
+                continue;
+            }
             Map<String, AxonValue> item = new LinkedHashMap<>();
             item.put("ns", AxonValue.str(command.namespace()));
             item.put("db", AxonValue.str(command.database()));

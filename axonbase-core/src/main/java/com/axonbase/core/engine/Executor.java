@@ -431,9 +431,12 @@ public final class Executor {
             if (session.definitionScope() != null) {
                 return def;
             }
+            // renderiza antes de mexer no catálogo: um nome que não pode ser citado recusa o comando
+            String definition = com.axonbase.parser.Render.stmt(new DefineTable(name, false, false,
+                Statement.Permissions.none(), null));
             db.catalog().defineTable(def);
             session.tableCreated(db.ns(), db.db(), name);
-            control(db, ControlCommand.Kind.TABLE, name, "DEFINE TABLE " + name + " SCHEMALESS");
+            control(db, ControlCommand.Kind.TABLE, name, definition);
         }
         return def;
     }
