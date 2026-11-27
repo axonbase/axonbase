@@ -593,7 +593,8 @@ public final class Parser {
         boolean ifNotExists = false;
         if (matchKeyword("if")) {
             expectKeyword("not");
-            expectKeyword("exists");
+            // exists não é reservada: continua valendo como nome de tabela e de campo
+            expectText("exists");
             ifNotExists = true;
         }
         String table = expectIdentOrString();
