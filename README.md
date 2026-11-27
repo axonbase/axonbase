@@ -10,7 +10,7 @@ Release candidate notes (in Portuguese): [1.0.0-rc2](docs/notas-1.0.0-rc2.md), i
 - **AxonQL**: SQL-like query language with graph traversal (`->`/`<-`), subqueries, aggregations, 130+ built-in functions, and EXPLAIN/EXPLAIN ANALYZE
 - **Native sagas**: `BEGIN SAGA`, `COMMIT SAGA`, `CANCEL SAGA` with correlation IDs, automatic compensation, remote rollback via Database Link, and ledger tracking
 - **AI Audit**: LLM-generated security rules classify every query as `SAFE`, `WARNING`, or `DANGER` before execution — no production data reaches the AI provider
-- **Data Rules**: row-level security with predicate ANDing and automatic field masking, enforced across all queries without application changes
+- **Data Rules**: row-level security with predicate ANDing and automatic masking of top level fields (see [coverage and limits](#data-rules-coverage-and-limits))
 - **Search engines**: BM25 full-text with configurable analyzers, HNSW vector search (cosine/Euclidean/Manhattan), geo spatial with an H3 hierarchical hexagonal index, graph traversal, and columnar indexes for direct aggregation (count/sum/avg/min/max)
 - **Multi-model indexes**: unique, count, full-text (SEARCH ANALYZER), HNSW vector, GEO spatial, and COLUMNAR analytical
 - **MVCC transactions**: snapshot isolation, savepoints, optimistic retry, phantom protection via read ranges, and `VersionConflictException`
@@ -19,6 +19,26 @@ Release candidate notes (in Portuguese): [1.0.0-rc2](docs/notas-1.0.0-rc2.md), i
 - **Protocols**: JSON-RPC over WebSocket and HTTP, REST (`/sql`, `/table`), GraphQL, MCP (Model Context Protocol), and JDBC
 - **Observability**: Prometheus metrics (`/metrics`), health/ready/status endpoints, structured JSON logging, S3 backup with AES-256-GCM encryption
 - **Configuration**: file-based (`axonbase.conf`), environment variables (`AXON_*`), and CLI flags with precedence chain
+
+## Data Rules coverage and limits
+
+A data rule filters rows in `SELECT` (including `JOIN`), `UPDATE` and `DELETE`, and restricts what `CREATE`, `INSERT` and `UPSERT` can write. It masks top level fields in query results and write responses, including `SELECT VALUE`, aliases, access by record id and `FETCH`. Access is denied when a rule assigned to the user does not exist in the current database, or when the rule needs a value the session does not have (for example `$auth.tenant` without that claim). A user with a data rule cannot open `LIVE SELECT` or call `/export`.
+
+`$auth` and `$token` hold the claims of the session token (`$auth.id` is the user name). An authenticated session cannot set them.
+
+The following paths are **not** covered, so a data rule is not a complete isolation boundary:
+
+- `WHERE` and `ORDER BY` on a masked field use the real value, which can therefore be inferred
+- a write that copies a masked field into another field of the same row (`SET copy = cpf`, `SET info.copy = cpf`) exposes the value. A `PATCH` list is stricter: `test`, `copy` and `move` are refused on a masked field and on the whole record
+- masks do not reach nested fields such as `address.cpf`
+- edge properties read through graph traversal are not masked
+- the `AUDIT_LOG` and `AUDIT_CASES` virtual tables show the original content
+- event bodies (`DEFINE EVENT`) receive `$before` and `$after` without masks
+- functions that read storage directly, such as `kv::`, and queries sent through a database link
+- schema statements such as `DROP TABLE`, as well as `RELATE` and `UNRELATE`, are not restricted by data rules
+- error messages, such as a unique index or primary key violation, can reveal that a hidden value exists
+- a program declared `SECURITY DEFINER` runs with the rules of its owner
+- backup and management routes, which require an administrative role
 
 ## SDKs
 

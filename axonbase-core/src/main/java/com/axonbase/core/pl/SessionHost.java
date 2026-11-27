@@ -263,6 +263,7 @@ final class SessionHost implements PlHost {
         if (params == null || !params.isObject() || params.asObject().isEmpty()) {
             return Map.of();
         }
+        params.asObject().keySet().forEach(session::requireDefinable);
         Map<String, AxonValue> saved = new HashMap<>();
         for (Map.Entry<String, AxonValue> e : params.asObject().entrySet()) {
             saved.put(e.getKey(), session.vars().get(e.getKey()));

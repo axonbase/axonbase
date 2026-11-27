@@ -58,7 +58,9 @@ final class GatewayExpressions {
             case Expr.Literal literal -> true;
             case Expr.Path path -> Functions.constant(path.name()) != null;
             case Expr.Ident ident -> row;
-            case Expr.Param param -> vars.contains(param.name());
+            // $auth e $token são do shard, que conhece a credencial
+            case Expr.Param param -> vars.contains(param.name())
+                && !com.axonbase.core.Session.isIdentityVariable(param.name());
             case Expr.RecordId id -> id.table() instanceof Expr.Ident && check(id.key(), vars, false);
             case Expr.ArrayLit array -> array.items().stream().allMatch(item -> check(item, vars, row));
             case Expr.SetLit set -> set.items().stream().allMatch(item -> check(item, vars, row));

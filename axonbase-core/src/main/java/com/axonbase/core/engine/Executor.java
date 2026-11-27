@@ -107,6 +107,8 @@ public final class Executor {
 
     private final Datastore ds;
     private Session session;
+    /** Sessão que responde por {@code $auth} e {@code $token} quando não é a corrente (assinante de uma live query). */
+    private Session identitySession;
     private final DatabaseLinkClient linkClient = new DatabaseLinkClient();
     private SagaLedger sagaLedger;
     /** SQL original vindo do Datastore, usado pela intercepção de AI Audit. */
@@ -126,6 +128,7 @@ public final class Executor {
     public AxonValue execute(Query query, Session session, Map<String, AxonValue> webVars) {
         this.session = session;
         if (webVars != null) {
+            webVars.keySet().forEach(session::requireDefinable);
             webVars.forEach(session.vars()::set);
         }
         AxonValue result = AxonValue.nul();
@@ -152,6 +155,7 @@ public final class Executor {
     public AxonValue executePartial(Statement.Select select, Session scope, Map<String, AxonValue> webVars) {
         this.session = scope;
         if (webVars != null) {
+            webVars.keySet().forEach(scope::requireDefinable);
             webVars.forEach(scope.vars()::set);
         }
         if (!bypassAudit && rawSql != null) {
@@ -340,7 +344,8 @@ public final class Executor {
         if (target == null) {
             target = emptyDoc();
         }
-        return truthy(evalExprInDoc(cond, target));
+        Document row = target;
+        return truthy(asPolicy(() -> evalExprInDoc(cond, row)));
     }
 
     private Document emptyDoc() {
@@ -414,6 +419,11 @@ public final class Executor {
 
     /** Um usuário nunca cria identidade de escopo maior que o seu, nem fora do seu ns/db. */
     private void authorizeUserScope(Statement.AuthScope target, String ns, String database) {
+        authorizeScope(target, ns, database, "auth_scope_escalation");
+    }
+
+    /** Nenhuma sessão autenticada age sobre algo de escopo maior que o seu, nem fora do seu ns/db. */
+    private void authorizeScope(Statement.AuthScope target, String ns, String database, String messageKey) {
         AxonValue auth = session.auth();
         if (!com.axonbase.core.security.Authz.authenticated(auth)) {
             return;
@@ -427,7 +437,7 @@ public final class Executor {
             || (caller == com.axonbase.core.security.AuthCatalog.Scope.DATABASE
                 && !java.util.Objects.equals(database, com.axonbase.core.security.Authz.db(auth)));
         if (broader || outside) {
-            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_scope_escalation"));
+            throw new com.axonbase.common.AxonError(-32002, Messages.get(messageKey));
         }
     }
 
@@ -592,6 +602,10 @@ public final class Executor {
      * cliente usa depois no KILL e que vem em cada notificação.
      */
     private AxonValue runLive(Statement.Live lv) {
+        if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            // a notificação não passa pelo filtro nem pela máscara
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_live_refused"));
+        }
         Database db = db();
         String table = tableName(lv.select().from());
         if (table.isEmpty()) {
@@ -628,15 +642,26 @@ public final class Executor {
             return;
         }
         for (LiveBus.Subscription sub : subs) {
-            Document doc = new Document(rid, candidate);
-            if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
+            // a sessão pode ter trocado de usuário depois do LIVE SELECT
+            if (sub.owner() != null && com.axonbase.core.security.Authz.hasDataRules(sub.owner().auth())) {
                 continue;
             }
+            Document doc = new Document(rid, candidate);
             AxonValue payload;
-            if (sub.diff() && !LiveBus.DELETE.equals(action)) {
-                payload = diffOf(before, after);
-            } else {
-                payload = project(sub.select(), doc);
+            // $auth e $token da consulta são os do assinante, não os de quem escreveu
+            Session previousIdentity = identitySession;
+            identitySession = sub.owner();
+            try {
+                if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
+                    continue;
+                }
+                if (sub.diff() && !LiveBus.DELETE.equals(action)) {
+                    payload = diffOf(before, after);
+                } else {
+                    payload = project(sub.select(), doc);
+                }
+            } finally {
+                identitySession = previousIdentity;
             }
             LiveBus.Notification note = new LiveBus.Notification(sub.id(), action, payload);
             if (session.inTransaction()) {
@@ -773,6 +798,7 @@ public final class Executor {
     }
 
     private AxonValue runLet(Statement.Let l) {
+        session.requireDefinable(l.name());
         AxonValue v = eval(l.value());
         session.vars().set(l.name(), v);
         return v;
@@ -1012,7 +1038,8 @@ public final class Executor {
                 sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rId.table(), rId, AxonValue.nul(), "CREATE");
             }
         }
-        return c.only() ? record : AxonValue.array(List.of(record));
+        AxonValue shown = visible(record);
+        return c.only() ? shown : AxonValue.array(List.of(shown));
     }
 
     private AxonValue runCreateViaLink(Statement.Create create, Expr.Qualified target, Expr.RecordId recordId) {
@@ -1046,6 +1073,7 @@ public final class Executor {
                 }
             }
         }
+        records.replaceAll(this::visible);
         return output(i.ret(), AxonValue.array(records));
     }
 
@@ -1144,6 +1172,9 @@ public final class Executor {
         Object idKey = obj.containsKey("id") ? unwrapId(obj.remove("id")) : null;
         AxonValue key = explicitKey != null ? explicitKey : resolveKey(idKey);
         RecordId rid = new RecordId(table, key);
+        // antes de olhar se o id existe: sobre um registro oculto pela regra a recusa é sempre a mesma, sem pular nem
+        // dizer que ele já existe
+        refuseHiddenRecord(db, rid);
         // um id recém-gerado não existe em lugar algum: não precisa ser procurado
         boolean generated = explicitKey == null && idKey == null;
         AxonValue previous = generated ? null : existingRecord(db, rid);
@@ -1168,6 +1199,9 @@ public final class Executor {
         if (previous == null && !generated && db.catalog().partitioning(table) != null) {
             // numa tabela particionada outra criação pode ter confirmado entre a procura e a escolha da partição
             previous = existingRecord(db, rid);
+            if (previous != null) {
+                refuseHiddenRecord(db, rid);
+            }
             if (previous != null && existing != Existing.REPLACE) {
                 if (existing == Existing.SKIP) {
                     return null;
@@ -1432,6 +1466,7 @@ public final class Executor {
                 results.add(createRecord(db, table, evalData(u.data(), table), recordKey(rid.key()), Existing.REPLACE));
             }
         }
+        results.replaceAll(this::visible);
         return retNone ? AxonValue.none() : AxonValue.array(results);
     }
 
@@ -1506,6 +1541,7 @@ public final class Executor {
                 deleted.add(doc.current());
             }
         }
+        deleted.replaceAll(this::visible);
         return deleted.isEmpty() ? AxonValue.array(List.of()) : AxonValue.array(deleted);
     }
 
@@ -1569,6 +1605,7 @@ public final class Executor {
                 if (pv.isObject()) {
                     current.putAll(pv.asObject());
                 } else if (pv.isArray()) {
+                    refuseMaskedPatch(pv.asArray());
                     Map<String, AxonValue> patched =
                         RecordChanges.patch(AxonValue.object(current), pv.asArray()).asObject();
                     current.clear();
@@ -1592,6 +1629,46 @@ public final class Executor {
                 }
             }
         }
+    }
+
+    /**
+     * Num PATCH, {@code test}, {@code copy} e {@code move} leem o registro. Com uma coluna mascarada, o resultado ou o
+     * erro entregaria o valor: ficam recusados sobre ela e sobre o registro inteiro, e nenhum caminho entra nela.
+     */
+    private void refuseMaskedPatch(List<AxonValue> operations) {
+        if (!masksColumns()) {
+            return;
+        }
+        for (AxonValue operation : operations) {
+            if (!operation.isObject()) {
+                continue; // o próprio PATCH recusa
+            }
+            Map<String, AxonValue> fields = operation.asObject();
+            AxonValue op = fields.get("op");
+            String name = op != null && op.isString() ? op.asString() : "";
+            boolean copies = "copy".equals(name) || "move".equals(name);
+            if (reachesMasked(fields.get("path"), "test".equals(name))
+                || copies && reachesMasked(fields.get("from"), true)) {
+                throw errorStmt("permission denied");
+            }
+        }
+    }
+
+    /** O ponteiro lê ({@code reads}) ou percorre uma coluna mascarada. O ponteiro vazio é o registro inteiro. */
+    private boolean reachesMasked(AxonValue pointer, boolean reads) {
+        if (pointer == null || !pointer.isString()) {
+            return false;
+        }
+        String text = pointer.asString();
+        if (text.isEmpty()) {
+            return reads;
+        }
+        if (!text.startsWith("/")) {
+            return false;
+        }
+        String[] steps = text.substring(1).split("/", -1);
+        String column = steps[0].replace("~1", "/").replace("~0", "~");
+        return (reads || steps.length > 1) && maskedColumn(column);
     }
 
     // ------------------------------------------------------------------
@@ -1846,6 +1923,8 @@ public final class Executor {
         int stop = Math.min(docs.size(), start + limit);
         List<AxonValue> out = new ArrayList<>();
         boolean scalarAggregate = false;
+        // as colunas são mascaradas na origem: apelido, SELECT VALUE, ONLY e agregados veem o valor mascarado
+        boolean masking = masksColumns();
         if (aggregating) {
             // FETCH resolve antes da agregación, que traballa sobre todo o conxunto
             if (!sel.fetch().isEmpty()) {
@@ -1855,6 +1934,9 @@ public final class Executor {
             if (aggregation == null) {
                 aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
                 for (Document d : docs) {
+                    if (masking) {
+                        d.setCurrent(applyDataRuleMask(d.current()));
+                    }
                     aggregation.accept(d);
                 }
             }
@@ -1871,6 +1953,9 @@ public final class Executor {
                 if (!sel.fetch().isEmpty() && !joined) {
                     fetchDocs(d, sel.fetch());
                 }
+                if (masking && !joined) {
+                    d.setCurrent(applyDataRuleMask(d.current()));
+                }
                 AxonValue row = joined ? projectJoin(sel, d) : project(sel, d);
                 // FETCH também vale para colunas calculadas (->comprou->produto AS p ... FETCH p)
                 out.add(!sel.fetch().isEmpty() && !joined ? fetchProjected(row, sel.fetch()) : row);
@@ -1879,7 +1964,7 @@ public final class Executor {
         if (scalarAggregate) {
             return out.get(0);
         }
-        if (!sel.only() && !sel.valueOnly()) {
+        if (masking) {
             out.replaceAll(this::applyDataRuleMask);
         }
         if (out.size() == 1 && (sel.only() || (sel.from() != null && isSingleTarget(sel.from())))) {
@@ -1935,11 +2020,17 @@ public final class Executor {
         List<AxonValue> rows = new ArrayList<>();
         for (int i = 0; i < window; i++) {
             Document d = docs.get(i);
+            // as chaves de ordenação usam o valor real: MaskedOrder já recusou o que vazaria coluna mascarada
+            var keys = sortKeys(orders, d);
+            boolean masking = masksColumns();
+            if (masking) {
+                d.setCurrent(applyDataRuleMask(d.current()));
+            }
             AxonValue row = project(sel, d);
-            if (!sel.only() && !sel.valueOnly()) {
+            if (masking) {
                 row = applyDataRuleMask(row);
             }
-            rows.add(ShardPartial.row(d.id().key().keyString(), sortKeys(orders, d), row));
+            rows.add(ShardPartial.row(d.id().key().keyString(), keys, row));
         }
         return ShardPartial.rows(rows);
     }
@@ -2064,6 +2155,7 @@ public final class Executor {
         Catalog.TableDef def = db.catalog().table(table);
         boolean checkPermissions = def != null && def.permissions() != null;
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        boolean masking = masksColumns();
         java.util.function.BiConsumer<GroupAggregation, String> consume = (agg, key) -> {
             Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
             if (doc == null) {
@@ -2072,7 +2164,7 @@ public final class Executor {
             if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
                 return;
             }
-            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+            if (combinedRules != null && !truthy(asPolicy(() -> evalCond(combinedRules, doc)))) {
                 return;
             }
             if (checkPermissions && !allowed(doc, table, "select")) {
@@ -2080,6 +2172,9 @@ public final class Executor {
             }
             if (!sel.fetch().isEmpty()) {
                 fetchDocs(doc, sel.fetch());
+            }
+            if (masking) {
+                doc.setCurrent(applyDataRuleMask(doc.current()));
             }
             agg.accept(doc);
         };
@@ -2230,7 +2325,7 @@ public final class Executor {
             if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
                 return false;
             }
-            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+            if (combinedRules != null && !truthy(asPolicy(() -> evalCond(combinedRules, doc)))) {
                 return false;
             }
             return !checkPermissions || allowed(doc, table, "select");
@@ -2370,7 +2465,9 @@ public final class Executor {
                                     Statement.Join join, String outerTable) {
         String outerKey = lastFieldName(join.left());
         String innerKey = lastFieldName(join.right());
-        List<Document> inner = dbDocs(db, join.source());
+        List<Document> inner = new ArrayList<>(dbDocs(db, join.source()));
+        applyDataRulesFilter(inner);
+        boolean masking = masksColumns();
         List<Document> out = new ArrayList<>();
         for (Document lo : outer) {
             AxonValue ok = fieldValue(lo.current(), outerKey);
@@ -2380,7 +2477,8 @@ public final class Executor {
             for (Document li : inner) {
                 AxonValue ik = fieldValue(li.current(), innerKey);
                 if (!unspecified(ik) && ok.equals(ik)) {
-                    out.add(flattenJoin(outerTable, lo, innerTable, li));
+                    out.add(flattenJoin(outerTable, masking ? masked(lo) : lo,
+                        innerTable, masking ? masked(li) : li));
                 }
             }
         }
@@ -3830,7 +3928,14 @@ return score;
     private AxonValue fetchOne(AxonValue.RecordId rid) {
         try {
             Document doc = loadDoc(db(), new RecordId(rid.table(), rid.key() instanceof AxonValue ? (AxonValue) rid.key() : keyOf(rid.key())));
-            return doc != null ? doc.current() : null;
+            if (doc == null) {
+                return null;
+            }
+            if (evaluatingPolicy.get() != null || !com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+                return doc.current();
+            }
+            // acesso por id e FETCH: registro oculto não aparece e o visível vem mascarado
+            return dataRuleFilter(doc) ? applyDataRuleMask(doc.current()) : null;
         } catch (Exception e) {
             return null;
         }
@@ -4868,6 +4973,7 @@ return score;
         if (da.scope() == Statement.AuthScope.DATABASE && (database == null || database.isBlank())) {
             throw errorStmt(Messages.get("stmt_access_needs_db"));
         }
+        authorizeUserScope(da.scope(), ns, database);
         ds.authCatalog().defineAccess(da.name(), authScope(da.scope()), ns, database);
         ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.ACCESS, ns, database,
             identity(da.name(), da.scope(), ns, database),
@@ -4880,6 +4986,7 @@ return score;
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_link_needs_ns"));
         }
+        authorizeLink(ns);
         var def = new com.axonbase.core.engine.Datastore.DatabaseLinkDef(
             ddl.name(), ddl.url(), ddl.ns(), ddl.db(), ddl.user(), ddl.password());
         ds.defineDatabaseLink(ns, ddl.name(), def);
@@ -4893,6 +5000,7 @@ return score;
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_link_drop_needs_ns"));
         }
+        authorizeLink(ns);
         ds.dropDatabaseLink(ns, ddl.name());
         ds.removeControl(session, ns, "", ControlCommand.Kind.DATABASE_LINK, ddl.name());
         return AxonValue.nul();
@@ -4902,7 +5010,18 @@ return score;
     // SAGA (stubs — implementação nas fases 2-3)
     // ------------------------------------------------------------------
 
+    /** O link vale para o namespace inteiro, então exige escopo que o cubra. */
+    private void authorizeLink(String ns) {
+        authorizeScope(Statement.AuthScope.NAMESPACE, ns, null, "auth_scope_forbidden");
+    }
+
+    /** A definição de saga é global ao servidor, então criar, substituir ou apagar exige escopo ROOT. */
+    private void authorizeSagaDefinition() {
+        authorizeScope(Statement.AuthScope.ROOT, null, null, "auth_scope_forbidden");
+    }
+
     private AxonValue runCreateSaga(CreateSaga cs) {
+        authorizeSagaDefinition();
         var def = new Datastore.SagaDef(cs.name(), cs.links());
         ds.defineSaga(cs.name(), def);
         ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.SAGA, "", "", cs.name(),
@@ -5344,7 +5463,22 @@ return score;
             return AxonValue.nul();
         }
         db();
-        if (this.ds.authCatalog().removeUser(du.name(), ns, database)) {
+        AuthCatalog catalog = this.ds.authCatalog();
+        // vale o escopo da identidade encontrada, que pode ser maior que o da sessão
+        AuthCatalog.User target = catalog.user(du.name(), ns, database);
+        if (target == null) {
+            return AxonValue.nul();
+        }
+        authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
+            "auth_scope_forbidden");
+        if (catalog.isInitialRoot(target.name(), target.scope())) {
+            if (com.axonbase.core.security.Authz.authenticated(session.auth())) {
+                throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_initial_root_protected"));
+            }
+            // modo embutido ou servidor sem autenticação: não remove e não falha
+            return AxonValue.nul();
+        }
+        if (catalog.removeUser(du.name(), ns, database)) {
             ds.pruneUserControl(session, du.name());
         }
         return AxonValue.nul();
@@ -5368,11 +5502,17 @@ return score;
     private AxonValue runRevokeAccess(Statement.RevokeAccess ra) {
         String ns = session.namespace();
         String database = session.database();
-        this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+        AuthCatalog.Access target = this.ds.authCatalog().access(ra.name(), ns, database);
+        if (target != null) {
+            authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
+                "auth_scope_forbidden");
+            this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+        }
         return AxonValue.nul();
     }
 
     private AxonValue runDropSaga(Statement.DropSaga d) {
+        authorizeSagaDefinition();
         if (ds.saga(d.name()) == null) {
             throw errorStmt(Messages.get("stmt_saga_missing", d.name()));
         }
@@ -5389,9 +5529,79 @@ return score;
         List<Expr> predicates = new ArrayList<>();
         for (String name : dataRuleNames(auth)) {
             Catalog.DataRuleDef def = db.catalog().dataRule(name);
-            if (def != null) predicates.add(def.predicate());
+            // regra que não existe neste banco nega: liberar tornaria um nome errado em acesso total
+            if (def == null) return DENY_ALL;
+            if (lacksParameterValue(def.predicate())) return DENY_ALL;
+            predicates.add(def.predicate());
         }
         return predicates;
+    }
+
+    /** Ligado enquanto o motor avalia regras e permissões: ali a travessia de um link lê o registro como ele é. */
+    private final ThreadLocal<Boolean> evaluatingPolicy = new ThreadLocal<>();
+
+    private AxonValue asPolicy(java.util.function.Supplier<AxonValue> work) {
+        Boolean previous = evaluatingPolicy.get();
+        evaluatingPolicy.set(Boolean.TRUE);
+        try {
+            return work.get();
+        } finally {
+            if (previous == null) {
+                evaluatingPolicy.remove();
+            } else {
+                evaluatingPolicy.set(previous);
+            }
+        }
+    }
+
+    /** Predicado que não deixa passar linha alguma. */
+    private static final List<Expr> DENY_ALL = List.of(new Expr.Literal(AxonValue.bool(false)));
+
+    /**
+     * Algum {@code $parametro} da regra (ou o campo pedido a ele, como {@code $auth.tenant}) está sem valor. Comparar
+     * a falta com um campo ausente daria verdadeiro, então a regra inteira passa a negar.
+     */
+    private boolean lacksParameterValue(Expr e) {
+        return switch (e) {
+            case null -> false;
+            case Expr.Param p -> !"parent".equals(p.name()) && isMissing(eval(p));
+            case Expr.Idiom i -> idiomLacksValue(i);
+            case Expr.Binary b -> lacksParameterValue(b.left()) || lacksParameterValue(b.right());
+            case Expr.Unary u -> lacksParameterValue(u.operand());
+            case Expr.Cast c -> lacksParameterValue(c.operand());
+            case Expr.Alias a -> lacksParameterValue(a.expr());
+            case Expr.Call c -> c.args().stream().anyMatch(this::lacksParameterValue);
+            case Expr.ArrayLit a -> a.items().stream().anyMatch(this::lacksParameterValue);
+            case Expr.SetLit s -> s.items().stream().anyMatch(this::lacksParameterValue);
+            case Expr.ObjectLit o -> o.entries().stream().anyMatch(en -> lacksParameterValue(en.value()));
+            case Expr.RecordId r -> lacksParameterValue(r.key());
+            case Expr.Range r -> lacksParameterValue(r.start()) || lacksParameterValue(r.end());
+            case Expr.SubQuery sq -> sq.query().statements().stream()
+                .anyMatch(st -> st instanceof Statement.Select sel && lacksParameterValue(sel.cond()));
+            case Expr.Literal l -> false;
+            case Expr.Ident id -> false;
+            case Expr.Qualified q -> false;
+            case Expr.Path p -> false;
+            case Expr.Block b -> false;
+        };
+    }
+
+    /** Confere o trecho {@code $parametro.campo.campo} de um idiom; o que vier depois é percorrido como expressão. */
+    private boolean idiomLacksValue(Expr.Idiom i) {
+        if (!(i.base() instanceof Expr.Param p)) {
+            return lacksParameterValue(i.base());
+        }
+        if ("parent".equals(p.name())) {
+            return false;
+        }
+        List<Expr.Part> fields = i.parts().stream().takeWhile(part -> part instanceof Expr.Part.Field).toList();
+        Expr value = fields.isEmpty() ? p : new Expr.Idiom(p, fields);
+        // como avaliação de política: se o parâmetro for um record id, a leitura não volta a aplicar as regras
+        return isMissing(asPolicy(() -> eval(value)));
+    }
+
+    private static boolean isMissing(AxonValue v) {
+        return v == null || v.isNone() || v.isNull();
     }
 
     /** Extrai os nomes das Data Rules do objeto auth (array ou CSV). */
@@ -5447,7 +5657,7 @@ return score;
     /** Injeta nos campos do novo registro os valores mapeados pelas data rules do usuário. */
     private void injectDataRuleFields(Map<String, AxonValue> obj) {
         for (var entry : dataRuleInjections().entrySet()) {
-            AxonValue value = eval(entry.getValue());
+            AxonValue value = asPolicy(() -> eval(entry.getValue()));
             if (value != null && !value.isNone()) {
                 obj.put(entry.getKey(), value);
             }
@@ -5477,6 +5687,26 @@ return score;
         return result;
     }
 
+    /** O registro devolvido por uma escrita, com as máscaras do usuário. */
+    private AxonValue visible(AxonValue record) {
+        return masksColumns() ? applyDataRuleMask(record) : record;
+    }
+
+    private Document masked(Document d) {
+        return new Document(d.id(), applyDataRuleMask(d.current()));
+    }
+
+    /** CREATE e UPSERT gravam sobre a chave: um registro que a regra esconde não pode ser tocado. */
+    private void refuseHiddenRecord(Database db, RecordId rid) {
+        if (!com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            return;
+        }
+        Document existing = loadDoc(db, rid);
+        if (existing != null && !dataRuleFilter(existing)) {
+            throw errorStmt("permission denied");
+        }
+    }
+
     /** Converte padrão SQL LIKE (com %) para regex. */
     private static String sqlLikeToRegex(String pattern) {
         StringBuilder regex = new StringBuilder("(?i)");
@@ -5499,7 +5729,7 @@ return score;
         if (predicates.isEmpty()) return;
         Expr combined = predicates.size() == 1 ? predicates.get(0)
             : Expr.and(predicates);
-        docs.removeIf(doc -> !truthy(evalCond(combined, doc)));
+        docs.removeIf(doc -> !truthy(asPolicy(() -> evalCond(combined, doc))));
     }
 
     /** Retorna true se o documento passa pelo filtro das Data Rules. */
@@ -5508,7 +5738,7 @@ return score;
         if (predicates.isEmpty()) return true;
         Expr combined = predicates.size() == 1 ? predicates.get(0)
             : Expr.and(predicates);
-        return truthy(evalOnDocument(combined, doc));
+        return truthy(asPolicy(() -> evalOnDocument(combined, doc)));
     }
 
     private Session sagaSession() {
@@ -5604,7 +5834,7 @@ return score;
             return out;
         }
         if (target instanceof Expr.Param p) {
-            AxonValue v = session.vars().get(p.name());
+            AxonValue v = parameter(p.name());
             if (v != null && v.isRecordId()) {
                 AxonValue.RecordId r = v.asRecordId();
                 return List.of(new RecordId(r.table(), keyOf(r.key())));
@@ -5646,7 +5876,7 @@ return score;
             case Expr.Ident id -> id.name();
             case Expr.RecordId rid -> rid.table() instanceof Expr.Ident id2 ? id2.name() : "";
             case Expr.Param p -> {
-                AxonValue v = session.vars().get(p.name());
+                AxonValue v = parameter(p.name());
                 yield v != null && v.isRecordId() ? v.asRecordId().table() : "";
             }
             default -> "";
@@ -5699,6 +5929,12 @@ return score;
     // Evaluación de expresións
     // ------------------------------------------------------------------
 
+    /** Resolvedor único de parâmetros, ou {@code null} quando não há valor. */
+    private AxonValue parameter(String name) {
+        Session source = identitySession != null && Session.isIdentityVariable(name) ? identitySession : session;
+        return source.parameter(name);
+    }
+
     private AxonValue eval(Expr e) {
         if (e == null) {
             return AxonValue.nul();
@@ -5715,7 +5951,10 @@ return score;
                 yield AxonValue.table(def != null ? def.name() : name);
             }
             case Expr.Qualified q -> AxonValue.table(q.table());
-            case Expr.Param p -> session.vars().getOrMissing(p.name());
+            case Expr.Param p -> {
+                AxonValue v = parameter(p.name());
+                yield v == null ? AxonValue.none() : v;
+            }
             case Expr.Path p -> invokePath(p);
             case Expr.Call c -> invokeCall(c);
             case Expr.RecordId rid -> mapping(rid);
@@ -6614,7 +6853,9 @@ return score;
         }
         try {
             Executor sub = new Executor(ds);
-            return sub.execute(sq.query(), session, session.vars().copy());
+            sub.identitySession = identitySession;
+            // as variáveis já estão na sessão: nada a repassar
+            return sub.execute(sq.query(), session, null);
         } finally {
             if (outer != null) {
                 session.vars().set("parent",
@@ -6795,8 +7036,9 @@ return score;
         for (Expr check : def.checks()) {
             java.util.Set<String> cited = new java.util.HashSet<>();
             citedFields(check, cited);
+            // a restrição é do esquema: avaliada como política, lê um registro ligado como ele é, sem a regra de quem grava
             if (record.keySet().containsAll(cited)
-                && !truthy(evalExprInDoc(check, new Document(rid, AxonValue.object(record))))) {
+                && !truthy(asPolicy(() -> evalExprInDoc(check, new Document(rid, AxonValue.object(record)))))) {
                 throw errorStmt(Messages.get("stmt_table_check_violation", rid.table(),
                     com.axonbase.parser.Render.expr(check)));
             }
@@ -7780,6 +8022,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (userId.equals(auditCase.userId()) && cat.isBlocked(userId)) {
             throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_self_decision"));
         }
+        // montada antes de decidir: sem a identidade do autor o caso continua pendente
+        Session author = "AUTHORIZED".equals(sac.status()) ? authorSession(auditCase) : null;
         auditCase.resolve(sac.status(), userId, sac.reason());
         cat.addEvent(sac.hash(), new com.axonbase.core.audit.AuditCaseEvent(
             sac.status().equals("AUTHORIZED") ? "AUTHORIZED" : "DENIED", userId, sac.reason(), System.currentTimeMillis()));
@@ -7789,8 +8033,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             cat.unblockUser(auditCase.userId());
         }
 
-        // If AUTHORIZED, execute the original SQL
-        if ("AUTHORIZED".equals(sac.status())) {
+        // O comando aprovado roda com a identidade e o poder de quem o pediu
+        if (author != null) {
             try {
                 String originalSql = auditCase.sql();
                 // Execute the original SQL that was blocked - bypass audit to avoid recursion
@@ -7798,7 +8042,19 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
                 exec.bypassAudit = true;
                 exec.rawSql = originalSql;
                 Query q = com.axonbase.parser.AxonQl.parse(originalSql);
-                return exec.execute(q, session, null);
+                boolean shared = session.inTransaction();
+                if (shared) {
+                    // a escrita aprovada vai na mesma transação da decisão (é o que a replica no cluster)
+                    author.tx(session.tx());
+                    author.txControlVersion(session.txControlVersion());
+                    author.txIndexEpoch(session.txIndexEpoch());
+                }
+                AxonValue result = exec.execute(q, author, auditCase.author().vars());
+                if (shared) {
+                    // as notificações de live query saem no COMMIT de quem abriu a transação
+                    session.queueLive(author::flushLive);
+                }
+                return result;
             } catch (Exception e) {
                 throw errorStmt(Messages.get("audit_exec_error", e.getMessage()));
             }
@@ -7807,6 +8063,69 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         return AxonValue.object(java.util.Map.of(
             "hash", AxonValue.str(sac.hash()),
             "status", AxonValue.str(sac.status())));
+    }
+
+    /**
+     * Sessão com a identidade do autor do caso. Para quem entrou por signin valem os papéis e as Data Rules de hoje,
+     * sem passar do papel que o autor tinha ao pedir o comando; autor removido não executa nada.
+     */
+    private Session authorSession(com.axonbase.core.audit.AuditCase auditCase) {
+        com.axonbase.core.audit.AuditAuthor author = auditCase.author();
+        if (author == null) {
+            throw errorStmt(Messages.get("audit_no_author"));
+        }
+        Map<String, AxonValue> claims = new LinkedHashMap<>(author.claims().asObject());
+        // o comando já passou pela auditoria
+        claims.remove("audit");
+        AxonValue effective = AxonValue.object(claims);
+        AxonValue type = claims.get("typ");
+        if (type != null && type.isString() && "access".equals(type.asString())) {
+            AuthCatalog.User current = currentIdentity(claims);
+            if (current == null) {
+                throw errorStmt(Messages.get("audit_author_gone"));
+            }
+            putOrRemove(claims, "roles", current.roles());
+            putOrRemove(claims, "data_rules", current.dataRules());
+            effective = com.axonbase.core.security.Authz.cap(AxonValue.object(claims),
+                com.axonbase.core.security.Authz.role(author.claims()));
+        }
+        Session result = new Session(session.namespace(), session.database());
+        result.auth(effective);
+        if (author.readOnly()) {
+            result.roleCap(com.axonbase.core.security.Authz.Role.VIEWER);
+        }
+        return result;
+    }
+
+    private AuthCatalog.User currentIdentity(Map<String, AxonValue> claims) {
+        return ds.authCatalog().users().stream()
+            .filter(u -> claimEquals(claims, "id", u.name()) && claimEquals(claims, "scope", u.scope().name())
+                && claimEquals(claims, "ns", u.namespace()) && claimEquals(claims, "db", u.database()))
+            .findFirst().orElse(null);
+    }
+
+    private static boolean claimEquals(Map<String, AxonValue> claims, String key, String expected) {
+        AxonValue v = claims.get(key);
+        return java.util.Objects.equals(v != null && v.isString() ? v.asString() : null, expected);
+    }
+
+    private static void putOrRemove(Map<String, AxonValue> claims, String key, List<String> values) {
+        if (values.isEmpty()) {
+            claims.remove(key);
+        } else {
+            claims.put(key, AxonValue.str(String.join(",", values)));
+        }
+    }
+
+    /** O que a execução futura de um comando retido precisa saber sobre quem o pediu. */
+    private com.axonbase.core.audit.AuditAuthor currentAuthor() {
+        Map<String, AxonValue> claims = new LinkedHashMap<>(session.auth().asObject());
+        claims.remove("jti");
+        claims.remove("exp");
+        Map<String, AxonValue> vars = new LinkedHashMap<>(session.vars().copy());
+        vars.keySet().removeIf(Session::isIdentityVariable);
+        vars.values().removeIf(java.util.Objects::isNull);
+        return new com.axonbase.core.audit.AuditAuthor(AxonValue.object(claims), vars, session.readOnly());
     }
 
     // ---- AUDIT_CASES virtual table ----
@@ -7935,7 +8254,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
 
         // Generate hash
         String hash = sha256Hex(sql + System.currentTimeMillis() + userId);
-        var auditCase = new com.axonbase.core.audit.AuditCase(hash, userId, sql, auditName, classification, System.currentTimeMillis());
+        var auditCase = new com.axonbase.core.audit.AuditCase(hash, userId, sql, auditName, classification,
+            System.currentTimeMillis(), currentAuthor());
 
         if ("DANGER".equals(classification)) {
             // Block the user
