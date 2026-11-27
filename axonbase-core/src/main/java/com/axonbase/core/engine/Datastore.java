@@ -2016,6 +2016,9 @@ public final class Datastore {
         }
         try (guards) {
             commitGuarded(session, tx, validated);
+        } catch (VersionConflictException conflict) {
+            session.writesDiscarded(); // um conflito não grava nada
+            throw conflict;
         }
     }
 
@@ -2035,6 +2038,7 @@ public final class Datastore {
         session.tx(null);
         session.txControlVersion(-1);
         session.discardLive();
+        session.writesDiscarded();
     }
 
     private void commitGuarded(Session session, Transaction tx, Long validated) {
@@ -2068,6 +2072,7 @@ public final class Datastore {
             commitReplicated(coordinator, session, tx, validated);
         }
         session.tx(null);
+        session.keepWrites();
         backend.flush();
         // As notificações retidas durante a transação só saem agora, depois do quórum.
         session.flushLive();
@@ -2098,6 +2103,9 @@ public final class Datastore {
                 consumeLocalOrigin(transactionId);
                 // Sem confirmação a transação morre aqui. Deixá-la aberta faria a própria
                 // sessão continuar lendo escritas que o cluster nunca aceitou.
+                if (!(notConfirmed instanceof VersionConflictException)) {
+                    session.keepWrites(); // sem desfecho: a escrita ainda pode valer
+                }
                 cancelSession(session);
                 throw notConfirmed;
             }
@@ -2127,6 +2135,7 @@ public final class Datastore {
         }
         session.txControlVersion(-1);
         session.discardLive();
+        session.writesDiscarded();
         // DDL e auth foram aplicados em memória para a própria sessão; se o batch não
         // confirmou, o plano de controle volta ao que está durável no storage. Reconstruir reexecuta todo o
         // plano de controle de todos os bancos, então só se faz quando houve DDL desde o começo da transação.

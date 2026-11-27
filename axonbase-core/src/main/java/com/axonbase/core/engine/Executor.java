@@ -292,13 +292,22 @@ public final class Executor {
         for (int attempt = 1; ; attempt++) {
             com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
             batch = mine;
+            batchSagaUndo.clear();
             long outbound = ExternalCalls.count();
             try {
-                AxonValue result = runStatementUnbatched(s);
+                AxonValue result;
+                try {
+                    result = runStatementUnbatched(s);
+                } catch (RuntimeException notWritten) {
+                    discardBatchSagaSteps();
+                    throw notWritten;
+                }
                 batch = null;
                 mine.commit();
+                batchSagaUndo.clear();
                 return result;
             } catch (com.axonbase.core.storage.VersionConflictException conflict) {
+                discardBatchSagaSteps();
                 // só um lote com condições (tabela particionada) conflita. Nada foi gravado, então refaz sobre o
                 // estado novo, a menos que o statement já tenha chamado para fora
                 if (!mine.conditional() || attempt >= CONDITIONAL_ATTEMPTS || ExternalCalls.count() != outbound) {
@@ -310,6 +319,46 @@ public final class Executor {
                 batch = null;
                 mine.discard();
             }
+        }
+    }
+
+    /** Retira os passos de SAGA das escritas do lote em curso, quando ele não é gravado. */
+    private final List<Runnable> batchSagaUndo = new ArrayList<>();
+
+    private void discardBatchSagaSteps() {
+        List<Runnable> undo = List.copyOf(batchSagaUndo);
+        batchSagaUndo.clear();
+        undo.forEach(Runnable::run);
+    }
+
+    /** Registra o passo de uma escrita local. Ele sai junto se o lote ou a transação da escrita for descartado. */
+    private void recordLocalStep(String correlationId, Database db, RecordId rid, AxonValue before,
+                                 String operation) {
+        long order = sagaLedger.recordStep(correlationId, db.ns(), db.db(), "", "local", rid.table(), rid, before,
+            operation);
+        undoStepWithWrite(db, correlationId, order);
+    }
+
+    private void recordEdgeStep(String correlationId, Database db, AxonValue.RecordId from, String kind,
+                                AxonValue.RecordId to) {
+        String outKey = edgeKey(db, "out", from, kind, to);
+        long order = sagaLedger.recordEdgeStep(correlationId, db.ns(), db.db(), kind,
+            new RecordId(from.table(), keyOf(from.key())), new RecordId(to.table(), keyOf(to.key())),
+            records(db).get(outKey).isPresent(), edgeProperties(db, outKey));
+        undoStepWithWrite(db, correlationId, order);
+    }
+
+    /**
+     * O passo é gravado antes da escrita, fora dela. Se a escrita não acontecer, um passo de criação que ficasse
+     * apagaria, no CANCEL, um registro que outro criou depois com a mesma chave.
+     */
+    private void undoStepWithWrite(Database db, String correlationId, long order) {
+        KvBackend target = rawRecords(db);
+        Runnable undo = () -> sagaLedger.discardStep(correlationId, order);
+        if (batch != null && target == batch) {
+            batchSagaUndo.add(undo);
+        } else if (target == session.tx()) {
+            session.onWritesDiscarded(undo);
         }
     }
 
@@ -1028,16 +1077,6 @@ public final class Executor {
         AxonValue explicitKey = c.target() instanceof Expr.RecordId rid
             ? recordKey(rid.key()) : null;
         AxonValue record = createRecord(db, table, evalData(c.data(), table), explicitKey, onExisting(false));
-        // Saga: record step (before=null)
-        String sagaCorr = sagaCorrelation();
-        if (sagaCorr != null && record.isObject()) {
-            AxonValue ridVal = record.asObject().get("id");
-            if (ridVal != null && ridVal.isRecordId()) {
-                var ar = ridVal.asRecordId();
-                RecordId rId = new RecordId(ar.table(), keyOf(ar.key()));
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rId.table(), rId, AxonValue.nul(), "CREATE");
-            }
-        }
         AxonValue shown = visible(record);
         return c.only() ? shown : AxonValue.array(List.of(shown));
     }
@@ -1212,6 +1251,12 @@ public final class Executor {
         }
         enforcePrimaryKey(db, rid, previous, record);
         enforceUnique(db, rid, previous, record);
+        // Saga: criar se desfaz apagando; regravar um existente (UPSERT), repondo o anterior
+        String sagaCorr = sagaCorrelation();
+        if (sagaCorr != null) {
+            recordLocalStep(sagaCorr, db, rid, previous == null ? AxonValue.nul() : previous,
+                previous == null ? "CREATE" : "UPDATE");
+        }
         records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));
         indexSearch(db, rid, previous, record);
         indexAdvanced(db, rid, previous, record);
@@ -1391,8 +1436,10 @@ public final class Executor {
                             + com.axonbase.parser.Render.key(qRid.key());
                         List<AxonValue> rows = linkClient.query(linkDef, selectSql);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                        // um UPSERT sobre o que não existe cria: desfazer é apagar
+                        String operation = rows.isEmpty() && u.mode() == UpdateMode.UPSERT ? "CREATE" : "UPDATE";
                         sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
+                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, operation);
                     }
                 }
                 return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
@@ -1427,7 +1474,7 @@ public final class Executor {
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
                 // Sem o passo registrado não há como compensar: a falha aborta a escrita.
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "UPDATE");
+                recordLocalStep(sagaCorr, db, rid, doc.current(), "UPDATE");
             }
             Map<String, AxonValue> current = new LinkedHashMap<>(doc.current().asObject());
             if (u.data() != null) {
@@ -1524,7 +1571,7 @@ public final class Executor {
             // Saga: capture BEFORE state
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "DELETE");
+                recordLocalStep(sagaCorr, db, rid, doc.current(), "DELETE");
             }
             records(db).delete(rid.storageKey(db.ns(), db.db()));
             enforcePrimaryKey(db, rid, doc.current(), null);
@@ -4039,6 +4086,10 @@ return score;
         Expr.Qualified rq = (rFrom instanceof Expr.RecordId rr && rr.table() instanceof Expr.Qualified q) ? q : null;
         if (rq != null || rFrom instanceof Expr.Qualified || rTo instanceof Expr.Qualified
             || (rTo instanceof Expr.RecordId tr && tr.table() instanceof Expr.Qualified)) {
+            if (sagaCorrelation() != null) {
+                // o estado anterior da aresta remota não é capturado, então o CANCEL não teria como desfazer
+                throw errorStmt(Messages.get("stmt_saga_relate_link_unsupported"));
+            }
             return runWriteViaLink(rq != null ? rq : (Expr.Qualified) qualifiedOf(rFrom, rTo),
                 com.axonbase.parser.Render.stmt(r));
         }
@@ -4063,6 +4114,10 @@ return score;
             Map<String, AxonValue> properties = new LinkedHashMap<>(assigned);
             properties.remove("in");
             properties.remove("out");
+            String sagaCorr = sagaCorrelation();
+            if (sagaCorr != null) {
+                recordEdgeStep(sagaCorr, db, fromR, kind, toR);
+            }
             persistEdge(db, fromR, kind, toR, properties);
         }
         Map<String, AxonValue> edge = new LinkedHashMap<>();
