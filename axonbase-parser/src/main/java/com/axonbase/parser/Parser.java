@@ -608,7 +608,9 @@ public final class Parser {
                 expectIdentOrString(); // skip constraint name
             }
 
-            if (matchKeyword("primary")) {
+            // "primary" e "check" também são nomes de coluna: versões anteriores os gravavam sem crases
+            if (atKeyword("primary") && peek(1).isKeyword("key")) {
+                pos++;
                 expectKeyword("key");
                 expect(TokenType.LPAREN);
                 primaryKeyCols.add(expectIdentOrString());
@@ -616,7 +618,8 @@ public final class Parser {
                     primaryKeyCols.add(expectIdentOrString());
                 }
                 expect(TokenType.RPAREN);
-            } else if (matchKeyword("check")) {
+            } else if (atKeyword("check") && peek(1).is(TokenType.LPAREN)) {
+                pos++;
                 expect(TokenType.LPAREN);
                 checks.add(parseExpr());
                 expect(TokenType.RPAREN);
