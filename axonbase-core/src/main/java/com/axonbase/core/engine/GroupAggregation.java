@@ -30,6 +30,9 @@ import java.util.function.Function;
  * <p>Cada chamada de agregado dentro de uma expressão (inclusive {@code sum(x) / count()}) é trocada por um
  * identificador interno cujo valor é calculado por grupo; a expressão reescrita é avaliada pelo mesmo avaliador
  * das linhas comuns, então operadores e funções funcionam igual.</p>
+ *
+ * <p>As reduções {@code math::*} de um argumento também agregam aqui; fora de uma consulta agrupada continuam sendo
+ * funções de linha sobre listas.</p>
  */
 final class GroupAggregation {
 
@@ -44,6 +47,9 @@ final class GroupAggregation {
     private static final int AVG_SCALE = 10;
     private static final String SLOT = "\u0001agg";
     private static final String ROW_TABLE = "\u0001group";
+    /** Reduzem uma lista numa consulta comum e o grupo inteiro numa consulta agrupada. */
+    private static final Set<String> MATH_REDUCTIONS =
+        Set.of("math::sum", "math::min", "math::max", "math::mean", "math::median", "math::product");
 
     private record Spec(String name, Expr arg) {
     }
@@ -133,13 +139,19 @@ final class GroupAggregation {
         };
     }
 
+    /** {@code math::sum(x)} e afins, desde que não envolvam outro agregado nem sejam a própria expressão do grupo. */
+    private boolean isMathReduction(Expr.Call c) {
+        return c.args().size() == 1 && MATH_REDUCTIONS.contains(c.name().toLowerCase(Locale.ROOT))
+            && !containsAggregate(c.args().get(0)) && !groupExprs.contains(c);
+    }
+
     private static Expr unwrap(Expr f) {
         return f instanceof Expr.Alias a ? a.expr() : f;
     }
 
     private Expr extract(Expr e) {
         return switch (e) {
-            case Expr.Call c when isAggregateName(c.name()) -> {
+            case Expr.Call c when isAggregateName(c.name()) || isMathReduction(c) -> {
                 String slot = SLOT + specs.size();
                 specs.add(new Spec(c.name().toLowerCase(Locale.ROOT), c.args().isEmpty() ? null : c.args().get(0)));
                 yield new Expr.Ident(slot);
@@ -353,8 +365,92 @@ final class GroupAggregation {
                 case "sum" -> new Sum();
                 case "avg" -> new Avg();
                 case "min" -> new Extreme(true);
+                case "math::sum" -> new Numbers(new Sum());
+                case "math::mean" -> new Numbers(new Avg());
+                case "math::min" -> new Numbers(new Extreme(true));
+                case "math::max" -> new Numbers(new Extreme(false));
+                case "math::median" -> new Numbers(new Collected(Functions::median));
+                case "math::product" -> new Numbers(new Collected(Functions::product));
                 default -> new Extreme(false);
             };
+        }
+    }
+
+    /** Entrada de uma redução {@code math::*}: só números contam, e um campo lista contribui com cada item. */
+    private static final class Numbers implements State {
+        private final State inner;
+
+        Numbers(State inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public void add(AxonValue value) {
+            if (value == null) {
+                return;
+            }
+            if (value.isArray()) {
+                value.asArray().forEach(this::add);
+            } else if (value.isSet()) {
+                value.asSet().forEach(this::add);
+            } else if (value.isNumber()) {
+                inner.add(value);
+            }
+        }
+
+        @Override
+        public void merge(State other) {
+            inner.merge(((Numbers) other).inner);
+        }
+
+        @Override
+        public AxonValue export() {
+            return inner.export();
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            inner.absorb(exported);
+        }
+
+        @Override
+        public AxonValue result() {
+            return inner.result();
+        }
+    }
+
+    /** Mediana e produto precisam de todos os valores do grupo, então a memória cresce com as linhas. */
+    private static final class Collected implements State {
+        private final List<AxonValue> values = new ArrayList<>();
+        private final Function<List<AxonValue>, AxonValue> reducer;
+
+        Collected(Function<List<AxonValue>, AxonValue> reducer) {
+            this.reducer = reducer;
+        }
+
+        @Override
+        public void add(AxonValue value) {
+            values.add(value);
+        }
+
+        @Override
+        public void merge(State other) {
+            values.addAll(((Collected) other).values);
+        }
+
+        @Override
+        public AxonValue export() {
+            return AxonValue.array(List.copyOf(values));
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            values.addAll(exported.asArray());
+        }
+
+        @Override
+        public AxonValue result() {
+            return reducer.apply(values);
         }
     }
 

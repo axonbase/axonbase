@@ -481,7 +481,7 @@ public final class Functions {
             .stripTrailingZeros());
     }
 
-    private static AxonValue median(List<AxonValue> values) {
+    static AxonValue median(List<AxonValue> values) {
         List<AxonValue> nums = new ArrayList<>(values.stream().filter(AxonValue::isNumber).toList());
         if (nums.isEmpty()) {
             return AxonValue.nul();
@@ -495,7 +495,7 @@ public final class Functions {
             .divide(BigDecimal.valueOf(2), 10, RoundingMode.HALF_UP).stripTrailingZeros());
     }
 
-    private static AxonValue product(List<AxonValue> values) {
+    static AxonValue product(List<AxonValue> values) {
         List<AxonValue> nums = values.stream().filter(AxonValue::isNumber).toList();
         return nums.isEmpty() ? AxonValue.nul() : Arith.product(nums);
     }
