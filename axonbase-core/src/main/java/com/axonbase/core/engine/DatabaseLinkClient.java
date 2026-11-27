@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.axonbase.value.AxonJson;
@@ -40,6 +41,11 @@ public class DatabaseLinkClient {
      * Returns a list of AxonValue objects (each row is an object).
      */
     public List<AxonValue> query(Datastore.DatabaseLinkDef def, String axonql) {
+        // todo envio passa por aqui, inclusive os da SAGA: nada aninhado nem com efeito sai com a credencial da ligação
+        Optional<String> refused = LinkPayload.refusal(axonql);
+        if (refused.isPresent()) {
+            throw new IllegalStateException("comando não aceito num DATABASE LINK: " + refused.get());
+        }
         HttpClient client = httpClient(def);
         // Antes de pedir o token: a própria autenticação já é uma chamada para fora.
         ExternalCalls.record();
