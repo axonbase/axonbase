@@ -6,13 +6,15 @@ EXAMPLE_DIR="$ROOT/examples/saga-microservices"
 DATA_DIR="${AXONBASE_SAGA_DEMO_DATA_DIR:-/tmp/axonbase-saga-demo}"
 
 cd "$ROOT"
-mvn -pl axonbase-server -am -DskipTests compile -q
+mvn -B -q -pl axonbase-server -am -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+mvn -q -pl axonbase-server dependency:copy-dependencies -DincludeScope=runtime \
+  -DoutputDirectory="$ROOT/axonbase-server/target/deps" -Dgpg.skip=true -Dmaven.javadoc.skip=true
 
 CLASSPATH=""
-for module in axonbase-common axonbase-value axonbase-parser axonbase-core axonbase-server; do
+for module in axonbase-common axonbase-value axonbase-parser axonbase-pl axonbase-core axonbase-server; do
   CLASSPATH="$CLASSPATH:$ROOT/$module/target/classes"
 done
-CLASSPATH="$CLASSPATH:$(find "$HOME/.m2/repository/org/eclipse/jetty" "$HOME/.m2/repository/org/slf4j" -name '*.jar' | tr '\n' ':')"
+CLASSPATH="${CLASSPATH#:}:$ROOT/axonbase-server/target/deps/*"
 
 start_database() {
   local name="$1"
