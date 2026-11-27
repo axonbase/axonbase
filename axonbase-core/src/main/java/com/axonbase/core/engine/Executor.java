@@ -308,8 +308,8 @@ public final class Executor {
                 return result;
             } catch (com.axonbase.core.storage.VersionConflictException conflict) {
                 discardBatchSagaSteps();
-                // só um lote com condições (tabela particionada) conflita. Nada foi gravado, então refaz sobre o
-                // estado novo, a menos que o statement já tenha chamado para fora
+                // só um lote com condições (partição, chave primária, UNIQUE) conflita. Nada foi gravado, então refaz
+                // sobre o estado novo, a menos que o statement já tenha chamado para fora
                 if (!mine.conditional() || attempt >= CONDITIONAL_ATTEMPTS || ExternalCalls.count() != outbound) {
                     throw conflict;
                 }
@@ -4688,6 +4688,7 @@ return score;
             if (!sharedColumn) {
                 String head = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000!uidx\u0000";
                 deleteAll(db, head + (index.columns().size() == 1 ? index.columns().get(0) : name) + "\u0000");
+                deleteAll(db, uniqueClaimPrefix(db, table) + uniqueSegment(index) + "|");
             }
         }
         if (index.columnar()) {
@@ -5387,6 +5388,7 @@ return score;
         // se a tabela era um tipo de aresta (RELATE), as arestas dele saem junto
         removeEdgesOfKind(db, table);
         records(db).delete(primaryKeyMarker(db, table));
+        deleteAll(db, uniqueClaimPrefix(db, table));
         ds.removeTableControl(session, db.ns(), db.db(), table);
         return AxonValue.nul();
     }
@@ -7258,6 +7260,10 @@ return score;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
             if (nextPrefix != null) {
+                // antes de ler: se outra escrita tomar ou soltar o valor no meio, o commit deste lote conflita
+                if (rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
+                    pending.expect(uniqueClaimKey(db, rid.table(), ix, nextPrefix));
+                }
                 String ownEntry = nextPrefix + rid.key().keyString();
                 var existing = records(db).keysWithPrefix(nextPrefix);
                 if (existing.stream().anyMatch(key -> !key.equals(ownEntry))) {
@@ -7268,11 +7274,42 @@ return score;
             String previousPrefix = uniqueIndexPrefix(db, rid.table(), ix, before);
             if (previousPrefix != null) {
                 records(db).delete(previousPrefix + rid.key().keyString());
+                if (!previousPrefix.equals(nextPrefix)) {
+                    records(db).delete(uniqueClaimKey(db, rid.table(), ix, previousPrefix));
+                }
             }
             if (nextPrefix != null) {
                 records(db).put(nextPrefix + rid.key().keyString(), new byte[0]);
+                if (!nextPrefix.equals(previousPrefix)) {
+                    records(db).put(uniqueClaimKey(db, rid.table(), ix, nextPrefix), new byte[0]);
+                }
             }
         }
+    }
+
+    /**
+     * A chave disputada por quem toma um valor UNIQUE: duas escritas simultâneas do mesmo valor a gravam, e a segunda
+     * conflita. Fica fora do prefixo da tabela, então nenhuma leitura de índice ou de registros a encontra, e vale
+     * também para tabela particionada. As entradas do índice continuam sendo a verdade sobre quem tem o valor.
+     */
+    private static String uniqueClaimKey(Database db, String table, Catalog.IndexDef index, String valuePrefix) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(valuePrefix.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return uniqueClaimPrefix(db, table) + uniqueSegment(index) + "|"
+                + java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private static String uniqueClaimPrefix(Database db, String table) {
+        return "UQL|" + db.ns() + "|" + db.db() + "|" + table + "|";
+    }
+
+    /** O trecho das chaves que identifica o índice: a coluna quando é uma só, senão o nome dele. */
+    private static String uniqueSegment(Catalog.IndexDef index) {
+        return index.columns().size() == 1 ? index.columns().get(0) : index.name();
     }
 
     private String uniqueIndexPrefix(Database db, String table, Catalog.IndexDef index, AxonValue record) {
