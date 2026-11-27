@@ -4286,7 +4286,8 @@ return score;
         } finally {
             write.unlock();
         }
-        if (countRows(db, di.table(), db.indexInlineRows() + 1) <= db.indexInlineRows()) {
+        // numa importação a construção em segundo plano não veria as linhas da transação ainda não confirmada
+        if (session.restoring() || countRows(db, di.table(), db.indexInlineRows() + 1) <= db.indexInlineRows()) {
             // tabela pequena: constrói no próprio comando, e uma duplicata falha aqui, sem registrar nada
             IndexBuilder.build(ds, this, db.ns(), db.db(), di.table(), di.name(), false, stalled);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);

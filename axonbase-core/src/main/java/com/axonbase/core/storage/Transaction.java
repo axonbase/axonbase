@@ -51,6 +51,17 @@ public final class Transaction implements KvBackend {
     /** Quantidade de escritas e de remoções pendentes (leitura aproximada, sem copiar). */
     public int stagedWriteCount() { return staged.size(); }
     public int stagedDeleteCount() { return deleted.size(); }
+    /** Tamanho aproximado do lote que o commit levaria: chaves e valores gravados e chaves apagadas. */
+    public long stagedBytes() {
+        long bytes = 0;
+        for (var entry : staged.entrySet()) {
+            bytes += entry.getKey().length() + (long) entry.getValue().length;
+        }
+        for (String key : deleted) {
+            bytes += key.length();
+        }
+        return bytes;
+    }
     public java.util.Map<String, byte[]> stagedWrites() { return java.util.Map.copyOf(staged); }
     public java.util.Set<String> stagedDeletes() { return java.util.Set.copyOf(deleted); }
 
@@ -323,10 +334,12 @@ public final class Transaction implements KvBackend {
             get(k);
             keys.add(k);
         }
-        for (String k : staged.keySet()) {
-            if (k.startsWith(prefix)) {
-                keys.add(k);
+        // só o trecho do prefixo: numa transação grande (importação) percorrer tudo a cada leitura não termina
+        for (String k : staged.tailMap(prefix, true).keySet()) {
+            if (!k.startsWith(prefix)) {
+                break;
             }
+            keys.add(k);
         }
         keys.removeAll(deleted);
         return List.copyOf(keys);

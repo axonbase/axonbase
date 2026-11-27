@@ -1524,13 +1524,70 @@ public final class Datastore {
         }
     }
 
-    /** Restaura um dump AxonQL executando-o. */
+    /**
+     * Restaura um dump AxonQL numa transação só: ou entra inteiro, ou o banco fica como estava (dados, definições,
+     * arestas e chave-valor). As linhas voltam como foram escritas: um registro existente é substituído e as
+     * restrições de tabela não são conferidas.
+     *
+     * <p>O limite é o teto de uma entrada do log Raft ({@code AXON_IMPORT_MAX_MB} o reduz, ou o aumenta num nó fora de
+     * cluster). Vale para o arquivo e para o que a transação acumula, índices incluídos.</p>
+     */
     public void importDatabase(String ns, String db, String dump) {
+        long limit = importLimitBytes();
+        requireImportSize(dump.getBytes(StandardCharsets.UTF_8).length, limit);
         Session s = Session.create();
         s.namespace(ns);
         s.database(db);
         s.restoring(true);
-        execute(dump, s, null, LegacyDump::restoreTypes);
+        Supplier<AxonValue> work = () -> {
+            AxonValue result = execute(dump, s, null, query -> {
+                refuseTransactionControl(query);
+                return LegacyDump.restoreTypes(query);
+            });
+            requireImportSize(s.tx().stagedBytes(), limit);
+            return result;
+        };
+        if (commitCoordinator != null) {
+            autocommit(s, work);
+            return;
+        }
+        beginSession(s);
+        try {
+            work.get();
+            commitSession(s);
+            backend.flush();
+        } finally {
+            if (s.inTransaction()) {
+                cancelSession(s);
+            }
+        }
+    }
+
+    private long importLimitBytes() {
+        long cluster = coldTier.settings().clusterBytes();
+        String configured = System.getenv("AXON_IMPORT_MAX_MB");
+        if (configured == null || configured.isBlank()) {
+            return cluster;
+        }
+        long wanted = Long.parseLong(configured.trim()) << 20;
+        return commitCoordinator != null ? Math.min(wanted, cluster) : wanted;
+    }
+
+    private static void requireImportSize(long bytes, long limit) {
+        if (bytes > limit) {
+            throw AxonError.internal(Messages.get("stmt_import_too_large", bytes, limit));
+        }
+    }
+
+    /** Um BEGIN, COMMIT ou CANCEL no meio do dump partiria a transação que torna a importação atômica. */
+    private static void refuseTransactionControl(Query query) {
+        for (Statement statement : query.statements()) {
+            if (statement instanceof Statement.Begin || statement instanceof Statement.Commit
+                || statement instanceof Statement.Cancel) {
+                throw AxonError.internal(Messages.get("stmt_import_transaction_control",
+                    statement.getClass().getSimpleName().toUpperCase(Locale.ROOT)));
+            }
+        }
     }
 
     // ------------------------------------------------------------------
