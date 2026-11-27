@@ -635,4 +635,13 @@ class AxonQlTest {
         org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
             () -> AxonQl.parse("DEFINE EMBEDDING e PROVIDER http URL \"u\" MODEL \"m\" DIMENSION 0"));
     }
+
+    @Test
+    void createTableIfNotExistsEhAceitoSemReservarAPalavraExists() {
+        String rendered = AxonQl.render(AxonQl.parse("CREATE TABLE if not Exists item (nome STRING NOT NULL)"));
+        org.junit.jupiter.api.Assertions.assertTrue(rendered.startsWith("CREATE TABLE IF NOT EXISTS item ("), rendered);
+        assertEquals(rendered, AxonQl.render(AxonQl.parse(rendered)));
+        // identificadores chamados exists continuam valendo, com a caixa que o texto trouxe
+        assertRoundTrip("SELECT Exists FROM exists");
+    }
 }

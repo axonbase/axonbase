@@ -428,6 +428,9 @@ public final class Executor {
         Catalog.TableDef def = db.catalog().table(name);
         if (def == null) {
             def = new Catalog.TableDef(name, false, false);
+            if (session.definitionScope() != null) {
+                return def;
+            }
             db.catalog().defineTable(def);
             session.tableCreated(db.ns(), db.db(), name);
             control(db, ControlCommand.Kind.TABLE, name, "DEFINE TABLE " + name + " SCHEMALESS");
@@ -492,13 +495,21 @@ public final class Executor {
     /**
      * Apagar tabela, mudar a definição de uma que existe e declarar PERMISSIONS são tarefas do administrador do banco.
      * Criar tabela, campo ou índice que ainda não existe continua livre, salvo numa tabela com PERMISSIONS. Repetir a
-     * definição em vigor não muda nada.
+     * definição em vigor não muda nada. Definir, mudar ou apagar embedding e analyzer é sempre dele.
      */
     private boolean changesSchema(Statement s) {
         return switch (s) {
             case Statement.DropTable ignored -> true;
             case Statement.RemoveTable ignored -> true;
             case Statement.DropIndex ignored -> true;
+            // a URL de um embedding decide para onde o texto vai, e o analyzer muda o que a busca encontra
+            case Statement.DefineEmbedding de -> changesEmbedding(de);
+            case Statement.DropEmbedding ignored -> true;
+            case Statement.DefineAnalyzer da -> changesAnalyzer(
+                new Catalog.AnalyzerDef(da.name(), da.lowercase(), da.stopwords(), da.stemming()));
+            case Statement.CreateAnalyzer ca -> changesAnalyzer(
+                new Catalog.AnalyzerDef(ca.name(), ca.lowercase(), ca.stopwords(), ca.stemming()));
+            case Statement.DropAnalyzer ignored -> true;
             case DefineTable dt -> restricts(dt.permissions()) || redefines(dt);
             case Statement.CreateTable ct -> !ct.ifNotExists() && settledTable(ct.name()) != null;
             case Statement.AlterTable at -> settledTable(at.name()) != null;
@@ -525,6 +536,29 @@ public final class Executor {
             return null;
         }
         return db.catalog().table(name);
+    }
+
+    private boolean changesEmbedding(Statement.DefineEmbedding wanted) {
+        Database db = sessionDatabase();
+        return db == null || !embeddingDef(wanted).equals(db.catalog().embedding(wanted.name()));
+    }
+
+    private boolean changesAnalyzer(Catalog.AnalyzerDef wanted) {
+        Database db = sessionDatabase();
+        return db == null || !wanted.equals(db.catalog().analyzer(wanted.name()));
+    }
+
+    /** O banco da sessão, sem criá-lo; {@code null} se não há. */
+    private Database sessionDatabase() {
+        return session.namespace() == null || session.database() == null ? null
+            : ds.findDatabase(session.namespace(), session.database());
+    }
+
+    private static Catalog.EmbeddingDef embeddingDef(Statement.DefineEmbedding de) {
+        return new Catalog.EmbeddingDef(de.name(), de.url(), de.model(), de.dimension(), de.keyEnv(),
+            de.timeoutSeconds() == null ? Catalog.EmbeddingDef.DEFAULT_TIMEOUT_SECONDS : de.timeoutSeconds(),
+            de.batch() == null ? Catalog.EmbeddingDef.DEFAULT_BATCH : de.batch(), de.documentPrefix(),
+            de.queryPrefix(), de.sendDimension(), de.authHeader());
     }
 
     private static boolean restricts(Statement.Permissions perms) {
@@ -627,6 +661,7 @@ public final class Executor {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
         requireAllowedInEvent(s);
+        requireReadingOnly(s);
         authorize(s);
         requireWritableIfNeeded(s);
         return switch (s) {
@@ -733,7 +768,11 @@ public final class Executor {
 
     /** AxonPL: CREATE/DROP FUNCTION|PROCEDURE|PACKAGE e CALL (a lógica fica em {@code core.pl}). */
     private AxonValue runProgram(Statement s) {
-        return ds.programs().run(s, session, this::eval);
+        if (s instanceof Statement.CallProgram) {
+            return ds.programs().run(s, session, this::eval);
+        }
+        // o padrão de um parâmetro faz parte da definição, e é avaliado de novo a cada reinício
+        return ds.programs().run(s, session, e -> asDefinition(() -> eval(e)));
     }
 
     /**
@@ -759,8 +798,60 @@ public final class Executor {
             || s instanceof Statement.Release || s instanceof Statement.RollbackTo;
     }
 
-    /** Esta é a subconsulta de uma PERMISSIONS ou Data Rule: quem a escreveu não foi o corpo de um evento. */
-    private boolean withinPolicy;
+    /**
+     * Quem escreve uma expressão de esquema ou de política não é quem a avalia: ela roda na sessão de quem grava ou
+     * consulta, que pode ser o root. Por isso ali só passa leitura, também nas subconsultas e nas funções que ela chama.
+     * O corpo de uma função somente leitura segue a mesma regra, sem o limite de banco.
+     */
+    private void requireReadingOnly(Statement s) {
+        Session.EventScope scope = session.definitionScope();
+        if (scope != null && !readsDatabaseOnly(s)) {
+            throw outsideDefinitionScope();
+        }
+        if (session.readOnlyCall() && !readsOnly(s)) {
+            throw refusedInFunction();
+        }
+    }
+
+    private static boolean readsDatabaseOnly(Statement s) {
+        if (s instanceof Info info) {
+            return !"root".equals(info.kind()) && !"namespace".equals(info.kind());
+        }
+        return s instanceof Statement.Select || s instanceof Statement.Return || s instanceof Statement.IfElse
+            || s instanceof Statement.ErrorStmt || s instanceof Statement.DescribeTable;
+    }
+
+    private static boolean readsOnly(Statement s) {
+        if (s instanceof Statement.Use || s instanceof Statement.Begin || s instanceof Statement.Commit
+            || s instanceof Statement.Cancel || s instanceof Statement.Live || s instanceof Kill) {
+            return false;
+        }
+        return Datastore.isReadOnly(s) || s instanceof Statement.IfElse || s instanceof Statement.ErrorStmt;
+    }
+
+    /** Avalia uma expressão que vem do esquema ou de uma política, confinada à leitura do banco corrente. */
+    private <T> T asDefinition(java.util.function.Supplier<T> work) {
+        Session scoped = session;
+        Session.EventScope outer = scoped.definitionScope();
+        if (outer == null) {
+            scoped.definitionScope(new Session.EventScope(scoped.namespace(), scoped.database()));
+        }
+        try {
+            return work.get();
+        } finally {
+            scoped.definitionScope(outer);
+        }
+    }
+
+    private com.axonbase.common.AxonError outsideDefinitionScope() {
+        Session.EventScope scope = session.definitionScope();
+        return new com.axonbase.common.AxonError(-32002,
+            Messages.get("definition_scope_refused", scope.namespace() + "/" + scope.database()));
+    }
+
+    private static com.axonbase.common.AxonError refusedInFunction() {
+        return new com.axonbase.common.AxonError(-32002, Messages.get("function_read_only"));
+    }
 
     /** Um DATABASE LINK leva a outro servidor: o corpo de um evento não o usa. */
     private void refuseLinkInEvent() {
@@ -770,15 +861,29 @@ public final class Executor {
     }
 
     /**
-     * Num corpo de evento, {@code banco.tabela} só vale para o próprio banco, e nunca para um DATABASE LINK. As leituras
-     * de uma PERMISSIONS ou Data Rule valem como numa escrita direta.
+     * Passagem de todo {@code banco.tabela}. Numa expressão de esquema ou de política, e num corpo de evento, só vale o
+     * próprio banco, e nunca um DATABASE LINK. Fora disso, outro banco do namespace exige que o escopo da identidade o
+     * alcance, antes de o banco ser lido ou criado.
      */
-    private void requireInEventScope(String qualifier) {
+    private void requireInReach(String qualifier) {
+        Session.EventScope definition = session.definitionScope();
+        if (definition != null && leaves(definition, qualifier)) {
+            throw outsideDefinitionScope();
+        }
         Session.EventScope scope = session.eventScope();
-        if (scope != null && !withinPolicy && evaluatingPolicy.get() == null
-            && (!qualifier.equals(scope.database()) || ds.databaseLink(scope.namespace(), qualifier) != null)) {
+        if (scope != null && leaves(scope, qualifier)) {
             throw outsideEventScope();
         }
+        String ns = session.namespace();
+        if (ns != null && !qualifier.equals(session.database()) && ds.databaseLink(ns, qualifier) == null
+            && !com.axonbase.core.security.Authz.allows(session.auth(), ns, qualifier)) {
+            throw new com.axonbase.common.AxonError(-32002,
+                Messages.get("database_scope_refused", ns + "/" + qualifier));
+        }
+    }
+
+    private boolean leaves(Session.EventScope scope, String qualifier) {
+        return !qualifier.equals(scope.database()) || ds.databaseLink(scope.namespace(), qualifier) != null;
     }
 
     private com.axonbase.common.AxonError outsideEventScope() {
@@ -867,16 +972,25 @@ public final class Executor {
             Session previousIdentity = identitySession;
             identitySession = sub.owner();
             try {
-                if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
-                    continue;
+                payload = asSubscriber(db, sub, () -> {
+                    if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
+                        return null;
+                    }
+                    return sub.diff() && !LiveBus.DELETE.equals(action)
+                        ? diffOf(before, after) : project(sub.select(), doc);
+                });
+            } catch (com.axonbase.common.AxonError refused) {
+                if (refused.code() != -32002) {
+                    throw refused;
                 }
-                if (sub.diff() && !LiveBus.DELETE.equals(action)) {
-                    payload = diffOf(before, after);
-                } else {
-                    payload = project(sub.select(), doc);
-                }
+                // a consulta do assinante pediu o que não pode: ele fica sem o aviso, e a escrita vale
+                System.err.println("{\"event\":\"live_query_refused\",\"id\":\"" + sub.id() + "\"}");
+                continue;
             } finally {
                 identitySession = previousIdentity;
+            }
+            if (payload == null) {
+                continue;
             }
             LiveBus.Notification note = new LiveBus.Notification(sub.id(), action, payload);
             if (session.inTransaction()) {
@@ -886,6 +1000,29 @@ public final class Executor {
             } else {
                 bus.deliver(sub, note);
             }
+        }
+    }
+
+    /**
+     * O filtro e as colunas de um LIVE são de quem assinou, mas são calculados durante a escrita de outra sessão: valem
+     * com a identidade do assinante e só leem o banco da tabela.
+     */
+    private AxonValue asSubscriber(Database db, LiveBus.Subscription sub,
+                                   java.util.function.Supplier<AxonValue> work) {
+        AxonValue writerAuth = session.auth();
+        String writerNamespace = session.namespace();
+        String writerDatabase = session.database();
+        session.namespace(db.ns());
+        session.database(db.db());
+        if (sub.owner() != null) {
+            session.auth(sub.owner().auth());
+        }
+        try {
+            return asDefinition(work);
+        } finally {
+            session.auth(writerAuth);
+            session.namespace(writerNamespace);
+            session.database(writerDatabase);
         }
     }
 
@@ -964,7 +1101,7 @@ public final class Executor {
                     continue;
                 }
                 Document doc = new Document(rid, value != null ? value : AxonValue.object(Map.of()));
-                if (ev.whenExpr() != null && !truthy(evalExprInDoc(ev.whenExpr(), doc))) {
+                if (ev.whenExpr() != null && !truthy(asDefinition(() -> evalExprInDoc(ev.whenExpr(), doc)))) {
                     continue;
                 }
                 for (Statement st : ev.then()) {
@@ -1508,7 +1645,7 @@ public final class Executor {
             boolean present = obj.containsKey(fieldName);
             AxonValue value = present ? obj.get(fieldName) : null;
             if (!present && fd.defaultExpr() != null) {
-                obj.put(fieldName, eval(fd.defaultExpr()));
+                obj.put(fieldName, asDefinition(() -> eval(fd.defaultExpr())));
                 present = true;
                 value = obj.get(fieldName);
             }
@@ -1522,7 +1659,8 @@ public final class Executor {
                 value = coerced;
             }
             if (present && value != null && fd.assertExpr() != null) {
-                AxonValue ok = evalWithValue(fd.assertExpr(), value);
+                AxonValue asserted = value;
+                AxonValue ok = asDefinition(() -> evalWithValue(fd.assertExpr(), asserted));
                 if (!truthy(ok)) {
                     throw AxonError.internal(Messages.get("stmt_assert_failed", fieldName, value));
                 }
@@ -2082,6 +2220,9 @@ public final class Executor {
             if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName))
                 && com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
                 throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_audit_refused"));
+            }
+            if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName)) && session.definitionScope() != null) {
+                throw outsideDefinitionScope();
             }
             if (isAuditCasesTable(tableName)) return runSelectAuditCases(sel);
             if (isAuditLogTable(tableName)) return runSelectAuditLog(sel);
@@ -3626,7 +3767,7 @@ return score;
      */
     private AxonValue runSelectViaLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q,
                                         Statement.Select sel) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         // Render the SELECT, then replace qualified FROM with unqualified one
         String rendered = com.axonbase.parser.Render.stmt(sel);
         String qualifiedFrom = q.link() + "." + q.table();
@@ -3647,7 +3788,7 @@ return score;
         }
     }
     private List<Document> sourceDocsQualified(Expr.Qualified q) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3683,7 +3824,7 @@ return score;
 
     /** O banco do namespace citado em {@code banco.tabela}, já com a tabela garantida. */
     private Database localQualifiedDatabase(String ns, Expr.Qualified q) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         Database targetDb = ds.ensureDatabase(session, ns, q.link());
         ensureTable(targetDb, q.table());
         return targetDb;
@@ -3720,7 +3861,7 @@ return score;
 
     /** Resolve a qualified record ID {@code "link"."table":key}. */
     private List<Document> sourceDocsQualifiedRecordId(Expr.Qualified q, Expr.RecordId rid) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -4988,10 +5129,7 @@ return score;
             throw errorStmt(Messages.get("embedding_provider_unsupported", de.provider()));
         }
         ds.embeddings().checkUrl(de.url());
-        db.catalog().defineEmbedding(new Catalog.EmbeddingDef(de.name(), de.url(), de.model(), de.dimension(),
-            de.keyEnv(), de.timeoutSeconds() == null ? Catalog.EmbeddingDef.DEFAULT_TIMEOUT_SECONDS : de.timeoutSeconds(),
-            de.batch() == null ? Catalog.EmbeddingDef.DEFAULT_BATCH : de.batch(), de.documentPrefix(),
-            de.queryPrefix(), de.sendDimension(), de.authHeader()));
+        db.catalog().defineEmbedding(embeddingDef(de));
         control(db, ControlCommand.Kind.EMBEDDING, de.name(), com.axonbase.parser.Render.stmt(de));
         return AxonValue.nul();
     }
@@ -5863,7 +6001,7 @@ return score;
         Boolean previous = evaluatingPolicy.get();
         evaluatingPolicy.set(Boolean.TRUE);
         try {
-            return work.get();
+            return asDefinition(work);
         } finally {
             if (previous == null) {
                 evaluatingPolicy.remove();
@@ -6147,7 +6285,7 @@ return score;
             String table = q.link().equals(ns) ? q.table() : q.link();
             Database targetDb = db();
             if (!q.link().equals(ns)) {
-                requireInEventScope(q.link());
+                requireInReach(q.link());
                 targetDb = ds.ensureDatabase(session, ns, q.link());
             }
             String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + table + "\u0000";
@@ -6872,6 +7010,14 @@ return score;
         if (ns == null || ns.isBlank() || db == null || db.isBlank()) {
             throw AxonError.internal(Messages.get("stmt_kv_scope_required"));
         }
+        if (name.equals("kv::set") || name.equals("kv::del")) {
+            if (session.definitionScope() != null) {
+                throw outsideDefinitionScope();
+            }
+            if (session.readOnlyCall()) {
+                throw refusedInFunction();
+            }
+        }
         return switch (name.substring(4)) {
             case "get" -> ds.kvGet(session, ns, db, kvStr(args, 0));
             case "set" -> ds.kvSet(session, ns, db, kvStr(args, 0), kvArg(args, 1), kvTtl(args));
@@ -7179,7 +7325,6 @@ return score;
         try {
             Executor sub = new Executor(ds);
             sub.identitySession = identitySession;
-            sub.withinPolicy = withinPolicy || evaluatingPolicy.get() != null;
             // as variáveis já estão na sessão: nada a repassar
             return sub.execute(sq.query(), session, null);
         } finally {

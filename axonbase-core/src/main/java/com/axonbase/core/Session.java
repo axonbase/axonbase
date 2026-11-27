@@ -151,6 +151,37 @@ public final class Session {
         this.eventScope = scope;
     }
 
+    // por thread: a varredura paralela avalia PERMISSIONS e Data Rules da mesma sessão em várias ao mesmo tempo
+    private final ThreadLocal<EventScope> definitionScope = new ThreadLocal<>();
+
+    /**
+     * O banco da expressão de esquema ou de política em avaliação nesta thread (DEFAULT, ASSERT, CHECK, PERMISSIONS,
+     * Data Rule, condição de evento, filtro de LIVE), ou {@code null} fora de uma. Enquanto vale, a sessão só lê esse
+     * banco. Só o motor liga isto.
+     */
+    public EventScope definitionScope() {
+        return definitionScope.get();
+    }
+
+    public void definitionScope(EventScope scope) {
+        if (scope == null) {
+            definitionScope.remove();
+        } else {
+            definitionScope.set(scope);
+        }
+    }
+
+    private boolean readOnlyCall;
+
+    /** Uma função somente leitura está em execução: nada do que ela dispara escreve. Só o motor liga isto. */
+    public boolean readOnlyCall() {
+        return readOnlyCall;
+    }
+
+    public void readOnlyCall(boolean value) {
+        this.readOnlyCall = value;
+    }
+
     private java.util.Set<String> importedTables;
 
     /** Começa a anotar as tabelas que uma importação cria. */
