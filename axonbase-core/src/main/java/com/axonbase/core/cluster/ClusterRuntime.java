@@ -1261,8 +1261,11 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         InetSocketAddress me = config.advertiseAddress();
         // um líder que escuta em 0.0.0.0 não sabe o endereço pelo qual os outros o alcançam
         if (me.getAddress() == null || !me.getAddress().isAnyLocalAddress()) {
+            // uma lista herdada de versão anterior pode já trazer este nó: ele entra uma vez só
             List<InetSocketAddress> voters = new ArrayList<>(members);
-            voters.add(me);
+            if (!voters.contains(me)) {
+                voters.add(me);
+            }
             puts.put(RaftNode.VOTERS_KEY,
                 (others + "\n" + RaftNodeState.formatPeers(voters)).getBytes(StandardCharsets.UTF_8));
         }
