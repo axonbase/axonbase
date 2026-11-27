@@ -443,10 +443,7 @@ public final class AuthService {
             return null;
         }
         // signup só cria: trocar senha ou papéis de quem já existe é outra operação
-        boolean taken = users.catalog().users().stream().anyMatch(u -> u.name().equals(user)
-            && u.scope() == AuthCatalog.Scope.DATABASE
-            && namespace.equals(u.namespace()) && database.equals(u.database()));
-        if (taken) {
+        if (users.catalog().hasUserExact(user, AuthCatalog.Scope.DATABASE, namespace, database)) {
             throw new IllegalArgumentException(Messages.get("auth_signup_user_exists"));
         }
         users.catalog().defineUser(user, AuthCatalog.Scope.DATABASE, namespace, database,
