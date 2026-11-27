@@ -3352,8 +3352,10 @@ public final class Executor {
         }
         List<TextSearch> out = new ArrayList<>();
         for (Expr part : conjuncts(sel.cond())) {
+            // numa condição combinada, um lado direito que dependa da linha continua sendo comparado linha a linha
             if (!(part instanceof Expr.Binary match) || match.op() != Expr.BinaryOp.MATCH
-                || !(match.left() instanceof Expr.Ident field) || !isRowIndependent(match.right())) {
+                || !(match.left() instanceof Expr.Ident field)
+                || part != sel.cond() && !isRowIndependent(match.right())) {
                 continue;
             }
             Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
