@@ -2,6 +2,8 @@
 
 Multi-model database written in Java 21+, combining document, graph, relational, key-value, full-text, vector, and geospatial models in a single engine with a unified query language (AxonQL), HTTP and WebSocket server, and SDKs in 8 languages.
 
+Release candidate notes for 1.0.0-rc1 (in Portuguese): [docs/notas-1.0.0-rc1.md](docs/notas-1.0.0-rc1.md).
+
 ## Features
 
 - **Multi-model engine**: documents, graph edges, relational tables, key-value, time series, geospatial (GeoJSON), and vectors in one ACID-compliant engine
