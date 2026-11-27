@@ -72,7 +72,7 @@ public class SagaLedger {
     public void beginSaga(String sagaResource, String correlationId, List<String> links, String linkNamespace) {
         String participants = Render.value(
             AxonValue.array(links.stream().map(AxonValue::str).toList()));
-        ds.execute("UPSERT saga:" + escKey(correlationId)
+        ds.execute("UPSERT " + ledgerRecord(correlationId)
             + " CONTENT {name: \"" + esc(sagaResource)
             + "\", correlation_id: \"" + esc(correlationId)
             + "\", links: " + participants
@@ -83,7 +83,7 @@ public class SagaLedger {
     /** O registro da transação no ledger, ou {@code null} quando não há nenhuma com essa correlação. */
     Map<String, AxonValue> transaction(String correlationId) {
         if (correlationId == null || correlationId.isBlank()) return null;
-        AxonValue result = ds.execute("SELECT * FROM saga:" + escKey(correlationId), sagaSession(), null);
+        AxonValue result = ds.execute("SELECT * FROM " + ledgerRecord(correlationId), sagaSession(), null);
         if (result.isArray()) {
             result = result.asArray().isEmpty() ? AxonValue.nul() : result.asArray().get(0);
         }
@@ -91,14 +91,14 @@ public class SagaLedger {
     }
 
     public void commitSaga(String sagaResource, String correlationId) {
-        ds.execute("UPDATE saga:" + escKey(correlationId) + " SET status = 'COMMITTED'",
+        ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'COMMITTED'",
             sagaSession(), null);
     }
 
     public boolean isSagaActive(String correlationId) {
         if (correlationId == null || correlationId.isBlank()) return false;
         AxonValue result = ds.execute(
-            "SELECT VALUE status FROM saga:" + escKey(correlationId), sagaSession(), null);
+            "SELECT VALUE status FROM " + ledgerRecord(correlationId), sagaSession(), null);
         if (result.isString()) return "RUNNING".equals(result.asString());
         if (result.isArray() && !result.asArray().isEmpty()
             && result.asArray().get(0).isObject()) {
@@ -208,7 +208,7 @@ public class SagaLedger {
      * Idempotente: cada step é marcado como COMPENSATED e a busca é por status PREPARED.
      */
     public void cancelSaga(String sagaResource, String correlationId) {
-        ds.execute("UPDATE saga:" + escKey(correlationId) + " SET status = 'COMPENSATING'",
+        ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'COMPENSATING'",
             sagaSession(), null);
 
         // Busca steps em ordem reversa que ainda estão PREPARED
@@ -228,7 +228,7 @@ public class SagaLedger {
             compensateStep(step, correlationId);
         }
 
-        ds.execute("UPDATE saga:" + escKey(correlationId) + " SET status = 'FAILED'",
+        ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'FAILED'",
             sagaSession(), null);
     }
 
@@ -372,7 +372,12 @@ public class SagaLedger {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
-    private static String escKey(String s) {
-        return s.replaceAll("[^a-zA-Z0-9_\\-]", "_");
+    /**
+     * O registro da transação como literal AxonQL. Uma correlação só de dígitos continua sendo chave numérica, como
+     * nas versões anteriores; as demais vão entre aspas, que é o que aceita hífen (UUID).
+     */
+    private static String ledgerRecord(String correlationId) {
+        String key = correlationId.replaceAll("[^a-zA-Z0-9_\\-]", "_");
+        return key.matches("\\d{1,18}") ? "saga:" + key : "saga:'" + key + "'";
     }
 }
