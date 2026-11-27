@@ -1177,11 +1177,11 @@ public final class Executor {
     private AxonValue coerceType(String type, AxonValue v) {
         String t = type.toLowerCase();
         return switch (t) {
-            case "int" -> v.isNumber() ? AxonValue.num(v.asLong())
+            case "int" -> v.isNumber() ? wholeNumber(v)
                 : v.isString() ? tryLong(v.asString()) : null;
             case "float", "number" -> v.isNumber() ? AxonValue.num(v.asDouble())
                 : v.isString() ? tryDouble(v.asString()) : null;
-            case "string" -> v.isString() ? v : AxonValue.str(v.toString());
+            case "string" -> v.isString() ? v : AxonValue.str(Functions.text(v));
             case "bool" -> v.isBool() ? v : null;
             case "datetime" -> v.isDatetime() ? v
                 : v.isString() ? tryInstant(v.asString()) : null;
@@ -1199,6 +1199,15 @@ public final class Executor {
     private boolean isGeometry(AxonValue value) {
         return value.isObject() && value.asObject().get("type") != null
             && value.asObject().get("type").isString() && value.asObject().get("coordinates") != null;
+    }
+
+    /** O número como inteiro, ou {@code null} quando há fração: um campo int não trunca em silêncio. */
+    private AxonValue wholeNumber(AxonValue v) {
+        try {
+            return AxonValue.num(v.asDecimal().longValueExact());
+        } catch (ArithmeticException | NumberFormatException notWhole) {
+            return null;
+        }
     }
 
     private AxonValue tryLong(String s) {
@@ -5908,14 +5917,11 @@ return score;
     private AxonValue evalCast(Expr.Cast c) {
         AxonValue v = eval(c.operand());
         return switch (c.type().toLowerCase()) {
-            case "int" -> {
-                if (v.isNumber()) yield AxonValue.num(v.asLong());
-                if (v.isString()) yield AxonValue.num(Long.parseLong(v.asString()));
-                yield AxonValue.nul();
-            }
+            case "int" -> Functions.call("type::int", List.of(v));
             case "float", "number" -> AxonValue.num(v.asDouble());
-            case "string" -> AxonValue.str(v.toString());
-            case "bool" -> AxonValue.bool(truthy(v));
+            case "decimal" -> Functions.call("type::decimal", List.of(v));
+            case "string" -> v.isNull() || v.isNone() ? v : AxonValue.str(Functions.text(v));
+            case "bool" -> Functions.call("type::bool", List.of(v));
             case "datetime" -> v;
             default -> v;
         };
