@@ -4609,6 +4609,7 @@ return score;
             throw errorStmt(Messages.get("stmt_link_drop_needs_ns"));
         }
         ds.dropDatabaseLink(ns, ddl.name());
+        ds.removeControl(session, ns, "", ControlCommand.Kind.DATABASE_LINK, ddl.name());
         return AxonValue.nul();
     }
 

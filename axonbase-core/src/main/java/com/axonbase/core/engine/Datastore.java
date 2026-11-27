@@ -744,6 +744,7 @@ public final class Datastore {
         replaying.set(true);
         try {
             namespaces.clear();
+            databaseLinks.clear();
             sagas.clear();
             authCatalog.clear();
             for (ControlCommand command : snapshot.commands()) {
