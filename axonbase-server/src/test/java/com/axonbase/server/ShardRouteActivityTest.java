@@ -70,6 +70,20 @@ class ShardRouteActivityTest {
     }
 
     @Test
+    @DisplayName("escrita que estoura o prazo responde desfecho desconhecido, e não uma falha definitiva")
+    void escritaQueEstouraOPrazoTemDesfechoDesconhecido() throws Exception {
+        AxonServer server = shard(200);
+        try {
+            HttpResponse<String> response = execute(server, "UPDATE t SET x = 1 WHERE v = 5;".repeat(400));
+
+            assertEquals(504, response.statusCode(), response.body());
+            assertTrue(response.body().contains("OUTCOME_UNKNOWN"), response.body());
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
     void consultaDaRotaApareceNaAtividadeEPodeSerCancelada() throws Exception {
         AxonServer server = shard(30_000);
         try {
