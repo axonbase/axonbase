@@ -59,6 +59,21 @@ class ExportRecreatesEverythingTest {
     }
 
     @Test
+    @DisplayName("as propriedades gravadas pelo RELATE SET voltam com o tipo")
+    void edgePropertiesSurvive() {
+        run(source, "CREATE c:ana; CREATE pr:cafe");
+        run(source, "RELATE c:ana->comprou->pr:cafe SET desde = 2020, quando = d\"2024-01-01T00:00:00Z\", "
+            + "nota = 'um; dois'");
+
+        Datastore target = copy();
+
+        String query = "SELECT ->comprou.desde AS desde, ->comprou.quando AS quando, ->comprou.nota AS nota "
+            + "FROM c:ana";
+        assertTrue(json(source, query).contains("2020"), json(source, query));
+        assertEquals(json(source, query), json(target, query));
+    }
+
+    @Test
     @DisplayName("as entradas do chave-valor voltam, com tipo e prazo")
     void keyValueSurvives() {
         run(source, "RETURN kv::set('tema', {cor: 'azul', quando: d\"2024-01-01T00:00:00Z\", saldo: -1.50dec})");
