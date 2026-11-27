@@ -5942,7 +5942,7 @@ return score;
 
     /**
      * O texto que segue por um DATABASE LINK para coordenar uma SAGA. Como numa escrita encaminhada, é uma única
-     * sentença do tipo montado; relida, ela precisa ter o mesmo nome e a mesma correlação.
+     * sentença; relida, ela precisa voltar como o mesmo comando (um nome que é palavra-chave volta em minúsculas).
      */
     private String sagaCommandText(Statement command) {
         String text = com.axonbase.parser.Render.stmt(command);
@@ -5952,7 +5952,7 @@ return score;
         } catch (RuntimeException e) {
             throw errorStmt(e.getMessage());
         }
-        if (parsed.size() != 1 || !command.equals(parsed.get(0))) {
+        if (parsed.size() != 1 || !com.axonbase.parser.Render.stmt(parsed.get(0)).equalsIgnoreCase(text)) {
             throw errorStmt("comando de SAGA não aceito num DATABASE LINK: " + text);
         }
         return text;
