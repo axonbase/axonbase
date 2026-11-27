@@ -373,7 +373,16 @@ public final class Executor {
     // Permisos de táboa (PERMISSIONS FOR ... WHERE ...)
     // ------------------------------------------------------------------
 
+    /** A escrita nesta tabela é a que desfaz um passo de SAGA: repõe o que já existia. */
+    private boolean compensates(String table) {
+        SagaCompensation compensation = session.compensation();
+        return compensation != null && compensation.restores(table);
+    }
+
     private boolean allowed(Document doc, String table, String action) {
+        if (!"select".equals(action) && compensates(table)) {
+            return true;
+        }
         Catalog.TableDef def = db().catalog().table(table);
         if (def == null || def.permissions() == null) {
             return true;
@@ -663,6 +672,10 @@ public final class Executor {
     private AxonValue runStatementUnbatched(Statement s) {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
+        SagaCompensation compensation = session.compensation();
+        if (compensation != null && !compensation.permits(s)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("saga_compensation_only"));
+        }
         requireAllowedInEvent(s);
         requireReadingOnly(s);
         authorize(s);
@@ -1028,9 +1041,12 @@ public final class Executor {
         if (sub.owner() != null) {
             session.auth(sub.owner().auth());
         }
+        SagaCompensation compensation = session.compensation();
+        session.compensation(null);
         try {
             return asDefinition(work);
         } finally {
+            session.compensation(compensation);
             session.auth(writerAuth);
             session.namespace(writerNamespace);
             session.database(writerDatabase);
@@ -1099,6 +1115,9 @@ public final class Executor {
         // o que um evento escreve é escrita nova, mesmo quando quem o disparou está repondo dados
         boolean restoring = session.restoring();
         session.restoring(false);
+        // nem é compensação: a marca vale só para a escrita que desfaz o passo
+        SagaCompensation compensation = session.compensation();
+        session.compensation(null);
         // a condição e o corpo enxergam só o banco da tabela, mesmo quando a escrita veio de outro
         Session.EventScope outerScope = session.eventScope();
         String writerNamespace = session.namespace();
@@ -1124,6 +1143,7 @@ public final class Executor {
             session.namespace(writerNamespace);
             session.database(writerDatabase);
             session.restoring(restoring);
+            session.compensation(compensation);
             restoreVar("event", prevEvent);
             restoreVar("before", prevBefore);
             restoreVar("after", prevAfter);
@@ -1471,6 +1491,9 @@ public final class Executor {
 
     /** O usuário tem Data Rule ou a tabela tem PERMISSIONS para a ação. */
     private boolean restrictsWrite(Database db, String table, String action) {
+        if (compensates(table)) {
+            return false;
+        }
         if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
             return true;
         }
@@ -1654,18 +1677,25 @@ public final class Executor {
         if (def == null) {
             return;
         }
-        autoEmbed(db, def, obj, before);
+        // quem desfaz um passo de SAGA repõe o valor que existia: nada é gerado nem conferido de novo
+        boolean compensating = compensates(table);
+        if (!compensating) {
+            autoEmbed(db, def, obj, before);
+        }
         for (Catalog.FieldDef fd : def.fields().values()) {
             String fieldName = fd.name();
             boolean present = obj.containsKey(fieldName);
             AxonValue value = present ? obj.get(fieldName) : null;
-            if (!present && fd.defaultExpr() != null) {
+            if (!present && fd.defaultExpr() != null && !compensating) {
                 obj.put(fieldName, asDefinition(() -> eval(fd.defaultExpr())));
                 present = true;
                 value = obj.get(fieldName);
             }
             if (present && value != null && fd.type() != null && !value.isNull() && !value.isNone()) {
                 AxonValue coerced = coerceType(fd.type(), value);
+                if (coerced == null && compensating) {
+                    coerced = value;
+                }
                 if (coerced == null) {
                     throw AxonError.internal(Messages.get("stmt_field_type_invalid",
                         fieldName, fd.type(), value));
@@ -1673,14 +1703,15 @@ public final class Executor {
                 obj.put(fieldName, coerced);
                 value = coerced;
             }
-            if (present && value != null && fd.assertExpr() != null) {
+            if (present && value != null && fd.assertExpr() != null && !compensating) {
                 AxonValue asserted = value;
                 AxonValue ok = asDefinition(() -> evalWithValue(fd.assertExpr(), asserted));
                 if (!truthy(ok)) {
                     throw AxonError.internal(Messages.get("stmt_assert_failed", fieldName, value));
                 }
             }
-            if (present && value != null && fd.references() != null && (value.isRecordId() || value.isString())) {
+            if (present && value != null && fd.references() != null && !compensating
+                && (value.isRecordId() || value.isString())) {
                 validateReference(db, fd.references(), value);
             }
         }
@@ -3959,7 +3990,7 @@ return score;
      */
     private List<AxonValue> queryLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q, String axonql,
                                       Class<? extends Statement> expected) {
-        if (!q.table().matches("[\\p{L}_][\\p{L}\\p{Nd}_]*")) {
+        if (!LinkGuard.plain(q.table())) {
             throw errorStmt("nome de tabela não aceito num DATABASE LINK: " + q.table());
         }
         try {
@@ -3967,13 +3998,9 @@ return score;
         } catch (IllegalArgumentException e) {
             throw errorStmt(e.getMessage());
         }
-        // vale para qualquer nome do comando (JOIN, aresta, subconsulta, campo): só o que foi escrito entre crases
-        // traz literal no token
-        for (var token : com.axonbase.parser.token.Lexer.tokenize(axonql)) {
-            if (token.is(com.axonbase.parser.token.TokenType.IDENT) && token.literal() instanceof String quoted
-                && !quoted.matches("[\\p{L}_][\\p{L}\\p{Nd}_]*")) {
-                throw errorStmt("nome não aceito num DATABASE LINK: " + quoted);
-            }
+        Optional<String> refused = LinkGuard.refusedQuotedName(axonql);
+        if (refused.isPresent()) {
+            throw errorStmt("nome não aceito num DATABASE LINK: " + refused.get());
         }
         return linkClient.query(linkDef, axonql);
     }
@@ -5703,6 +5730,8 @@ return score;
     }
 
     private AxonValue runShowSagaTransaction(ShowSagaTransaction st) {
+        // o ledger é lido com sessão interna: o escopo de quem pergunta é conferido antes
+        sagaLedger.requireReach(session.auth(), st.correlationId());
         // Query the saga ledger
         AxonValue saga = ds.execute(
             "SELECT * FROM saga WHERE correlation_id = \"" + SagaLedger.esc(st.correlationId()) + "\"",
@@ -5719,10 +5748,12 @@ return score;
 
     private AxonValue runBeginSaga(BeginSaga bs) {
         sagaLedger.ensureTables();
+        // reabrir a correlação de outro escopo tomaria a SAGA dele
+        sagaLedger.requireReach(session.auth(), bs.correlationId());
         Datastore.SagaDef definition = ds.saga(bs.name());
         String linkNamespace = session.namespace() == null ? "" : session.namespace();
         sagaLedger.beginSaga(bs.name(), bs.correlationId(), definition == null ? List.of() : definition.links(),
-            linkNamespace);
+            linkNamespace, session.database() == null ? "" : session.database());
         coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false, session.namespace());
         return AxonValue.object(Map.of(
             "saga", AxonValue.str(bs.name()),
@@ -5738,6 +5769,8 @@ return score;
      * @return o estado encontrado
      */
     private String requireSaga(String name, String correlationId, boolean resumable) {
+        // antes de tudo: o estado e o nome de uma SAGA fora do escopo não são revelados
+        sagaLedger.requireReach(session.auth(), correlationId);
         Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
         AxonValue value = record == null ? null : record.get("status");
         String status = value != null && value.isString() ? value.asString() : "";
@@ -5771,7 +5804,7 @@ return score;
             coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true,
                 linkNamespace(cs.correlationId()));
         }
-        sagaLedger.cancelSaga(cs.name(), cs.correlationId());
+        sagaLedger.cancelSaga(cs.name(), cs.correlationId(), session);
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
     }
 
@@ -5812,9 +5845,9 @@ return score;
         if (reverse) {
             java.util.Collections.reverse(links);
         }
-        String quotedName = com.axonbase.parser.Render.sagaName(sagaName);
-        String statement = action + " SAGA " + quotedName + " WITH CORRELATION '"
-            + SagaLedger.esc(correlationId) + "'";
+        String statement = sagaCommandText(sagaCommand(action, sagaName, correlationId));
+        String show = "BEGIN".equals(action)
+            ? null : sagaCommandText(new ShowSagaTransaction(sagaName, correlationId));
         for (String linkName : links) {
             Datastore.DatabaseLinkDef link = ds.databaseLink(linkNamespace, linkName);
             if (link == null) {
@@ -5823,9 +5856,8 @@ return score;
             try {
                 // Participant cancellation owns its local steps. Mirror them first as
                 // reporting-only records so the orchestrator never compensates them again.
-                if (!"BEGIN".equals(action)) {
-                    List<AxonValue> transaction = linkClient.query(link,
-                        "SHOW SAGA TRANSACTION " + quotedName + " '" + SagaLedger.esc(correlationId) + "'");
+                if (show != null) {
+                    List<AxonValue> transaction = linkClient.query(link, show);
                     if (!transaction.isEmpty() && transaction.get(0).isObject()) {
                         AxonValue steps = transaction.get(0).asObject().get("steps");
                         if (steps != null && steps.isArray()) {
@@ -5838,6 +5870,33 @@ return score;
                 throw errorStmt(Messages.get("stmt_saga_participant_failed", linkName, action, e.getMessage()));
             }
         }
+    }
+
+    private static Statement sagaCommand(String action, String name, String correlationId) {
+        return switch (action) {
+            case "BEGIN" -> new BeginSaga(name, correlationId);
+            case "COMMIT" -> new CommitSaga(name, correlationId);
+            case "CANCEL" -> new CancelSaga(name, correlationId);
+            default -> throw new IllegalStateException(action);
+        };
+    }
+
+    /**
+     * O texto que segue por um DATABASE LINK para coordenar uma SAGA. Como numa escrita encaminhada, é uma única
+     * sentença do tipo montado; relida, ela precisa ter o mesmo nome e a mesma correlação.
+     */
+    private String sagaCommandText(Statement command) {
+        String text = com.axonbase.parser.Render.stmt(command);
+        List<Statement> parsed;
+        try {
+            parsed = AxonQl.parse(text).statements();
+        } catch (RuntimeException e) {
+            throw errorStmt(e.getMessage());
+        }
+        if (parsed.size() != 1 || !command.equals(parsed.get(0))) {
+            throw errorStmt("comando de SAGA não aceito num DATABASE LINK: " + text);
+        }
+        return text;
     }
 
     // ------------------------------------------------------------------
@@ -6248,6 +6307,9 @@ return score;
 
     /** Injeta nos campos do novo registro os valores mapeados pelas data rules do usuário. */
     private void injectDataRuleFields(Map<String, AxonValue> obj) {
+        if (session.compensation() != null) {
+            return;
+        }
         for (var entry : dataRuleInjections().entrySet()) {
             AxonValue value = asPolicy(() -> eval(entry.getValue()));
             if (value != null && !value.isNone()) {
@@ -6326,6 +6388,7 @@ return score;
 
     /** Retorna true se o documento passa pelo filtro das Data Rules. */
     private boolean dataRuleFilter(Document doc) {
+        if (session.compensation() != null && compensates(doc.id().table())) return true;
         List<Expr> predicates = dataRulePredicates();
         if (predicates.isEmpty()) return true;
         Expr combined = predicates.size() == 1 ? predicates.get(0)

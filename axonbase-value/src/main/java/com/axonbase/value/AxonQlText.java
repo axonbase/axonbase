@@ -63,8 +63,17 @@ public final class AxonQlText {
         if (name == null) {
             throw new IllegalArgumentException("identificador AxonQL nulo");
         }
-        if (isBare(name)) {
-            return name;
+        return isBare(name) ? name : quotedIdentifier(name);
+    }
+
+    /**
+     * Nome sempre entre crases, ou entre {@code ⟨ ⟩} quando ele tem crase, mesmo que seja simples.
+     *
+     * @throws IllegalArgumentException nome nulo, ou com crase e {@code ⟩} ao mesmo tempo (não há como citar)
+     */
+    public static String quotedIdentifier(String name) {
+        if (name == null) {
+            throw new IllegalArgumentException("identificador AxonQL nulo");
         }
         if (name.indexOf('`') < 0) {
             return "`" + name + "`";
