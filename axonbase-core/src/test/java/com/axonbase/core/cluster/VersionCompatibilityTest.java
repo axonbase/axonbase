@@ -59,6 +59,22 @@ class VersionCompatibilityTest {
     }
 
     @Test
+    @DisplayName("o pré-lançamento vem antes da versão final: não há volta da final nem de uma candidata mais nova")
+    void prereleaseComesBeforeTheFinalVersion() {
+        assertFalse(check("1.0.0-rc1", "1.0.0", "1.0.0", "1.0.0").allowed());
+        assertFalse(check("1.0.0-rc1", "1.0.0-rc2", "1.0.0-rc2", "1.0.0-rc2").allowed());
+        assertFalse(check("1.0.0-rc2", "1.0.0-rc10", "1.0.0-rc10", "1.0.0-rc10").allowed());
+        assertTrue(check("1.0.0-rc2", "1.0.0-rc1", "1.0.0-rc1", "1.0.0-rc1").allowed());
+        assertTrue(check("1.0.0-rc10", "1.0.0-rc2", "1.0.0-rc2", "1.0.0-rc2").allowed());
+        assertTrue(check("1.0.0", "1.0.0-rc2", "1.0.0-rc2", "1.0.0-rc2").allowed());
+        assertTrue(check("1.0.0-rc1", "1.0.0-SNAPSHOT").problems().size() == 1);
+        // metadado de build não muda a ordem nem conta como outra versão
+        assertTrue(check("1.0.0+build.7", "1.0.0", "1.0.0", "1.0.0").allowed());
+        // candidatas e final são versões diferentes: três ao mesmo tempo não são permitidas
+        assertFalse(check("1.0.0", "1.0.0-rc2", "1.0.0-rc1", "1.0.0-rc1").allowed());
+    }
+
+    @Test
     @DisplayName("recusa entradas que não entende")
     void invalidInput() {
         assertFalse(check("um", "0.10.1").allowed());

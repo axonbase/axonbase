@@ -66,6 +66,23 @@ class InstallFilesTest {
     }
 
     @Test
+    void testeDoClusterSobeAImagemCompiladaDoCodigoLocalNumProjetoProprio() throws IOException {
+        String script = read("tests/cluster/cluster.sh");
+        String override = read("tests/cluster/docker-compose.build.yml");
+
+        assertTrue(script.contains("-f tests/cluster/docker-compose.build.yml"));
+        // o teste termina com down --volumes: não pode usar o projeto do cluster do usuário
+        assertTrue(script.contains("-p axonbase-cluster-test"));
+        assertTrue(override.contains("image: axonbase/axonbase:cluster-test"));
+        assertTrue(override.contains("context: ."));
+    }
+
+    @Test
+    void notasNaoPrometemPortaPadraoParaORaft() throws IOException {
+        assertFalse(read("docs/notas-1.0.0-rc1.md").contains("9000 por padrão"));
+    }
+
+    @Test
     void conferenciaDeVersoesIncluiOComposeEOReadme() throws IOException {
         String script = read("scripts/check-versions.sh");
 
