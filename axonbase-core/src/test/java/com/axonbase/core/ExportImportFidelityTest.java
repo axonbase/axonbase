@@ -12,7 +12,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -57,13 +56,17 @@ class ExportImportFidelityTest {
             return target;
         }
 
-        /** Chave física para o texto guardado, só dos registros ({@code ns, db, tabela, chave}). */
+        /**
+         * Chave física para o texto guardado, só dos registros ({@code ns, db, tabela, chave}). Os campos saem em
+         * ordem alfabética: um DEFAULT entra depois do {@code id} na criação, e antes dele quando vem no dump.
+         */
         Map<String, String> rows() {
             Map<String, String> rows = new TreeMap<>();
             for (String key : backend.keysWithPrefix("test\u0000dev\u0000")) {
                 String[] parts = key.split("\u0000", -1);
                 if (parts.length == 4 && (parts[3].startsWith("n") || parts[3].startsWith("s"))) {
-                    rows.put(key, new String(backend.get(key).orElseThrow(), StandardCharsets.UTF_8));
+                    AxonValue record = AxonJson.decode(backend.get(key).orElseThrow());
+                    rows.put(key, AxonJson.write(AxonValue.object(new TreeMap<>(record.asObject()))));
                 }
             }
             return rows;
@@ -289,7 +292,8 @@ class ExportImportFidelityTest {
             engine.run(item(9));
             engine.run("UPDATE item:2 SET saldo = -50.75, cat = 'b', codigo = -22.5");
             engine.run("DELETE item:3");
-            engine.run("CREATE item:30 CONTENT {codigo: -3.5, saldo: -3.25, cat: 'a'}");
+            // o código da linha apagada volta a ficar livre
+            engine.run(item(30).replace("codigo: -30.5", "codigo: -3.5"));
         }
         assertSameAnswers(source, imported, unindexed);
         assertEquals(source.rows(), imported.rows());
