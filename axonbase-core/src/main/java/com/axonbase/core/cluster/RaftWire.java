@@ -30,6 +30,13 @@ public final class RaftWire {
     public static final byte READ_INDEX = 6;
     /** Um learner se apresenta ao líder. {@code index} é a última entrada que ele tem. */
     public static final byte JOIN = 7;
+    /** O líder pede ao destinatário que abra uma eleição já (transferência de liderança). */
+    public static final byte TIMEOUT_NOW = 8;
+    /** Pergunta o nível de protocolo, que volta em {@code matchIndex}. Um nó antigo recusa. */
+    public static final byte PEER_INFO = 9;
+
+    /** Nível de protocolo deste build: 3 entende {@link #TIMEOUT_NOW} e {@link #PEER_INFO}. */
+    public static final int PROTOCOL_LEVEL = 3;
 
     private static final int MAX_PAYLOAD = 1 << 30;
 

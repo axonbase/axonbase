@@ -112,7 +112,7 @@ Mudanças da versão 3: o carimbo de tempo dos lotes está decidido (relógio h�
 
 **Entregas**
 - Prioridade por tipo de carga (QoS, Quality of Service): análises não degradam as transações.
-- Atualização com um nó de cada vez.
+- Atualização com um nó de cada vez entre versões novas. Da 0.10.x, só com os três nós parados.
 - Testes de caos: matar o líder, partir a rede, matar durante backup e durante restore.
 - Exercício de recuperação de desastre (DR, Disaster Recovery) automatizado: perda total do cluster, restaurar do MinIO e a um instante.
 
@@ -172,7 +172,7 @@ O HLC viaja em toda mensagem entre gateway e shards, com a regra de recebimento 
 
 O `RaftPayload` escreve o indicador de snapshot por último, e o decodificador só o lê se ainda houver bytes. Basta acrescentar `(físico: long, lógico: int)` depois dele.
 
-- **Nó antigo lendo entrada nova:** ignora os bytes finais, então a atualização de uma versão para outra funciona.
+- **Nó antigo lendo entrada nova:** ignora os bytes finais, então o formato é lido nos dois sentidos. Isso não torna suportada a atualização um nó de cada vez a partir da 0.10.x, que é só com os três nós parados (veja [operacao-e-resiliencia.md](operacao-e-resiliencia.md#atualização-um-nó-de-cada-vez)).
 - **Nó novo lendo entrada antiga (0.9.x):** não encontra carimbo e trata como "sem carimbo". O PITR só alcança instantes a partir do primeiro lote estampado, e isso será documentado.
 - **O log Raft em arquivo** não muda, porque o carimbo vive dentro do payload. O journal de PITR é um formato novo, com versão no cabeçalho.
 

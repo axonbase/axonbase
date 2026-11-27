@@ -908,7 +908,24 @@ public final class Datastore {
     // Execução
     // ------------------------------------------------------------------
 
+    /** Liga a prioridade por tipo de carga (QoS); {@code null} desliga. */
+    public void workloadGovernor(com.axonbase.core.qos.WorkloadGovernor governor) {
+        this.workloadGovernor = governor;
+    }
+
+    private volatile com.axonbase.core.qos.WorkloadGovernor workloadGovernor;
+
     public AxonValue execute(String sql, Session session, Map<String, AxonValue> vars) {
+        var governor = workloadGovernor;
+        if (governor == null) {
+            return executeAdmitted(sql, session, vars);
+        }
+        try (var admitted = governor.admit(sql, session)) {
+            return executeAdmitted(sql, session, vars);
+        }
+    }
+
+    private AxonValue executeAdmitted(String sql, Session session, Map<String, AxonValue> vars) {
         if (commitCoordinator != null && !session.inTransaction() && isMutation(sql)) {
             return autocommit(session, () -> {
                 var exec = new Executor(this);
@@ -933,6 +950,23 @@ public final class Datastore {
         return new Executor(this).executePartial(select, session, vars);
     }
 
+    /**
+     * O mesmo, passando pela prioridade por tipo de carga: a parte de um shard disputa vaga e processador como a
+     * consulta inteira faria.
+     *
+     * @param sql o texto recebido, que o governador usa para classificar a consulta
+     */
+    public AxonValue executePartial(String sql, Statement.Select select, Session session,
+                                    Map<String, AxonValue> vars) {
+        var governor = workloadGovernor;
+        if (governor == null) {
+            return executePartial(select, session, vars);
+        }
+        try (var admitted = governor.admit(sql, session)) {
+            return executePartial(select, session, vars);
+        }
+    }
+
     /** Tentativas de um comando avulso no cluster quando outro confirma antes sobre as mesmas chaves. */
     private static final int AUTOCOMMIT_ATTEMPTS = 100;
 
@@ -943,6 +977,13 @@ public final class Datastore {
      * fez uma chamada para fora do banco ({@link ExternalCalls}).
      */
     private <T> T autocommit(Session session, java.util.function.Supplier<T> work) {
+        // durante uma transferência de liderança a escrita espera aqui, antes de executar qualquer coisa
+        try (var admitted = commitCoordinator.admitWrite()) {
+            return autocommitAdmitted(session, work);
+        }
+    }
+
+    private <T> T autocommitAdmitted(Session session, java.util.function.Supplier<T> work) {
         for (int attempt = 1; ; attempt++) {
             beginSession(session);
             boolean committing = false;
@@ -963,6 +1004,15 @@ public final class Datastore {
                 // Espera curta e sorteada para os concorrentes não voltarem todos juntos.
                 java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
                     .nextLong(1_000_000L * Math.min(attempt, 10)));
+            } catch (com.axonbase.core.cluster.NotLeaderException moved) {
+                if (session.inTransaction()) {
+                    cancelSession(session);
+                }
+                // O redirecionamento faria o cliente repetir, e a chamada para fora aconteceria de novo.
+                if (ExternalCalls.count() != outbound) {
+                    throw new AxonError(-32000, Messages.get("txn_external_not_retried", moved.getMessage()), moved);
+                }
+                throw moved;
             } catch (RuntimeException e) {
                 if (session.inTransaction()) {
                     cancelSession(session);

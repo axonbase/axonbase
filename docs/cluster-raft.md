@@ -119,11 +119,11 @@ Restaurar ou importar um backup físico pela API continua recusado em cluster: t
 
 ## Carimbo de tempo
 
-Cada entrada do log leva um carimbo de um relógio híbrido, o HLC (Hybrid Logical Clock). O líder carimba ao propor, e seguidores e learners adotam o carimbo recebido, então a ordem do log é a ordem dos carimbos mesmo depois de uma troca de líder. Um lote que chegue mais de 500 ms à frente do relógio local é recusado e reenviado: sincronize os nós com o `chrony`. O journal de restauração a um instante não é ligado em cluster. Detalhes em [pitr.md](pitr.md#o-carimbo-de-tempo).
+Cada entrada do log leva um carimbo de um relógio híbrido, o HLC (Hybrid Logical Clock). O líder carimba ao propor, e seguidores e learners adotam o carimbo recebido, então a ordem do log é a ordem dos carimbos mesmo depois de uma troca de líder. Um lote que chegue mais de 500 ms à frente do relógio local é recusado e reenviado: sincronize os nós com o `chrony`. Com `AXON_PITR=on`, cada nó arquiva os lotes confirmados para a [recuperação de desastre](operacao-e-resiliencia.md#recuperação-de-desastre). Detalhes do carimbo em [pitr.md](pitr.md#o-carimbo-de-tempo).
 
 ## Compatibilidade na atualização
 
-Atualize um nó de cada vez. Um líder novo percebe um membro antigo e fala com ele o protocolo anterior (uma entrada por conexão), e um membro novo continua aceitando um líder antigo. Enquanto houver nó antigo, a vazão de replicação para ele é a da versão anterior. Com líder antigo, os seguidores novos não atendem `linearizable` nem `max-lag` (o líder antigo não responde à consulta); `stale`, o padrão, continua funcionando. Requisições com outro `AXON_CLUSTER_ID` são recusadas.
+O roteiro de atualização, a drenagem, a transferência de liderança e os riscos de misturar versões estão em [operacao-e-resiliencia.md](operacao-e-resiliencia.md). Da 0.10.x ou anterior, atualize só com os três nós parados: um nó de cada vez a partir dessas versões não é suportado, porque elas podem [confirmar escritas sem gravar](operacao-e-resiliencia.md#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar). Entre versões novas, atualize um nó de cada vez. O motor ainda entende o protocolo anterior (um líder novo fala com um membro antigo uma entrada por conexão, e um membro novo aceita um líder antigo), o que reduz o dano de uma mistura de versões, mas não a torna suportada. Enquanto houver nó antigo, a vazão de replicação para ele é a da versão anterior. Com líder antigo, os seguidores novos não atendem `linearizable` nem `max-lag` (o líder antigo não responde à consulta); `stale`, o padrão, continua funcionando. Requisições com outro `AXON_CLUSTER_ID` são recusadas.
 
 ## Limites conhecidos
 

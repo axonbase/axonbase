@@ -24,12 +24,18 @@ public final class LearnerBootstrap {
 
     /**
      * Restaura o backup mais novo de {@code backupDir} em {@code dataDir}, se este estiver vazio ou não existir.
+     * A restauração é feita ao lado e trocada no fim: um processo morto no meio deixa {@code dataDir} sem base, e a
+     * chamada seguinte recomeça.
      *
      * @return o ponto do log restaurado, ou vazio quando {@code dataDir} já tem uma base (que não é tocada)
      * @throws IllegalStateException se não há backup ou se ele não veio de um nó de cluster
      */
     public static Optional<RaftApplier.Applied> restore(Path backupDir, Path dataDir) {
-        if (hasFiles(dataDir)) {
+        boolean existed = Files.isDirectory(dataDir);
+        if (existed) {
+            PhysicalBackups.recoverInterruptedSwap(dataDir);
+        }
+        if (hasData(dataDir)) {
             return Optional.empty();
         }
         if (!Files.isDirectory(backupDir)) {
@@ -43,25 +49,30 @@ public final class LearnerBootstrap {
             }
             latest = all.getLast().id();
         }
-        PhysicalBackups.restore(backupDir, latest, dataDir);
+        Path prepared = PhysicalBackups.prepareRestore(backupDir, latest, dataDir);
         Optional<RaftApplier.Applied> applied;
-        try (RocksDbBackend restored = new RocksDbBackend(dataDir.toString(), RocksDbBackend.SyncMode.OFF)) {
+        try (RocksDbBackend restored = new RocksDbBackend(prepared.toString(), RocksDbBackend.SyncMode.OFF)) {
             applied = RaftApplier.applied(restored);
         }
         if (applied.isEmpty()) {
-            delete(dataDir);
+            PhysicalBackups.discardPrepared(dataDir);
+            if (!existed) {
+                delete(dataDir);
+            }
             throw new IllegalStateException("o backup " + latest + " de " + backupDir
                 + " não veio de um nó de cluster: não diz em que ponto do log foi tirado");
         }
+        PhysicalBackups.commitPrepared(dataDir);
         return applied;
     }
 
-    private static boolean hasFiles(Path directory) {
+    /** Há uma base: algum arquivo que não seja do mecanismo de troca, cujos nomes começam com ponto. */
+    private static boolean hasData(Path directory) {
         if (!Files.isDirectory(directory)) {
             return false;
         }
         try (Stream<Path> files = Files.list(directory)) {
-            return files.findAny().isPresent();
+            return files.anyMatch(file -> !file.getFileName().toString().startsWith("."));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

@@ -189,6 +189,11 @@ final class PitrApi {
     private static void windows(AxonServer srv, HttpServletRequest req, HttpServletResponse resp)
             throws IOException {
         RocksDbBackend rocks = PhysicalBackupApi.rocks(srv);
+        if (PhysicalBackupApi.clustered(srv)) {
+            // as janelas se medem pelo índice do nó único; em cluster a restauração a um instante é a do DR
+            AdminV1Servlet.write(resp, 200, AdminJson.obj("windows", List.of()));
+            return;
+        }
         String source = req.getParameter("source");
         List<SegmentInfo> segments = segments(srv, rocks, source);
         Path journalDir = root(srv, rocks, source, false);

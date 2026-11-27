@@ -28,6 +28,22 @@ public interface CommitCoordinator {
         return true;
     }
 
+    /** A admissão de uma escrita; fechá-la diz que ela terminou. */
+    interface WritePermit extends AutoCloseable {
+        WritePermit NONE = () -> { };
+
+        @Override
+        void close();
+    }
+
+    /**
+     * Chamado antes de executar uma escrita avulsa de cliente. Durante uma transferência de liderança, segura a
+     * escrita; se o nó deixar de liderar, lança {@link NotLeaderException} sem que nada tenha sido executado.
+     */
+    default WritePermit admitWrite() {
+        return WritePermit.NONE;
+    }
+
     /** O consenso aplica o lote confirmado neste armazenamento, então quem chamou não deve regravá-lo. */
     default boolean appliesTo(KvBackend backend) {
         return false;

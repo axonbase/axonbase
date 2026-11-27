@@ -173,6 +173,25 @@ public final class PhysicalBackups implements AutoCloseable {
         return Path.of(options.backupDir());
     }
 
+    /**
+     * A marca de um backup lida direto do manifesto {@code meta/<id>}, sem abrir o {@code BackupEngine}, que não pode
+     * ser aberto por dois processos ao mesmo tempo. {@link CommitWatermark#NONE} se o manifesto não a traz.
+     */
+    public static CommitWatermark watermarkOfMeta(Path metaFile) {
+        try {
+            for (String line : Files.readAllLines(metaFile, java.nio.charset.StandardCharsets.UTF_8)) {
+                if (line.startsWith("metadata ")) {
+                    String hex = line.substring("metadata ".length()).trim();
+                    return parseWatermark(new String(java.util.HexFormat.of().parseHex(hex),
+                        java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+            return CommitWatermark.NONE;
+        } catch (IOException | IllegalArgumentException e) {
+            throw new BackupFailedException("manifesto ilegível: " + metaFile, e);
+        }
+    }
+
     // ---- restore ----
 
     /**
@@ -248,6 +267,23 @@ public final class PhysicalBackups implements AutoCloseable {
             throw e;
         }
         return restoring;
+    }
+
+    /**
+     * Põe no lugar de {@code liveDir}, que não pode estar aberta, o diretório preparado por {@link #prepareRestore}.
+     * Uma queda no meio é desfeita na próxima abertura.
+     */
+    public static Path commitPrepared(Path liveDir) {
+        try {
+            return DirectorySwap.swap(liveDir, DirectorySwap.restoringDir(liveDir));
+        } catch (IOException e) {
+            try {
+                DirectorySwap.recover(liveDir);
+            } catch (IOException recoverFailed) {
+                e.addSuppressed(recoverFailed);
+            }
+            throw new BackupFailedException("falha ao trocar a base restaurada pela original", e);
+        }
     }
 
     /** Descarta o diretório preparado por {@link #prepareRestore} quando a troca desistiu. */

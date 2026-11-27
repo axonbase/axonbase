@@ -16,6 +16,15 @@ public interface ReplicationHooks {
     }
 
     /**
+     * A partir de que índice os ganchos precisam rever o que o nó já aplicou, por terem perdido numa queda o que
+     * só estava na memória. Ao instalá-los, o nó entrega por {@link #committed} as entradas aplicadas dali em
+     * diante que o log ainda guarda. {@link Long#MAX_VALUE} quando não há nada a rever.
+     */
+    default long replayFrom() {
+        return Long.MAX_VALUE;
+    }
+
+    /**
      * No líder, sob a trava que atribui o índice: a ordem das chamadas é a ordem do log. Também carimba o lote
      * de um snapshot antes do envio, porque quem o recebe pula as entradas que ele cobre.
      */

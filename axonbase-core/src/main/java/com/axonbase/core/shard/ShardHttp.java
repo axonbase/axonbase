@@ -6,6 +6,7 @@ import com.axonbase.core.cluster.NotLeaderException;
 import com.axonbase.core.cluster.QuorumUnavailableException;
 import com.axonbase.core.cluster.StaleReadException;
 import com.axonbase.core.hlc.ClockDriftException;
+import com.axonbase.core.qos.QosCodes;
 import com.axonbase.core.storage.VersionConflictException;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
@@ -53,6 +54,10 @@ public final class ShardHttp {
         if (error instanceof ShardException shard) {
             return failure(409, "SHARD_" + shard.code().name(), error.getMessage(), null);
         }
+        if (error instanceof AxonError axon && axon.code() == QosCodes.REJECTED) {
+            // sem vaga para a consulta: nada foi executado, o gateway pode repetir
+            return failure(503, "OVERLOADED", error.getMessage(), null);
+        }
         int code = error instanceof AxonError axon ? axon.code() : -32000;
         return failure(code == -32002 ? 403 : 400, "ERR", error.getMessage(), String.valueOf(code));
     }
@@ -67,6 +72,10 @@ public final class ShardHttp {
 
     /** A exceção que uma resposta de erro representa do lado do gateway. */
     public static RuntimeException error(String shard, int status, String body) {
+        // o filtro de admissão do nó recusa antes de executar, com um corpo que não é o desta rota
+        if (status == 503 && body != null && body.contains("\"kind\":\"OVERLOADED\"")) {
+            return overloaded(shard, body);
+        }
         String code = "";
         String message = body;
         String detail = "";
@@ -84,6 +93,7 @@ public final class ShardHttp {
             case "NO_QUORUM" -> new QuorumUnavailableException(shard);
             case "STALE_READ" -> new StaleReadException(message);
             case "CONFLICT" -> new VersionConflictException(message, "");
+            case "OVERLOADED" -> overloaded(shard, message);
             case "ERR" -> new AxonError(detail.isEmpty() ? -32000 : Integer.parseInt(detail), message);
             default -> {
                 if (code.startsWith("SHARD_")) {
@@ -93,5 +103,10 @@ public final class ShardHttp {
                     "shard " + shard + " respondeu " + status + ": " + message);
             }
         };
+    }
+
+    /** Um nó cheio não executou nada: para o cliente do grupo é o mesmo que um nó inalcançável, que se repete. */
+    private static RuntimeException overloaded(String shard, String detail) {
+        return new ShardUnreachableException("shard " + shard + " ocupado: " + detail, null);
     }
 }

@@ -49,9 +49,11 @@ public final class MixedVersionNode {
                     }
                     String key = "k-" + id + "-" + life + "-" + sequence++;
                     try {
-                        node.confirm(id, new CommittedBatch(key,
+                        long returned = node.confirm(id, new CommittedBatch(key,
                             Map.of(key, key.getBytes(StandardCharsets.UTF_8)), Set.of()));
-                        say("ACK " + key);
+                        // diagnóstico: onde o líder estava quando confirmou
+                        say("ACK " + key + " " + returned + " " + node.commitIndex() + " " + node.lastIndex() + " "
+                            + node.status().term());
                         sleep(5);
                     } catch (RuntimeException notConfirmed) {
                         sleep(20);
@@ -60,7 +62,8 @@ public final class MixedVersionNode {
             });
             Thread.ofPlatform().daemon().start(() -> {
                 while (running.get()) {
-                    say("STATE " + node.role() + " " + node.commitIndex() + " " + node.lastIndex());
+                    say("STATE " + node.role() + " " + node.commitIndex() + " " + node.lastIndex() + " "
+                        + node.status().term());
                     sleep(100);
                 }
             });
@@ -68,6 +71,8 @@ public final class MixedVersionNode {
             for (String line = in.readLine(); line != null && !line.equals("exit"); line = in.readLine()) {
                 if (line.equals("stop")) {
                     writing.set(false);
+                } else if (line.equals("go")) {
+                    writing.set(true);
                 } else if (line.startsWith("check ")) {
                     check(backend, Path.of(line.substring(6)));
                 }
@@ -80,8 +85,10 @@ public final class MixedVersionNode {
     /** Confere as chaves confirmadas (uma por linha) e imprime um resumo do conteúdo. */
     private static void check(RocksDbBackend backend, Path acknowledged) {
         try {
-            long lost = java.nio.file.Files.readAllLines(acknowledged).stream()
-                .filter(key -> backend.get(key).isEmpty()).count();
+            List<String> missing = java.nio.file.Files.readAllLines(acknowledged).stream()
+                .filter(key -> backend.get(key).isEmpty()).toList();
+            missing.forEach(key -> say("LOSTKEY " + key));
+            long lost = missing.size();
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             long keys = 0;
             for (String key : backend.keysWithPrefix("k-").stream().sorted().toList()) {

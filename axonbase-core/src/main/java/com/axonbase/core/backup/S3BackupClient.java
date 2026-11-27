@@ -8,6 +8,9 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -26,6 +29,9 @@ import java.util.regex.Pattern;
  * não materializar o payload inteiro em RAM.</p>
  */
 public final class S3BackupClient implements RemoteBackupStore {
+
+    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
+    private static final int READ_TIMEOUT_MILLIS = 120_000;
 
     private static final int CHUNK_SIZE = 8192;
 
@@ -125,12 +131,12 @@ public final class S3BackupClient implements RemoteBackupStore {
 
     /** Envia o arquivo em fluxo, com o tamanho declarado, sem carregá-lo na memória. */
     @Override
-    public void uploadFile(String bucket, String key, java.nio.file.Path file) throws java.io.IOException {
-        HttpURLConnection conn = withTimeouts(open("PUT", bucket, key, null));
+    public void uploadFile(String bucket, String key, Path file) throws java.io.IOException {
+        HttpURLConnection conn = open("PUT", bucket, key, null);
         conn.setDoOutput(true);
-        conn.setFixedLengthStreamingMode(java.nio.file.Files.size(file));
+        conn.setFixedLengthStreamingMode(Files.size(file));
         try (OutputStream out = conn.getOutputStream()) {
-            java.nio.file.Files.copy(file, out);
+            Files.copy(file, out);
         }
         try {
             check("upload", conn);
@@ -141,10 +147,13 @@ public final class S3BackupClient implements RemoteBackupStore {
         }
     }
 
-    /** Baixa o objeto em fluxo; {@code false} quando não existe. */
+    /**
+     * Baixa o objeto em fluxo; {@code false} quando não existe. O arquivo de destino só aparece inteiro: o
+     * conteúdo vai para um arquivo parcial e é conferido contra o tamanho declarado antes de ser renomeado.
+     */
     @Override
-    public boolean downloadFile(String bucket, String key, java.nio.file.Path target) throws java.io.IOException {
-        HttpURLConnection conn = withTimeouts(open("GET", bucket, key, null));
+    public boolean downloadFile(String bucket, String key, Path target) throws java.io.IOException {
+        HttpURLConnection conn = open("GET", bucket, key, null);
         int status = conn.getResponseCode();
         if (status == 404) {
             return false;
@@ -158,8 +167,17 @@ public final class S3BackupClient implements RemoteBackupStore {
                 throw AxonError.internal(Messages.get("backup_s3_download_failed", e.getMessage()));
             }
         }
+        Files.createDirectories(target.toAbsolutePath().getParent());
+        Path partial = target.resolveSibling(target.getFileName() + ".partial");
         try (InputStream in = conn.getInputStream()) {
-            java.nio.file.Files.copy(in, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            long copied = Files.copy(in, partial, StandardCopyOption.REPLACE_EXISTING);
+            long declared = conn.getContentLengthLong();
+            if (declared >= 0 && copied != declared) {
+                throw new java.io.IOException("download incompleto de " + key + ": " + copied + " de " + declared);
+            }
+            Files.move(partial, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } finally {
+            Files.deleteIfExists(partial);
         }
         return true;
     }
@@ -184,21 +202,21 @@ public final class S3BackupClient implements RemoteBackupStore {
         }
     }
 
-    /** Lista as chaves do bucket que começam com {@code prefix}, em ordem léxica. */
+    /** Lista as chaves do bucket que começam com {@code prefix}, em ordem léxica, seguindo todas as páginas. */
     public List<String> listObjects(String bucket, String prefix) {
         try {
             String encodedBucket = URLEncoder.encode(bucket, StandardCharsets.UTF_8);
             List<String> keys = new ArrayList<>();
-            String token = null;
+            String continuation = null;
             do {
-                // parâmetros em ordem alfabética, como a assinatura V4 exige
-                String query = "?";
-                if (token != null) {
-                    query += "continuation-token=" + encodeQuery(token) + "&";
+                // parâmetros em ordem alfabética: é a forma canônica que a assinatura exige
+                StringBuilder query = new StringBuilder("?");
+                if (continuation != null) {
+                    query.append("continuation-token=").append(encodeQuery(continuation)).append('&');
                 }
-                query += "list-type=2";
+                query.append("list-type=2");
                 if (prefix != null && !prefix.isBlank()) {
-                    query += "&prefix=" + encodeQuery(prefix);
+                    query.append("&prefix=").append(encodeQuery(prefix));
                 }
                 HttpURLConnection conn = openUrl("GET", endpoint + "/" + encodedBucket + query);
                 int status = conn.getResponseCode();
@@ -207,14 +225,31 @@ public final class S3BackupClient implements RemoteBackupStore {
                 }
                 String xml = new String(conn.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
                 keys.addAll(parseKeys(xml));
-                token = nextToken(xml);
-            } while (token != null);
+                continuation = nextPage(xml);
+            } while (continuation != null);
             return keys;
         } catch (AxonError e) {
             throw e;
         } catch (Exception e) {
             throw AxonError.internal(Messages.get("backup_s3_list_failed", e.getMessage()));
         }
+    }
+
+    private static String encodeQuery(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
+    /** O token da próxima página, ou {@code null} se a listagem acabou. */
+    private static String nextPage(String xml) {
+        if (!xml.contains("<IsTruncated>true</IsTruncated>")) {
+            return null;
+        }
+        Matcher token = Pattern.compile("<NextContinuationToken>(.*?)</NextContinuationToken>", Pattern.DOTALL)
+            .matcher(xml);
+        if (!token.find()) {
+            throw AxonError.internal(Messages.get("backup_s3_list_failed", "página sem token de continuação"));
+        }
+        return token.group(1).trim();
     }
 
     /** Apaga um objeto do bucket. */
@@ -235,26 +270,6 @@ public final class S3BackupClient implements RemoteBackupStore {
     // ------------------------------------------------------------------
     // conexão e autenticação
     // ------------------------------------------------------------------
-
-    /** Um armazenamento mudo não pode prender para sempre quem lê ou envia um objeto. */
-    private static HttpURLConnection withTimeouts(HttpURLConnection conn) {
-        conn.setConnectTimeout(30_000);
-        conn.setReadTimeout(120_000);
-        return conn;
-    }
-
-    private static String encodeQuery(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
-    }
-
-    /** O token da próxima página de uma listagem truncada, ou {@code null}. */
-    private static String nextToken(String xml) {
-        if (!xml.contains("<IsTruncated>true</IsTruncated>")) {
-            return null;
-        }
-        Matcher token = Pattern.compile("<NextContinuationToken>(.*?)</NextContinuationToken>").matcher(xml);
-        return token.find() ? token.group(1).trim() : null;
-    }
 
     private static boolean localEndpoint(String endpoint) {
         String host = endpoint.replace("https://", "").replace("http://", "");
@@ -293,6 +308,9 @@ public final class S3BackupClient implements RemoteBackupStore {
         try {
             var conn = (HttpURLConnection) new java.net.URL(rawUrl).openConnection();
             conn.setRequestMethod(method);
+            // um armazenamento que para de responder não pode prender o arquivamento nem a restauração para sempre
+            conn.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
+            conn.setReadTimeout(READ_TIMEOUT_MILLIS);
             if (basicAuth) {
                 String credentials = Base64.getEncoder().encodeToString(
                     (accessKey + ":" + secretKey).getBytes(StandardCharsets.UTF_8));

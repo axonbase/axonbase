@@ -147,6 +147,15 @@ public final class ShardGateway implements AutoCloseable {
                 mutations.relate(map, session, piece, unrelate.from(), unrelate.kind(), unrelate.to());
             case Statement.Live live -> throw ShardException.refused("cross_live");
             case Statement.Kill kill -> throw ShardException.refused("cross_live");
+            case Statement.Partition partition -> {
+                // partição e TTL só no shard base deixariam os outros sem a regra, sem aviso
+                String table = partition.command().table();
+                if (GatewayRules.databaseSharded(map, session) && GatewayRules.sharded(map, session, table)) {
+                    throw ShardException.refused("sharded_partition", table);
+                }
+                yield partition.command().readOnly()
+                    ? Plan.read(map.home().id(), piece.text()) : Plan.write(map.home().id(), piece.text());
+            }
             default -> {
                 // o resto (INFO, SHOW, DESCRIBE, CALL, IF...) é do shard base
                 GatewayRules.requireHomeOnly(map, session, statement);

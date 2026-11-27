@@ -86,6 +86,9 @@ public final class RaftNode implements AutoCloseable {
      */
     private void recover() {
         RaftApplier.Applied marker = durable ? RaftApplier.applied(stateMachine).orElse(null) : null;
+        if (marker != null && state.appliedTerm() == 0 && state.appliedIndex() > marker.index()) {
+            marker = refreshMarker(state.appliedIndex());
+        }
         if (marker != null) {
             applied = marker.index();
             appliedTerm = marker.term();
@@ -113,6 +116,21 @@ public final class RaftNode implements AutoCloseable {
             }
         }
         checkpointed = applied;
+    }
+
+    /**
+     * A 0.10.x não grava o marcador no armazenamento, e o estado que ela salva não traz o termo aplicado. Um nó que
+     * recebeu o marcador num snapshot e continuou rodando a versão antiga tem dados além dele: vale o índice do
+     * estado. Voltar ao marcador faria este nó aceitar como novos índices que os outros já aplicaram.
+     */
+    private RaftApplier.Applied refreshMarker(long index) {
+        long term = log.termAt(index);
+        if (index > log.lastIndex()) {
+            log.reset(index, term);
+        }
+        stateMachine.applyReplicated(Map.of(RaftApplier.APPLIED_KEY, RaftApplier.marker(index, term)),
+            java.util.Set.of());
+        return new RaftApplier.Applied(index, term);
     }
 
     private void replay(long through) {
@@ -184,12 +202,27 @@ public final class RaftNode implements AutoCloseable {
             new CommittedBatch("estado-" + applied, values, java.util.Set.of(), true), Map.of());
     }
 
-    /** Instala os pontos de extensão da replicação e mostra a eles a entrada mais recente do log. */
+    /**
+     * Instala os pontos de extensão da replicação, mostra a eles a entrada mais recente do log e reentrega o que já
+     * foi aplicado e eles pedem para rever ({@link ReplicationHooks#replayFrom}).
+     */
     public synchronized void hooks(ReplicationHooks hooks) {
         this.hooks = hooks == null ? ReplicationHooks.NONE : hooks;
         FileRaftLog.Entry tail = log.entry(log.lastIndex());
         if (tail != null) {
             this.hooks.recovered(tail.batch());
+        }
+        applyLock.lock();
+        try {
+            for (long i = Math.max(this.hooks.replayFrom(), log.firstIndex());
+                 i <= Math.min(applied, log.lastIndex()); i++) {
+                FileRaftLog.Entry entry = log.entry(i);
+                if (entry != null) {
+                    this.hooks.committed(i, entry.term(), entry.batch());
+                }
+            }
+        } finally {
+            applyLock.unlock();
         }
     }
 
@@ -297,8 +330,11 @@ public final class RaftNode implements AutoCloseable {
         }
         RaftPayload.Vote candidate = RaftPayload.decodeVote(request.payload());
         long localTerm = log.termAt(log.lastIndex());
-        boolean upToDate = candidate.lastTerm() > localTerm
-            || candidate.lastTerm() == localTerm && candidate.lastIndex() >= log.lastIndex();
+        // Um líder precisa ter tudo o que foi confirmado. A 0.10.x apaga o log ao receber um snapshot e o refaz com o
+        // mandato atual: sem a segunda condição, ela venceria pelo mandato com um log menor que o já aplicado aqui.
+        boolean upToDate = (candidate.lastTerm() > localTerm
+            || candidate.lastTerm() == localTerm && candidate.lastIndex() >= log.lastIndex())
+            && candidate.lastIndex() >= applied;
         boolean free = state.votedFor().isEmpty() || state.votedFor().equals(request.leaderOrCandidate());
         if (free && upToDate) {
             state.vote(request.term(), request.leaderOrCandidate());
@@ -349,7 +385,7 @@ public final class RaftNode implements AutoCloseable {
     /** Protocolo antigo: uma entrada por requisição, gravada com o termo da requisição. */
     private Received legacyAppend(RaftWire.Request request) {
         if (request.payload().length == 0) {
-            return new Received(true, -1, 0, Math.min(request.commitIndex(), log.lastIndex()));
+            return new Received(true, -1, 0, checkedCommit(request));
         }
         RaftPayload.Append append;
         boolean legacy = false;
@@ -361,12 +397,25 @@ public final class RaftNode implements AutoCloseable {
                 RaftPayload.decode(request.payload()));
         }
         long previous = append.previousIndex();
-        if (previous != 0 && previous > applied && log.termAt(previous) != append.previousTerm()) {
+        if (previous != 0 && previous > applied && log.termAt(previous) != append.previousTerm()
+            && !storedFromThisLeader(previous, append.previousTerm(), request.term())) {
             return Received.rejected();
         }
         long index = request.index();
+        // Entrada confirmada não muda. Quem manda outra no lugar não a tem, e o aceite daqui faria esse líder
+        // confirmar ao cliente uma escrita que nenhum nó vai aplicar.
+        if (index <= applied && !sameContent(index, append.batch())) {
+            if (log.termAt(index) != request.term()) {
+                // A confirmada é de outro mandato: o líder não tem a história. Só recusar o prenderia no laço de
+                // recuo da 0.10.x, calando os batimentos; um mandato à frente o tira do cargo.
+                state.vote(request.term() + 1, "");
+            }
+            return Received.rejected();
+        }
         if (index > applied) {
-            if (index <= log.lastIndex() && log.termAt(index) != request.term()) {
+            // O líder antigo apaga uma escrita sem quórum e grava outra no mesmo índice e mandato: vale o conteúdo.
+            if (index <= log.lastIndex()
+                && (log.termAt(index) != request.term() || !sameContent(index, append.batch()))) {
                 truncate(index);
             }
             if (index > log.lastIndex()) {
@@ -380,15 +429,66 @@ public final class RaftNode implements AutoCloseable {
                 log.append(new FileRaftLog.Entry(index, request.term(), append.batch()));
             }
         }
-        return new Received(true, -1, Math.min(index, log.lastIndex()),
-            Math.min(request.commitIndex(), log.lastIndex()));
+        // Só se aplica até a entrada que este pedido conferiu: o que vem depois dela ainda não foi comparado.
+        long checked = Math.min(index, log.lastIndex());
+        return new Received(true, -1, checked, Math.min(request.commitIndex(), checked));
+    }
+
+    /**
+     * O batimento antigo traz o índice confirmado sem entrada anterior para conferir. Aplica-se só até a última
+     * entrada gravada com o mandato deste líder: ela veio dele, e com ela o que está antes. Uma cauda de outro
+     * mandato pode ser uma escrita que nunca se confirmou.
+     */
+    private long checkedCommit(RaftWire.Request request) {
+        long index = Math.min(request.commitIndex(), log.lastIndex());
+        while (index > applied && log.termAt(index) != request.term()) {
+            index--;
+        }
+        return index;
+    }
+
+    /**
+     * O protocolo antigo grava cada entrada com o termo do pedido. Uma entrada reenviada de um mandato anterior fica
+     * aqui com o termo do líder atual, e ele, na entrada seguinte, informa o termo verdadeiro: sem esta exceção a
+     * conferência falharia para sempre. Só um líder há por mandato, então uma entrada gravada com o termo dele veio
+     * dele; e ele nunca reescreve uma entrada de mandato anterior.
+     *
+     * <p>O termo gravado não muda: rebaixá-lo faria este nó parecer mais atrasado que os membros antigos e entregar
+     * a eleição a um deles com menos dados.</p>
+     */
+    private boolean storedFromThisLeader(long index, long claimed, long leaderTerm) {
+        return claimed < leaderTerm && index <= log.lastIndex() && log.termAt(index) == leaderTerm;
+    }
+
+    /** O lote no índice é o mesmo do pedido, sem olhar o carimbo, que um nó antigo no caminho não repassa. */
+    private boolean sameContent(long index, CommittedBatch incoming) {
+        FileRaftLog.Entry stored = log.entry(index);
+        if (stored == null) {
+            return true;
+        }
+        CommittedBatch batch = stored.batch();
+        return batch.transactionId().equals(incoming.transactionId())
+            && batch.fullSnapshot() == incoming.fullSnapshot() && batch.deletes().equals(incoming.deletes())
+            && batch.puts().keySet().equals(incoming.puts().keySet())
+            && batch.puts().entrySet().stream()
+                .allMatch(put -> java.util.Arrays.equals(put.getValue(), incoming.puts().get(put.getKey())));
     }
 
     private Received snapshot(RaftWire.Request request) {
         // O payload do snapshot é um batch atômico do state machine no índice pedido.
         long index = request.index();
+        // O líder conta como entregue o snapshot aceito. Um que fica atrás deste nó e não traz o marcador dele vem de
+        // um líder antigo que não tem o que já foi confirmado.
+        if (index <= applied && !describesIndex(RaftPayload.decode(request.payload()), index)) {
+            return Received.rejected(applied);
+        }
         if (index > applied) {
             CommittedBatch batch = RaftPayload.decode(request.payload());
+            // O líder anterior à fase E2 manda o estado já aplicado com o índice do fim do log dele. Num nó com
+            // dados isso marcaria como aplicadas entradas que não vieram; recusado, o líder segue entrada a entrada.
+            if (!describesIndex(batch, index) && (applied > 0 || log.lastIndex() > 0)) {
+                return Received.rejected(applied);
+            }
             if (!hooks.accept(batch)) {
                 return Received.rejected(applied);
             }
@@ -413,6 +513,12 @@ public final class RaftNode implements AutoCloseable {
             }
         }
         return new Received(true, -1, 0, 0);
+    }
+
+    /** O snapshot diz, no próprio estado, que ele é o daquele índice (o formato desde a fase E2). */
+    private static boolean describesIndex(CommittedBatch snapshot, long index) {
+        return RaftApplier.decodeMarker(snapshot.puts().get(RaftApplier.APPLIED_KEY))
+            .map(marker -> marker.index() == index).orElse(false);
     }
 
     private void truncate(long index) {

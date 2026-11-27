@@ -10,6 +10,7 @@ import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.core.storage.WalBackend;
 import com.axonbase.core.storage.VersionedKvBackend;
 import com.axonbase.core.cluster.ClockHooks;
+import com.axonbase.core.cluster.ReplicationHooks;
 import com.axonbase.core.cluster.ClusterConfig;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.TcpRaftCommitCoordinator;
@@ -96,6 +97,9 @@ public final class Main {
             return;
         }
 
+        // um valor mal escrito derruba o processo aqui, antes de abrir a base, uma porta ou um nó no cluster
+        AxonServer.validateSettings(System::getenv);
+
         // Réplica de leitura: recebe o log, não vota. A base pode vir de um backup físico de um membro.
         boolean learner = "true".equalsIgnoreCase(System.getenv("AXON_RAFT_LEARNER"));
         String bootstrapBackup = System.getenv("AXON_RAFT_BOOTSTRAP_BACKUP");
@@ -116,12 +120,10 @@ public final class Main {
             default -> new RocksDbBackend(path);
         };
 
-        // o journal entra antes do Datastore, para arquivar também as escritas da subida
+        // o journal entra antes do Datastore, para arquivar também as escritas da subida; em cluster startPitr
+        // devolve null e o journal nasce junto dos ganchos do consenso, mais abaixo
         PitrSettings pitrSettings = PitrSettings.fromEnvironment();
-        // em cluster quem arquiva é o apply do Raft (journal de shard, ligado abaixo)
-        boolean shardJournal = pitrSettings.enabled() && !config.clusterId().isBlank()
-            && backend instanceof RocksDbBackend;
-        PitrJournal journal = shardJournal ? null : startPitr(pitrSettings, backend, config.clusterId());
+        PitrJournal journal = startPitr(pitrSettings, backend, config.clusterId());
 
         // Create Datastore before default databases so S3 restore can replay into it.
         Datastore ds = new Datastore(backend,
@@ -169,19 +171,26 @@ public final class Main {
             if (learner) {
                 clusterConfig = clusterConfig.asLearner();
             }
+            // os ganchos ficam prontos antes do nó: abrir o journal pode demorar, e o nó já aplicaria lotes sem eles.
+            // O consenso aceita um só conjunto: o journal de cluster é um só e faz também o papel do ClockHooks
+            ShardJournalHooks archived = null;
+            if (pitrSettings.enabled() && backend instanceof RocksDbBackend rocks) {
+                // em cluster os lotes do journal vêm do log Raft; a restauração é a do backup de cluster com shards
+                // (restore-shards) ou a do exercício de DR (DrTool)
+                archived = ShardJournalHooks.open(rocks.clock(), pitrSettings.directoryFor(rocks),
+                    pitrSettings.options());
+                // quem fecha é o desligamento do servidor, depois de atender as requisições em curso
+                journal = archived.journal();
+            }
+            ReplicationHooks hooks = archived != null ? archived : new ClockHooks(clockFor(backend));
             cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
                 (VersionedKvBackend) backend);
             // logo depois de construir: o relógio precisa ver a cauda do log antes de carimbar qualquer lote
-            if (shardJournal) {
+            cluster.hooks(hooks);
+            if (archived != null) {
                 RocksDbBackend rocks = (RocksDbBackend) backend;
-                ShardJournalHooks hooks = ShardJournalHooks.open(rocks.clock(), pitrSettings.directoryFor(rocks),
-                    pitrSettings.options());
-                cluster.hooks(hooks);
-                shardBackup = new ShardBackupNode(cluster, rocks, hooks, shardBackupDir(rocks),
-                    java.time.Duration.ofSeconds(60));
-                Runtime.getRuntime().addShutdownHook(new Thread(hooks::close, "ax-shard-journal-close"));
-            } else {
-                cluster.hooks(new ClockHooks(clockFor(backend)));
+                shardBackup = new ShardBackupNode(cluster, rocks, archived, shardBackupDir(rocks),
+                    java.time.Duration.ofSeconds(60), ds);
             }
         }
         if (cluster != null) {
@@ -191,6 +200,8 @@ public final class Main {
 
         AxonServer server = AxonServer.start(ds, secret, config);
         server.pitr(journal);
+        server.qos(System::getenv);
+        server.operations(System::getenv);
         server.shardBackup(shardBackup);
         if (cluster != null) {
             server.clusterStatus(cluster);
@@ -233,15 +244,18 @@ public final class Main {
     }
 
     /**
-     * Liga o journal de PITR quando pedido, em nó único com RocksDB. No cluster os lotes vêm do log Raft e a
-     * restauração a um instante ainda não existe (o backup físico é só de nó único).
+     * Liga o journal de PITR quando pedido, em nó único com RocksDB. No cluster os lotes vêm do log Raft e quem liga
+     * o journal é {@link ShardJournalHooks}, junto dos ganchos do consenso.
      */
     static PitrJournal startPitr(PitrSettings settings, KvBackend backend, String clusterId) {
         if (!settings.enabled()) {
             return null;
         }
-        if (!(backend instanceof RocksDbBackend rocks) || !clusterId.isBlank()) {
+        if (!(backend instanceof RocksDbBackend rocks)) {
             AxonLog.log("warn", "pitr_unavailable", Messages.get("pitr_unavailable"));
+            return null;
+        }
+        if (!clusterId.isBlank()) {
             return null;
         }
         // quem fecha é o desligamento do servidor, depois de atender as requisições em curso

@@ -23,7 +23,7 @@ final class DdlPlanner {
     /** Tipos cuja conversão não muda o slot: o hash trata número e texto numérico como iguais. */
     private static final Set<String> KEY_TYPES = Set.of("", "any", "string", "int", "number", "decimal");
     private static final List<String> CHECKED_DEFINITIONS =
-        List.of("DEFINE EVENT", "CREATE EVENT", "CREATE DATA RULE");
+        List.of("DEFINE EVENT", "CREATE EVENT", "CREATE DATA RULE", "DEFINE PARTITION", "DEFINE TTL");
 
     private final GatewayContext context;
     private final ShardMapStore store;
@@ -164,7 +164,7 @@ final class DdlPlanner {
         }
     }
 
-    /** Eventos de qualquer tabela que citem a nova, e Data Rules que usem a chave dela. */
+    /** Eventos de qualquer tabela que citem a nova, Data Rules que usem a chave dela, e partição ou TTL dela. */
     private void checkOtherDefinitions(ShardMap map, GatewaySession session, String table, String field) {
         AxonValue definitions = context.sendSystem(map, map.home().id(), session, ShardRequest.DEFINITIONS);
         for (AxonValue item : definitions.asArray()) {
@@ -178,6 +178,11 @@ final class DdlPlanner {
             for (Statement statement : AxonQl.parse(text).statements()) {
                 if (statement instanceof Statement.CreateDataRule rule) {
                     requireKeyOutsideRule(rule, field);
+                } else if (statement instanceof Statement.Partition partition) {
+                    // a regra existe só no shard base: os outros shards ficariam sem ela
+                    if (partition.command().table().equals(table)) {
+                        throw ShardException.refused("sharded_partition", table);
+                    }
                 } else if (StatementScan.of(statement).identifiers().contains(table)) {
                     throw ShardException.refused("cross_event", table);
                 }
