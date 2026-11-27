@@ -661,11 +661,18 @@ public final class RpcDispatcher {
                     var verified = certificateChallenges.complete(new CertificateChallengeService.Challenge(
                         completion.id(), completion.challenge(), Instant.EPOCH), completion.store(),
                         session.namespace(), session.database(), completion.chain(), completion.signature(), trustStore);
+                    String declared = AxonServer.certificateIdentity(trustStores, completion.store(),
+                        verified.certificate());
+                    if (declared != null && !declared.equals(completion.user())) {
+                        throw new IllegalArgumentException(Messages.get("cert_user_mismatch"));
+                    }
                     long remainingSec = auth.remainingCooldown(completion.user(), completion.store());
                     if (remainingSec > 0) {
                         throw new IllegalArgumentException(Messages.get("cert_rate_limited", remainingSec));
                     }
-                    result = AxonValue.str(auth.issueTemporaryCredential(completion.user(), completion.store(), verified.fingerprint()));
+                    result = AxonValue.str(declared != null
+                        ? auth.issueCredentialForCertificate(declared, completion.store(), verified.fingerprint())
+                        : auth.issueTemporaryCredential(completion.user(), completion.store(), verified.fingerprint()));
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                 }

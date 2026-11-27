@@ -1170,12 +1170,16 @@ public final class AxonServer {
                     var fingerprint = certificateChallenges.verifyChain(
                         java.util.List.of(certChain), trustStore);
 
-                    String user = req.getParameter("user");
-                    if (user == null || user.isBlank()) {
-                        user = trustStores.usesIcpBrasilCollector(store)
-                            ? extractIcpBrasilUserId(certChain[0])
-                            : trustStores.collectUser(store, certChain[0]);
+                    // quem o certificado identifica manda; o parâmetro só vale quando ele não identifica ninguém
+                    String requested = req.getParameter("user");
+                    String declared = certificateIdentity(trustStores, store, certChain[0]);
+                    if (declared != null && requested != null && !requested.isBlank() && !declared.equals(requested)) {
+                        html.append("<div class=\"info\">").append(Messages.get("cert_user_mismatch")).append("</div>");
+                        html.append("</body></html>");
+                        html(resp, 200, html.toString());
+                        return;
                     }
+                    String user = declared != null ? declared : requested;
                     System.err.println("{\"event\":\"certificate_login\",\"subject\":\""
                         + esc(certChain[0].getSubjectX500Principal().getName())
                         + "\",\"issuer\":\"" + esc(certChain[0].getIssuerX500Principal().getName())
@@ -1211,7 +1215,9 @@ public final class AxonServer {
                         return;
                     }
 
-                    String credential = auth.issueTemporaryCredential(user, store, fingerprint.fingerprint());
+                    String credential = declared != null
+                        ? auth.issueCredentialForCertificate(user, store, fingerprint.fingerprint())
+                        : auth.issueTemporaryCredential(user, store, fingerprint.fingerprint());
 
                     String copyUserLabel = Messages.get("cert_copy_user");
                     String copyPassLabel = Messages.get("cert_copy_password");
@@ -1714,6 +1720,14 @@ public final class AxonServer {
      *    2.16.76.1.3.7 (pessoa jurídica), onde o CPF/CNPJ fica numa
      *    UTF8String/PrintableString dentro do DER da extensão.</p>
      */
+    /** Usuário que o próprio certificado declara, pela regra do truststore; {@code null} quando não declara. */
+    static String certificateIdentity(TrustStoreRegistry stores, String store,
+                                      java.security.cert.X509Certificate certificate) {
+        return stores.usesIcpBrasilCollector(store)
+            ? extractIcpBrasilUserId(certificate)
+            : stores.collectUser(store, certificate);
+    }
+
     private static String extractIcpBrasilUserId(java.security.cert.X509Certificate certificate) {
         try {
             LdapName ldapName = new LdapName(certificate.getSubjectX500Principal().getName());

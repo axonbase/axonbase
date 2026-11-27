@@ -24,7 +24,8 @@ public final class AuthService {
     /** Cache JWT por credencial temporária para reuso na mesma sessão. */
     private final Map<String, String> credentialJwts = new ConcurrentHashMap<>();
 
-    private record TemporaryCredential(String user, String certificate, String fingerprint, long expiresAt) {
+    private record TemporaryCredential(String user, String certificate, String fingerprint,
+                                       boolean identityFromCertificate, long expiresAt) {
         boolean matches(String requestedUser) {
             return user.equals(requestedUser) && System.currentTimeMillis() <= expiresAt;
         }
@@ -107,14 +108,33 @@ public final class AuthService {
         return jwt;
     }
 
-    /** Emite uma senha opaca de uso único, sem amarrar a um namespace/banco. */
+    /**
+     * Emite uma credencial para um nome informado pelo cliente, quando o certificado não identifica ninguém: só vale
+     * para usuário cujo FINGERPRINT é o do certificado apresentado.
+     */
     public String issueTemporaryCredential(String user, String certificateStore, String fingerprint) {
+        return issue(user, certificateStore, fingerprint, false);
+    }
+
+    /**
+     * Emite uma credencial para o usuário que o próprio certificado identifica. O nome precisa ter sido extraído do
+     * certificado pelo servidor, nunca recebido do cliente.
+     */
+    public String issueCredentialForCertificate(String certificateUser, String certificateStore, String fingerprint) {
+        return issue(certificateUser, certificateStore, fingerprint, true);
+    }
+
+    /** Senha opaca e temporária, sem amarrar a um namespace/banco até o primeiro uso. */
+    private String issue(String user, String certificateStore, String fingerprint, boolean fromCertificate) {
         cleanup();
-        AuthCatalog.User identity = users.catalog().certificateUser(user, certificateStore, fingerprint);
+        AuthCatalog.User identity = fromCertificate
+            ? users.catalog().certificateUser(user, certificateStore, fingerprint)
+            : pinnedUser(user, certificateStore, fingerprint);
         if (identity == null) {
             com.axonbase.server.AxonLog.log("warn", "cert_issue_failed", "credencial temporária recusada",
                 Map.of("user", user == null ? "" : user, "store", certificateStore == null ? "" : certificateStore));
-            throw new IllegalArgumentException(Messages.get("cert_user_missing"));
+            throw new IllegalArgumentException(Messages.get(
+                fromCertificate ? "cert_user_missing" : "cert_fingerprint_required"));
         }
         String userKey = user + "@" + certificateStore;
         Long lastIssue = lastCredentialIssuance.get(userKey);
@@ -127,7 +147,7 @@ public final class AuthService {
         random.nextBytes(entropy);
         String credential = "axontc_" + Base64.getUrlEncoder().withoutPadding().encodeToString(entropy);
         temporaryCredentials.put(credential, new TemporaryCredential(user,
-            identity.certificate(), identity.fingerprint(), System.currentTimeMillis() + 60_000L));
+            identity.certificate(), fingerprint, fromCertificate, System.currentTimeMillis() + 60_000L));
         lastCredentialIssuance.put(userKey, now);
         com.axonbase.server.AxonLog.log("info", "certificate_login", "credencial temporária emitida",
             Map.of("user", user, "store", certificateStore));
@@ -159,6 +179,20 @@ public final class AuthService {
         return java.util.Objects.equals(identity.fingerprint(), fingerprint);
     }
 
+    /** O usuário tem FINGERPRINT definido e ele é o do certificado apresentado. */
+    private static boolean pinned(AuthCatalog.User identity, String fingerprint) {
+        return identity.fingerprint() != null && !identity.fingerprint().isBlank()
+            && identity.fingerprint().equals(fingerprint);
+    }
+
+    private AuthCatalog.User pinnedUser(String name, String certificateStore, String fingerprint) {
+        return users.catalog().users().stream()
+            .filter(u -> u.name().equals(name) && u.certificateBased() && u.certificate().equals(certificateStore))
+            .filter(u -> pinned(u, fingerprint))
+            .findFirst()
+            .orElse(null);
+    }
+
     private AuthCatalog.User consumeTemporaryCredential(String user, String pass, String namespace,
                                                         String database) {
         if (pass == null || !pass.startsWith("axontc_")) {
@@ -175,9 +209,14 @@ public final class AuthService {
             return null;
         }
         AuthCatalog.User identity = users.catalog().user(user, namespace, database);
-        return identity != null && identity.certificateBased()
-            && identity.certificate().equals(credential.certificate())
-            && matchesFingerprint(identity, credential.fingerprint()) ? identity : null;
+        if (identity == null || !identity.certificateBased()
+            || !identity.certificate().equals(credential.certificate())) {
+            return null;
+        }
+        boolean accepted = credential.identityFromCertificate()
+            ? matchesFingerprint(identity, credential.fingerprint())
+            : pinned(identity, credential.fingerprint());
+        return accepted ? identity : null;
     }
 
     /** Verifica que un JWT sexa válido. Devolve {@code true} se válido. */

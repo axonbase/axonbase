@@ -116,6 +116,8 @@ public final class Messages {
         ,Map.entry("cert_store_required", "store JKS é obrigatório: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "parâmetros ns e db são obrigatórios")
         ,Map.entry("cert_user_missing", "usuário de certificado não existe no escopo ativo")
+        ,Map.entry("cert_user_mismatch", "o usuário informado não é o identificado pelo certificado")
+        ,Map.entry("cert_fingerprint_required", "o certificado não identifica o usuário: só entra o usuário definido com o FINGERPRINT deste certificado")
         ,Map.entry("cert_rate_limited", "Nova credencial disponível em %d segundos. Cada credencial só pode ser gerada a cada 10 minutos.")
 
         ,Map.entry("audit_not_configured", "AI Audit não configurado. Defina AXON_AI_PROVIDER, AXON_AI_MODEL e AXON_AI_API_KEY.")
@@ -576,6 +578,8 @@ public final class Messages {
         ,Map.entry("cert_store_required", "JKS store is required: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "ns and db parameters are required")
         ,Map.entry("cert_user_missing", "certificate user does not exist in the active scope")
+        ,Map.entry("cert_user_mismatch", "the given user is not the one identified by the certificate")
+        ,Map.entry("cert_fingerprint_required", "the certificate does not identify the user: only a user defined with the FINGERPRINT of this certificate may sign in")
         ,Map.entry("cert_rate_limited", "New credential available in %d seconds. Each credential can only be generated every 10 minutes.")
 
         ,Map.entry("audit_not_configured", "AI Audit not configured. Set AXON_AI_PROVIDER, AXON_AI_MODEL and AXON_AI_API_KEY.")
