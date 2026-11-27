@@ -142,7 +142,7 @@ public final class ClusterRestore {
         // a base restaurada começa uma história nova: sem a lista de membros e, se o grupo era um shard, sem a
         // identificação da história antiga, para um backup de shards não misturar os journals das duas
         db.applyReplicated(Map.of(RaftApplier.APPLIED_KEY, RaftApplier.marker(merge.next - 1, base.term())),
-            Set.of(CONFIG_KEY, ShardBackupNode.INCARNATION_KEY, ShardJournalHooks.BARRIER_KEY));
+            Set.of(CONFIG_KEY, RaftNode.VOTERS_KEY, ShardBackupNode.INCARNATION_KEY, ShardJournalHooks.BARRIER_KEY));
         return new Prepared(target, base.index(), merge.next - 1, merge.applied, merge.lastStamp);
     }
 

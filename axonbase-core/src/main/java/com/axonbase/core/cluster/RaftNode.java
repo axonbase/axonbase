@@ -34,6 +34,11 @@ public final class RaftNode implements AutoCloseable {
     /** Lotes guardados para um listener que ainda não foi acoplado (a janela entre subir o nó e o datastore). */
     private static final int PENDING_LIMIT = 10_000;
     private static final String CONFIG_KEY = "__raft/config";
+    /**
+     * Todos os votantes, líder incluído, para cada nó tirar a si mesmo da lista. A primeira linha repete o valor de
+     * {@link #CONFIG_KEY} gravado junto: se os dois não combinam, um líder antigo mudou os membros depois e vale ele.
+     */
+    static final String VOTERS_KEY = "__raft/voters";
 
     private final String nodeId;
     private final RaftNodeState state;
@@ -52,6 +57,7 @@ public final class RaftNode implements AutoCloseable {
     private volatile AppliedBatchListener listener = AppliedBatchListener.none();
     private volatile ReplicationHooks hooks = ReplicationHooks.NONE;
     private volatile LongSupplier retentionFloor = () -> Long.MAX_VALUE;
+    private final InetSocketAddress self;
     private volatile boolean learner;
     private volatile long applied;
     private long appliedTerm;
@@ -67,6 +73,13 @@ public final class RaftNode implements AutoCloseable {
     }
 
     public RaftNode(String nodeId, Path dataDir, VersionedKvBackend stateMachine, RaftOptions options) {
+        this(nodeId, dataDir, stateMachine, options, null);
+    }
+
+    /** @param self endereço deste nó na lista de membros; {@code null} quando não se sabe qual é */
+    RaftNode(String nodeId, Path dataDir, VersionedKvBackend stateMachine, RaftOptions options,
+             InetSocketAddress self) {
+        this.self = self;
         this.nodeId = nodeId;
         this.options = options;
         this.state = new RaftNodeState(dataDir);
@@ -712,9 +725,34 @@ public final class RaftNode implements AutoCloseable {
 
     private void adoptConfig(CommittedBatch batch) {
         byte[] configData = batch.puts().get(CONFIG_KEY);
-        if (configData != null) {
-            state.updatePeers(RaftNodeState.parsePeers(new String(configData, StandardCharsets.UTF_8)));
+        if (configData == null) {
+            return;
         }
+        String config = new String(configData, StandardCharsets.UTF_8);
+        List<InetSocketAddress> others = othersAmongVoters(config, batch.puts().get(VOTERS_KEY));
+        state.updatePeers(others != null ? others : RaftNodeState.parsePeers(config));
+    }
+
+    /**
+     * Os votantes sem este nó, ou {@code null} quando a lista completa não serve (não veio, é de outra mudança, ou
+     * este nó não se reconhece nela) e vale a lista antiga.
+     */
+    private List<InetSocketAddress> othersAmongVoters(String config, byte[] votersData) {
+        if (votersData == null || self == null) {
+            return null;
+        }
+        String[] parts = new String(votersData, StandardCharsets.UTF_8).split("\n", -1);
+        if (parts.length != 2 || !parts[0].equals(config)) {
+            return null;
+        }
+        List<InetSocketAddress> voters = RaftNodeState.parsePeers(parts[1]);
+        List<InetSocketAddress> others = voters.stream().filter(voter -> !isSelf(voter)).toList();
+        return others.size() < voters.size() ? others : null;
+    }
+
+    private boolean isSelf(InetSocketAddress address) {
+        return address.equals(self) || address.getPort() == self.getPort()
+            && address.getHostString().equalsIgnoreCase(self.getHostString());
     }
 
     // ---- snapshot ----
