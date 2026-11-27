@@ -219,6 +219,11 @@ public final class AuthCatalog {
         return users.remove(userKey(name, scope, namespace, database)) != null;
     }
 
+    /** Há uma identidade exatamente neste escopo? */
+    public boolean hasUserExact(String name, Scope scope, String namespace, String database) {
+        return users.containsKey(userKey(name, scope, namespace, database));
+    }
+
     /** Remove um access method em qualquer escopo compatível com ns/db. */
     public boolean removeAccess(String name, String namespace, String database) {
         for (Scope scope : List.of(Scope.DATABASE, Scope.NAMESPACE, Scope.ROOT)) {

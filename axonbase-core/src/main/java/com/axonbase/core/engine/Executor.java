@@ -194,11 +194,26 @@ public final class Executor {
     /**
      * Persiste uma aresta de grafo no KV com chave direcional dupla.
      * Formato da chave: {@code E|<ns>|<db>|out|<fromTbl>|<fromKey>|<kind>|<toTbl>|<toKey>}.
+     * O valor das duas chaves é o objeto de propriedades da aresta, ou vazio quando não há nenhuma. As novas se
+     * somam às já gravadas, então repetir o RELATE não apaga propriedade.
      */
     private void persistEdge(com.axonbase.core.catalog.Database db, AxonValue.RecordId from,
-                             String kind, AxonValue.RecordId to) {
-        records(db).put(edgeKey(db, "out", from, kind, to), new byte[0]);
-        records(db).put(edgeKey(db, "in", to, kind, from), new byte[0]);
+                             String kind, AxonValue.RecordId to, Map<String, AxonValue> properties) {
+        String outKey = edgeKey(db, "out", from, kind, to);
+        Map<String, AxonValue> merged = new LinkedHashMap<>(edgeProperties(db, outKey));
+        merged.putAll(properties);
+        byte[] value = merged.isEmpty() ? new byte[0] : encode(AxonValue.object(merged));
+        records(db).put(outKey, value);
+        records(db).put(edgeKey(db, "in", to, kind, from), value);
+    }
+
+    private Map<String, AxonValue> edgeProperties(com.axonbase.core.catalog.Database db, String key) {
+        Optional<byte[]> raw = records(db).get(key);
+        if (raw.isEmpty() || raw.get().length == 0) {
+            return Map.of();
+        }
+        AxonValue stored = decode(raw.get());
+        return stored.isObject() ? stored.asObject() : Map.of();
     }
 
     private String edgeKey(com.axonbase.core.catalog.Database db, String dir, AxonValue.RecordId from,
@@ -1198,11 +1213,11 @@ public final class Executor {
     private AxonValue coerceType(String type, AxonValue v) {
         String t = type.toLowerCase();
         return switch (t) {
-            case "int" -> v.isNumber() ? AxonValue.num(v.asLong())
+            case "int" -> v.isNumber() ? wholeNumber(v)
                 : v.isString() ? tryLong(v.asString()) : null;
             case "float", "number" -> v.isNumber() ? AxonValue.num(v.asDouble())
                 : v.isString() ? tryDouble(v.asString()) : null;
-            case "string" -> v.isString() ? v : AxonValue.str(v.toString());
+            case "string" -> v.isString() ? v : AxonValue.str(Functions.text(v));
             case "bool" -> v.isBool() ? v : null;
             case "datetime" -> v.isDatetime() ? v
                 : v.isString() ? tryInstant(v.asString()) : null;
@@ -1220,6 +1235,15 @@ public final class Executor {
     private boolean isGeometry(AxonValue value) {
         return value.isObject() && value.asObject().get("type") != null
             && value.asObject().get("type").isString() && value.asObject().get("coordinates") != null;
+    }
+
+    /** O número como inteiro, ou {@code null} quando há fração: um campo int não trunca em silêncio. */
+    private AxonValue wholeNumber(AxonValue v) {
+        try {
+            return AxonValue.num(v.asDecimal().longValueExact());
+        } catch (ArithmeticException | NumberFormatException notWhole) {
+            return null;
+        }
     }
 
     private AxonValue tryLong(String s) {
@@ -3202,9 +3226,8 @@ return score;
             return rowsToDocs(rows, q.table());
         }
         // Local database (other db in same ns)
-        Database targetDb = ds.ensureDatabase(session, ns, q.link());
+        Database targetDb = localQualifiedDatabase(ns, q);
         String tableName = q.table();
-        ensureTable(targetDb, tableName);
         String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + tableName + "\u0000";
         List<Document> docs = new ArrayList<>();
         for (String k : records(targetDb).keysWithPrefix(prefix)) {
@@ -3216,6 +3239,19 @@ return score;
             }
         }
         return docs;
+    }
+
+    /** {@code banco.tabela} aponta para um banco do próprio namespace, e não para um DATABASE LINK. */
+    private boolean isLocalQualified(Expr.Qualified q) {
+        String ns = session.namespace();
+        return ns != null && !ns.isBlank() && ds.databaseLink(ns, q.link()) == null;
+    }
+
+    /** O banco do namespace citado em {@code banco.tabela}, já com a tabela garantida. */
+    private Database localQualifiedDatabase(String ns, Expr.Qualified q) {
+        Database targetDb = ds.ensureDatabase(session, ns, q.link());
+        ensureTable(targetDb, q.table());
+        return targetDb;
     }
 
     /**
@@ -3496,16 +3532,71 @@ return score;
             return 1;
         }
         if (PS_COLUMNAR_AGG.equals(plan.strategy())) {
-            return columnarEntryCount(db, plan);
+            return estimatedColumnarEntries(db, plan);
         }
-        return fullScanDocs(db, sel).size();
+        return countSourceRows(db, sel.from());
+    }
+
+    /**
+     * Quantos documentos {@link #sourceDocs} devolveria. Numa tabela, conta as chaves em fluxo, sem montar a lista
+     * nem ler os valores; as demais origens (registro, subconsulta, lista, DATABASE LINK) passam por
+     * {@code sourceDocs}. Como ele, não filtra por regra de acesso.
+     */
+    private long countSourceRows(Database db, Expr from) {
+        if (from instanceof Expr.Ident table) {
+            ensureTable(db, table.name());
+            return countRecords(db, table.name());
+        }
+        if (from instanceof Expr.Qualified q && isLocalQualified(q)) {
+            return countRecords(localQualifiedDatabase(session.namespace(), q), q.table());
+        }
+        return sourceDocs(db, from).size();
+    }
+
+    private long countRecords(Database db, String table) {
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        KvBackend kv = countingRecords(db);
+        long[] count = {0};
+        scanRecordKeys(kv, prefix, key -> {
+            // como a leitura por loadDoc: vale a chave que o id lido dela alcança. No caso normal é ela mesma, e
+            // nada é lido
+            String reached = new RecordId(table, parseKey(key.substring(prefix.length())))
+                .storageKey(db.ns(), db.db());
+            if (reached.equals(key) || kv.get(reached).isPresent()) {
+                count[0]++;
+            }
+            return true;
+        });
+        return count[0];
+    }
+
+    /** Como {@link #records}, para só contar: numa transação, não registra leituras nem guarda o que passa. */
+    private KvBackend countingRecords(Database db) {
+        KvBackend raw = rawRecords(db);
+        if (raw instanceof Transaction tx) {
+            raw = tx.untrackedReads();
+        }
+        return com.axonbase.core.partition.PartitionedKv.wrap(db, raw, partitions, ds.coldTier().records());
+    }
+
+    private long estimatedColumnarEntries(Database db, ExplainPlan plan) {
+        long[] count = {0};
+        countingRecords(db).scanPrefix(columnarCountPrefix(db, plan), key -> {
+            QueryContext.checkCancelled();
+            count[0]++;
+            return true;
+        });
+        return count[0];
     }
 
     /** Entradas de uma coluna do índice columnar (uma por linha da tabela). */
     private long columnarEntryCount(Database db, ExplainPlan plan) {
-        String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
+        return records(db).keysWithPrefix(columnarCountPrefix(db, plan)).size();
+    }
+
+    private String columnarCountPrefix(Database db, ExplainPlan plan) {
+        return com.axonbase.core.storage.ColumnarIndex.columnPrefix(
             db.ns(), db.db(), plan.table(), plan.index().name(), plan.index().columns().get(0));
-        return records(db).keysWithPrefix(prefix).size();
     }
 
     private long explainedRows(Database db, Statement.Select whole, ExplainPlan plan) {
@@ -3790,6 +3881,12 @@ return score;
         AxonValue from = mapping(r.from());
         AxonValue to = mapping(r.to());
         String kind = tableOf(r.kind());
+        Map<String, AxonValue> assigned = new LinkedHashMap<>();
+        if (r.data() instanceof Data.SetClause sc) {
+            for (Assignment a : sc.assignments()) {
+                assigned.put(fieldOf(a.path()), evalExpr(a.value()));
+            }
+        }
         if (from.isRecordId() && to.isRecordId()) {
             AxonValue.RecordId fromR = from.asRecordId();
             AxonValue.RecordId toR = to.asRecordId();
@@ -3798,16 +3895,16 @@ return score;
             if (Datastore.PLAIN_NAME.matcher(kind).matches()) {
                 ensureTable(db, kind);
             }
-            persistEdge(db, fromR, kind, toR);
+            // in e out são as pontas da aresta, não propriedades
+            Map<String, AxonValue> properties = new LinkedHashMap<>(assigned);
+            properties.remove("in");
+            properties.remove("out");
+            persistEdge(db, fromR, kind, toR, properties);
         }
         Map<String, AxonValue> edge = new LinkedHashMap<>();
         edge.put("in", from);
         edge.put("out", to);
-        if (r.data() instanceof Data.SetClause sc) {
-            for (Assignment a : sc.assignments()) {
-                edge.put(fieldOf(a.path()), evalExpr(a.value()));
-            }
-        }
+        edge.putAll(assigned);
         return AxonValue.object(edge);
     }
 
@@ -4696,6 +4793,7 @@ return score;
         ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.USER, ns, database,
             identity(du.name(), du.scope(), ns, database),
             com.axonbase.parser.Render.stmt(replayable)));
+        ds.pruneUserControl(session, du.name());
         return AxonValue.nul();
     }
 
@@ -4737,6 +4835,7 @@ return score;
             throw errorStmt(Messages.get("stmt_link_drop_needs_ns"));
         }
         ds.dropDatabaseLink(ns, ddl.name());
+        ds.removeControl(session, ns, "", ControlCommand.Kind.DATABASE_LINK, ddl.name());
         return AxonValue.nul();
     }
 
@@ -4747,6 +4846,8 @@ return score;
     private AxonValue runCreateSaga(CreateSaga cs) {
         var def = new Datastore.SagaDef(cs.name(), cs.links());
         ds.defineSaga(cs.name(), def);
+        ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.SAGA, "", "", cs.name(),
+            com.axonbase.parser.Render.stmt(cs)));
         return AxonValue.nul();
     }
 
@@ -4872,8 +4973,11 @@ return score;
 
     private AxonValue runBeginSaga(BeginSaga bs) {
         sagaLedger.ensureTables();
-        sagaLedger.beginSaga(bs.name(), bs.correlationId());
-        coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false);
+        Datastore.SagaDef definition = ds.saga(bs.name());
+        String linkNamespace = session.namespace() == null ? "" : session.namespace();
+        sagaLedger.beginSaga(bs.name(), bs.correlationId(), definition == null ? List.of() : definition.links(),
+            linkNamespace);
+        coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false, session.namespace());
         return AxonValue.object(Map.of(
             "saga", AxonValue.str(bs.name()),
             "correlation_id", AxonValue.str(bs.correlationId()),
@@ -4881,28 +4985,52 @@ return score;
         ));
     }
 
-    private AxonValue runCommitSaga(CommitSaga cs) {
-        if (!sagaLedger.isSagaActive(cs.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", cs.correlationId()));
+    /**
+     * A transação precisa estar ativa, ter sido aberta com este nome e ainda ter a definição que usou no BEGIN.
+     *
+     * @param resumable aceita também a transação parada em {@code COMPENSATING}, para o CANCEL terminar o serviço
+     * @return o estado encontrado
+     */
+    private String requireSaga(String name, String correlationId, boolean resumable) {
+        Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
+        AxonValue value = record == null ? null : record.get("status");
+        String status = value != null && value.isString() ? value.asString() : "";
+        if (!"RUNNING".equals(status) && !(resumable && "COMPENSATING".equals(status))) {
+            throw errorStmt(Messages.get("stmt_saga_inactive", correlationId));
         }
-        coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false);
+        AxonValue opened = record.get("name");
+        if (opened != null && opened.isString() && !opened.asString().equals(name)) {
+            throw errorStmt(Messages.get("stmt_saga_other_name", name, correlationId, opened.asString()));
+        }
+        AxonValue links = record.get("links");
+        // sem a definição, os participantes não seriam avisados e o comando informaria um sucesso falso
+        if ("RUNNING".equals(status) && links != null && links.isArray() && !links.asArray().isEmpty()
+            && ds.saga(name) == null) {
+            throw errorStmt(Messages.get("stmt_saga_missing", name));
+        }
+        return status;
+    }
+
+    private AxonValue runCommitSaga(CommitSaga cs) {
+        requireSaga(cs.name(), cs.correlationId(), false);
+        coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false,
+            linkNamespace(cs.correlationId()));
         sagaLedger.commitSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("COMMITTED")));
     }
 
     private AxonValue runCancelSaga(CancelSaga cs) {
-        if (!sagaLedger.isSagaActive(cs.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", cs.correlationId()));
+        // em COMPENSATING os participantes já responderam: falta só terminar a compensação local
+        if ("RUNNING".equals(requireSaga(cs.name(), cs.correlationId(), true))) {
+            coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true,
+                linkNamespace(cs.correlationId()));
         }
-        coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true);
         sagaLedger.cancelSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
     }
 
     private AxonValue runJoinSaga(JoinSaga js) {
-        if (!sagaLedger.isSagaActive(js.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", js.correlationId()));
-        }
+        requireSaga(js.name(), js.correlationId(), false);
         session.sagaBegin(js.name(), js.correlationId());
         session.vars().set("saga_corr", AxonValue.str(js.correlationId()));
         return AxonValue.object(Map.of("status", AxonValue.str("RUNNING")));
@@ -4914,7 +5042,22 @@ return score;
         return AxonValue.object(Map.of("ok", AxonValue.str("1")));
     }
 
-    private void coordinateSagaParticipants(String sagaName, String correlationId, String action, boolean reverse) {
+    /**
+     * Namespace onde procurar as ligações dos participantes. A API de gestão executa em {@code system}: nesse caso
+     * vale o namespace de quem abriu a SAGA. Nas demais sessões vale o da própria sessão.
+     */
+    private String linkNamespace(String correlationId) {
+        if (!"system".equals(session.namespace())) {
+            return session.namespace();
+        }
+        Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
+        AxonValue opened = record == null ? null : record.get("link_namespace");
+        return opened != null && opened.isString() && !opened.asString().isEmpty()
+            ? opened.asString() : session.namespace();
+    }
+
+    private void coordinateSagaParticipants(String sagaName, String correlationId, String action, boolean reverse,
+                                            String linkNamespace) {
         Datastore.SagaDef definition = ds.saga(sagaName);
         if (definition == null) {
             return;
@@ -4923,10 +5066,11 @@ return score;
         if (reverse) {
             java.util.Collections.reverse(links);
         }
-        String statement = action + " SAGA " + sagaName + " WITH CORRELATION '"
+        String quotedName = com.axonbase.parser.Render.sagaName(sagaName);
+        String statement = action + " SAGA " + quotedName + " WITH CORRELATION '"
             + SagaLedger.esc(correlationId) + "'";
         for (String linkName : links) {
-            Datastore.DatabaseLinkDef link = ds.databaseLink(session.namespace(), linkName);
+            Datastore.DatabaseLinkDef link = ds.databaseLink(linkNamespace, linkName);
             if (link == null) {
                 throw errorStmt(Messages.get("stmt_saga_link_missing", linkName));
             }
@@ -4935,11 +5079,11 @@ return score;
                 // reporting-only records so the orchestrator never compensates them again.
                 if (!"BEGIN".equals(action)) {
                     List<AxonValue> transaction = linkClient.query(link,
-                        "SHOW SAGA TRANSACTION " + sagaName + " '" + SagaLedger.esc(correlationId) + "'");
+                        "SHOW SAGA TRANSACTION " + quotedName + " '" + SagaLedger.esc(correlationId) + "'");
                     if (!transaction.isEmpty() && transaction.get(0).isObject()) {
                         AxonValue steps = transaction.get(0).asObject().get("steps");
                         if (steps != null && steps.isArray()) {
-                            sagaLedger.reportParticipantSteps(correlationId, session.namespace(), linkName, steps.asArray());
+                            sagaLedger.reportParticipantSteps(correlationId, linkNamespace, linkName, steps.asArray());
                         }
                     }
                 }
@@ -4958,7 +5102,9 @@ return score;
         Database db = db();
         Map<String, Expr> injections = extractInjections(cd.predicate());
         db.catalog().defineDataRule(new Catalog.DataRuleDef(cd.name(), cd.predicate(), cd.maskPatterns(), injections));
-        control(db, ControlCommand.Kind.TABLE, cd.name(), com.axonbase.parser.Render.stmt(cd));
+        ds.removeDataRuleControl(session, db.ns(), db.db(), cd.name());
+        // nome próprio no plano de controle: o nome puro é o da definição da tabela
+        control(db, ControlCommand.Kind.TABLE, "datarule:" + cd.name(), com.axonbase.parser.Render.stmt(cd));
         return AxonValue.nul();
     }
 
@@ -4967,6 +5113,7 @@ return score;
         if (!db.catalog().removeDataRule(dr.name())) {
             throw errorStmt(Messages.get("stmt_data_rule_missing", dr.name()));
         }
+        ds.removeDataRuleControl(session, db.ns(), db.db(), dr.name());
         return AxonValue.nul();
     }
 
@@ -5131,13 +5278,32 @@ return score;
     }
 
     private AxonValue runDropUser(Statement.DropUser du) {
-        Database db = db();
         String ns = session.namespace();
         String database = session.database();
-        this.ds.authCatalog().removeUser(du.name(), ns, database);
-        control(db, ControlCommand.Kind.USER, du.name(),
-            com.axonbase.parser.Render.stmt(du));
+        if (ds.isReplaying()) {
+            replayDropUser(du.name(), ns, database);
+            return AxonValue.nul();
+        }
+        db();
+        if (this.ds.authCatalog().removeUser(du.name(), ns, database)) {
+            ds.pruneUserControl(session, du.name());
+        }
         return AxonValue.nul();
+    }
+
+    /**
+     * Um {@code DROP USER} gravado por versão anterior. O gravado pela API para escopo de namespace ou root não tem
+     * banco, e exigir um impedia o servidor de subir; sem banco, só o escopo exato é removido.
+     */
+    private void replayDropUser(String name, String ns, String database) {
+        if (database != null) {
+            ds.authCatalog().removeUser(name, ns, database);
+        } else {
+            ds.authCatalog().removeUserExact(name, ns == null
+                ? com.axonbase.core.security.AuthCatalog.Scope.ROOT
+                : com.axonbase.core.security.AuthCatalog.Scope.NAMESPACE, ns, null);
+        }
+        System.err.println(Messages.get("user_drop_legacy", name));
     }
 
     private AxonValue runRevokeAccess(Statement.RevokeAccess ra) {
@@ -5148,7 +5314,11 @@ return score;
     }
 
     private AxonValue runDropSaga(Statement.DropSaga d) {
-        this.ds.dropSaga(d.name());
+        if (ds.saga(d.name()) == null) {
+            throw errorStmt(Messages.get("stmt_saga_missing", d.name()));
+        }
+        ds.dropSaga(d.name());
+        ds.removeControl(session, "", "", ControlCommand.Kind.SAGA, d.name());
         return AxonValue.nul();
     }
 
@@ -5505,11 +5675,58 @@ return score;
     }
 
     private AxonValue evalIdiom(Expr.Idiom i, Document doc) {
-        AxonValue base = idiomBase(i.base(), doc);
-        for (Expr.Part p : i.parts()) {
-            base = applyPart(base, p);
+        // ->aresta.campo chega como idiom dentro de idiom: achatado, o passo de grafo fica ao lado do campo
+        List<Expr.Part> parts = new ArrayList<>(i.parts());
+        Expr root = i.base();
+        while (root instanceof Expr.Idiom nested) {
+            parts.addAll(0, nested.parts());
+            root = nested.base();
+        }
+        AxonValue base = idiomBase(root, doc);
+        for (int at = 0; at < parts.size(); at++) {
+            AxonValue from = base;
+            base = applyPart(base, parts.get(at));
+            if (at + 1 < parts.size() && parts.get(at) instanceof Expr.Part.Graph graph
+                && graph.lookup() instanceof Expr.Ident edge
+                && parts.get(at + 1) instanceof Expr.Part.Field field) {
+                // ->aresta.campo: vale o campo do registro alcançado; sem ele, a propriedade da aresta
+                AxonValue read = fieldAccess(base, field.name());
+                boolean missing = read.isNull() || read.isNone() || read.isArray() && read.asArray().isEmpty();
+                base = missing ? edgeProperty(from, graph.direction(), edge.name(), field.name(), read) : read;
+                at++;
+            }
         }
         return base;
+    }
+
+    /** A propriedade {@code name} das arestas {@code kind} que saem (ou chegam) nos registros de {@code from}. */
+    private AxonValue edgeProperty(AxonValue from, Expr.Direction direction, String kind, String name,
+                                   AxonValue absent) {
+        Database db = db();
+        List<String> dirs = direction == Expr.Direction.BOTH
+            ? List.of("out", "in")
+            : List.of(direction == Expr.Direction.IN ? "in" : "out");
+        List<AxonValue> sources = from.isArray() ? from.asArray() : List.of(from);
+        List<AxonValue> found = new ArrayList<>();
+        for (AxonValue source : sources) {
+            AxonValue id = source.isObject() ? source.asObject().get("id") : source;
+            if (id == null || !id.isRecordId()) {
+                continue;
+            }
+            for (String dir : dirs) {
+                String prefix = edgePrefix(db, dir, id.asRecordId()) + kind + "|";
+                for (String key : records(db).keysWithPrefix(prefix)) {
+                    AxonValue value = edgeProperties(db, key).get(name);
+                    if (value != null && !value.isNull() && !value.isNone()) {
+                        found.add(value);
+                    }
+                }
+            }
+        }
+        if (found.isEmpty()) {
+            return absent;
+        }
+        return found.size() == 1 ? found.get(0) : AxonValue.array(found);
     }
 
     /**
@@ -5971,14 +6188,11 @@ return score;
     private AxonValue evalCast(Expr.Cast c) {
         AxonValue v = eval(c.operand());
         return switch (c.type().toLowerCase()) {
-            case "int" -> {
-                if (v.isNumber()) yield AxonValue.num(v.asLong());
-                if (v.isString()) yield AxonValue.num(Long.parseLong(v.asString()));
-                yield AxonValue.nul();
-            }
+            case "int" -> Functions.call("type::int", List.of(v));
             case "float", "number" -> AxonValue.num(v.asDouble());
-            case "string" -> AxonValue.str(v.toString());
-            case "bool" -> AxonValue.bool(truthy(v));
+            case "decimal" -> Functions.call("type::decimal", List.of(v));
+            case "string" -> v.isNull() || v.isNone() ? v : AxonValue.str(Functions.text(v));
+            case "bool" -> Functions.call("type::bool", List.of(v));
             case "datetime" -> v;
             default -> v;
         };
@@ -7374,8 +7588,15 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         return AxonValue.array(out);
     }
 
+    /** Cabeçalho (comentário AxonQL) com o que o texto do comando não carrega: regras geradas, data e autor. */
+    private static final String AUDIT_HEADER = "-- aiaudit ";
+
     private AxonValue runDefineAiAudit(Statement.DefineAiAudit aa) {
-        if (!ds.aiProvider().isConfigured()) {
+        if (ds.isReplaying()) {
+            restoreAiAudit(aa);
+            return AxonValue.nul();
+        }
+        if (ds.aiProvider() == null || !ds.aiProvider().isConfigured()) {
             throw errorStmt(Messages.get("audit_not_configured"));
         }
         Database db = db();
@@ -7396,19 +7617,65 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             aa.name(), aa.warningWhen(), aa.dangerWhen(),
             warningRules, dangerRules, System.currentTimeMillis(), userId);
         db.catalog().defineAudit(def);
-        control(db, ControlCommand.Kind.AUDIT, aa.name(), com.axonbase.parser.Render.stmt(aa));
+        Map<String, AxonValue> stored = new LinkedHashMap<>();
+        stored.put("rules", AxonValue.str(rulesJson));
+        stored.put("created_at", AxonValue.num(def.createdAt()));
+        stored.put("created_by", AxonValue.str(def.createdBy() == null ? "" : def.createdBy()));
+        String header = AUDIT_HEADER
+            + com.axonbase.value.AxonJson.write(AxonValue.object(stored)).replace('\n', ' ') + "\n";
+        control(db, ControlCommand.Kind.AUDIT, aa.name(), header + com.axonbase.parser.Render.stmt(aa));
         return AxonValue.object(java.util.Map.of(
             "name", AxonValue.str(aa.name()),
             "rules", AxonValue.str(rulesJson),
             "status", AxonValue.str("CREATED")));
     }
 
+    /**
+     * Recria a auditoria na releitura do catálogo sem chamar o provedor de IA, que ainda não está configurado nesse
+     * momento. Definições gravadas por versões anteriores não têm as regras: voltam sem nenhuma, com um aviso.
+     */
+    private void restoreAiAudit(Statement.DefineAiAudit aa) {
+        Database db = db();
+        java.util.List<com.axonbase.core.audit.AiAuditRule> warningRules = new java.util.ArrayList<>();
+        java.util.List<com.axonbase.core.audit.AiAuditRule> dangerRules = new java.util.ArrayList<>();
+        long createdAt = 0;
+        String createdBy = "";
+        boolean restored = false;
+        for (ControlCommand command : ds.controlSnapshot().commands()) {
+            String text = command.definition();
+            if (command.kind() != ControlCommand.Kind.AUDIT || !command.namespace().equals(db.ns())
+                || !command.database().equals(db.db()) || !command.name().equals(aa.name())
+                || !text.startsWith(AUDIT_HEADER)) {
+                continue;
+            }
+            try {
+                Map<String, AxonValue> stored = com.axonbase.value.AxonJson.parseDocument(
+                    text.substring(AUDIT_HEADER.length(), text.indexOf('\n'))).asObject();
+                parseRules(stored.get("rules").asString(), warningRules, dangerRules);
+                createdAt = stored.get("created_at").asLong();
+                createdBy = stored.get("created_by").asString();
+                restored = true;
+            } catch (RuntimeException unreadable) {
+                System.err.println(Messages.get("audit_parse_error", unreadable.getMessage()));
+            }
+        }
+        if (!restored) {
+            System.err.println(Messages.get("audit_rules_not_stored", aa.name()));
+        }
+        db.catalog().defineAudit(new com.axonbase.core.audit.AiAuditDef(
+            aa.name(), aa.warningWhen(), aa.dangerWhen(), warningRules, dangerRules, createdAt, createdBy));
+    }
+
     private AxonValue runDropAiAudit(Statement.DropAiAudit da) {
         Database db = db();
         if (!db.catalog().removeAudit(da.name())) {
+            // versões anteriores gravavam o próprio DROP no plano de controle
+            if (ds.isReplaying()) {
+                return AxonValue.nul();
+            }
             throw errorStmt(Messages.get("audit_not_found", da.name()));
         }
-        control(db, ControlCommand.Kind.AUDIT, da.name(), com.axonbase.parser.Render.stmt(da));
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.AUDIT, da.name());
         return AxonValue.nul();
     }
 
