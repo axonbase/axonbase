@@ -53,6 +53,11 @@ public final class TcpRaftCommitCoordinator implements CommitCoordinator {
     }
 
     @Override
+    public long awaitCatalog() {
+        return runtime == null ? 0 : runtime.awaitCatalog();
+    }
+
+    @Override
     public long beginValidation() {
         return runtime == null ? 0 : runtime.beginValidation();
     }

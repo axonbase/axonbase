@@ -121,6 +121,24 @@ public final class Session {
         this.txIndexEpoch = epoch;
     }
 
+    private long txCatalogMark = -1;
+    private long txCatalogVersion = -1;
+
+    /** Em cluster, a marca do consenso quando a transação começou; {@code -1} se o nó não liderava. */
+    public long txCatalogMark() {
+        return txCatalogMark;
+    }
+
+    /** Em cluster, a versão do plano de controle gravado quando a transação começou. */
+    public long txCatalogVersion() {
+        return txCatalogVersion;
+    }
+
+    public void txCatalog(long mark, long version) {
+        this.txCatalogMark = mark;
+        this.txCatalogVersion = version;
+    }
+
     private Transaction requireTx() {
         if (txt == null || !txt.isOpen()) {
             throw new com.axonbase.common.AxonError(-32000, Messages.get("txn_inactive"));

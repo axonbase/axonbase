@@ -649,6 +649,20 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         }
     }
 
+    /**
+     * No líder, além da barreira, entrega ao listener o que já foi aplicado: é ele que relê o catálogo, e a entrega
+     * normal corre noutra thread.
+     */
+    @Override
+    public long awaitCatalog() {
+        if (role != ClusterRole.LEADER) {
+            return -1;
+        }
+        long epoch = beginValidation();
+        node.drainNotifications();
+        return epoch;
+    }
+
     /** Replica um batch do state machine e só retorna depois do commit por maioria. */
     @Override
     public long confirm(String nodeId, CommittedBatch batch) {

@@ -1640,6 +1640,13 @@ public final class Datastore {
         if (session.inTransaction()) {
             throw AxonError.internal(Messages.get("txn_active"));
         }
+        CommitCoordinator coordinator = commitCoordinator;
+        if (coordinator != null) {
+            // antes de olhar o catálogo: num líder recém eleito ele ainda pode não ter uma definição do log anterior.
+            // A versão é lida antes da espera, para uma mudança posterior não passar por já vista
+            long version = storedCatalogVersion();
+            session.txCatalog(coordinator.awaitCatalog(), version);
+        }
         // Uma definição de escopo ROOT não tem banco selecionado, mas ainda precisa
         // de um buffer para que o snapshot de controle entre no batch replicado.
         KvBackend base = session.namespace() == null || session.database() == null
@@ -1739,6 +1746,10 @@ public final class Datastore {
         try (KeyLocks.Held held = replicationLocks.lock(tx.touchedKeys())) {
             // sem condições, a barreira continua aqui, depois das travas por chave
             long validation = validated != null ? validated : beginValidation(coordinator, session);
+            if (catalogMayBeStale(session, tx, validation)) {
+                cancelSession(session);
+                throw new VersionConflictException(Messages.get("txn_catalog_changed"), ControlStore.KEY);
+            }
             tx.validate();
             String transactionId = java.util.UUID.randomUUID().toString();
             // Registrar antes de confirmar: o listener do consenso precisa reconhecer o batch
@@ -1761,6 +1772,22 @@ public final class Datastore {
                 tx.commitValidated();
             }
         }
+    }
+
+    /**
+     * A escrita foi executada com um catálogo que pode não valer mais: a liderança mudou (ou uma escrita ficou sem
+     * desfecho) desde o começo da transação e o plano de controle gravado também, ou o nó nem liderava quando ela
+     * começou.
+     */
+    private boolean catalogMayBeStale(Session session, Transaction tx, long validation) {
+        if (tx.stagedWriteCount() == 0 && tx.stagedDeleteCount() == 0 || session.txCatalogMark() == validation) {
+            return false;
+        }
+        return session.txCatalogMark() < 0 || storedCatalogVersion() != session.txCatalogVersion();
+    }
+
+    private long storedCatalogVersion() {
+        return backend instanceof VersionedKvBackend versioned ? versioned.versionOf(ControlStore.KEY) : 0L;
     }
 
     private final KeyLocks replicationLocks = new KeyLocks();
