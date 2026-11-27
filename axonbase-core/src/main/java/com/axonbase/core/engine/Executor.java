@@ -399,7 +399,10 @@ public final class Executor {
             || s instanceof Statement.DropAiAudit || s instanceof DefineDatabaseLink
             || s instanceof DropDatabaseLink || s instanceof Statement.CreateDatabaseLink
             || s instanceof Statement.AlterDatabaseLink || s instanceof CreateSaga
-            || s instanceof Statement.DropSaga;
+            || s instanceof Statement.DropSaga
+            // o corpo do evento roda na sessão de quem dispara a escrita, inclusive a do root
+            || s instanceof DefineEvent || s instanceof Statement.CreateEvent
+            || s instanceof Statement.DropEvent;
         if (s instanceof Statement.SetAuditCase) {
             min = com.axonbase.core.security.Authz.Role.OPERATOR;
             needs = true;
