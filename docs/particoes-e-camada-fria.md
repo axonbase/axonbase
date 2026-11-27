@@ -182,7 +182,6 @@ Nada muda no formato. Restaurar a um instante anterior à remoção de uma parti
 - Seguidores e réplicas de leitura aplicam a marca de remoção no mesmo ponto do log.
 - Um nó novo recebe descritores e marcas pela cópia completa. Na aplicação de um lote, as remoções por faixa vêm antes das escritas.
 - A thread de manutenção só age no líder. O envio ao armazenamento de objetos é feito por um nó só.
-- Antes de executar uma transação (inclusive um comando avulso ou um `BEGIN`), o líder espera aplicar as entradas pendentes do log e reler o catálogo, para que uma partição ou um índice definido pelo líder anterior já valha para a escrita. Se a liderança mudar e as definições também antes do `COMMIT`, ele falha com conflito. Isso vale para toda tabela, com ou sem partição. Sem quórum para resolver uma entrada pendente, a transação já falha no começo.
 
 ## Compatibilidade
 
