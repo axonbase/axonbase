@@ -1138,13 +1138,12 @@ public final class Datastore {
     // ------------------------------------------------------------------
 
 /**
-     * Genera un dump AxonQL de la base: DEFINEs del catálogo seguidos de un CREATE por
-     * registro, para restauração.
+     * Gera um dump AxonQL do banco: o que {@link #importDatabase} recebe recria analyzers, embeddings, tabelas,
+     * índices, partições, programas, registros, arestas, chave-valor, campos e eventos.
      *
-     * <p>O KV público queda fóra do dump: as chaves {@code KV|...} non entran no
-     * varrido {@code ns\0db\0} que este método percorre, nin se restauran con
-     * {@link #importDatabase}. Unha copia de seguridade que despexe a base non
-     * inclúe, pois, as entradas do key-value.</p>
+     * <p>Campos e eventos vêm depois dos dados: a importação repõe as linhas como estavam, sem DEFAULT, ASSERT nem
+     * REFERENCES sobre o que já existia, e nenhum evento dispara de novo. Usuários, acessos, Data Rules, permissões de
+     * tabela, auditorias e database links ficam fora do dump.</p>
      */
     public String exportDatabase(String ns, String db) {
         ConcurrentMap<String, Database> databases = namespaces.get(ns);
@@ -1157,6 +1156,12 @@ public final class Datastore {
         for (Catalog.AnalyzerDef analyzer : database.catalog().analyzers()) {
             sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineAnalyzer(analyzer.name(),
                 analyzer.lowercase(), analyzer.stopwords(), analyzer.stemming()))).append(";\n");
+        }
+        for (Catalog.EmbeddingDef embedding : database.catalog().embeddings()) {
+            sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineEmbedding(embedding.name(), "http",
+                embedding.url(), embedding.model(), embedding.dimension(), embedding.keyEnv(),
+                embedding.timeoutSeconds(), embedding.batch(), embedding.documentPrefix(), embedding.queryPrefix(),
+                embedding.sendDimension(), embedding.authHeader()))).append(";\n");
         }
         for (Catalog.TableDef def : database.catalog().tables()) {
             sb.append("DEFINE TABLE ").append(def.name());
@@ -1172,22 +1177,6 @@ public final class Datastore {
                 sb.append(" SHARD BY ").append(def.shardBy());
             }
             sb.append(";\n");
-            for (Catalog.FieldDef fd : def.fields().values()) {
-                sb.append("DEFINE FIELD ").append(fd.name()).append(" ON TABLE ").append(def.name());
-                if (fd.type() != null) {
-                    sb.append(" TYPE ").append(fd.type());
-                }
-                if (fd.assertExpr() != null) {
-                    sb.append(" ASSERT ").append(com.axonbase.parser.Render.expr(fd.assertExpr()));
-                }
-                if (fd.defaultExpr() != null) {
-                    sb.append(" DEFAULT ").append(com.axonbase.parser.Render.expr(fd.defaultExpr()));
-                }
-                if (fd.references() != null) {
-                    sb.append(" REFERENCES ").append(fd.references());
-                }
-                sb.append(";\n");
-            }
             for (Catalog.IndexDef ix : def.indexes().values()) {
                 sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineIndex(ix.name(), def.name(),
                     ix.columns(), ix.unique(), ix.count(), ix.searchAnalyzer(), ix.geo(), ix.columnar(),
@@ -1214,7 +1203,93 @@ public final class Datastore {
             }
         }
         exportColdRecords(sb, database);
+        appendEdges(sb, database);
+        appendKeyValues(sb, ns, db);
+        appendFields(sb, database);
+        appendEvents(sb, database);
         return sb.toString();
+    }
+
+    /** Um RELATE por aresta, lido da chave de saída ({@code E|ns|db|out|tabela|chave|tipo|tabela|chave}). */
+    private static void appendEdges(StringBuilder sb, Database database) {
+        String prefix = "E|" + database.ns() + "|" + database.db() + "|out|";
+        for (String key : database.records().keysWithPrefix(prefix)) {
+            String[] parts = key.substring(prefix.length()).split("\\|", -1);
+            if (parts.length != 5) {
+                // uma chave com '|' não deixa saber onde a aresta começa e termina: melhor falhar que perdê-la
+                throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", key));
+            }
+            sb.append("RELATE ").append(endpoint(key, parts[0], parts[1])).append("->").append(name(parts[2]))
+                .append("->").append(endpoint(key, parts[3], parts[4])).append(";\n");
+        }
+    }
+
+    private static String endpoint(String edge, String table, String token) {
+        if (token.startsWith("s")) {
+            return name(table) + ":" + AxonJson.write(AxonValue.str(token.substring(1)));
+        }
+        if (token.startsWith("n")) {
+            return name(table) + ":" + com.axonbase.parser.Render.numberKey(
+                numberKeyValue(new java.math.BigDecimal(token.substring(1)), ""));
+        }
+        throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
+    }
+
+    private static String name(String name) {
+        return PLAIN_NAME.matcher(name).matches() ? name : AxonJson.write(AxonValue.str(name));
+    }
+
+    /** As entradas do chave-valor, com o prazo que ainda resta; as vencidas ficam de fora. */
+    private void appendKeyValues(StringBuilder sb, String ns, String db) {
+        String prefix = kvPrefix(ns, db);
+        long now = Instant.now().getEpochSecond();
+        for (String key : backend.keysWithPrefix(prefix)) {
+            String name = key.substring(prefix.length());
+            Optional<byte[]> raw = name.startsWith("ttl|") ? Optional.empty() : backend.get(key);
+            if (raw.isEmpty()) {
+                continue;
+            }
+            Long remaining = backend.get(kvTtlKey(ns, db, name)).map(expiry -> remainingSeconds(expiry, now))
+                .orElse(null);
+            if (remaining != null && remaining <= 0) {
+                continue;
+            }
+            sb.append("RETURN kv::set(").append(AxonJson.write(AxonValue.str(name))).append(", ")
+                .append(com.axonbase.parser.Render.value(decodeKv(raw.get())));
+            if (remaining != null) {
+                sb.append(", ").append(remaining);
+            }
+            sb.append(");\n");
+        }
+    }
+
+    private static Long remainingSeconds(byte[] expiry, long now) {
+        try {
+            return Long.parseLong(new String(expiry, StandardCharsets.UTF_8)) - now;
+        } catch (NumberFormatException corrupted) {
+            return null; // como na leitura: metadado corrompido não vence a entrada
+        }
+    }
+
+    private static void appendFields(StringBuilder sb, Database database) {
+        for (Catalog.TableDef def : database.catalog().tables()) {
+            for (Catalog.FieldDef field : def.fields().values()) {
+                sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineField(field.name(), def.name(),
+                    field.type(), field.assertExpr(), field.readonly(), null, field.defaultExpr(), field.references(),
+                    field.embeddingName(), field.embeddingFrom()))).append(";\n");
+            }
+        }
+    }
+
+    private static void appendEvents(StringBuilder sb, Database database) {
+        for (Catalog.TableDef def : database.catalog().tables()) {
+            for (Catalog.EventDef event : def.events().values()) {
+                com.axonbase.parser.ast.Expr when = event.whenExpr() != null ? event.whenExpr()
+                    : new com.axonbase.parser.ast.Expr.Literal(AxonValue.bool(true));
+                sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineEvent(event.name(), def.name(), when,
+                    event.then()))).append(";\n");
+            }
+        }
     }
 
     /** As linhas das partições que estão na camada fria entram no dump lidas do objeto. */
