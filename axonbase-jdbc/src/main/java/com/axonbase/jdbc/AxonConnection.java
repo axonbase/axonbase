@@ -2,6 +2,7 @@ package com.axonbase.jdbc;
 
 import com.axonbase.common.Messages;
 import com.axonbase.sdk.Axon;
+import com.axonbase.sdk.AxonQlText;
 import com.axonbase.sdk.AxonSdkException;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
@@ -83,7 +84,8 @@ public class AxonConnection implements Connection, SagaScope {
     public SagaBinding joinSaga(String sagaName, String correlationId) throws SQLException {
         if (closed) throw new SQLException(Messages.get("jdbc_connection_closed"));
         try {
-            axon.query("JOIN SAGA " + sagaName + " WITH CORRELATION '" + correlationId.replace("'", "''") + "'");
+            axon.query("JOIN SAGA " + AxonQlText.sagaName(sagaName)
+                + " WITH CORRELATION " + AxonQlText.literal(correlationId));
             return new SagaBinding() {
                 @Override
                 public void close() throws SQLException {
