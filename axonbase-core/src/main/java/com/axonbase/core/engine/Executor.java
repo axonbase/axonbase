@@ -1172,12 +1172,13 @@ public final class Executor {
         Object idKey = obj.containsKey("id") ? unwrapId(obj.remove("id")) : null;
         AxonValue key = explicitKey != null ? explicitKey : resolveKey(idKey);
         RecordId rid = new RecordId(table, key);
-        // antes de olhar se o id existe: sobre um registro oculto pela regra a recusa é sempre a mesma, sem pular nem
-        // dizer que ele já existe
-        refuseHiddenRecord(db, rid);
         // um id recém-gerado não existe em lugar algum: não precisa ser procurado
         boolean generated = explicitKey == null && idKey == null;
         AxonValue previous = generated ? null : existingRecord(db, rid);
+        if (previous != null) {
+            // antes de pular ou de dizer que existe: sobre um registro oculto pela regra a recusa é sempre a mesma
+            refuseHiddenRecord(db, rid);
+        }
         if (previous != null && existing == Existing.SKIP) {
             return null;
         }
