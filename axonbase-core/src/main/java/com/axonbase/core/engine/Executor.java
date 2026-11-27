@@ -827,7 +827,12 @@ public final class Executor {
             throw errorStmt(Messages.get("stmt_live_table_required"));
         }
         ensureTable(db, table);
-        String id = ds.liveBus().register(db.ns(), db.db(), table, lv.select(), lv.diff(), session);
+        // FROM t:chave acompanha só aquele registro; a chave é resolvida agora, com as variáveis de quem assina
+        String watched = lv.select().from() instanceof Expr.RecordId target
+            && (target.key() instanceof Expr.Literal || target.key() instanceof Expr.Ident
+                || target.key() instanceof Expr.Param)
+            ? configRecordId(target).key().keyString() : null;
+        String id = ds.liveBus().register(db.ns(), db.db(), table, watched, lv.select(), lv.diff(), session);
         return AxonValue.str(id);
     }
 
@@ -857,6 +862,9 @@ public final class Executor {
             return;
         }
         for (LiveBus.Subscription sub : subs) {
+            if (sub.recordKey() != null && !sub.recordKey().equals(rid.key().keyString())) {
+                continue;
+            }
             // a sessão pode ter trocado de usuário depois do LIVE SELECT
             if (sub.owner() != null && com.axonbase.core.security.Authz.hasDataRules(sub.owner().auth())) {
                 continue;

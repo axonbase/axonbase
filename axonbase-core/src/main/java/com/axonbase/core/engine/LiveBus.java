@@ -26,8 +26,8 @@ public final class LiveBus {
     public static final String UPDATE = "UPDATE";
     public static final String DELETE = "DELETE";
 
-    /** Assinatura viva de uma consulta. */
-    public record Subscription(String id, String ns, String db, String table,
+    /** Assinatura viva de uma consulta; {@code recordKey} nulo acompanha a tabela inteira. */
+    public record Subscription(String id, String ns, String db, String table, String recordKey,
                                Statement.Select select, boolean diff, Session owner) {
     }
 
@@ -52,10 +52,10 @@ public final class LiveBus {
     private final ConcurrentMap<String, Subscription> subscriptions = new ConcurrentHashMap<>();
 
     /** Regista uma subscription e devolve o identificador da live query. */
-    public String register(String ns, String db, String table, Statement.Select select,
+    public String register(String ns, String db, String table, String recordKey, Statement.Select select,
                            boolean diff, Session owner) {
         String id = UUID.randomUUID().toString();
-        subscriptions.put(id, new Subscription(id, ns, db, table, select, diff, owner));
+        subscriptions.put(id, new Subscription(id, ns, db, table, recordKey, select, diff, owner));
         if (owner != null) {
             owner.trackLive(id);
         }

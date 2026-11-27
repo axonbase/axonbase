@@ -154,6 +154,10 @@ Continuam como antes: criar tabela sem `PERMISSIONS` (também ao gravar um regis
 - `campo @@ 'texto' AND outra_condição`, sobre um campo com índice `SEARCH`, passa a usar o índice, o analisador e a pontuação de `search::score()`. Antes virava comparação de trecho de texto, com pontuação zero, e podia devolver outras linhas.
 - Com várias buscas ligadas por `AND`, a pontuação é a soma delas. Junto de `OR`, de `NOT` ou de `JOIN`, o comportamento não mudou.
 
+### Consulta ao vivo sobre um registro
+
+- `LIVE SELECT * FROM t:chave` passa a notificar só as mudanças desse registro. Antes notificava as da tabela inteira. Quem dependia disso precisa assinar a tabela (`FROM t`).
+
 ### Conversões
 
 As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool>` passam a recusar entrada inválida em vez de gravar o instante atual, zero ou um texto com marcador. Um campo `int` recusa número com fração.
