@@ -1807,7 +1807,11 @@ public final class Parser {
                 } else {
                     break;
                 }
-                if (!match(COMMA)) break;
+                // a vírgula é opcional antes de outra operação com COLUMN: o texto gravado vinha sem ela
+                if (!match(COMMA) && !((atKeyword("add") || atKeyword("drop") || atKeyword("modify"))
+                    && peek(1).isKeyword("column"))) {
+                    break;
+                }
             }
             if (ops.isEmpty()) {
                 throw error(Messages.get("parser_alter_table_no_ops", peek().start()));
