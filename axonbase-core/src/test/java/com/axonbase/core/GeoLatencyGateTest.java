@@ -149,8 +149,9 @@ class GeoLatencyGateTest {
             Session s = GeoTestData.session();
             Random rnd = new Random(7000 + first);
             for (int i = first; i < moves; i += threads) {
+                // a seleção de um único registro devolve o próprio valor, sem lista em volta
                 List<AxonValue> at = ds.execute("SELECT VALUE pos FROM g:" + i * stride, s, null)
-                    .asArray().get(0).asObject().get("coordinates").asArray();
+                    .asObject().get("coordinates").asArray();
                 double heading = rnd.nextDouble() * 2 * Math.PI;
                 double lat = at.get(1).asDouble() + step * Math.cos(heading) / METERS_PER_DEGREE;
                 double lon = at.get(0).asDouble()
