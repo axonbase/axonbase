@@ -181,7 +181,7 @@ public final class Datastore {
                     if (dbEntry.getValue().catalog().table(kind) == null) {
                         dbEntry.getValue().catalog().defineTable(new com.axonbase.core.catalog.Catalog.TableDef(kind, false, false));
                         controlState.apply(ControlCommand.of(ControlCommand.Kind.TABLE, ns, db, kind,
-                            "DEFINE TABLE " + kind + " SCHEMALESS"));
+                            "DEFINE TABLE " + com.axonbase.value.AxonQlText.identifier(kind) + " SCHEMALESS"));
                         registered = true;
                     }
                 }
@@ -694,6 +694,12 @@ public final class Datastore {
         if (replaying.get()) {
             return;
         }
+        // só entra no plano de controle o que o replay aceita: uma definição do tipo e do nome registrados
+        if (command.kind() != ControlCommand.Kind.DATABASE && command.kind() != ControlCommand.Kind.JKS
+            && com.axonbase.core.control.ControlGuard.replayable(command).isEmpty()) {
+            throw com.axonbase.common.AxonError.internal("definição recusada pelo plano de controle: "
+                + command.kind() + " '" + command.name() + "'");
+        }
         synchronized (controlLock) {
             controlState.apply(command);
             KvBackend target = session != null && session.inTransaction() ? session.tx() : backend;
@@ -894,7 +900,15 @@ public final class Datastore {
         }
         Session session = new Session(emptyToNull(command.namespace()),
             emptyToNull(command.database()));
-        Query query = AxonQl.parse(command.definition());
+        Query query = com.axonbase.core.control.ControlGuard.replayable(command).orElse(null);
+        if (query == null) {
+            // gravado por uma versão anterior: nada dele é executado, e a base abre sem a definição. O texto não vai
+            // para o log porque pode trazer credenciais.
+            LOG.log(System.Logger.Level.ERROR, "definição ignorada no replay (não é uma definição válida do tipo "
+                + "registrado): " + command.kind() + " '" + command.name() + "' de " + command.namespace() + "/"
+                + command.database());
+            return;
+        }
         com.axonbase.core.pl.ProgramMeta.beginReplay(command.definition());
         try {
             new Executor(this).execute(query, session, null);
@@ -1392,7 +1406,7 @@ public final class Datastore {
                 false, perms, def.shardBy()));
             if (def.drop()) {
                 // o parser lê DROP antes do tipo de esquema
-                String head = "DEFINE TABLE " + def.name();
+                String head = "DEFINE TABLE " + com.axonbase.value.AxonQlText.identifier(def.name());
                 text = head + " DROP" + text.substring(head.length());
             }
             sb.append(text).append(";\n");
@@ -1409,12 +1423,13 @@ public final class Datastore {
 
     /** A tabela com as opções dela; as PERMISSIONS vão depois dos dados. */
     private static void appendTable(StringBuilder sb, Catalog.TableDef def) {
-        sb.append("DEFINE TABLE ").append(def.name()).append(def.schemafull() ? " SCHEMAFULL" : " SCHEMALESS");
+        sb.append("DEFINE TABLE ").append(com.axonbase.value.AxonQlText.identifier(def.name()))
+            .append(def.schemafull() ? " SCHEMAFULL" : " SCHEMALESS");
         if (def.drop()) {
             sb.append(" DROP");
         }
         if (def.shardBy() != null) {
-            sb.append(" SHARD BY ").append(def.shardBy());
+            sb.append(" SHARD BY ").append(com.axonbase.value.AxonQlText.identifier(def.shardBy()));
         }
         sb.append(";\n");
     }
@@ -1493,8 +1508,17 @@ public final class Datastore {
         // então um registro que perdeu o campo id (rc1, UPDATE CONTENT) também sai no dump
         Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
         AxonValue id = m.remove("id");
-        sb.append("CREATE ").append(table).append(":").append(literalKey(table, keyStr, id))
+        sb.append("CREATE ").append(createTarget(table)).append(":").append(literalKey(table, keyStr, id))
             .append(" CONTENT ").append(com.axonbase.parser.Render.value(AxonValue.object(m))).append(";\n");
+    }
+
+    /** Palavras que, logo depois de CREATE, começam outro comando. */
+    private static final java.util.Set<String> AFTER_CREATE = java.util.Set.of(
+        "table", "saga", "ai", "jks", "data", "database", "only");
+
+    private static String createTarget(String table) {
+        return AFTER_CREATE.contains(table) ? "`" + table + "`"
+            : com.axonbase.value.AxonQlText.identifier(table);
     }
 
     /** A definição de partição e de TTL da tabela, depois dos campos e índices dela e antes dos dados. */

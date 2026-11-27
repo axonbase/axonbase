@@ -26,7 +26,8 @@ public record SlotFilter(String table, String field, List<SlotRange> ranges) {
 
     /** A condição equivalente na AxonQL: {@code shard::owned(campo, "tabela", "campo", "faixas")}. */
     public String condition() {
-        return "shard::owned(" + field + ", \"" + table + "\", \"" + field + "\", \"" + SlotRange.format(ranges) + "\")";
+        return "shard::owned(" + com.axonbase.value.AxonQlText.identifier(field) + ", " + com.axonbase.value.AxonQlText.string(table) + ", "
+            + com.axonbase.value.AxonQlText.string(field) + ", " + com.axonbase.value.AxonQlText.string(SlotRange.format(ranges)) + ")";
     }
 
     /**

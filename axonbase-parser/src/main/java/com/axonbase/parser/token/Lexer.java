@@ -11,31 +11,7 @@ import java.util.Set;
 /** Lexer da AxonQL feito à mão. Produz tokens com keywords case-insensitive. */
 public final class Lexer {
 
-    private static final Set<String> KEYWORDS = Set.of(
-        "use", "set", "let", "create", "insert", "into", "ignore", "relation",
-        "update", "upsert", "merge", "patch", "replace", "content", "delete", "select",
-        "from", "where", "order", "by", "limit", "start", "fetch", "only", "return",
-        "relate", "define", "table", "field", "index", "event", "type", "on", "columns",
-        "unique", "count", "sum", "avg", "min", "max", "assert", "readonly", "value", "default", "schemafull",
-        "schemaless", "drop", "permissions", "for", "group", "namespace", "root", "database",
-        "if", "then", "else", "end", "when", "error", "kill", "info", "and", "or", "not",
-        "true", "false", "null", "none", "contains", "inside", "outside", "intersects",
-        "begin", "commit", "cancel", "any", "option", "live", "diff",
-        "savepoint", "release", "rollback",
-        "in", "as", "asc", "desc", "user", "access", "password", "passhash", "roles",
-        "jks", "path", "certificate", "fingerprint", "collect", "oid", "icpbrasil",
-        "analyzer", "search", "lowercase", "stopwords", "stemming", "geo", "hnsw", "dimension", "dist",
-        "references", "join",
-        "int", "float", "number", "decimal", "string", "bool", "datetime", "uuid",
-        "array", "object", "bytes", "duration", "record", "geometry", "vector",
-        "explain", "analyze", "at", "before", "timestamp", "statement",
-        "link", "connect", "with", "saga", "correlation", "databases", "describe", "show",
-        "data", "rule", "rules", "apply", "mask", "fields", "columnar",
-        "ai", "audit", "warning", "danger", "reason", "case", "cases",
-        "authorized", "denied", "audited", "remove",
-        "values", "primary", "key", "check", "schema", "flexible",
-        "alter", "add", "column", "modify", "revoke", "grant"
-    );
+    private static final Set<String> KEYWORDS = com.axonbase.value.AxonQlText.KEYWORDS;
 
     private static final List<String> DUR_UNITS = List.of("ms", "us", "ns", "y", "w", "d", "h", "m", "s");
 

@@ -1,5 +1,8 @@
 package com.axonbase.server;
 
+import com.axonbase.parser.AxonQl;
+import com.axonbase.parser.ast.Statement;
+import com.axonbase.value.AxonQlText;
 import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterStatusProvider;
 import com.axonbase.core.cluster.CommitOutcomeUnknownException;
@@ -361,7 +364,7 @@ public final class RpcDispatcher {
             }
             sql = sb.toString();
         }
-        return ds.execute(sql, session, Map.of());
+        return ds.execute(AxonQl.requireSingle(sql, Statement.Select.class), session, Map.of());
     }
 
     /**
@@ -393,19 +396,23 @@ public final class RpcDispatcher {
         return switch (method) {
             case "create" -> {
                 requireMin(pa, 2, method);
-                yield "CREATE " + ident(pa.get(0)) + " CONTENT " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("CREATE " + ident(pa.get(0)) + " CONTENT " + contentObject(pa.get(1)),
+                    Statement.Create.class);
             }
             case "insert" -> {
                 requireMin(pa, 2, method);
-                yield "INSERT INTO " + ident(pa.get(0)) + " " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("INSERT INTO " + ident(pa.get(0)) + " " + contentObject(pa.get(1)),
+                    Statement.Insert.class);
             }
             case "update" -> {
                 requireMin(pa, 2, method);
-                yield "UPDATE " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("UPDATE " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1)),
+                    Statement.Update.class);
             }
             case "upsert" -> {
                 requireMin(pa, 2, method);
-                yield "UPSERT " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("UPSERT " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1)),
+                    Statement.Update.class);
             }
             case "delete" -> {
                 requireMin(pa, 1, method);
@@ -413,14 +420,14 @@ public final class RpcDispatcher {
                 if (pa.size() > 1 && pa.get(1) != null && !pa.get(1).isNone() && !pa.get(1).isNull()) {
                     sb.append(" WHERE ").append(pa.get(1).asString());
                 }
-                yield sb.toString();
+                yield AxonQl.requireSingle(sb.toString(), Statement.Delete.class);
             }
             case "relate" -> {
                 requireMin(pa, 3, method);
                 StringBuilder sb = new StringBuilder("RELATE ")
                     .append(ident(pa.get(0))).append("->").append(ident(pa.get(1)))
                     .append("->").append(ident(pa.get(2)));
-                if (pa.get(3) != null && pa.get(3).isObject()) {
+                if (pa.size() > 3 && pa.get(3) != null && pa.get(3).isObject()) {
                     sb.append(" SET ");
                     boolean first = true;
                     for (Map.Entry<String, AxonValue> e : pa.get(3).asObject().entrySet()) {
@@ -428,10 +435,10 @@ public final class RpcDispatcher {
                             sb.append(", ");
                         }
                         first = false;
-                        sb.append(e.getKey()).append(" = ").append(e.getValue().toString());
+                        sb.append(propertyPath(e.getKey())).append(" = ").append(AxonQlText.value(e.getValue()));
                     }
                 }
-                yield sb.toString();
+                yield AxonQl.requireSingle(sb.toString(), Statement.Relate.class);
             }
             default -> throw new IllegalArgumentException(Messages.get("rpc_data_method_unsupported", method));
         };
@@ -449,10 +456,19 @@ public final class RpcDispatcher {
             throw new IllegalArgumentException(Messages.get("rpc_identifier_string"));
         }
         String s = v.asString().trim();
-        if (!s.matches("[\\p{L}\\p{N}_.:\\-]+")) {
+        // "--" abre comentário e cortaria o resto do comando, inclusive o WHERE
+        if (!s.matches("[\\p{L}\\p{N}_.:\\-]+") || s.contains("--")) {
             throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", s));
         }
         return s;
+    }
+
+    /** Nome de propriedade de aresta: um nome simples ou um caminho ({@code a.b}). */
+    private static String propertyPath(String key) {
+        if (!key.matches("[\\p{L}_][\\p{L}\\p{Nd}_]*(\\.[\\p{L}_][\\p{L}\\p{Nd}_]*)*")) {
+            throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", key));
+        }
+        return AxonQlText.path(key);
     }
 
     /** Dados de escrita como literal AxonQL (mapa/objeto). */
@@ -460,7 +476,7 @@ public final class RpcDispatcher {
         if (v == null || !v.isObject()) {
             throw new IllegalArgumentException(Messages.get("rpc_data_object"));
         }
-        return v.toString();
+        return AxonQlText.value(v);
     }
 
     private void observeQuery(long startedNanos, boolean error) {
@@ -698,7 +714,10 @@ public final class RpcDispatcher {
                     && lp.asArray().get(1).asBool();
                 String sql = "LIVE SELECT * FROM " + table + (diff ? " DIFF" : "");
                 try {
-                    result = ds.execute(sql, session, Map.of());
+                    if (table.contains("--")) {
+                        throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", table));
+                    }
+                    result = ds.execute(AxonQl.requireSingle(sql, Statement.Live.class), session, Map.of());
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                     errorCode = errorCode(e);

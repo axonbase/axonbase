@@ -113,7 +113,7 @@ final class CreatePlanner {
             positions.computeIfAbsent(shard, s -> new ArrayList<>()).add(i);
         }
         GatewayRules.requireSettled(map, slots);
-        String text = "INSERT " + (insert.ignore() ? "IGNORE " : "") + "INTO " + table + " $" + ROWS
+        String text = "INSERT " + (insert.ignore() ? "IGNORE " : "") + "INTO " + com.axonbase.value.AxonQlText.identifier(table) + " $" + ROWS
             + (silent ? " RETURN NONE" : "");
         List<Plan.Part> parts = new ArrayList<>();
         List<List<Integer>> order = new ArrayList<>();
@@ -225,7 +225,7 @@ final class CreatePlanner {
 
     /** Outro shard, que não {@code owner}, que já guarda o id; {@code null} quando nenhum guarda. */
     private String holder(ShardMap map, GatewaySession session, String table, AxonValue key, String owner) {
-        String query = "SELECT * FROM " + table + ":" + GatewayRules.keyLiteral(key);
+        String query = "SELECT * FROM " + com.axonbase.value.AxonQlText.identifier(table) + ":" + GatewayRules.keyLiteral(key);
         for (String shard : map.shardIds()) {
             if (shard.equals(owner)) {
                 continue;

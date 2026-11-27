@@ -13,7 +13,33 @@ Tire um backup antes de atualizar.
 - Instalações fora de contêiner e as que usam `--path /data/db` com volume em `/data` não precisam desse passo.
 - O passo a passo, inclusive como voltar atrás, está em [cluster Raft](cluster-raft.md#contêiner-com-o-comando-padrão-copiar-antes-de-recriar).
 
+## Atenção: revise os usuários root de instalações existentes
+
+> **Em versões anteriores, um texto vindo de fora (nome de tabela, chave de objeto, valor enviado por um conector) podia ser executado como comando AxonQL e criar um usuário root. Depois de atualizar, rode `INFO FOR ROOT`, confira cada usuário, em especial os de escopo `ROOT` e os de papel `OWNER`, apague com `DROP USER` (com um namespace e um banco selecionados) os que não reconhecer e troque as senhas dos demais.**
+
+- Um usuário criado dessa forma pode estar gravado como qualquer outro. A atualização não tem como distingui-lo e não o apaga.
+- Confira também os acessos (`accesses` na mesma resposta), as ligações entre bancos e, nos servidores apontados por elas, os usuários root.
+- Procure no log do primeiro início a mensagem `definição ignorada no replay`. Ela indica um registro do catálogo que não é uma definição válida: nada dele é executado.
+
 ## Mudanças de comportamento
+
+### Nomes e textos não viram comando
+
+- Ao reiniciar, cancelar uma transação ou aplicar um lote replicado, o servidor só reexecuta a definição do tipo e do nome registrados. Um registro diferente disso é ignorado e anotado no log, e a base abre sem ele. Isso vale para nomes com espaço ou hífen gravados sem crases por versões anteriores, que antes impediam a subida: a definição ignorada (inclusive campos, índices e `PERMISSIONS` dessa tabela) precisa ser declarada de novo.
+- Uma definição que não possa ser relida passa a ser recusada no momento da gravação. Um nome com crase e `⟩` ao mesmo tempo não é aceito.
+- Nomes que não são simples saem entre crases no catálogo e na exportação.
+- Os métodos `create`, `insert`, `update`, `upsert`, `relate`, `delete`, `select` e `live` do RPC (Remote Procedure Call) aceitam uma única sentença do tipo pedido. Chaves e valores chegam como dados, um identificador com `--` é recusado e as propriedades de aresta do `relate` precisam ter nome simples. A rota `/table` segue a mesma regra e responde 400.
+- Por `DATABASE LINK`, só são encaminhados comandos em que os nomes (tabelas, arestas e campos) são simples: letras, números e `_`.
+- Colunas chamadas `check` ou `primary` deixam de impedir o reinício, também em bases já gravadas.
+
+### Parênteses em condições gravadas
+
+Versões anteriores gravavam `CHECK`, `ASSERT`, `PERMISSIONS`, Data Rules, eventos e a exportação sem os parênteses. Uma condição como `(a OR b) AND c` volta do disco como `a OR (b AND c)`, e a informação perdida não pode ser recuperada. A atualização não corrige o que já foi gravado: **revise toda condição que usava parênteses e declare-a de novo.**
+
+- `PERMISSIONS` e campos: repita o `DEFINE TABLE` ou o `DEFINE FIELD` com a condição correta.
+- `CHECK` de coluna: use `ALTER TABLE ... MODIFY COLUMN`.
+- Data Rules e eventos: apague e crie de novo.
+- `CHECK` de tabela: um novo `CREATE TABLE` acrescenta a condição correta, mas não remove a antiga. Se a antiga for mais restritiva que a desejada, é preciso recriar a tabela.
 
 ### `CREATE` e `INSERT` recusam um registro que já existe
 
@@ -80,7 +106,7 @@ Tire um backup antes de atualizar.
 ### Segurança do servidor
 
 - O armazenamento de chave e valor, ou KV (Key-Value), passa a conferir o escopo do token contra o namespace e o banco informados na chamada.
-- Essa conferência vale para as chamadas por RPC (Remote Procedure Call), o protocolo de chamadas do servidor.
+- Essa conferência vale para as chamadas por RPC, o protocolo de chamadas do servidor.
 - O método `signup` exige um administrador cujo escopo cubra o destino, é recusado em sessão somente leitura e não altera um usuário existente.
 - A entrada e a saída de membros do cluster exigem administrador root.
 - A API (Application Programming Interface) de gestão aplica o teto de papel pedido em `Axon-Role-Cap`. Registrar um truststore passa a exigir papel de administrador.

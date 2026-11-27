@@ -514,7 +514,7 @@ public final class AxonValue implements Comparable<AxonValue> {
         var it = obj.entrySet().iterator();
         while (it.hasNext()) {
             var e = it.next();
-            sb.append('"').append(e.getKey()).append("\": ").append(e.getValue());
+            sb.append(quote(e.getKey())).append(": ").append(e.getValue());
             if (it.hasNext()) {
                 sb.append(", ");
             }

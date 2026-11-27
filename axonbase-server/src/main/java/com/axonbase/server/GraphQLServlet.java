@@ -135,7 +135,8 @@ public final class GraphQLServlet extends HttpServlet {
                     .append("\",\"fields\":[{\"name\":\"id\",\"type\":{\"kind\":\"SCALAR\",\"name\":\"String\"}}");
                 // Adicionar campos do schema se disponíveis
                 try {
-                    AxonValue tableInfo = ds.execute("INFO FOR TABLE " + tableName, s, null);
+                    AxonValue tableInfo = ds.execute("INFO FOR TABLE "
+                        + com.axonbase.value.AxonQlText.identifier(tableName), s, null);
                     if (tableInfo.isObject() && tableInfo.asObject().get("fields").isObject()) {
                         for (String field : tableInfo.asObject().get("fields").asObject().keySet()) {
                             sb.append(",{\"name\":\"").append(field)

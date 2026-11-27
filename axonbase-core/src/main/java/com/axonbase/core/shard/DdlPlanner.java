@@ -128,7 +128,7 @@ final class DdlPlanner {
             if (!GatewayRules.mentions(database, table.name())) {
                 continue;
             }
-            AxonValue rows = context.sendSystem(map, shard, session, "SELECT * FROM " + table.name() + " LIMIT 1");
+            AxonValue rows = context.sendSystem(map, shard, session, "SELECT * FROM " + com.axonbase.value.AxonQlText.identifier(table.name()) + " LIMIT 1");
             if (rows.isArray() && !rows.asArray().isEmpty()) {
                 throw ShardException.refused("shard_table_not_empty", table.name());
             }
@@ -147,7 +147,7 @@ final class DdlPlanner {
             Map.of("table", AxonValue.str(table))).asBool()) {
             throw ShardException.refused("sharded_permissions", table);
         }
-        AxonValue info = context.sendSystem(map, home, session, "INFO FOR TABLE " + table);
+        AxonValue info = context.sendSystem(map, home, session, "INFO FOR TABLE " + com.axonbase.value.AxonQlText.identifier(table));
         Map<String, AxonValue> out = info.asObject();
         AxonValue indexes = out.get("indexes");
         if (indexes != null && indexes.isObject()) {
