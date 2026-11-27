@@ -111,7 +111,7 @@ class AiAuditInterceptorTest {
         s.database("outro");
 
         assertThrows(AxonError.class, () -> ds.execute("SELECT * FROM users", s, null));
-        ds.execute("USE NS test DB dev", s, null);
+        ds.execute("USE test dev", s, null);
 
         assertNotNull(ds.execute("SELECT * FROM users", s, null));
     }
