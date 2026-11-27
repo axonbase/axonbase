@@ -39,7 +39,7 @@ final class SagaUndo {
             if (!"CREATE".equalsIgnoreCase(operation) || key == null) {
                 return List.of();
             }
-            return List.of(new Statement.Delete(record(table, key), null, Statement.ReturnSpec.AFTER));
+            return List.of(new Statement.Delete(recordId(table, key), null, Statement.ReturnSpec.AFTER));
         }
         if (key == null) {
             throw refused(table);
@@ -47,15 +47,15 @@ final class SagaUndo {
         // o id é a própria chave do alvo: a escrita o mantém, ou o repõe quando recria o registro
         Map<String, AxonValue> content = new LinkedHashMap<>(before.asObject());
         content.remove("id");
-        return List.of(new Statement.Update(Statement.UpdateMode.UPSERT, false, record(table, key),
+        return List.of(new Statement.Update(Statement.UpdateMode.UPSERT, false, recordId(table, key),
             new Statement.Data.Content(new Expr.Literal(AxonValue.object(content))), null,
             Statement.ReturnSpec.AFTER));
     }
 
     /** Remove a aresta e, quando ela já existia, recria-a só com as propriedades anteriores. */
     private static List<Statement> edge(String kind, Map<String, AxonValue> edge) {
-        Expr from = record(text(edge, "from_table"), literalKey(text(edge, "from_key")));
-        Expr to = record(text(edge, "to_table"), literalKey(text(edge, "to_key")));
+        Expr from = recordId(text(edge, "from_table"), literalKey(text(edge, "from_key")));
+        Expr to = recordId(text(edge, "to_table"), literalKey(text(edge, "to_key")));
         Expr name = new Expr.Ident(kind);
         List<Statement> statements = new ArrayList<>();
         statements.add(new Statement.Unrelate(from, name, to));
@@ -76,7 +76,7 @@ final class SagaUndo {
         return statements;
     }
 
-    private static Expr.RecordId record(String table, Expr.Literal key) {
+    private static Expr.RecordId recordId(String table, Expr.Literal key) {
         return new Expr.RecordId(new Expr.Ident(table), key);
     }
 
@@ -102,7 +102,7 @@ final class SagaUndo {
         return new Expr.Literal(AxonValue.num(new BigDecimal(raw)));
     }
 
-    /** Lê o literal gravado no passo. Só vale um texto ou um número; qualquer coisa a mais é recusada. */
+    /** Lê o literal gravado no passo: só vale um texto ou um número, sem outra sentença nem condição. */
     private static Expr.Literal literalKey(String literal) {
         List<Statement> parsed = AxonQl.parse("DELETE x:" + literal).statements();
         if (parsed.size() == 1 && parsed.get(0) instanceof Statement.Delete delete && delete.cond() == null
