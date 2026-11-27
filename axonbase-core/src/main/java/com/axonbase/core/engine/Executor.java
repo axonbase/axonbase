@@ -3913,8 +3913,11 @@ return score;
     private AxonValue runDefineIndex(DefineIndex di) {
         Database db = db();
         Catalog.TableDef def = ensureTable(db, di.table());
-        com.axonbase.core.partition.PartitionRunner.checkIndex(db, di.table(), di.name(),
-            di.searchAnalyzer() != null || di.geo() || di.vectorDimension() != null || di.count());
+        // no replay a definição já foi aceita: recusá-la agora impediria a base de abrir
+        if (!ds.isReplaying()) {
+            com.axonbase.core.partition.PartitionRunner.checkIndex(db, di.table(), di.name(),
+                di.searchAnalyzer() != null || di.geo() || di.vectorDimension() != null || di.count());
+        }
         if (di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", di.searchAnalyzer()));
         }

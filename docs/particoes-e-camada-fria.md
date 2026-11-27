@@ -41,7 +41,7 @@ Regras:
 
 ## Catálogo
 
-A definição (campo, intervalo, retenção, prazo frio, TTL) fica no plano de controle, em dois tipos novos (`PARTITIONING` e `TTL`), com o texto AxonQL da própria instrução. É replicada e reexecutada como as demais definições.
+A definição (campo, intervalo, retenção, prazo frio, TTL) fica no plano de controle, em dois tipos novos (`PARTITIONING` e `TTL`), com o texto AxonQL da própria instrução. É replicada e reexecutada como as demais definições, com uma diferença de ordem: na releitura do catálogo, as duas vêm logo depois da tabela e antes dos índices, para que uma construção de índice retomada já saiba que a tabela é particionada.
 
 A lista de partições fica em **chaves de dados**, não no plano de controle. Assim ela entra no mesmo lote atômico das linhas, e vai de graça para o journal, a replicação e os backups.
 
