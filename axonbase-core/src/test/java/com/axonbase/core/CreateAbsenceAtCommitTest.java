@@ -6,6 +6,7 @@ import com.axonbase.value.AxonValue;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -292,7 +293,7 @@ class CreateAbsenceAtCommitTest {
         }
     }
 
-    @Test
+    @RepeatedTest(10)
     @DisplayName("atalho e transações disputando o mesmo id criam uma vez só")
     void shortcutAndTransactionsCreateOnce() throws Exception {
         run("DEFINE TABLE p SCHEMALESS");
