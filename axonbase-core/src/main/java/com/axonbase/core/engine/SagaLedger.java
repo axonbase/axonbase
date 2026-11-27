@@ -38,6 +38,7 @@ public class SagaLedger {
         ds.execute("DEFINE FIELD status ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD created_at ON TABLE saga TYPE datetime;", sagaSession(), null);
         ds.execute("DEFINE FIELD links ON TABLE saga TYPE array;", sagaSession(), null);
+        ds.execute("DEFINE FIELD link_namespace ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE INDEX saga_corr ON TABLE saga COLUMNS correlation_id UNIQUE;", sagaSession(), null);
 
         ds.execute("DEFINE TABLE saga_step SCHEMAFULL;", sagaSession(), null);
@@ -60,18 +61,22 @@ public class SagaLedger {
     }
 
     public void beginSaga(String sagaResource, String correlationId) {
-        beginSaga(sagaResource, correlationId, List.of());
+        beginSaga(sagaResource, correlationId, List.of(), "");
     }
 
-    /** @param links participantes da definição no momento do BEGIN; vazio quando a SAGA não tem definição. */
-    public void beginSaga(String sagaResource, String correlationId, List<String> links) {
+    /**
+     * @param links participantes da definição no momento do BEGIN; vazio quando a SAGA não tem definição
+     * @param linkNamespace namespace de quem abriu a SAGA, onde as ligações dos participantes estão definidas
+     */
+    public void beginSaga(String sagaResource, String correlationId, List<String> links, String linkNamespace) {
         String participants = Render.value(
             AxonValue.array(links.stream().map(AxonValue::str).toList()));
         ds.execute("UPSERT saga:" + escKey(correlationId)
             + " CONTENT {name: \"" + esc(sagaResource)
             + "\", correlation_id: \"" + esc(correlationId)
             + "\", links: " + participants
-            + ", status: \"RUNNING\", created_at: time::now()}", sagaSession(), null);
+            + ", link_namespace: \"" + esc(linkNamespace)
+            + "\", status: \"RUNNING\", created_at: time::now()}", sagaSession(), null);
     }
 
     /** O registro da transação no ledger, ou {@code null} quando não há nenhuma com essa correlação. */

@@ -4779,8 +4779,10 @@ return score;
     private AxonValue runBeginSaga(BeginSaga bs) {
         sagaLedger.ensureTables();
         Datastore.SagaDef definition = ds.saga(bs.name());
-        sagaLedger.beginSaga(bs.name(), bs.correlationId(), definition == null ? List.of() : definition.links());
-        coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false);
+        String linkNamespace = session.namespace() == null ? "" : session.namespace();
+        sagaLedger.beginSaga(bs.name(), bs.correlationId(), definition == null ? List.of() : definition.links(),
+            linkNamespace);
+        coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false, session.namespace());
         return AxonValue.object(Map.of(
             "saga", AxonValue.str(bs.name()),
             "correlation_id", AxonValue.str(bs.correlationId()),
@@ -4816,7 +4818,8 @@ return score;
 
     private AxonValue runCommitSaga(CommitSaga cs) {
         requireSaga(cs.name(), cs.correlationId(), false);
-        coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false);
+        coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false,
+            linkNamespace(cs.correlationId()));
         sagaLedger.commitSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("COMMITTED")));
     }
@@ -4824,7 +4827,8 @@ return score;
     private AxonValue runCancelSaga(CancelSaga cs) {
         // em COMPENSATING os participantes já responderam: falta só terminar a compensação local
         if ("RUNNING".equals(requireSaga(cs.name(), cs.correlationId(), true))) {
-            coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true);
+            coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true,
+                linkNamespace(cs.correlationId()));
         }
         sagaLedger.cancelSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
@@ -4843,7 +4847,22 @@ return score;
         return AxonValue.object(Map.of("ok", AxonValue.str("1")));
     }
 
-    private void coordinateSagaParticipants(String sagaName, String correlationId, String action, boolean reverse) {
+    /**
+     * Namespace onde procurar as ligações dos participantes. A API de gestão executa em {@code system}: nesse caso
+     * vale o namespace de quem abriu a SAGA. Nas demais sessões vale o da própria sessão.
+     */
+    private String linkNamespace(String correlationId) {
+        if (!"system".equals(session.namespace())) {
+            return session.namespace();
+        }
+        Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
+        AxonValue opened = record == null ? null : record.get("link_namespace");
+        return opened != null && opened.isString() && !opened.asString().isEmpty()
+            ? opened.asString() : session.namespace();
+    }
+
+    private void coordinateSagaParticipants(String sagaName, String correlationId, String action, boolean reverse,
+                                            String linkNamespace) {
         Datastore.SagaDef definition = ds.saga(sagaName);
         if (definition == null) {
             return;
@@ -4856,7 +4875,7 @@ return score;
         String statement = action + " SAGA " + quotedName + " WITH CORRELATION '"
             + SagaLedger.esc(correlationId) + "'";
         for (String linkName : links) {
-            Datastore.DatabaseLinkDef link = ds.databaseLink(session.namespace(), linkName);
+            Datastore.DatabaseLinkDef link = ds.databaseLink(linkNamespace, linkName);
             if (link == null) {
                 throw errorStmt(Messages.get("stmt_saga_link_missing", linkName));
             }
@@ -4869,7 +4888,7 @@ return score;
                     if (!transaction.isEmpty() && transaction.get(0).isObject()) {
                         AxonValue steps = transaction.get(0).asObject().get("steps");
                         if (steps != null && steps.isArray()) {
-                            sagaLedger.reportParticipantSteps(correlationId, session.namespace(), linkName, steps.asArray());
+                            sagaLedger.reportParticipantSteps(correlationId, linkNamespace, linkName, steps.asArray());
                         }
                     }
                 }
