@@ -8,6 +8,16 @@ public interface CommitCoordinator {
     long confirm(String nodeId, CommittedBatch batch);
 
     /**
+     * Chamado antes de uma transação executar. No líder, espera a base local e o catálogo em memória refletirem tudo
+     * que o log pode vir a confirmar, e devolve a mesma marca de {@link #beginValidation()}.
+     *
+     * @return a marca, ou {@code -1} num nó que não lidera
+     */
+    default long awaitCatalog() {
+        return 0;
+    }
+
+    /**
      * Chamado antes de validar uma transação. Espera até o estado local refletir tudo que o log pode vir a
      * confirmar e devolve uma marca que {@link #confirm(String, CommittedBatch, long)} confere.
      */
