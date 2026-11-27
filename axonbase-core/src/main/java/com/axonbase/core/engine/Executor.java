@@ -1001,7 +1001,7 @@ public final class Executor {
         ensureTable(db, table);
         AxonValue explicitKey = c.target() instanceof Expr.RecordId rid
             ? recordKey(rid.key()) : null;
-        AxonValue record = createRecord(db, table, evalData(c.data()), explicitKey, onExisting(false));
+        AxonValue record = createRecord(db, table, evalData(c.data(), table), explicitKey, onExisting(false));
         // Saga: record step (before=null)
         String sagaCorr = sagaCorrelation();
         if (sagaCorr != null && record.isObject()) {
@@ -1068,21 +1068,67 @@ public final class Executor {
         return found == null ? null : found.current();
     }
 
-    private AxonValue evalData(Data data) {
+    private AxonValue evalData(Data data, String table) {
         return switch (data) {
             case Data.Content c -> eval(c.content());
             case Data.SetClause sc -> {
                 Map<String, AxonValue> m = new LinkedHashMap<>();
                 for (Assignment a : sc.assignments()) {
-                    m.put(fieldOf(a.path()), eval(a.value()));
+                    write(m, assignmentPath(a.path(), table, m), eval(a.value()));
                 }
                 yield AxonValue.object(m);
             }
             case Data.Merge m -> eval(m.merge());
-            case Data.Patch p -> eval(p.patch());
+            case Data.Patch p -> {
+                // numa criação a lista de operações parte de um documento vazio
+                AxonValue patch = eval(p.patch());
+                yield patch.isArray() ? RecordChanges.patch(AxonValue.object(Map.of()), patch.asArray()) : patch;
+            }
             case Data.Replace r -> eval(r.replace());
             case null -> AxonValue.object(Map.of());
         };
+    }
+
+    /**
+     * Os passos do caminho de um SET: nomes de campo e posições de lista. {@code tabela.campo} é a coluna, a menos que
+     * o registro tenha um campo com o nome da tabela.
+     */
+    private List<Object> assignmentPath(Expr path, String table, Map<String, AxonValue> record) {
+        List<Object> steps = new ArrayList<>();
+        if (path instanceof Expr.Ident id) {
+            steps.add(id.name());
+        } else if (path instanceof Expr.Idiom idiom && idiom.base() instanceof Expr.Ident base) {
+            steps.add(base.name());
+            for (Expr.Part part : idiom.parts()) {
+                if (part instanceof Expr.Part.Field field) {
+                    steps.add(field.name());
+                } else if (part instanceof Expr.Part.Index index) {
+                    steps.add(listPosition(eval(index.index())));
+                } else {
+                    throw errorStmt(Messages.get("stmt_path_unsupported", com.axonbase.parser.Render.expr(path)));
+                }
+            }
+        } else {
+            throw errorStmt(Messages.get("stmt_path_unsupported", com.axonbase.parser.Render.expr(path)));
+        }
+        if (steps.size() > 1 && steps.get(0).equals(table) && !record.containsKey(table)
+            && steps.get(1) instanceof String) {
+            steps.remove(0);
+        }
+        return steps;
+    }
+
+    private Integer listPosition(AxonValue value) {
+        if (!value.isNumber() || value.asLong() < 0 || value.asLong() > Integer.MAX_VALUE) {
+            throw errorStmt(Messages.get("stmt_path_index", value));
+        }
+        return (int) value.asLong();
+    }
+
+    private static void write(Map<String, AxonValue> record, List<Object> path, AxonValue value) {
+        Map<String, AxonValue> changed = RecordChanges.set(AxonValue.object(record), path, value).asObject();
+        record.clear();
+        record.putAll(changed);
     }
 
     /**
@@ -1368,12 +1414,12 @@ public final class Executor {
             if (u.target() instanceof Expr.Ident idTarget) {
                 String table = idTarget.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data()), null, Existing.REPLACE));
+                results.add(createRecord(db, table, evalData(u.data(), table), null, Existing.REPLACE));
             } else if (u.target() instanceof Expr.RecordId rid
                 && rid.table() instanceof Expr.Ident ridTable) {
                 String table = ridTable.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data()), recordKey(rid.key()), Existing.REPLACE));
+                results.add(createRecord(db, table, evalData(u.data(), table), recordKey(rid.key()), Existing.REPLACE));
             }
         }
         return retNone ? AxonValue.none() : AxonValue.array(results);
@@ -1486,16 +1532,9 @@ public final class Executor {
         switch (data) {
             case Data.SetClause sc -> {
                 for (Assignment a : sc.assignments()) {
-                    String fieldName;
-                    if (a.path() instanceof Expr.Ident id) {
-                        fieldName = id.name();
-                    } else if (a.path() instanceof Expr.Idiom idiom) {
-                        fieldName = fieldOf(idiom);
-                    } else {
-                        continue;
-                    }
+                    List<Object> path = assignmentPath(a.path(), doc.id().table(), current);
                     AxonValue newValue = evalOnDocument(a.value(), doc);
-                    AxonValue existing = current.get(fieldName);
+                    AxonValue existing = path.size() == 1 ? current.get((String) path.get(0)) : null;
                     if (existing != null && existing.isNumber() && newValue.isString()) {
                         try {
                             String s = newValue.asString().trim();
@@ -1504,19 +1543,28 @@ public final class Executor {
                                 : AxonValue.num(Long.parseLong(s));
                         } catch (NumberFormatException ignored) {}
                     }
-                    current.put(fieldName, newValue);
+                    write(current, path, newValue);
                 }
             }
             case Data.Merge m -> {
                 AxonValue mv = evalExpr(m.merge());
                 if (mv.isObject()) {
-                    current.putAll(mv.asObject());
+                    Map<String, AxonValue> merged = RecordChanges.merge(current, mv.asObject());
+                    current.clear();
+                    current.putAll(merged);
                 }
             }
             case Data.Patch p -> {
                 AxonValue pv = evalExpr(p.patch());
                 if (pv.isObject()) {
                     current.putAll(pv.asObject());
+                } else if (pv.isArray()) {
+                    Map<String, AxonValue> patched =
+                        RecordChanges.patch(AxonValue.object(current), pv.asArray()).asObject();
+                    current.clear();
+                    current.putAll(patched);
+                } else {
+                    throw errorStmt(Messages.get("stmt_patch_invalid", pv));
                 }
             }
             case Data.Replace r -> {
@@ -6628,10 +6676,6 @@ return score;
 
     private AxonValue resolveKey(Object idKey) {
         return generateKey(idKey);
-    }
-
-    private AxonValue dataExpr(Statement.Data data) {
-        return evalData(data);
     }
 
     private AxonValue ridAsValue(RecordId rid) {

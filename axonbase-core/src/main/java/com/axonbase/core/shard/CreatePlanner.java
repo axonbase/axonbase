@@ -32,7 +32,7 @@ final class CreatePlanner {
         }
         GatewayRules.requireSelfContained(create, table);
         AxonValue explicit = create.target() instanceof Expr.RecordId id ? recordKey(session, id.key()) : null;
-        AxonValue chosen = explicit != null ? explicit : dataField(session, create.data(), "id");
+        AxonValue chosen = explicit != null ? explicit : dataField(session, create.data(), table, "id");
         String text = piece.text();
         AxonValue key = chosen;
         if (key == null) {
@@ -40,7 +40,7 @@ final class CreatePlanner {
             key = AxonValue.str(generated);
             text = withKey(piece, create, table, generated);
         }
-        AxonValue value = field.equals("id") ? engineKey(key) : dataField(session, create.data(), field);
+        AxonValue value = field.equals("id") ? engineKey(key) : dataField(session, create.data(), table, field);
         if (value == null) {
             throw ShardException.refused("shard_key_required", table, field);
         }
@@ -167,11 +167,16 @@ final class CreatePlanner {
     }
 
     /** O valor que os dados gravam num campo, quando está escrito neles; {@code null} se o campo não aparece. */
-    AxonValue dataField(GatewaySession session, Statement.Data data, String name) {
+    AxonValue dataField(GatewaySession session, Statement.Data data, String table, String name) {
         if (data instanceof Statement.Data.SetClause set) {
             Expr found = null;
             for (Statement.Assignment assignment : set.assignments()) {
-                if (GatewayRules.assignedField(assignment).equals(name)) {
+                List<String> path = GatewayRules.assignedPath(assignment, table);
+                if (path.get(0).equals(name)) {
+                    // escrever dentro do campo que roteia não diz o valor que ele passa a ter
+                    if (path.size() > 1) {
+                        throw ShardException.refused("assignment_unsupported");
+                    }
                     found = assignment.value();
                 }
             }

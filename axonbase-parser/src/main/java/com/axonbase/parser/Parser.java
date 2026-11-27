@@ -817,12 +817,12 @@ public final class Parser {
         pos++;
         boolean only = matchKeyword("only");
         Expr target = parseTarget();
-        consumeAlias();
+        String alias = consumeAlias();
         Data data = null;
         if (matchKeyword("content")) {
             data = new Data.Content(parseExpr());
         } else if (matchKeyword("set")) {
-            data = new Data.SetClause(parseAssignments());
+            data = new Data.SetClause(withoutQualifier(parseAssignments(), alias));
         } else if (matchKeyword("merge")) {
             data = new Data.Merge(parseExpr());
         } else if (matchKeyword("patch")) {
@@ -1109,16 +1109,40 @@ public final class Parser {
         return expect(IDENT).text();
     }
 
-    /** Consome um alias opcional após um target de FROM/JOIN (ex.: {@code FROM users u}). */
-    private void consumeAlias() {
+    /**
+     * Consome um alias opcional após um target de FROM/JOIN (ex.: {@code FROM users u}) e o devolve, ou {@code null}.
+     */
+    private String consumeAlias() {
         Token t = peek();
-        if (t == null || !t.is(IDENT)) return;
+        if (t == null || !t.is(IDENT)) return null;
         String text = t.text();
         if (!"join".equals(text) && !"where".equals(text) && !"order".equals(text)
             && !"limit".equals(text) && !"start".equals(text) && !"group".equals(text)
             && !"fetch".equals(text) && !"on".equals(text)) {
             pos++;
+            return text;
         }
+        return null;
+    }
+
+    /** Em {@code UPDATE t apelido SET apelido.campo = ...} o apelido só qualifica a coluna: sai do caminho. */
+    private static List<Assignment> withoutQualifier(List<Assignment> assignments, String alias) {
+        if (alias == null) {
+            return assignments;
+        }
+        List<Assignment> out = new ArrayList<>(assignments.size());
+        for (Assignment assignment : assignments) {
+            if (assignment.path() instanceof Expr.Idiom idiom && idiom.base() instanceof Expr.Ident base
+                && base.name().equals(alias) && idiom.parts().get(0) instanceof Part.Field first) {
+                List<Part> rest = idiom.parts().subList(1, idiom.parts().size());
+                Expr column = new Expr.Ident(first.name());
+                out.add(new Assignment(rest.isEmpty() ? column : new Expr.Idiom(column, List.copyOf(rest)),
+                    assignment.value()));
+            } else {
+                out.add(assignment);
+            }
+        }
+        return out;
     }
 
     private Statement parseDefine() {
@@ -2273,13 +2297,16 @@ public final class Parser {
     private Expr parseAssignmentPath() {
         String name = expectIdent();
         List<Part> parts = new ArrayList<>();
-        while (match(DOT)) {
-            parts.add(new Part.Field(expectIdent()));
-        }
-        while (match(TokenType.LBRACKET)) {
-            Expr idx = parseExpr();
-            expect(TokenType.RBRACKET);
-            parts.add(new Part.Index(idx));
+        while (true) {
+            if (match(DOT)) {
+                parts.add(new Part.Field(expectIdent()));
+            } else if (match(TokenType.LBRACKET)) {
+                Expr idx = parseExpr();
+                expect(TokenType.RBRACKET);
+                parts.add(new Part.Index(idx));
+            } else {
+                break;
+            }
         }
         if (parts.isEmpty()) {
             return new Expr.Ident(name);
