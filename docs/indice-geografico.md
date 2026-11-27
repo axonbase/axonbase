@@ -91,7 +91,7 @@ O binário 0.10 não lê as chaves novas. O marcador `IXB` mantido pela versão 
 
 ### Cluster com versões misturadas
 
-Da 0.10.x ou anterior, atualize o cluster só com os três nós parados: um nó de cada vez a partir dessas versões não é suportado, porque elas podem confirmar escritas sem gravar (veja [operacao-e-resiliencia.md](operacao-e-resiliencia.md#falha-de-versões-mistas)). Como o índice H3 chega junto dessa troca, não há janela mista suportada. Se as versões se misturarem mesmo assim, este é o comportamento do índice, e a ordem que menos expõe é seguidores primeiro e líder por último:
+Todos os nós do cluster precisam rodar a mesma versão: cluster com versões misturadas não é suportado. Da 0.10.x ou anterior, atualize com os três nós parados, porque essas versões podem confirmar escritas sem gravar (veja [operacao-e-resiliencia.md](operacao-e-resiliencia.md#falha-de-versões-mistas)). Se as versões se misturarem mesmo assim, este é o comportamento do índice:
 
 - Líder antigo e seguidor novo: o seguidor percebe as escritas no formato antigo e reconstrói o índice. Durante a janela, as consultas geográficas nele varrem a tabela.
 - Líder novo e seguidor antigo: o seguidor antigo não atualiza o índice dele com as escritas novas e pode responder com resultado incompleto. Não leia de um nó antigo depois que a liderança passar para um nó novo.
