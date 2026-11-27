@@ -495,13 +495,21 @@ public final class Executor {
     /**
      * Apagar tabela, mudar a definição de uma que existe e declarar PERMISSIONS são tarefas do administrador do banco.
      * Criar tabela, campo ou índice que ainda não existe continua livre, salvo numa tabela com PERMISSIONS. Repetir a
-     * definição em vigor não muda nada.
+     * definição em vigor não muda nada. Definir, mudar ou apagar embedding e analyzer é sempre dele.
      */
     private boolean changesSchema(Statement s) {
         return switch (s) {
             case Statement.DropTable ignored -> true;
             case Statement.RemoveTable ignored -> true;
             case Statement.DropIndex ignored -> true;
+            // a URL de um embedding decide para onde o texto vai, e o analyzer muda o que a busca encontra
+            case Statement.DefineEmbedding de -> changesEmbedding(de);
+            case Statement.DropEmbedding ignored -> true;
+            case Statement.DefineAnalyzer da -> changesAnalyzer(
+                new Catalog.AnalyzerDef(da.name(), da.lowercase(), da.stopwords(), da.stemming()));
+            case Statement.CreateAnalyzer ca -> changesAnalyzer(
+                new Catalog.AnalyzerDef(ca.name(), ca.lowercase(), ca.stopwords(), ca.stemming()));
+            case Statement.DropAnalyzer ignored -> true;
             case DefineTable dt -> restricts(dt.permissions()) || redefines(dt);
             case Statement.CreateTable ct -> !ct.ifNotExists() && settledTable(ct.name()) != null;
             case Statement.AlterTable at -> settledTable(at.name()) != null;
@@ -528,6 +536,29 @@ public final class Executor {
             return null;
         }
         return db.catalog().table(name);
+    }
+
+    private boolean changesEmbedding(Statement.DefineEmbedding wanted) {
+        Database db = sessionDatabase();
+        return db == null || !embeddingDef(wanted).equals(db.catalog().embedding(wanted.name()));
+    }
+
+    private boolean changesAnalyzer(Catalog.AnalyzerDef wanted) {
+        Database db = sessionDatabase();
+        return db == null || !wanted.equals(db.catalog().analyzer(wanted.name()));
+    }
+
+    /** O banco da sessão, sem criá-lo; {@code null} se não há. */
+    private Database sessionDatabase() {
+        return session.namespace() == null || session.database() == null ? null
+            : ds.findDatabase(session.namespace(), session.database());
+    }
+
+    private static Catalog.EmbeddingDef embeddingDef(Statement.DefineEmbedding de) {
+        return new Catalog.EmbeddingDef(de.name(), de.url(), de.model(), de.dimension(), de.keyEnv(),
+            de.timeoutSeconds() == null ? Catalog.EmbeddingDef.DEFAULT_TIMEOUT_SECONDS : de.timeoutSeconds(),
+            de.batch() == null ? Catalog.EmbeddingDef.DEFAULT_BATCH : de.batch(), de.documentPrefix(),
+            de.queryPrefix(), de.sendDimension(), de.authHeader());
     }
 
     private static boolean restricts(Statement.Permissions perms) {
@@ -5096,10 +5127,7 @@ return score;
             throw errorStmt(Messages.get("embedding_provider_unsupported", de.provider()));
         }
         ds.embeddings().checkUrl(de.url());
-        db.catalog().defineEmbedding(new Catalog.EmbeddingDef(de.name(), de.url(), de.model(), de.dimension(),
-            de.keyEnv(), de.timeoutSeconds() == null ? Catalog.EmbeddingDef.DEFAULT_TIMEOUT_SECONDS : de.timeoutSeconds(),
-            de.batch() == null ? Catalog.EmbeddingDef.DEFAULT_BATCH : de.batch(), de.documentPrefix(),
-            de.queryPrefix(), de.sendDimension(), de.authHeader()));
+        db.catalog().defineEmbedding(embeddingDef(de));
         control(db, ControlCommand.Kind.EMBEDDING, de.name(), com.axonbase.parser.Render.stmt(de));
         return AxonValue.nul();
     }
