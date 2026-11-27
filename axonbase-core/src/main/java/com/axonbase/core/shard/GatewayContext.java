@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * O que os planejadores do gateway compartilham: os clientes dos shards, o relógio híbrido que viaja em toda mensagem e
@@ -27,10 +28,14 @@ final class GatewayContext {
     private final Map<ShardInfo, ShardClient> clients = new ConcurrentHashMap<>();
     final HybridClock clock;
     final ShardGateway.Options options;
+    /** O mapa em uso, para saber a qual shard perguntar pela credencial. */
+    private final Supplier<ShardMap> maps;
     /** Datastore vazio, só para avaliar expressões e funções no gateway. Nenhum dado é gravado nele. */
     final Datastore scratch = new Datastore(new MemoryBackend());
 
-    GatewayContext(Function<ShardInfo, ShardClient> factory, HybridClock clock, ShardGateway.Options options) {
+    GatewayContext(Function<ShardInfo, ShardClient> factory, HybridClock clock, ShardGateway.Options options,
+                   Supplier<ShardMap> maps) {
+        this.maps = maps;
         this.factory = factory;
         this.clock = clock;
         this.options = options;
@@ -44,7 +49,11 @@ final class GatewayContext {
 
     /** Envia um trecho a um shard com o carimbo e a credencial, e adota o carimbo da resposta. */
     AxonValue send(ShardMap map, Plan.Part part, GatewaySession session, boolean atomic) {
-        Map<String, AxonValue> vars = new LinkedHashMap<>(session.vars());
+        Map<String, AxonValue> vars = new LinkedHashMap<>();
+        // a pergunta pela credencial não leva as variáveis do cliente
+        if (!ShardRequest.AUTHENTICATE.equals(part.text())) {
+            vars.putAll(session.vars());
+        }
         vars.putAll(part.vars());
         ShardRequest request = ShardRequest.of(session.namespace(), session.database(), part.text())
             .withVars(vars)
@@ -72,12 +81,33 @@ final class GatewayContext {
         }
     }
 
-    /** Calcula no gateway uma expressão que não depende de dados (veja {@link GatewayExpressions}). */
+    /**
+     * Calcula no gateway uma expressão que não depende de dados (veja {@link GatewayExpressions}). Fora os literais,
+     * que não custam mais que o texto recebido, o cálculo exige a credencial conferida num shard e respeita o
+     * orçamento de tamanho da requisição ({@link LocalEvaluation}).
+     */
     AxonValue evaluate(Expr expr, GatewaySession session) {
         if (!GatewayExpressions.local(expr, session.vars().keySet())) {
             throw ShardException.refused("not_local");
         }
-        return new Executor(scratch).evaluate(expr, scope(session));
+        if (expr == null || GatewayExpressions.literal(expr)) {
+            return new Executor(scratch).evaluate(expr, scope(session));
+        }
+        authenticate(session);
+        return new LocalEvaluation(new Executor(scratch), scope(session), session).value(expr);
+    }
+
+    /**
+     * O gateway não conhece os usuários: pede ao shard base que confira a credencial do cliente, uma vez por
+     * requisição e banco.
+     */
+    void authenticate(GatewaySession session) {
+        if (session.authenticated()) {
+            return;
+        }
+        ShardMap map = maps.get();
+        send(map, Plan.Part.of(map.home().id(), ShardRequest.AUTHENTICATE), session, false);
+        session.authenticated(true);
     }
 
     /**

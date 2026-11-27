@@ -87,7 +87,8 @@ public final class HttpShardMember implements ShardMember {
     }
 
     private RuntimeException interrupted(ShardRequest request, Exception cause) {
-        boolean wrote = request.atomic() || !request.partial() && Datastore.isMutation(request.sql());
+        boolean wrote = request.atomic() || !request.partial()
+            && !ShardRequest.AUTHENTICATE.equals(request.sql()) && Datastore.isMutation(request.sql());
         return wrote ? new CommitOutcomeUnknownException(shard, cause)
             : new ShardUnreachableException(execute + ": " + cause.getMessage(), cause);
     }

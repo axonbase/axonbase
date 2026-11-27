@@ -58,8 +58,8 @@ public final class ShardGateway implements AutoCloseable {
      */
     public ShardGateway(ShardMapStore store, Function<ShardInfo, ShardClient> clients, Options options,
                         HybridClock clock) {
-        this.context = new GatewayContext(clients, clock, options);
         this.maps = new ShardMapCache(store::require, options.mapTtl(), System::nanoTime);
+        this.context = new GatewayContext(clients, clock, options, maps::get);
         this.creates = new CreatePlanner(context);
         this.mutations = new MutationPlanner(context, creates);
         this.reads = new ReadPlanner(context);
@@ -93,6 +93,7 @@ public final class ShardGateway implements AutoCloseable {
      * @param vars variáveis do script, somadas às da sessão
      */
     public AxonValue execute(GatewaySession session, String script, Map<String, AxonValue> vars) {
+        session.newRequest();
         if (vars != null) {
             session.vars().putAll(vars);
         }
@@ -169,6 +170,8 @@ public final class ShardGateway implements AutoCloseable {
         List<Plan.Part> parts = plan.parts();
         boolean inSaga = plan.write() && session.saga() != null;
         if (parts.isEmpty()) {
+            // resposta pronta no gateway: nenhum shard conferiria a credencial
+            context.authenticate(session);
             return plan.merge().apply(List.of());
         }
         if (inSaga) {

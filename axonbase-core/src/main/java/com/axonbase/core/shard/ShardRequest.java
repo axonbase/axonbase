@@ -26,6 +26,9 @@ public record ShardRequest(String namespace, String database, String sql, Map<St
     /** Pergunta se a tabela da variável {@code table} tem {@code PERMISSIONS}; exige o modo de sistema. */
     public static final String PERMISSIONS = "__axon_permissions";
 
+    /** Só confere a credencial: o nó não executa nada, e o transporte já a validou. */
+    public static final String AUTHENTICATE = "__axon_authenticate";
+
     public ShardRequest {
         vars = vars == null ? Map.of() : java.util.Collections.unmodifiableMap(new LinkedHashMap<>(vars));
         stamp = stamp == null ? HlcTimestamp.NONE : stamp;
