@@ -32,7 +32,8 @@ Cada item diz se está ligado por padrão ou só quando configurado.
 
 - **`SHARD BY` e gateway.** Tabela dividida por um campo, roteada por 4096 slots. Cada shard é um grupo Raft inteiro, com líder próprio. O gateway (`axonbase gateway`) não guarda dado e pode rodar em várias instâncias. Consultas espalhadas com `LIMIT` e agregações são empurradas para os shards. `UPDATE` e `DELETE` que atingem vários shards só rodam dentro de saga, e `INSERT` em vários shards é permitido.
 - **Plano de controle e movimentação.** O mapa dos shards fica no grupo do shard base. Há mover, retomar, desistir e acrescentar shard. O backup de cluster usa barreira e manifesto, e a restauração a um instante vale para todos os shards ou para nenhum.
-- **Desligado por padrão.** Sem gateway e sem `SHARD BY`, o banco segue como antes. A rota interna `/shard/v1/` existe em todo nó (ver mudanças de comportamento).
+- **Desligado por padrão.** Sem gateway e sem `SHARD BY`, o banco segue como antes. A rota interna `/shard/v1/` só responde em nó com `AXON_SHARD_SECRET`.
+- **Segredo dos shards.** `AXON_SHARD_SECRET` é obrigatório nos nós de shard e no gateway, que não sobe sem ele. O gateway o envia no cabeçalho `Axon-Shard-Secret`. Sem TLS (Transport Layer Security, cifra do transporte) entre eles, o segredo trafega em claro.
 - **Variáveis do gateway.** `AXON_GATEWAY_SHARDS` (mapa criado na primeira subida), `AXON_GATEWAY_SHARD_USER`, `AXON_GATEWAY_SHARD_PASS`, `AXON_GATEWAY_ADMIN_TOKEN`, `AXON_GATEWAY_BIND` (padrão `127.0.0.1`), `AXON_GATEWAY_PORT` (padrão 8080), `AXON_GATEWAY_MAP_TTL_MS`, `AXON_GATEWAY_DEADLINE_MS` e `AXON_GATEWAY_EXPLICIT_IDS` (padrão `refuse`).
 - **Recusas por decisão de projeto.** Em tabela dividida, o gateway recusa `JOIN`, `FETCH`, grafo, subconsulta, `RELATE`, busca textual, `LIVE`, `PERMISSIONS`, partição e TTL (Time To Live, prazo de validade das linhas). Também recusa Data Rule que use o campo de shard. Identificador de registro escolhido pelo cliente só com `AXON_GATEWAY_EXPLICIT_IDS=check`.
 - **Administração.** `SHARD BY`, movimentação e backup de shard exigem administrador root.
@@ -55,7 +56,7 @@ Cada item diz se está ligado por padrão ou só quando configurado.
 
 ### Painel Enterprise
 
-O backup automático, a janela de PITR e a tela de restauração a um instante estão no Enterprise, que é um repositório separado. O número de versão do Enterprise não muda com esta candidata. Veja o que não foi verificado abaixo.
+O backup automático, a janela de PITR e a tela de restauração a um instante estão no Enterprise, que é um repositório separado, publicado junto desta candidata como 0.10.0-rc1. Veja o que não foi verificado abaixo.
 
 ## Mudanças de comportamento em relação à 0.10.1
 
@@ -63,7 +64,7 @@ Com a configuração padrão, estas mudanças valem:
 
 - **Erro de desfecho desconhecido.** Sem quórum, a escrita responde RPC `-32013` (`OUTCOME_UNKNOWN`) ou HTTP 504 com `"status":"UNKNOWN"`, em vez de erro de falha comum.
 - **Redirecionamento 307 em `/sql`.** Perda de liderança passa a responder 307. Um comando que chamou serviço externo (link de banco, embedding ou provedor de IA) e perdeu a liderança devolve erro, sem ser refeito, em vez de redirecionar.
-- **Rota `/shard/v1/` em todo nó.** Ela existe mesmo sem gateway. Modo de sistema, definições e backup nessa rota exigem administrador root.
+- **Rota `/shard/v1/`.** Sem `AXON_SHARD_SECRET`, responde 404, como na 0.10.x. Com o segredo, modo de sistema, definições e backup nessa rota continuam exigindo administrador root, e escrita que estoura o prazo responde desfecho desconhecido (504).
 - **Manutenção de partições sempre ativa.** A thread roda a cada 10 segundos. Em cluster, só o líder age.
 - **Índices GEO antigos.** Índices geohash são reconstruídos ao abrir a base. Ao voltar para a 0.10.x, o marcador `IXB|` faz o binário antigo refazer o índice geohash sozinho. Ao atualizar de novo, a versão nova refaz o índice H3.
 - **Carimbo HLC em todo lote.** O teto de HLC é gravado em disco antes de ser usado. Se essa gravação falhar, o commit que precisava dele também falha.
@@ -143,6 +144,22 @@ Estes defeitos da 0.10.1 foram corrigidos no código desta candidata:
 ### Backup e recuperação
 
 - A restauração em cluster a um instante aceita o instante `latest`, mas recusa instantes posteriores à última escrita.
+- A recuperação de desastre sem instante falha quando o fim do histórico se perdeu. Aceitar a perda exige informar um instante anterior, e pela linha de comando o último milissegundo íntegro também fica de fora.
+- A restauração a partir do S3 pedida pela API administrativa pula backup vazio ou incompleto sem avisar e informa sucesso.
+- A mensagem de recusa por restauração incompleta cita o S3 mesmo quando a restauração parada foi de arquivo. Sem S3 configurado, a subida não confere essa marca.
+
+### Partições em cluster, procedimentos e concorrência
+
+- Em cluster, partição acima de cerca de 256 MiB (mebibyte) não vai nem volta da camada fria, e uma partição já fria acima disso não tem como voltar.
+- Em nó único, um procedimento chamado por evento não pode criar partição: o comando é recusado a cada faixa de tempo nova, salvo se uma escrita comum a criar antes.
+- Logo depois de uma troca de líder, um `DEFINE PARTITION` ou `DEFINE INDEX` ainda pendente pode não valer para uma escrita simultânea.
+- Uma releitura do catálogo (por exemplo, ao cancelar uma sessão depois de uma definição concorrente) pode deixar uma escrita simultânea ver o catálogo pela metade. Defeito anterior à candidata.
+- Nos primeiros instantes da subida, o servidor HTTP atende antes de conhecer o estado do cluster, e um seguidor pode ignorar a consistência de leitura pedida.
+
+### Auditoria e máscara
+
+- Em tabela dividida, os casos e bloqueios da auditoria por IA valem por shard.
+- A máscara de coluna no `/sql` pode ser contornada por apelido, `VALUE`, `ONLY` ou campo aninhado, e a ordem ou o filtro permitem deduzir valores. Defeito anterior à candidata.
 
 ### SDKs
 
@@ -156,16 +173,36 @@ Estes defeitos da 0.10.1 foram corrigidos no código desta candidata:
 - **Metas do índice geográfico.** As metas de latência com 10 milhões de pontos não foram medidas.
 - **Armazenamento real.** A recuperação de desastre não foi executada contra MinIO nem contra S3 real. Os testes do cliente usam um servidor HTTP simulado.
 - **Cobertura de testes.** Não há medição consolidada de cobertura para a candidata inteira.
-- **Correções depois das revisões.** As correções feitas depois das revisões independentes das frentes não passaram por nova revisão.
-- **Enterprise.** O backend do Enterprise foi testado só com agente falso, nunca com motor real. A tela não foi vista num navegador. O backup de cluster de ponta a ponta não foi executado. A detecção de queda pela API não foi testada. Excluir um cluster não apaga o journal no MinIO.
+- **Últimas correções.** A segunda revisão independente cobriu as correções até o meio da última rodada. As quatro correções finais (trava de índices na releitura do catálogo, ordem de instalação dos ganchos do cluster, prazo na rota de shard e marca de restauração de arquivo) não passaram por nova revisão.
+- **Desempenho em cluster.** A comparação com a 0.10.1 foi feita em nó único. A escrita em cluster não foi medida no código final.
+- **Enterprise.** A tela não foi vista num navegador. Excluir um cluster não apaga o journal no MinIO.
 - **Atualização de cluster.** A troca nó a nó entre duas versões novas diferentes não foi verificada.
 - **SDK .NET.** Não publicado no NuGet nesta candidata.
 - **SDK Java.** Os testes de integração precisam de autenticação para rodar.
 
 ## Validação
 
-a preencher
+Tudo rodou em máquinas virtuais Linux de 8 processadores virtuais no GCP (Google Cloud Platform).
+
+| Verificação | Resultado |
+|---|---|
+| Suíte completa do motor, três rodadas seguidas no código publicado | Sem falhas. Motor principal com 1284 testes (17 pulados) e servidor com 257 (2 pulados), além dos demais módulos |
+| Reinício nó a nó de um cluster só com esta versão | 60 de 60 rodadas sem falha e sem perda |
+| Atualização desde a 0.10.1 com parada total | 60 de 60 trocas sem perda causada pela troca e sem divergência, metade com parada normal e metade com processos derrubados. Em uma troca, a 0.10.1 já havia perdido escritas antes da parada |
+| Prova do defeito de escrita confirmada | A 0.10.1 falha e esta versão passa |
+| Ingestão em nó único contra a 0.10.1, na mesma máquina | +0,2% com 1 thread e +1,9% com 8 threads |
+| SDKs contra o motor desta versão | Java, Node.js, Python, .NET, Ruby, Rust, Go e PHP (PHP: Hypertext Preprocessor). Passam, exceto 2 testes de integração do Java que falham por falta de autenticação, também na 0.10.1 |
+| Enterprise: agente, backend, tela e regras de alerta | Sem falhas (314 testes no backend e 77 arquivos de teste na tela) |
+| Enterprise de ponta a ponta contra este motor, execução oficial | Backup em cluster, restauração a um instante e restauração física de 10 GiB (gibibyte) aprovados |
+
+Uma das rodadas anteriores da suíte falhou num teste intermitente da 0.10.1 (listagem de tokens de serviço), que comparava um trecho errado do segredo. O teste foi corrigido, sem mudança no produto.
 
 ### Achados da revisão independente
 
-a preencher
+Uma revisão só por leitura do código integrado apontou 4 achados críticos, 2 altos e 3 médios, e bloqueou a publicação. Todos receberam correção com um teste que falhava antes:
+
+- **Críticos:** rota interna dos shards sem auditoria e com vazamento por ordenação em coluna mascarada; escrita perdida em partição removida ao mesmo tempo; índice retomado vazio na releitura do catálogo; falha de restauração na subida que levava a apagar backups bons.
+- **Altos:** trava permanente em evento que criava partição; partição grande da camada fria que travava as escritas do cluster. A correção desta é uma recusa, e não a volta em lotes.
+- **Médios:** cálculo sem autenticação no gateway; consulta entre shards sem prazo nem cancelamento; recuperação de desastre que terminava com sucesso sem o fim do histórico.
+
+Uma segunda revisão não encontrou achado crítico nem alto, e os seus achados médio e baixos também foram corrigidos. As limitações que sobraram estão listadas acima.
