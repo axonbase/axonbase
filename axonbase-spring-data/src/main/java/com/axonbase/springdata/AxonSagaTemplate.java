@@ -4,6 +4,7 @@ import com.axonbase.common.Messages;
 import com.axonbase.jdbc.SagaBinding;
 import com.axonbase.jdbc.SagaScope;
 import com.axonbase.sdk.Axon;
+import com.axonbase.sdk.AxonQlText;
 import com.axonbase.value.AxonValue;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -105,8 +106,8 @@ public final class AxonSagaTemplate {
         @Override
         public SagaBinding joinSaga(String sagaName, String correlationId) {
             // Fallback: previous behavior using SDK directly
-            AxonValue result = axon.query("SHOW SAGA TRANSACTION " + escape(sagaName)
-                + " '" + escape(correlationId) + "'");
+            AxonValue result = axon.query("SHOW SAGA TRANSACTION " + AxonQlText.sagaName(sagaName)
+                + " " + AxonQlText.literal(correlationId));
             AxonValue saga = result.isObject() ? result.asObject().get("saga") : null;
             if (saga == null || !saga.isObject()
                 || !hasValue(saga, "name", sagaName)
@@ -114,7 +115,7 @@ public final class AxonSagaTemplate {
                 || !hasValue(saga, "status", "RUNNING")) {
                 throw new IllegalStateException(Messages.get("spring_no_active_saga", correlationId));
             }
-            axon.query("LET $saga_corr = '" + escape(correlationId) + "'");
+            axon.query("LET $saga_corr = " + AxonQlText.literal(correlationId));
             return () -> axon.query("LET $saga_corr = NULL");
         }
     }
@@ -143,9 +144,5 @@ public final class AxonSagaTemplate {
     private static boolean hasValue(AxonValue object, String field, String expected) {
         AxonValue value = object.asObject().get(field);
         return value != null && value.isString() && expected.equals(value.asString());
-    }
-
-    private static String escape(String value) {
-        return value.replace("'", "''").replace("\\", "\\\\");
     }
 }

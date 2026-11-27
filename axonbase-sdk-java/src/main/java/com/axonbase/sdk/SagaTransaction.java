@@ -45,12 +45,12 @@ public class SagaTransaction implements AutoCloseable {
      */
     public void begin() {
         if (begun) throw new IllegalStateException(Messages.get("sdk_saga_already_begun", correlationId));
-        AxonValue result = axon.query("BEGIN SAGA " + esc(sagaName) + " WITH CORRELATION '" + esc(correlationId) + "'");
+        AxonValue result = axon.query("BEGIN SAGA " + target());
         if (result.isObject()) {
             AxonValue status = result.asObject().get("status");
             if (status != null && status.isString() && "RUNNING".equals(status.asString())) {
                 begun = true;
-                axon.query("LET $saga_corr = '" + esc(correlationId) + "'");
+                axon.query("LET $saga_corr = " + AxonQlText.literal(correlationId));
                 return;
             }
         }
@@ -61,7 +61,7 @@ public class SagaTransaction implements AutoCloseable {
     public AxonValue step(String axonql) {
         if (!begun) throw new IllegalStateException(Messages.get("sdk_saga_not_begun"));
         if (finished) throw new IllegalStateException(Messages.get("sdk_saga_already_finished"));
-        axon.query("LET $saga_corr = '" + esc(correlationId) + "'");
+        axon.query("LET $saga_corr = " + AxonQlText.literal(correlationId));
         return axon.query(axonql);
     }
 
@@ -126,7 +126,7 @@ public class SagaTransaction implements AutoCloseable {
         if (!begun) throw new IllegalStateException(Messages.get("sdk_saga_not_begun"));
         if (finished) throw new IllegalStateException(Messages.get("sdk_saga_already_finished"));
         AxonValue result = axon.query(
-            "COMMIT SAGA " + esc(sagaName) + " WITH CORRELATION '" + esc(correlationId) + "'");
+            "COMMIT SAGA " + target());
         AxonValue status = result.isObject() ? result.asObject().get("status") : null;
         if (status == null || !status.isString() || !"COMMITTED".equals(status.asString())) {
             throw new AxonSdkException(Messages.get("sdk_saga_commit_failed", result));
@@ -142,7 +142,7 @@ public class SagaTransaction implements AutoCloseable {
     public void rollback() {
         if (!begun) return;
         if (finished) return;
-        axon.query("CANCEL SAGA " + esc(sagaName) + " WITH CORRELATION '" + esc(correlationId) + "'");
+        axon.query("CANCEL SAGA " + target());
         finished = true;
         axon.query("LET $saga_corr = NULL");
     }
@@ -152,11 +152,13 @@ public class SagaTransaction implements AutoCloseable {
      */
     public AxonValue describe() {
         return axon.query(
-            "SHOW SAGA TRANSACTION " + esc(sagaName) + " '" + esc(correlationId) + "'");
+            "SHOW SAGA TRANSACTION " + AxonQlText.sagaName(sagaName)
+                + " " + AxonQlText.literal(correlationId));
     }
 
-    private static String esc(String s) {
-        return s.replace("'", "''").replace("\\", "\\\\");
+    /** O nome e a correlação, já escritos como entram nos comandos do ciclo de vida. */
+    private String target() {
+        return AxonQlText.sagaName(sagaName) + " WITH CORRELATION " + AxonQlText.literal(correlationId);
     }
 
     /** Cancels an unfinished Saga when used in try-with-resources. */
