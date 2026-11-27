@@ -340,6 +340,10 @@ public final class Executor {
         if (cond == null) {
             return true;
         }
+        // como na Data Rule: sem o dado do token, NONE = NONE casaria e liberaria o acesso
+        if (lacksParameterValue(cond, TOKEN_PARAMETERS)) {
+            return false;
+        }
         Document target = doc;
         if (target == null) {
             target = emptyDoc();
@@ -5546,7 +5550,7 @@ return score;
             Catalog.DataRuleDef def = db.catalog().dataRule(name);
             // regra que não existe neste banco nega: liberar tornaria um nome errado em acesso total
             if (def == null) return DENY_ALL;
-            if (lacksParameterValue(def.predicate())) return DENY_ALL;
+            if (lacksParameterValue(def.predicate(), name2 -> true)) return DENY_ALL;
             predicates.add(def.predicate());
         }
         return predicates;
@@ -5572,27 +5576,32 @@ return score;
     /** Predicado que não deixa passar linha alguma. */
     private static final List<Expr> DENY_ALL = List.of(new Expr.Literal(AxonValue.bool(false)));
 
+    /** Os parâmetros que trazem dados do token da sessão. */
+    private static final java.util.function.Predicate<String> TOKEN_PARAMETERS =
+        name -> "auth".equals(name) || "token".equals(name);
+
     /**
-     * Algum {@code $parametro} da regra (ou o campo pedido a ele, como {@code $auth.tenant}) está sem valor. Comparar
-     * a falta com um campo ausente daria verdadeiro, então a regra inteira passa a negar.
+     * Algum {@code $parametro} conferido da regra (ou o campo pedido a ele, como {@code $auth.tenant}) está sem valor.
+     * Comparar a falta com um campo ausente daria verdadeiro, então a condição inteira passa a negar.
      */
-    private boolean lacksParameterValue(Expr e) {
+    private boolean lacksParameterValue(Expr e, java.util.function.Predicate<String> checked) {
+        java.util.function.Predicate<Expr> lacks = part -> lacksParameterValue(part, checked);
         return switch (e) {
             case null -> false;
-            case Expr.Param p -> !"parent".equals(p.name()) && isMissing(eval(p));
-            case Expr.Idiom i -> idiomLacksValue(i);
-            case Expr.Binary b -> lacksParameterValue(b.left()) || lacksParameterValue(b.right());
-            case Expr.Unary u -> lacksParameterValue(u.operand());
-            case Expr.Cast c -> lacksParameterValue(c.operand());
-            case Expr.Alias a -> lacksParameterValue(a.expr());
-            case Expr.Call c -> c.args().stream().anyMatch(this::lacksParameterValue);
-            case Expr.ArrayLit a -> a.items().stream().anyMatch(this::lacksParameterValue);
-            case Expr.SetLit s -> s.items().stream().anyMatch(this::lacksParameterValue);
-            case Expr.ObjectLit o -> o.entries().stream().anyMatch(en -> lacksParameterValue(en.value()));
-            case Expr.RecordId r -> lacksParameterValue(r.key());
-            case Expr.Range r -> lacksParameterValue(r.start()) || lacksParameterValue(r.end());
+            case Expr.Param p -> !"parent".equals(p.name()) && checked.test(p.name()) && isMissing(eval(p));
+            case Expr.Idiom i -> idiomLacksValue(i, checked);
+            case Expr.Binary b -> lacks.test(b.left()) || lacks.test(b.right());
+            case Expr.Unary u -> lacks.test(u.operand());
+            case Expr.Cast c -> lacks.test(c.operand());
+            case Expr.Alias a -> lacks.test(a.expr());
+            case Expr.Call c -> c.args().stream().anyMatch(lacks);
+            case Expr.ArrayLit a -> a.items().stream().anyMatch(lacks);
+            case Expr.SetLit s -> s.items().stream().anyMatch(lacks);
+            case Expr.ObjectLit o -> o.entries().stream().anyMatch(en -> lacks.test(en.value()));
+            case Expr.RecordId r -> lacks.test(r.key());
+            case Expr.Range r -> lacks.test(r.start()) || lacks.test(r.end());
             case Expr.SubQuery sq -> sq.query().statements().stream()
-                .anyMatch(st -> st instanceof Statement.Select sel && lacksParameterValue(sel.cond()));
+                .anyMatch(st -> st instanceof Statement.Select sel && lacks.test(sel.cond()));
             case Expr.Literal l -> false;
             case Expr.Ident id -> false;
             case Expr.Qualified q -> false;
@@ -5602,11 +5611,11 @@ return score;
     }
 
     /** Confere o trecho {@code $parametro.campo.campo} de um idiom; o que vier depois é percorrido como expressão. */
-    private boolean idiomLacksValue(Expr.Idiom i) {
+    private boolean idiomLacksValue(Expr.Idiom i, java.util.function.Predicate<String> checked) {
         if (!(i.base() instanceof Expr.Param p)) {
-            return lacksParameterValue(i.base());
+            return lacksParameterValue(i.base(), checked);
         }
-        if ("parent".equals(p.name())) {
+        if ("parent".equals(p.name()) || !checked.test(p.name())) {
             return false;
         }
         List<Expr.Part> fields = i.parts().stream().takeWhile(part -> part instanceof Expr.Part.Field).toList();
