@@ -243,13 +243,17 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
             .setCacheIndexAndFilterBlocks(true)
             .setPinL0FilterAndIndexBlocksInCache(true)
             .setBlockSize(16 * 1024);
-        return new ColumnFamilyOptions()
+        ColumnFamilyOptions options = new ColumnFamilyOptions()
             .setLevelCompactionDynamicLevelBytes(true)
             .setCompressionType(CompressionType.LZ4_COMPRESSION)
             .setBottommostCompressionType(CompressionType.ZSTD_COMPRESSION)
             .setWriteBufferSize(writeBuffer)
             .setMaxWriteBufferNumber(3)
             .setTableFormatConfig(table);
+        // filtro bloom também na memtable: a procura de uma chave ausente (id novo) não percorre a lista dela
+        options.setMemtablePrefixBloomSizeRatio(0.05);
+        options.setMemtableWholeKeyFiltering(true);
+        return options;
     }
 
     private static ColumnFamilyHandle findHandle(List<ColumnFamilyHandle> handles,
