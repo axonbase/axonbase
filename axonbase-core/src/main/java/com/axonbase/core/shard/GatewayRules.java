@@ -200,18 +200,25 @@ final class GatewayRules {
         return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
-    /** O nome do campo que uma atribuição grava, pela mesma regra do motor: o último nome do caminho. */
-    static String assignedField(Statement.Assignment assignment) {
+    /**
+     * O caminho que um SET escreve, como o motor o lê: o campo da raiz e o que vem dentro dele. {@code tabela.campo}
+     * é a coluna.
+     */
+    static List<String> assignedPath(Statement.Assignment assignment, String table) {
         Expr path = assignment.path();
         if (path instanceof Expr.Ident ident) {
-            return ident.name();
+            return List.of(ident.name());
         }
-        if (path instanceof Expr.Idiom idiom) {
-            for (int i = idiom.parts().size() - 1; i >= 0; i--) {
-                if (idiom.parts().get(i) instanceof Expr.Part.Field field) {
-                    return field.name();
-                }
+        if (path instanceof Expr.Idiom idiom && idiom.base() instanceof Expr.Ident base) {
+            List<String> steps = new ArrayList<>();
+            steps.add(base.name());
+            for (Expr.Part part : idiom.parts()) {
+                steps.add(part instanceof Expr.Part.Field field ? field.name() : "[]");
             }
+            if (steps.size() > 1 && steps.get(0).equals(table) && !steps.get(1).equals("[]")) {
+                steps.remove(0);
+            }
+            return steps;
         }
         throw ShardException.refused("assignment_unsupported");
     }

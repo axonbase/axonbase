@@ -76,6 +76,10 @@ public final class Render {
                     if (col.checkExpr() != null) sb.append(" CHECK (").append(expr(col.checkExpr())).append(')');
                     if (col.references() != null) sb.append(" REFERENCES ").append(col.references());
                 }
+                for (int i = 0; i < ct.checks().size(); i++) {
+                    if (i > 0 || !ct.columns().isEmpty()) sb.append(", ");
+                    sb.append("CHECK (").append(expr(ct.checks().get(i))).append(')');
+                }
                 sb.append(") WITH (SCHEMA = '").append(ct.schemafull() ? "FULL" : "SCHEMALESS").append("')");
             }
             case Statement.CreateJks jks -> {

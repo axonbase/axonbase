@@ -104,7 +104,7 @@ final class MutationPlanner {
             return owners.get(0);
         }
         // o registro criado por um UPSERT vem só dos dados: sem a chave ele ficaria invisível para o roteamento
-        AxonValue created = creates.dataField(session, data, field);
+        AxonValue created = creates.dataField(session, data, table, field);
         if (created == null || !slots.contains(SlotHash.ofValue(created))) {
             throw ShardException.refused("shard_key_required", table, field);
         }
@@ -119,7 +119,7 @@ final class MutationPlanner {
             return;
         }
         AxonValue id = target instanceof Expr.RecordId ? context.evaluate(target, session)
-            : creates.dataField(session, data, "id");
+            : creates.dataField(session, data, table, "id");
         if (id != null) {
             creates.requireUnusedId(map, session, table, id, owner);
         }
@@ -140,7 +140,7 @@ final class MutationPlanner {
             return;
         }
         boolean replaces = data instanceof Statement.Data.Content || data instanceof Statement.Data.Replace;
-        AxonValue next = creates.dataField(session, data, field);
+        AxonValue next = creates.dataField(session, data, table, field);
         if (next == null) {
             // CONTENT e REPLACE sem o campo o apagariam; o id é preservado pelo motor
             if (replaces && !field.equals("id")) {

@@ -7,7 +7,7 @@ vizinhos mais próximos), geo, grafo e columnar.
 ## Como usar
 
 1. Crie um banco só para o exemplo (por exemplo `app/cinco`) e abra o Workspace nele.
-2. Rode `seed.sql` com "Run all". Pode ser repetido: `CREATE` e `RELATE` regravam os mesmos registros.
+2. Rode `seed.sql` com "Run all". Pode ser repetido: `UPSERT` e `RELATE` regravam os mesmos registros.
 3. Rode as consultas de `queries.sql` uma a uma. Cada resultado ganha a aba que combina com ele.
 
 ## O que o seed cria

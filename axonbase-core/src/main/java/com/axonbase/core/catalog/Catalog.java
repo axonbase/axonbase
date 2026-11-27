@@ -148,6 +148,8 @@ public final class Catalog {
         private final boolean drop;
         private volatile com.axonbase.parser.ast.Statement.Permissions permissions;
         private volatile String shardBy;
+        private volatile List<Expr> checks = List.of();
+        private volatile boolean keyedById;
         final ConcurrentMap<String, FieldDef> fields = new ConcurrentHashMap<>();
         final ConcurrentMap<String, IndexDef> indexes = new ConcurrentHashMap<>();
         final ConcurrentMap<String, EventDef> events = new ConcurrentHashMap<>();
@@ -170,6 +172,33 @@ public final class Catalog {
 
         public void shardBy(String field) {
             this.shardBy = field;
+        }
+
+        /** Cláusulas {@code CHECK (...)} da tabela. */
+        public List<Expr> checks() {
+            return checks;
+        }
+
+        public void checks(List<Expr> value) {
+            this.checks = List.copyOf(value);
+        }
+
+        /** A chave primária declarada inclui a coluna {@code id}, que já é única. */
+        public boolean keyedById() {
+            return keyedById;
+        }
+
+        public void keyedById(boolean value) {
+            this.keyedById = value;
+        }
+
+        /**
+         * As colunas cuja combinação não pode se repetir, em ordem de nome. Vazio sem chave primária e quando ela
+         * inclui o {@code id}.
+         */
+        public List<String> primaryKey() {
+            return keyedById ? List.of()
+                : fields.values().stream().filter(FieldDef::primaryKey).map(FieldDef::name).sorted().toList();
         }
 
         public void permissions(com.axonbase.parser.ast.Statement.Permissions p) {
@@ -214,6 +243,8 @@ public final class Catalog {
         private final String references;
         private final String embeddingName;
         private final String embeddingFrom;
+        private final boolean notNull;
+        private final boolean primaryKey;
 
         public FieldDef(String name, String type, boolean readonly) {
             this(name, type, readonly, null, null, null);
@@ -244,6 +275,34 @@ public final class Catalog {
             this.references = references;
             this.embeddingName = embeddingName;
             this.embeddingFrom = embeddingFrom;
+            this.notNull = false;
+            this.primaryKey = false;
+        }
+
+        private FieldDef(FieldDef base, boolean notNull, boolean primaryKey) {
+            this.name = base.name;
+            this.type = base.type;
+            this.readonly = base.readonly;
+            this.assertExpr = base.assertExpr;
+            this.defaultExpr = base.defaultExpr;
+            this.references = base.references;
+            this.embeddingName = base.embeddingName;
+            this.embeddingFrom = base.embeddingFrom;
+            this.notNull = notNull;
+            this.primaryKey = primaryKey;
+        }
+
+        /** O mesmo campo com as restrições de coluna do {@code CREATE TABLE} ou do {@code ALTER TABLE}. */
+        public FieldDef constrained(boolean notNull, boolean primaryKey) {
+            return new FieldDef(this, notNull, primaryKey);
+        }
+
+        public boolean notNull() {
+            return notNull;
+        }
+
+        public boolean primaryKey() {
+            return primaryKey;
         }
 
         public String name() {

@@ -32,7 +32,7 @@ final class CreatePlanner {
         }
         GatewayRules.requireSelfContained(create, table);
         AxonValue explicit = create.target() instanceof Expr.RecordId id ? recordKey(session, id.key()) : null;
-        AxonValue chosen = explicit != null ? explicit : dataField(session, create.data(), "id");
+        AxonValue chosen = explicit != null ? explicit : dataField(session, create.data(), table, "id");
         String text = piece.text();
         AxonValue key = chosen;
         if (key == null) {
@@ -40,7 +40,7 @@ final class CreatePlanner {
             key = AxonValue.str(generated);
             text = withKey(piece, create, table, generated);
         }
-        AxonValue value = field.equals("id") ? engineKey(key) : dataField(session, create.data(), field);
+        AxonValue value = field.equals("id") ? engineKey(key) : dataField(session, create.data(), table, field);
         if (value == null) {
             throw ShardException.refused("shard_key_required", table, field);
         }
@@ -97,6 +97,11 @@ final class CreatePlanner {
                 GatewayRules.requireStorableKey(value);
                 slot = SlotHash.ofValue(value);
                 if (id != null) {
+                    // como no nó único, o IGNORE pula o id que já existe, aqui em qualquer shard
+                    if (insert.ignore() && context.options.checkExplicitIds()
+                        && holder(map, session, table, engineKey(id), map.ownerOf(slot)) != null) {
+                        continue;
+                    }
                     requireUnusedId(map, session, table, id, map.ownerOf(slot));
                 } else {
                     row.put("id", AxonValue.str(newKey()));
@@ -162,11 +167,16 @@ final class CreatePlanner {
     }
 
     /** O valor que os dados gravam num campo, quando está escrito neles; {@code null} se o campo não aparece. */
-    AxonValue dataField(GatewaySession session, Statement.Data data, String name) {
+    AxonValue dataField(GatewaySession session, Statement.Data data, String table, String name) {
         if (data instanceof Statement.Data.SetClause set) {
             Expr found = null;
             for (Statement.Assignment assignment : set.assignments()) {
-                if (GatewayRules.assignedField(assignment).equals(name)) {
+                List<String> path = GatewayRules.assignedPath(assignment, table);
+                if (path.get(0).equals(name)) {
+                    // escrever dentro do campo que roteia não diz o valor que ele passa a ter
+                    if (path.size() > 1) {
+                        throw ShardException.refused("assignment_unsupported");
+                    }
                     found = assignment.value();
                 }
             }
@@ -207,6 +217,14 @@ final class CreatePlanner {
             throw ShardException.refused("explicit_id", table);
         }
         AxonValue key = engineKey(id);
+        String shard = holder(map, session, table, key, owner);
+        if (shard != null) {
+            throw ShardException.refused("id_exists", table + ":" + GatewayRules.keyLiteral(key), shard);
+        }
+    }
+
+    /** Outro shard, que não {@code owner}, que já guarda o id; {@code null} quando nenhum guarda. */
+    private String holder(ShardMap map, GatewaySession session, String table, AxonValue key, String owner) {
         String query = "SELECT * FROM " + table + ":" + GatewayRules.keyLiteral(key);
         for (String shard : map.shardIds()) {
             if (shard.equals(owner)) {
@@ -214,9 +232,10 @@ final class CreatePlanner {
             }
             AxonValue found = context.send(map, Plan.Part.of(shard, query), session, false);
             if (found.isObject() || found.isArray() && !found.asArray().isEmpty()) {
-                throw ShardException.refused("id_exists", table + ":" + GatewayRules.keyLiteral(key), shard);
+                return shard;
             }
         }
+        return null;
     }
 
     /**

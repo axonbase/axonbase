@@ -112,10 +112,12 @@ public sealed interface Statement {
                      Expr defaultExpr, Expr checkExpr, String references) {
     }
 
+    /** {@code checks} são as cláusulas {@code CHECK (...)} da tabela; as de coluna ficam na própria coluna. */
     record CreateTable(String name, boolean ifNotExists, boolean schemafull,
-                       List<ColumnDef> columns) implements Statement {
+                       List<ColumnDef> columns, List<Expr> checks) implements Statement {
         public CreateTable {
             columns = columns == null ? List.of() : List.copyOf(columns);
+            checks = checks == null ? List.of() : List.copyOf(checks);
         }
     }
 

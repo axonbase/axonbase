@@ -110,11 +110,11 @@ func setup() {
 		wg.Wait()
 		fmt.Printf("  %s: %d registros em %.1fs (%.0f/s)\n", name, total, time.Since(t0).Seconds(), float64(total)/time.Since(t0).Seconds())
 	}
-	seed("pedido", *rows, func(i int) string { return fmt.Sprintf("CREATE pedido:%d CONTENT %s", i, order(i)) })
+	seed("pedido", *rows, func(i int) string { return fmt.Sprintf("UPSERT pedido:%d CONTENT %s", i, order(i)) })
 	seed("entregador", *drivers, func(i int) string {
 		r := rand.New(rand.NewSource(int64(i)))
 		lon, lat := point(r)
-		return fmt.Sprintf("CREATE entregador:%d CONTENT {nome: 'e%d', pos: {type: 'Point', coordinates: [%f, %f]}}", i, i, lon, lat)
+		return fmt.Sprintf("UPSERT entregador:%d CONTENT {nome: 'e%d', pos: {type: 'Point', coordinates: [%f, %f]}}", i, i, lon, lat)
 	})
 }
 
@@ -127,7 +127,8 @@ func statusUpdate(r *rand.Rand, _ int64) string {
 }
 func ordersInsert(r *rand.Rand, seq int64) string {
 	id := *rows + int(seq)
-	return fmt.Sprintf("CREATE pedido:%d CONTENT %s", id, order(id))
+	// UPSERT: uma segunda rodada do cenário repete os ids
+	return fmt.Sprintf("UPSERT pedido:%d CONTENT %s", id, order(id))
 }
 func driverPing(r *rand.Rand, _ int64) string {
 	lon, lat := point(r)

@@ -52,6 +52,8 @@ import java.util.function.UnaryOperator;
  */
 public final class Datastore {
 
+    private static final System.Logger LOG = System.getLogger(Datastore.class.getName());
+
     private final KvBackend backend;
     private final ConcurrentMap<String, ConcurrentMap<String, Database>> namespaces =
         new ConcurrentHashMap<>();
@@ -102,9 +104,50 @@ public final class Datastore {
         this.controlStore = new ControlStore(this.backend);
         synchronized (controlLock) {
             controlState.restore(controlStore.load());
+            repairControl();
             replayControl();
             registerLegacyEdgeKinds();
+            buildPrimaryKeys();
         }
+    }
+
+    /** Grava as entradas de chave primária que faltam: bases da rc1 declaravam a chave sem mantê-las. */
+    private void buildPrimaryKeys() {
+        namespaces.forEach((ns, databases) -> databases.forEach((name, database) -> {
+            for (com.axonbase.core.catalog.Catalog.TableDef table : database.catalog().tables()) {
+                if (!table.primaryKey().isEmpty()) {
+                    try {
+                        new Executor(this).forBuild(new Session(ns, name)).rebuildPrimaryKey(database, table.name());
+                        backend.flush();
+                    } catch (RuntimeException e) {
+                        // sem o marcador, a próxima abertura tenta de novo
+                        LOG.log(System.Logger.Level.ERROR, "chave primária de " + ns + "/" + name + "."
+                            + table.name() + " não foi refeita", e);
+                    }
+                }
+            }
+        }));
+    }
+
+    /**
+     * Ao abrir a base, tira do plano de controle o que versões anteriores gravaram e que não pode ser reexecutado
+     * (ver {@link LegacyIndexDrops}), e grava o resultado.
+     */
+    private void repairControl() {
+        if (removeLegacyIndexDrops()) {
+            controlStore.save(controlState, backend);
+            backend.flush();
+        }
+    }
+
+    private boolean removeLegacyIndexDrops() {
+        List<ControlCommand> stored = controlState.snapshot().commands();
+        List<ControlCommand> kept = LegacyIndexDrops.clean(stored, backend);
+        if (kept.size() == stored.size()) {
+            return false;
+        }
+        controlState.restore(new ControlSnapshot(kept));
+        return true;
     }
 
     /** Nome simples de tabela: o único que o RELATE registra e que a migração aceita (relê sem aspas). */
@@ -795,26 +838,45 @@ public final class Datastore {
      * <p>Os comandos vêm ordenados por dependência, então um índice com analyzer
      * encontra o analyzer, e um campo encontra a tabela. O flag {@code replaying}
      * evita que a reexecução grave de novo o que acabou de ler.</p>
+     *
+     * <p>Um comando que falha não interrompe a reconstrução: os demais são reexecutados, os usuários de arranque
+     * voltam e só então a primeira falha é lançada. Sem isso um CANCEL deixava o nó sem ninguém para autenticar.</p>
      */
     private void replayControl() {
+        // um restore ou um lote replicado também podem trazer um plano de controle gravado por uma versão anterior
+        removeLegacyIndexDrops();
         ControlSnapshot snapshot = controlState.snapshot();
         catalogRebuilds.incrementAndGet();
         replaying.set(true);
+        RuntimeException failure = null;
         try {
             namespaces.clear();
             databaseLinks.clear();
             sagas.clear();
             authCatalog.clear();
             for (ControlCommand command : snapshot.commands()) {
-                replay(command);
+                try {
+                    replay(command);
+                } catch (RuntimeException e) {
+                    LOG.log(System.Logger.Level.ERROR, "falha ao reexecutar a definição " + command.kind() + " '"
+                        + command.name() + "' de " + command.namespace() + "/" + command.database(), e);
+                    if (failure == null) {
+                        failure = e;
+                    } else if (failure != e) {
+                        failure.addSuppressed(e);
+                    }
+                }
                 java.util.function.Consumer<ControlCommand> hook = replayHook;
                 if (hook != null) {
                     hook.accept(command);
                 }
             }
-            authCatalog.restoreBootstrap();
         } finally {
+            authCatalog.restoreBootstrap();
             replaying.set(false);
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -1164,13 +1226,13 @@ public final class Datastore {
     // ------------------------------------------------------------------
 
 /**
-     * Genera un dump AxonQL de la base: DEFINEs del catálogo seguidos de un CREATE por
-     * registro, para restauração.
+     * Gera um dump AxonQL do banco: o que {@link #importDatabase} recebe recria analyzers, embeddings, tabelas,
+     * índices, partições, programas, registros, arestas, chave-valor, campos e eventos.
      *
-     * <p>O KV público queda fóra do dump: as chaves {@code KV|...} non entran no
-     * varrido {@code ns\0db\0} que este método percorre, nin se restauran con
-     * {@link #importDatabase}. Unha copia de seguridade que despexe a base non
-     * inclúe, pois, as entradas do key-value.</p>
+     * <p>Campos e eventos vêm depois dos dados: a importação repõe as linhas como estavam, sem DEFAULT, ASSERT nem
+     * REFERENCES sobre o que já existia, e nenhum evento dispara de novo. As definições de SAGA cujas ligações existem
+     * vão no fim. Usuários, acessos, Data Rules, permissões de tabela, auditorias e database links ficam fora do
+     * dump.</p>
      */
     public String exportDatabase(String ns, String db) {
         ConcurrentMap<String, Database> databases = namespaces.get(ns);
@@ -1184,36 +1246,14 @@ public final class Datastore {
             sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineAnalyzer(analyzer.name(),
                 analyzer.lowercase(), analyzer.stopwords(), analyzer.stemming()))).append(";\n");
         }
+        for (Catalog.EmbeddingDef embedding : database.catalog().embeddings()) {
+            sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineEmbedding(embedding.name(), "http",
+                embedding.url(), embedding.model(), embedding.dimension(), embedding.keyEnv(),
+                embedding.timeoutSeconds(), embedding.batch(), embedding.documentPrefix(), embedding.queryPrefix(),
+                embedding.sendDimension(), embedding.authHeader()))).append(";\n");
+        }
         for (Catalog.TableDef def : database.catalog().tables()) {
-            sb.append("DEFINE TABLE ").append(def.name());
-            if (def.schemafull()) {
-                sb.append(" SCHEMAFULL");
-            } else {
-                sb.append(" SCHEMALESS");
-            }
-            if (def.drop()) {
-                sb.append(" DROP");
-            }
-            if (def.shardBy() != null) {
-                sb.append(" SHARD BY ").append(def.shardBy());
-            }
-            sb.append(";\n");
-            for (Catalog.FieldDef fd : def.fields().values()) {
-                sb.append("DEFINE FIELD ").append(fd.name()).append(" ON TABLE ").append(def.name());
-                if (fd.type() != null) {
-                    sb.append(" TYPE ").append(fd.type());
-                }
-                if (fd.assertExpr() != null) {
-                    sb.append(" ASSERT ").append(com.axonbase.parser.Render.expr(fd.assertExpr()));
-                }
-                if (fd.defaultExpr() != null) {
-                    sb.append(" DEFAULT ").append(com.axonbase.parser.Render.expr(fd.defaultExpr()));
-                }
-                if (fd.references() != null) {
-                    sb.append(" REFERENCES ").append(fd.references());
-                }
-                sb.append(";\n");
-            }
+            appendTable(sb, def);
             for (Catalog.IndexDef ix : def.indexes().values()) {
                 sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineIndex(ix.name(), def.name(),
                     ix.columns(), ix.unique(), ix.count(), ix.searchAnalyzer(), ix.geo(), ix.columnar(),
@@ -1240,8 +1280,158 @@ public final class Datastore {
             }
         }
         exportColdRecords(sb, database);
+        appendEdges(sb, database);
+        appendKeyValues(sb, ns, db);
+        appendFields(sb, database);
+        appendEvents(sb, database);
         appendSagas(sb, ns);
         return sb.toString();
+    }
+
+    /** Um RELATE por aresta, lido da chave de saída ({@code E|ns|db|out|tabela|chave|tipo|tabela|chave}). */
+    private static void appendEdges(StringBuilder sb, Database database) {
+        String prefix = "E|" + database.ns() + "|" + database.db() + "|out|";
+        for (String key : database.records().keysWithPrefix(prefix)) {
+            String[] parts = key.substring(prefix.length()).split("\\|", -1);
+            if (parts.length != 5) {
+                // uma chave com '|' não deixa saber onde a aresta começa e termina: melhor falhar que perdê-la
+                throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", key));
+            }
+            sb.append("RELATE ").append(endpoint(key, parts[0], parts[1])).append("->").append(name(parts[2]))
+                .append("->").append(endpoint(key, parts[3], parts[4]));
+            appendEdgeProperties(sb, key, database.records().get(key).orElse(null));
+            sb.append(";\n");
+        }
+    }
+
+    /** O valor da chave da aresta é o objeto de propriedades dela (vazio quando não há): volta no SET do RELATE. */
+    private static void appendEdgeProperties(StringBuilder sb, String edge, byte[] value) {
+        if (value == null || value.length == 0) {
+            return;
+        }
+        AxonValue properties = AxonJson.decode(value);
+        if (!properties.isObject()) {
+            throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
+        }
+        String separator = " SET ";
+        for (Map.Entry<String, AxonValue> property : properties.asObject().entrySet()) {
+            if (!PLAIN_NAME.matcher(property.getKey()).matches()) {
+                throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
+            }
+            sb.append(separator).append(property.getKey()).append(" = ")
+                .append(com.axonbase.parser.Render.value(property.getValue()));
+            separator = ", ";
+        }
+    }
+
+    private static String endpoint(String edge, String table, String token) {
+        if (token.startsWith("s")) {
+            return name(table) + ":" + AxonJson.write(AxonValue.str(token.substring(1)));
+        }
+        if (token.startsWith("n")) {
+            return name(table) + ":" + com.axonbase.parser.Render.numberKey(
+                numberKeyValue(new java.math.BigDecimal(token.substring(1)), ""));
+        }
+        throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
+    }
+
+    private static String name(String name) {
+        return PLAIN_NAME.matcher(name).matches() ? name : AxonJson.write(AxonValue.str(name));
+    }
+
+    /** As entradas do chave-valor, com o prazo que ainda resta; as vencidas ficam de fora. */
+    private void appendKeyValues(StringBuilder sb, String ns, String db) {
+        String prefix = kvPrefix(ns, db);
+        long now = Instant.now().getEpochSecond();
+        for (String key : backend.keysWithPrefix(prefix)) {
+            String name = key.substring(prefix.length());
+            Optional<byte[]> raw = name.startsWith("ttl|") ? Optional.empty() : backend.get(key);
+            if (raw.isEmpty()) {
+                continue;
+            }
+            Long remaining = backend.get(kvTtlKey(ns, db, name)).map(expiry -> remainingSeconds(expiry, now))
+                .orElse(null);
+            if (remaining != null && remaining <= 0) {
+                continue;
+            }
+            sb.append("RETURN kv::set(").append(AxonJson.write(AxonValue.str(name))).append(", ")
+                .append(com.axonbase.parser.Render.value(decodeKv(raw.get())));
+            if (remaining != null) {
+                sb.append(", ").append(remaining);
+            }
+            sb.append(");\n");
+        }
+    }
+
+    private static Long remainingSeconds(byte[] expiry, long now) {
+        try {
+            return Long.parseLong(new String(expiry, StandardCharsets.UTF_8)) - now;
+        } catch (NumberFormatException corrupted) {
+            return null; // como na leitura: metadado corrompido não vence a entrada
+        }
+    }
+
+    /** A tabela com as opções dela; as permissões não vão no dump. */
+    private static void appendTable(StringBuilder sb, Catalog.TableDef def) {
+        sb.append("DEFINE TABLE ").append(def.name()).append(def.schemafull() ? " SCHEMAFULL" : " SCHEMALESS");
+        if (def.drop()) {
+            sb.append(" DROP");
+        }
+        if (def.shardBy() != null) {
+            sb.append(" SHARD BY ").append(def.shardBy());
+        }
+        sb.append(";\n");
+    }
+
+    private static void appendFields(StringBuilder sb, Database database) {
+        for (Catalog.TableDef def : database.catalog().tables()) {
+            appendConstraints(sb, def);
+            for (Catalog.FieldDef field : def.fields().values()) {
+                if (constrained(field)) {
+                    continue;
+                }
+                sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineField(field.name(), def.name(),
+                    field.type(), field.assertExpr(), field.readonly(), null, field.defaultExpr(), field.references(),
+                    field.embeddingName(), field.embeddingFrom()))).append(";\n");
+            }
+        }
+    }
+
+    private static boolean constrained(Catalog.FieldDef field) {
+        return field.notNull() || field.primaryKey();
+    }
+
+    /**
+     * NOT NULL, PRIMARY KEY e CHECK de tabela só se escrevem num CREATE TABLE. Vem depois dos dados; o DEFINE TABLE em
+     * seguida repõe as opções que o CREATE TABLE não leva.
+     */
+    private static void appendConstraints(StringBuilder sb, Catalog.TableDef def) {
+        List<Statement.ColumnDef> columns = new ArrayList<>();
+        if (def.keyedById()) {
+            columns.add(new Statement.ColumnDef("id", "string", true, false, null, null, null));
+        }
+        def.fields().values().stream().filter(Datastore::constrained)
+            .sorted(java.util.Comparator.comparing(Catalog.FieldDef::name))
+            .forEach(field -> columns.add(new Statement.ColumnDef(field.name(),
+                field.type() == null ? "any" : field.type(), field.primaryKey(), field.notNull(), field.defaultExpr(),
+                field.assertExpr(), field.references())));
+        if (columns.isEmpty() && def.checks().isEmpty()) {
+            return;
+        }
+        sb.append(com.axonbase.parser.Render.stmt(new Statement.CreateTable(def.name(), false, def.schemafull(),
+            columns, def.checks()))).append(";\n");
+        appendTable(sb, def);
+    }
+
+    private static void appendEvents(StringBuilder sb, Database database) {
+        for (Catalog.TableDef def : database.catalog().tables()) {
+            for (Catalog.EventDef event : def.events().values()) {
+                com.axonbase.parser.ast.Expr when = event.whenExpr() != null ? event.whenExpr()
+                    : new com.axonbase.parser.ast.Expr.Literal(AxonValue.bool(true));
+                sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineEvent(event.name(), def.name(), when,
+                    event.then()))).append(";\n");
+            }
+        }
     }
 
     /** As linhas das partições que estão na camada fria entram no dump lidas do objeto. */
@@ -1260,10 +1450,11 @@ public final class Datastore {
 
     private void appendCreate(StringBuilder sb, String table, String keyStr, byte[] raw) {
         AxonValue record = AxonJson.decode(raw);
-        if (!record.isObject() || !record.asObject().containsKey("id")) {
+        if (!record.isObject()) {
             return;
         }
-        // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>
+        // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>. A identidade vem da chave física,
+        // então um registro que perdeu o campo id (rc1, UPDATE CONTENT) também sai no dump
         Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
         AxonValue id = m.remove("id");
         sb.append("CREATE ").append(table).append(":").append(literalKey(table, keyStr, id))
@@ -1342,11 +1533,70 @@ public final class Datastore {
     }
 
     /**
-     * Restaura um dump no namespace/banco da sessão, com a identidade e o teto de papel dela: papel e escopo valem
-     * comando a comando, como no {@code /sql}. Quem atende requisições deve usar esta forma.
+     * Restaura um dump no namespace/banco da sessão, com a identidade e o teto de papel dela: papel, escopo e Data
+     * Rules valem comando a comando, como no {@code /sql}. Quem atende requisições deve usar esta forma. A sessão
+     * recebida não é alterada.
+     *
+     * <p>Tudo roda numa transação só: ou entra inteiro, ou o banco fica como estava (dados, definições, arestas e
+     * chave-valor), também quando um comando é recusado por falta de permissão. As linhas voltam como foram escritas:
+     * um registro existente é substituído e as restrições de tabela não são conferidas.</p>
+     *
+     * <p>O limite é o teto de uma entrada do log Raft ({@code AXON_IMPORT_MAX_MB} o reduz, ou o aumenta num nó fora de
+     * cluster). Vale para o arquivo e para o que a transação acumula, índices incluídos.</p>
      */
     public void importDatabase(Session session, String dump) {
-        execute(dump, session, null, LegacyDump::restoreTypes);
+        long limit = importLimitBytes();
+        requireImportSize(dump.getBytes(StandardCharsets.UTF_8).length, limit);
+        Session s = session.restoringCopy();
+        Supplier<AxonValue> work = () -> {
+            AxonValue result = execute(dump, s, null, query -> {
+                refuseTransactionControl(query);
+                return LegacyDump.restoreTypes(query);
+            });
+            requireImportSize(s.tx().stagedBytes(), limit);
+            return result;
+        };
+        if (commitCoordinator != null) {
+            autocommit(s, work);
+            return;
+        }
+        beginSession(s);
+        try {
+            work.get();
+            commitSession(s);
+            backend.flush();
+        } finally {
+            if (s.inTransaction()) {
+                cancelSession(s);
+            }
+        }
+    }
+
+    private long importLimitBytes() {
+        long cluster = coldTier.settings().clusterBytes();
+        String configured = System.getenv("AXON_IMPORT_MAX_MB");
+        if (configured == null || configured.isBlank()) {
+            return cluster;
+        }
+        long wanted = Long.parseLong(configured.trim()) << 20;
+        return commitCoordinator != null ? Math.min(wanted, cluster) : wanted;
+    }
+
+    private static void requireImportSize(long bytes, long limit) {
+        if (bytes > limit) {
+            throw AxonError.internal(Messages.get("stmt_import_too_large", bytes, limit));
+        }
+    }
+
+    /** Um BEGIN, COMMIT ou CANCEL no meio do dump partiria a transação que torna a importação atômica. */
+    private static void refuseTransactionControl(Query query) {
+        for (Statement statement : query.statements()) {
+            if (statement instanceof Statement.Begin || statement instanceof Statement.Commit
+                || statement instanceof Statement.Cancel) {
+                throw AxonError.internal(Messages.get("stmt_import_transaction_control",
+                    statement.getClass().getSimpleName().toUpperCase(Locale.ROOT)));
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1444,6 +1694,7 @@ public final class Datastore {
         if (restoredControl) {
             replayControl();
             controlStore.save(controlState, backend);
+            buildPrimaryKeys();
         }
         backend.flush();
         backend.delete(RESTORE_PENDING_KEY);
@@ -1543,8 +1794,10 @@ public final class Datastore {
     public void reloadFromBackend() {
         synchronized (controlLock) {
             controlState.restore(controlStore.load());
+            repairControl();
             replayControl();
             registerLegacyEdgeKinds();
+            buildPrimaryKeys();
         }
     }
 
@@ -1590,6 +1843,7 @@ public final class Datastore {
                 new String(lastCtrl[0], java.nio.charset.StandardCharsets.UTF_8)));
             replayControl();
             controlStore.save(controlState, backend);
+            buildPrimaryKeys();
         }
         backend.flush();
         backend.delete(RESTORE_PENDING_KEY);

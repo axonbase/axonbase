@@ -217,6 +217,8 @@ public class SagaLedger {
         Session targetSession = Session.create();
         targetSession.namespace(stepNs.isEmpty() ? SAGA_NS : stepNs);
         targetSession.database(stepDb.isEmpty() ? SAGA_DB : stepDb);
+        // a compensação repõe o que já existia: não passa pelas restrições das escritas novas
+        targetSession.restoring(true);
 
         Datastore.DatabaseLinkDef linkDef = null;
         if (!"local".equals(linkName)) {

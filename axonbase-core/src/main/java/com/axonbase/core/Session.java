@@ -81,6 +81,35 @@ public final class Session {
         return capReadOnly || authReadOnly;
     }
 
+    private boolean restoring;
+
+    /**
+     * Sessão que repõe dados que já existiam (importação de dump, movimentação de shard, compensação de saga): um
+     * CREATE ou INSERT sobre um id existente o substitui, e as restrições de tabela não são conferidas. Só o motor
+     * liga isto; nenhum pedido de cliente chega aqui.
+     */
+    public boolean restoring() {
+        return restoring;
+    }
+
+    public void restoring(boolean value) {
+        this.restoring = value;
+    }
+
+    /**
+     * Sessão nova para repor dados em nome desta: mesmo namespace e banco, mesma identidade e mesmo teto de papel, sem
+     * a transação, as variáveis nem as live queries dela.
+     */
+    public Session restoringCopy() {
+        Session copy = new Session(namespace, database);
+        copy.auth = auth;
+        copy.roleCap = roleCap;
+        copy.capReadOnly = capReadOnly;
+        copy.authReadOnly = authReadOnly;
+        copy.restoring = true;
+        return copy;
+    }
+
     // ------------------------------------------------------------------
     // transação activa
     // ------------------------------------------------------------------

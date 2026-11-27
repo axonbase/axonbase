@@ -94,10 +94,12 @@ class PartitionTest {
         }
 
         @Test
-        @DisplayName("CREATE de um id existente em outro dia substitui a linha")
-        void create_sameIdOtherDay_replaces() {
+        @DisplayName("CREATE de um id existente em outro dia é recusado e UPSERT substitui a linha")
+        void create_sameIdOtherDay_isRefused_upsertReplaces() {
             try (TimeData db = TimeData.memory().threeDays()) {
-                db.run("CREATE events:a CONTENT {at: d\"" + DAY2 + "\", who: \"nova\"}");
+                assertTrue(fails(db, "CREATE events:a CONTENT {at: d\"" + DAY2 + "\", who: \"nova\"}")
+                    .contains("events:a"));
+                db.run("UPSERT events:a CONTENT {at: d\"" + DAY2 + "\", who: \"nova\"}");
 
                 assertEquals(3, db.count("SELECT * FROM events"));
                 assertEquals(List.of("nova"), db.values("SELECT * FROM events:a", "who"));

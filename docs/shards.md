@@ -118,14 +118,15 @@ Antes de calcular qualquer coisa além de literais, e antes de responder uma ins
 ## Escrita
 
 - **Um shard:** a instrução segue como veio, com as garantias de um cluster comum.
-- **`INSERT` em vários shards:** permitido. É atômico em cada shard e **não** entre eles. Em falha, a mensagem diz quais shards gravaram.
+- **`INSERT` em vários shards:** permitido. É atômico em cada shard e **não** entre eles. Em falha, a mensagem diz quais shards gravaram. Um id que já existe faz o shard dono recusar a parte dele (desde a 1.0.0-rc2), e os outros shards podem já ter gravado. `INSERT IGNORE` pula o id existente.
 - **`UPDATE` ou `DELETE` por record id em tabela dividida por outro campo:** vai a todos, porque no máximo um registro existe.
 - **Outras escritas em mais de um shard:** só dentro de uma saga. Fora dela são recusadas.
 - **`UPSERT`:** precisa cair num shard só, e os dados precisam trazer a chave de shard.
-- **Chave de shard é imutável:** um `UPDATE` que a mude é recusado. Para mudar, apague e crie de novo, numa saga.
+- **Chave de shard é imutável:** um `UPDATE` que a mude é recusado, inclusive um `SET` num caminho dentro dela. Para mudar, apague e crie de novo, numa saga.
+- **`PRIMARY KEY` em tabela dividida:** precisa conter a chave de shard (ou a coluna `id`), porque só é conferida dentro de cada shard.
 - **Chave numérica é inteira:** um valor fracionário na chave é recusado, porque a conversão de tipo mudaria o shard.
 - **Escrita em vários shards:** o gateway relê o mapa antes de cada shard seguinte e para, informando quem gravou, se a época mudou.
-- **Record id explícito em tabela dividida por outro campo:** recusado por padrão, porque dois shards poderiam guardar o mesmo id. `AXON_GATEWAY_EXPLICIT_IDS=check` consulta todos os shards antes de criar. A consulta não é atômica: duas criações simultâneas do mesmo id com chaves de shard diferentes passam as duas. Quem precisa de id único e escolhido usa `SHARD BY id`.
+- **Record id explícito em tabela dividida por outro campo:** recusado por padrão, porque dois shards poderiam guardar o mesmo id. `AXON_GATEWAY_EXPLICIT_IDS=check` consulta todos os shards antes de criar, e então o `INSERT IGNORE` pula o id que existe em qualquer shard. A consulta não é atômica: duas criações simultâneas do mesmo id com chaves de shard diferentes passam as duas. Quem precisa de id único e escolhido usa `SHARD BY id`.
 
 ### Transações e sagas
 
