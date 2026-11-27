@@ -113,7 +113,7 @@ Numa base que tenha ao menos uma tabela dividida, `FETCH`, travessia de grafo, b
 
 O gateway calcula localmente só expressões puras: literais, variáveis definidas pelo cliente, operadores e funções que não leem dados, sessão nem executam instruções. Um `LET` com qualquer outra coisa é enviado ao shard base, com a credencial do cliente. Nos dados de um `INSERT`, na chave de um `CREATE`, em `START`, `LIMIT` e nas colunas de grupos de uma consulta espalhada, uma expressão não pura (por exemplo `$auth` ou `record::exists`) é recusada.
 
-Antes de calcular qualquer coisa além de literais, e antes de responder uma instrução sem consultar shard algum, o gateway pede ao shard base que confira a credencial do cliente (uma ida a mais por requisição). Sem credencial válida num conjunto com autenticação, a requisição é recusada. Cada requisição tem um orçamento de 64 Mi caracteres para os valores que o gateway produz ou consome nesses cálculos: um `string::repeat` que passaria dele é recusado antes de ser executado. As colunas calculadas ao fundir os grupos de uma agregação espalhada não entram nesse orçamento.
+Antes de calcular qualquer coisa além de literais, e antes de responder uma instrução sem consultar shard algum, o gateway pede ao shard base que confira a credencial do cliente (uma ida a mais por requisição). Qualquer nó do shard base responde, sem precisar de líder. Sem credencial válida num conjunto com autenticação, a requisição é recusada. Cada requisição tem um orçamento de 64 Mi caracteres para os valores que o gateway produz ou consome nesses cálculos: um `string::repeat` que passaria dele é recusado antes de ser executado. As colunas calculadas ao fundir os grupos de uma agregação espalhada não entram nesse orçamento.
 
 ## Escrita
 
