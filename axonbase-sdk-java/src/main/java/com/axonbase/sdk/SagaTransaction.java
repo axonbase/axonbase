@@ -3,6 +3,7 @@ package com.axonbase.sdk;
 import com.axonbase.common.Messages;
 import com.axonbase.value.AxonValue;
 
+import java.util.Map;
 
 /**
  * Client-side SagaTransaction for distributed transactions via DATABASE LINK.
@@ -68,19 +69,21 @@ public class SagaTransaction implements AutoCloseable {
      * Captura o estado atual de um registro e registra como step em system.saga.
      * Deve ser chamado <b>antes</b> da mutação, com o registro no estado original.
      *
-     * @param table     nome da tabela (ex: "inventory")
-     * @param recordId  chave do registro (ex: "sku1")
+     * @param table     nome da tabela (ex: "inventory"), obrigatoriamente um identificador simples
+     * @param recordId  chave crua do registro (ex: "sku1"), sem aspas nem crases
      * @param ns        namespace (ex: "test")
      * @param db        database (ex: "saga_test")
      * @param operation tipo de operação ("UPDATE" | "CREATE" | "DELETE")
+     * @throws IllegalArgumentException se a tabela não for um identificador simples
      */
     public void capture(String table, String recordId, String ns, String db, String operation) {
         if (!begun) throw new IllegalStateException(Messages.get("sdk_saga_not_begun"));
         if (finished) throw new IllegalStateException(Messages.get("sdk_saga_already_finished"));
+        String target = AxonQlText.tableName(table) + ":" + AxonQlText.recordKey(recordId);
 
         // 1. Get current state (before) from the business database
         axon.use(ns, db);
-        AxonValue before = axon.query("SELECT * FROM " + esc(table) + ":" + esc(recordId));
+        AxonValue before = axon.query("SELECT * FROM " + target);
         // SELECT * returns an array; extract the first record if present
         AxonValue beforeRecord = before;
         if (before != null && before.isArray() && !before.asArray().isEmpty()) {
@@ -89,18 +92,28 @@ public class SagaTransaction implements AutoCloseable {
 
         // 2. Record step in system.saga
         axon.use("system", "saga");
-        String beforeJson = beforeRecord != null && beforeRecord.isObject() ? beforeRecord.toString() : "{}";
+        AxonValue snapshot = beforeRecord != null && beforeRecord.isObject()
+            ? beforeRecord : AxonValue.object(Map.of());
+        // todos os dados vão como parâmetros: nenhum entra no texto do comando
         axon.query("CREATE saga_step CONTENT {"
-            + "correlation_id: '" + esc(correlationId) + "',"
-            + "step_order: " + System.currentTimeMillis() + ","
-            + "step_ns: '" + esc(ns) + "',"
-            + "step_db: '" + esc(db) + "',"
+            + "correlation_id: $step_correlation,"
+            + "step_order: $step_order,"
+            + "step_ns: $step_ns,"
+            + "step_db: $step_db,"
             + "link_name: 'local',"
-            + "table_name: '" + esc(table) + "',"
-            + "record_key: '" + esc(recordId) + "',"
-            + "before: " + beforeJson + ","
-            + "operation: '" + esc(operation) + "',"
-            + "status: 'PREPARED'}");
+            + "table_name: $step_table,"
+            + "record_key: $step_key,"
+            + "before: $step_before,"
+            + "operation: $step_operation,"
+            + "status: 'PREPARED'}", Map.of(
+                "step_correlation", AxonValue.str(correlationId),
+                "step_order", AxonValue.num(System.currentTimeMillis()),
+                "step_ns", AxonValue.str(ns),
+                "step_db", AxonValue.str(db),
+                "step_table", AxonValue.str(table),
+                "step_key", AxonValue.str(recordId),
+                "step_before", snapshot,
+                "step_operation", AxonValue.str(operation)));
 
         // 3. Switch back to business database
         axon.use(ns, db);
