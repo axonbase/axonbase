@@ -694,8 +694,14 @@ public final class RpcDispatcher {
                     break;
                 }
                 // LET/SET não tocam o backend: guardam a variável na sessão.
-                session.vars().set(pa.get(0).asString(), pa.get(1));
-                result = pa.get(1);
+                try {
+                    session.requireDefinable(pa.get(0).asString());
+                    session.vars().set(pa.get(0).asString(), pa.get(1));
+                    result = pa.get(1);
+                } catch (RuntimeException e) {
+                    error = e.getMessage();
+                    errorCode = errorCode(e);
+                }
             }
             case "unset" -> {
                 List<AxonValue> pa = paramsOf(obj);

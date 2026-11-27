@@ -107,6 +107,8 @@ public final class Executor {
 
     private final Datastore ds;
     private Session session;
+    /** Sessão que responde por {@code $auth} e {@code $token} quando não é a corrente (assinante de uma live query). */
+    private Session identitySession;
     private final DatabaseLinkClient linkClient = new DatabaseLinkClient();
     private SagaLedger sagaLedger;
     /** SQL original vindo do Datastore, usado pela intercepção de AI Audit. */
@@ -126,6 +128,7 @@ public final class Executor {
     public AxonValue execute(Query query, Session session, Map<String, AxonValue> webVars) {
         this.session = session;
         if (webVars != null) {
+            webVars.keySet().forEach(session::requireDefinable);
             webVars.forEach(session.vars()::set);
         }
         AxonValue result = AxonValue.nul();
@@ -152,6 +155,7 @@ public final class Executor {
     public AxonValue executePartial(Statement.Select select, Session scope, Map<String, AxonValue> webVars) {
         this.session = scope;
         if (webVars != null) {
+            webVars.keySet().forEach(scope::requireDefinable);
             webVars.forEach(scope.vars()::set);
         }
         if (!bypassAudit && rawSql != null) {
@@ -619,14 +623,21 @@ public final class Executor {
         }
         for (LiveBus.Subscription sub : subs) {
             Document doc = new Document(rid, candidate);
-            if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
-                continue;
-            }
             AxonValue payload;
-            if (sub.diff() && !LiveBus.DELETE.equals(action)) {
-                payload = diffOf(before, after);
-            } else {
-                payload = project(sub.select(), doc);
+            // $auth e $token da consulta são os do assinante, não os de quem escreveu
+            Session previousIdentity = identitySession;
+            identitySession = sub.owner();
+            try {
+                if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
+                    continue;
+                }
+                if (sub.diff() && !LiveBus.DELETE.equals(action)) {
+                    payload = diffOf(before, after);
+                } else {
+                    payload = project(sub.select(), doc);
+                }
+            } finally {
+                identitySession = previousIdentity;
             }
             LiveBus.Notification note = new LiveBus.Notification(sub.id(), action, payload);
             if (session.inTransaction()) {
@@ -759,6 +770,7 @@ public final class Executor {
     }
 
     private AxonValue runLet(Statement.Let l) {
+        session.requireDefinable(l.name());
         AxonValue v = eval(l.value());
         session.vars().set(l.name(), v);
         return v;
@@ -5112,9 +5124,59 @@ return score;
         List<Expr> predicates = new ArrayList<>();
         for (String name : dataRuleNames(auth)) {
             Catalog.DataRuleDef def = db.catalog().dataRule(name);
-            if (def != null) predicates.add(def.predicate());
+            if (def == null) continue;
+            if (lacksParameterValue(def.predicate())) return DENY_ALL;
+            predicates.add(def.predicate());
         }
         return predicates;
+    }
+
+    /** Predicado que não deixa passar linha alguma. */
+    private static final List<Expr> DENY_ALL = List.of(new Expr.Literal(AxonValue.bool(false)));
+
+    /**
+     * Algum {@code $parametro} da regra (ou o campo pedido a ele, como {@code $auth.tenant}) está sem valor. Comparar
+     * a falta com um campo ausente daria verdadeiro, então a regra inteira passa a negar.
+     */
+    private boolean lacksParameterValue(Expr e) {
+        return switch (e) {
+            case null -> false;
+            case Expr.Param p -> !"parent".equals(p.name()) && isMissing(eval(p));
+            case Expr.Idiom i -> idiomLacksValue(i);
+            case Expr.Binary b -> lacksParameterValue(b.left()) || lacksParameterValue(b.right());
+            case Expr.Unary u -> lacksParameterValue(u.operand());
+            case Expr.Cast c -> lacksParameterValue(c.operand());
+            case Expr.Alias a -> lacksParameterValue(a.expr());
+            case Expr.Call c -> c.args().stream().anyMatch(this::lacksParameterValue);
+            case Expr.ArrayLit a -> a.items().stream().anyMatch(this::lacksParameterValue);
+            case Expr.SetLit s -> s.items().stream().anyMatch(this::lacksParameterValue);
+            case Expr.ObjectLit o -> o.entries().stream().anyMatch(en -> lacksParameterValue(en.value()));
+            case Expr.RecordId r -> lacksParameterValue(r.key());
+            case Expr.Range r -> lacksParameterValue(r.start()) || lacksParameterValue(r.end());
+            case Expr.SubQuery sq -> sq.query().statements().stream()
+                .anyMatch(st -> st instanceof Statement.Select sel && lacksParameterValue(sel.cond()));
+            case Expr.Literal l -> false;
+            case Expr.Ident id -> false;
+            case Expr.Qualified q -> false;
+            case Expr.Path p -> false;
+            case Expr.Block b -> false;
+        };
+    }
+
+    /** Confere o trecho {@code $parametro.campo.campo} de um idiom; o que vier depois é percorrido como expressão. */
+    private boolean idiomLacksValue(Expr.Idiom i) {
+        if (!(i.base() instanceof Expr.Param p)) {
+            return lacksParameterValue(i.base());
+        }
+        if ("parent".equals(p.name())) {
+            return false;
+        }
+        List<Expr.Part> fields = i.parts().stream().takeWhile(part -> part instanceof Expr.Part.Field).toList();
+        return isMissing(fields.isEmpty() ? eval(p) : eval(new Expr.Idiom(p, fields)));
+    }
+
+    private static boolean isMissing(AxonValue v) {
+        return v == null || v.isNone() || v.isNull();
     }
 
     /** Extrai os nomes das Data Rules do objeto auth (array ou CSV). */
@@ -5327,7 +5389,7 @@ return score;
             return out;
         }
         if (target instanceof Expr.Param p) {
-            AxonValue v = session.vars().get(p.name());
+            AxonValue v = parameter(p.name());
             if (v != null && v.isRecordId()) {
                 AxonValue.RecordId r = v.asRecordId();
                 return List.of(new RecordId(r.table(), keyOf(r.key())));
@@ -5369,7 +5431,7 @@ return score;
             case Expr.Ident id -> id.name();
             case Expr.RecordId rid -> rid.table() instanceof Expr.Ident id2 ? id2.name() : "";
             case Expr.Param p -> {
-                AxonValue v = session.vars().get(p.name());
+                AxonValue v = parameter(p.name());
                 yield v != null && v.isRecordId() ? v.asRecordId().table() : "";
             }
             default -> "";
@@ -5422,6 +5484,12 @@ return score;
     // Evaluación de expresións
     // ------------------------------------------------------------------
 
+    /** Resolvedor único de parâmetros, ou {@code null} quando não há valor. */
+    private AxonValue parameter(String name) {
+        Session source = identitySession != null && Session.isIdentityVariable(name) ? identitySession : session;
+        return source.parameter(name);
+    }
+
     private AxonValue eval(Expr e) {
         if (e == null) {
             return AxonValue.nul();
@@ -5438,7 +5506,10 @@ return score;
                 yield AxonValue.table(def != null ? def.name() : name);
             }
             case Expr.Qualified q -> AxonValue.table(q.table());
-            case Expr.Param p -> session.vars().getOrMissing(p.name());
+            case Expr.Param p -> {
+                AxonValue v = parameter(p.name());
+                yield v == null ? AxonValue.none() : v;
+            }
             case Expr.Path p -> invokePath(p);
             case Expr.Call c -> invokeCall(c);
             case Expr.RecordId rid -> mapping(rid);
@@ -6293,7 +6364,9 @@ return score;
         }
         try {
             Executor sub = new Executor(ds);
-            return sub.execute(sq.query(), session, session.vars().copy());
+            sub.identitySession = identitySession;
+            // as variáveis já estão na sessão: nada a repassar
+            return sub.execute(sq.query(), session, null);
         } finally {
             if (outer != null) {
                 session.vars().set("parent",

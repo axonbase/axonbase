@@ -55,6 +55,29 @@ public final class Session {
         return auth;
     }
 
+    /** {@code $auth} e {@code $token}: numa sessão autenticada o servidor os preenche com os claims. */
+    public static boolean isIdentityVariable(String name) {
+        return "auth".equals(name) || "token".equals(name);
+    }
+
+    /** Recusa a definição, pelo cliente, de uma variável de identidade numa sessão autenticada. */
+    public void requireDefinable(String name) {
+        if (isIdentityVariable(name) && Authz.authenticated(auth)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_param_reserved", name));
+        }
+    }
+
+    /**
+     * Valor de um parâmetro {@code $nome}, ou {@code null} quando não há. As variáveis de identidade vêm dos claims
+     * sempre que a sessão está autenticada, mesmo que exista uma variável com o mesmo nome definida antes.
+     */
+    public AxonValue parameter(String name) {
+        if (isIdentityVariable(name) && Authz.authenticated(auth)) {
+            return auth;
+        }
+        return vars.get(name);
+    }
+
     /**
      * Define os claims da sessão. Aplica o teto de papel (se houver) e recalcula a
      * marca de somente leitura: papel explícito viewer vira somente leitura.
