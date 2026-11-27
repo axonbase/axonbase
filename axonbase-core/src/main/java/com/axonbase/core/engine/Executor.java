@@ -7176,8 +7176,15 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         return AxonValue.array(out);
     }
 
+    /** Cabeçalho (comentário AxonQL) com o que o texto do comando não carrega: regras geradas, data e autor. */
+    private static final String AUDIT_HEADER = "-- aiaudit ";
+
     private AxonValue runDefineAiAudit(Statement.DefineAiAudit aa) {
-        if (!ds.aiProvider().isConfigured()) {
+        if (ds.isReplaying()) {
+            restoreAiAudit(aa);
+            return AxonValue.nul();
+        }
+        if (ds.aiProvider() == null || !ds.aiProvider().isConfigured()) {
             throw errorStmt(Messages.get("audit_not_configured"));
         }
         Database db = db();
@@ -7198,19 +7205,65 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             aa.name(), aa.warningWhen(), aa.dangerWhen(),
             warningRules, dangerRules, System.currentTimeMillis(), userId);
         db.catalog().defineAudit(def);
-        control(db, ControlCommand.Kind.AUDIT, aa.name(), com.axonbase.parser.Render.stmt(aa));
+        Map<String, AxonValue> stored = new LinkedHashMap<>();
+        stored.put("rules", AxonValue.str(rulesJson));
+        stored.put("created_at", AxonValue.num(def.createdAt()));
+        stored.put("created_by", AxonValue.str(def.createdBy() == null ? "" : def.createdBy()));
+        String header = AUDIT_HEADER
+            + com.axonbase.value.AxonJson.write(AxonValue.object(stored)).replace('\n', ' ') + "\n";
+        control(db, ControlCommand.Kind.AUDIT, aa.name(), header + com.axonbase.parser.Render.stmt(aa));
         return AxonValue.object(java.util.Map.of(
             "name", AxonValue.str(aa.name()),
             "rules", AxonValue.str(rulesJson),
             "status", AxonValue.str("CREATED")));
     }
 
+    /**
+     * Recria a auditoria na releitura do catálogo sem chamar o provedor de IA, que ainda não está configurado nesse
+     * momento. Definições gravadas por versões anteriores não têm as regras: voltam sem nenhuma, com um aviso.
+     */
+    private void restoreAiAudit(Statement.DefineAiAudit aa) {
+        Database db = db();
+        java.util.List<com.axonbase.core.audit.AiAuditRule> warningRules = new java.util.ArrayList<>();
+        java.util.List<com.axonbase.core.audit.AiAuditRule> dangerRules = new java.util.ArrayList<>();
+        long createdAt = 0;
+        String createdBy = "";
+        boolean restored = false;
+        for (ControlCommand command : ds.controlSnapshot().commands()) {
+            String text = command.definition();
+            if (command.kind() != ControlCommand.Kind.AUDIT || !command.namespace().equals(db.ns())
+                || !command.database().equals(db.db()) || !command.name().equals(aa.name())
+                || !text.startsWith(AUDIT_HEADER)) {
+                continue;
+            }
+            try {
+                Map<String, AxonValue> stored = com.axonbase.value.AxonJson.parseDocument(
+                    text.substring(AUDIT_HEADER.length(), text.indexOf('\n'))).asObject();
+                parseRules(stored.get("rules").asString(), warningRules, dangerRules);
+                createdAt = stored.get("created_at").asLong();
+                createdBy = stored.get("created_by").asString();
+                restored = true;
+            } catch (RuntimeException unreadable) {
+                System.err.println(Messages.get("audit_parse_error", unreadable.getMessage()));
+            }
+        }
+        if (!restored) {
+            System.err.println(Messages.get("audit_rules_not_stored", aa.name()));
+        }
+        db.catalog().defineAudit(new com.axonbase.core.audit.AiAuditDef(
+            aa.name(), aa.warningWhen(), aa.dangerWhen(), warningRules, dangerRules, createdAt, createdBy));
+    }
+
     private AxonValue runDropAiAudit(Statement.DropAiAudit da) {
         Database db = db();
         if (!db.catalog().removeAudit(da.name())) {
+            // versões anteriores gravavam o próprio DROP no plano de controle
+            if (ds.isReplaying()) {
+                return AxonValue.nul();
+            }
             throw errorStmt(Messages.get("audit_not_found", da.name()));
         }
-        control(db, ControlCommand.Kind.AUDIT, da.name(), com.axonbase.parser.Render.stmt(da));
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.AUDIT, da.name());
         return AxonValue.nul();
     }
 
