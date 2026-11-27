@@ -85,8 +85,17 @@ public final class Transaction implements KvBackend {
         Optional<byte[]> read;
         if (base instanceof VersionedKvBackend versioned) {
             Optional<VersionedKvBackend.VersionedValue> value = versioned.getVersioned(key);
-            readVersions.put(key, value.map(VersionedKvBackend.VersionedValue::version)
-                .orElseGet(() -> versioned.versionOf(key)));
+            long version;
+            if (value.isPresent()) {
+                version = value.get().version();
+            } else {
+                // a versão de uma chave ausente é lida antes da leitura que confirma a ausência: lida só depois,
+                // seria a de quem a criou no meio, e este commit gravaria por cima
+                long before = versioned.versionOf(key);
+                value = versioned.getVersioned(key);
+                version = value.isPresent() ? value.get().version() : before;
+            }
+            readVersions.put(key, version);
             read = value.map(VersionedKvBackend.VersionedValue::value);
         } else {
             read = base.get(key);
