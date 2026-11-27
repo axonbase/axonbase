@@ -94,6 +94,9 @@ public final class AuthService {
         if (!identity.dataRules().isEmpty()) {
             claims.put("data_rules", String.join(",", identity.dataRules()));
         }
+        if (identity.auditName() != null && !identity.auditName().isBlank()) {
+            claims.put("audit", identity.auditName());
+        }
         if (access != null && !access.isBlank()) {
             claims.put("access", access);
         }

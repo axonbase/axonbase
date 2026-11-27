@@ -7518,6 +7518,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (userId.equals(auditCase.userId()) && cat.isBlocked(userId)) {
             throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_self_decision"));
         }
+        // montada antes de decidir: sem a identidade do autor o caso continua pendente
+        Session author = "AUTHORIZED".equals(sac.status()) ? authorSession(auditCase) : null;
         auditCase.resolve(sac.status(), userId, sac.reason());
         cat.addEvent(sac.hash(), new com.axonbase.core.audit.AuditCaseEvent(
             sac.status().equals("AUTHORIZED") ? "AUTHORIZED" : "DENIED", userId, sac.reason(), System.currentTimeMillis()));
@@ -7527,8 +7529,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             cat.unblockUser(auditCase.userId());
         }
 
-        // If AUTHORIZED, execute the original SQL
-        if ("AUTHORIZED".equals(sac.status())) {
+        // O comando aprovado roda com a identidade e o poder de quem o pediu
+        if (author != null) {
             try {
                 String originalSql = auditCase.sql();
                 // Execute the original SQL that was blocked - bypass audit to avoid recursion
@@ -7536,7 +7538,19 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
                 exec.bypassAudit = true;
                 exec.rawSql = originalSql;
                 Query q = com.axonbase.parser.AxonQl.parse(originalSql);
-                return exec.execute(q, session, null);
+                boolean shared = session.inTransaction();
+                if (shared) {
+                    // a escrita aprovada vai na mesma transação da decisão (é o que a replica no cluster)
+                    author.tx(session.tx());
+                    author.txControlVersion(session.txControlVersion());
+                    author.txIndexEpoch(session.txIndexEpoch());
+                }
+                AxonValue result = exec.execute(q, author, auditCase.author().vars());
+                if (shared) {
+                    // as notificações de live query saem no COMMIT de quem abriu a transação
+                    session.queueLive(author::flushLive);
+                }
+                return result;
             } catch (Exception e) {
                 throw errorStmt(Messages.get("audit_exec_error", e.getMessage()));
             }
@@ -7545,6 +7559,69 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         return AxonValue.object(java.util.Map.of(
             "hash", AxonValue.str(sac.hash()),
             "status", AxonValue.str(sac.status())));
+    }
+
+    /**
+     * Sessão com a identidade do autor do caso. Para quem entrou por signin valem os papéis e as Data Rules de hoje,
+     * sem passar do papel que o autor tinha ao pedir o comando; autor removido não executa nada.
+     */
+    private Session authorSession(com.axonbase.core.audit.AuditCase auditCase) {
+        com.axonbase.core.audit.AuditAuthor author = auditCase.author();
+        if (author == null) {
+            throw errorStmt(Messages.get("audit_no_author"));
+        }
+        Map<String, AxonValue> claims = new LinkedHashMap<>(author.claims().asObject());
+        // o comando já passou pela auditoria
+        claims.remove("audit");
+        AxonValue effective = AxonValue.object(claims);
+        AxonValue type = claims.get("typ");
+        if (type != null && type.isString() && "access".equals(type.asString())) {
+            AuthCatalog.User current = currentIdentity(claims);
+            if (current == null) {
+                throw errorStmt(Messages.get("audit_author_gone"));
+            }
+            putOrRemove(claims, "roles", current.roles());
+            putOrRemove(claims, "data_rules", current.dataRules());
+            effective = com.axonbase.core.security.Authz.cap(AxonValue.object(claims),
+                com.axonbase.core.security.Authz.role(author.claims()));
+        }
+        Session result = new Session(session.namespace(), session.database());
+        result.auth(effective);
+        if (author.readOnly()) {
+            result.roleCap(com.axonbase.core.security.Authz.Role.VIEWER);
+        }
+        return result;
+    }
+
+    private AuthCatalog.User currentIdentity(Map<String, AxonValue> claims) {
+        return ds.authCatalog().users().stream()
+            .filter(u -> claimEquals(claims, "id", u.name()) && claimEquals(claims, "scope", u.scope().name())
+                && claimEquals(claims, "ns", u.namespace()) && claimEquals(claims, "db", u.database()))
+            .findFirst().orElse(null);
+    }
+
+    private static boolean claimEquals(Map<String, AxonValue> claims, String key, String expected) {
+        AxonValue v = claims.get(key);
+        return java.util.Objects.equals(v != null && v.isString() ? v.asString() : null, expected);
+    }
+
+    private static void putOrRemove(Map<String, AxonValue> claims, String key, List<String> values) {
+        if (values.isEmpty()) {
+            claims.remove(key);
+        } else {
+            claims.put(key, AxonValue.str(String.join(",", values)));
+        }
+    }
+
+    /** O que a execução futura de um comando retido precisa saber sobre quem o pediu. */
+    private com.axonbase.core.audit.AuditAuthor currentAuthor() {
+        Map<String, AxonValue> claims = new LinkedHashMap<>(session.auth().asObject());
+        claims.remove("jti");
+        claims.remove("exp");
+        Map<String, AxonValue> vars = new LinkedHashMap<>(session.vars().copy());
+        vars.keySet().removeIf(Session::isIdentityVariable);
+        vars.values().removeIf(java.util.Objects::isNull);
+        return new com.axonbase.core.audit.AuditAuthor(AxonValue.object(claims), vars, session.readOnly());
     }
 
     // ---- AUDIT_CASES virtual table ----
@@ -7673,7 +7750,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
 
         // Generate hash
         String hash = sha256Hex(sql + System.currentTimeMillis() + userId);
-        var auditCase = new com.axonbase.core.audit.AuditCase(hash, userId, sql, auditName, classification, System.currentTimeMillis());
+        var auditCase = new com.axonbase.core.audit.AuditCase(hash, userId, sql, auditName, classification,
+            System.currentTimeMillis(), currentAuthor());
 
         if ("DANGER".equals(classification)) {
             // Block the user

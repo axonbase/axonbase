@@ -169,6 +169,12 @@ public final class AiAuditCatalog {
         map.put("resolved_by", AxonValue.str(ac.resolvedBy()));
         map.put("resolution_note", AxonValue.str(ac.resolutionNote()));
         map.put("resolved_at", AxonValue.num(ac.resolvedAt()));
+        AuditAuthor author = ac.author();
+        if (author != null) {
+            map.put("author_claims", author.claims());
+            map.put("author_vars", AxonValue.object(new java.util.LinkedHashMap<>(author.vars())));
+            map.put("author_read_only", AxonValue.bool(author.readOnly()));
+        }
         return AxonValue.object(map);
     }
 
@@ -178,7 +184,7 @@ public final class AiAuditCatalog {
             var obj = v.asObject();
             AuditCase ac = new AuditCase(
                 str(obj, "hash"), str(obj, "user"), str(obj, "sql"), str(obj, "audit"),
-                str(obj, "classification"), num(obj, "created_at"));
+                str(obj, "classification"), num(obj, "created_at"), author(obj));
             // restore reason
             String reason = str(obj, "reason");
             if (!reason.isEmpty()) ac.setReason(reason, ac.userId());
@@ -205,6 +211,17 @@ public final class AiAuditCatalog {
             "reason", AxonValue.str(bu.reason()),
             "blocked_at", AxonValue.num(bu.blockedAt()),
             "blocked_by", AxonValue.str(bu.blockedBy())));
+    }
+
+    private static AuditAuthor author(java.util.Map<String, AxonValue> obj) {
+        AxonValue claims = obj.get("author_claims");
+        if (claims == null || !claims.isObject()) {
+            return null;
+        }
+        AxonValue vars = obj.get("author_vars");
+        AxonValue readOnly = obj.get("author_read_only");
+        return new AuditAuthor(claims, vars != null && vars.isObject() ? vars.asObject() : java.util.Map.of(),
+            readOnly != null && readOnly.isBool() && readOnly.asBool());
     }
 
     private static BlockedUser fromBlockedJson(AxonValue v) {
