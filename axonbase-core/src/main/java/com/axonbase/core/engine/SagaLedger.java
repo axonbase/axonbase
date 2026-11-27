@@ -1,8 +1,11 @@
 package com.axonbase.core.engine;
 
+import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.core.Session;
 import com.axonbase.core.catalog.RecordId;
+import com.axonbase.core.security.AuthCatalog;
+import com.axonbase.core.security.Authz;
 import com.axonbase.parser.Render;
 import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonValue;
@@ -41,6 +44,7 @@ public class SagaLedger {
         ds.execute("DEFINE FIELD created_at ON TABLE saga TYPE datetime;", sagaSession(), null);
         ds.execute("DEFINE FIELD links ON TABLE saga TYPE array;", sagaSession(), null);
         ds.execute("DEFINE FIELD link_namespace ON TABLE saga TYPE string;", sagaSession(), null);
+        ds.execute("DEFINE FIELD open_database ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE INDEX saga_corr ON TABLE saga COLUMNS correlation_id UNIQUE;", sagaSession(), null);
 
         ds.execute("DEFINE TABLE saga_step SCHEMAFULL;", sagaSession(), null);
@@ -63,14 +67,16 @@ public class SagaLedger {
     }
 
     public void beginSaga(String sagaResource, String correlationId) {
-        beginSaga(sagaResource, correlationId, List.of(), "");
+        beginSaga(sagaResource, correlationId, List.of(), "", "");
     }
 
     /**
      * @param links participantes da definição no momento do BEGIN; vazio quando a SAGA não tem definição
      * @param linkNamespace namespace de quem abriu a SAGA, onde as ligações dos participantes estão definidas
+     * @param openDatabase banco de quem abriu a SAGA; com o namespace, delimita quem a alcança
      */
-    public void beginSaga(String sagaResource, String correlationId, List<String> links, String linkNamespace) {
+    public void beginSaga(String sagaResource, String correlationId, List<String> links, String linkNamespace,
+                          String openDatabase) {
         String participants = Render.value(
             AxonValue.array(links.stream().map(AxonValue::str).toList()));
         ds.execute("UPSERT " + ledgerRecord(correlationId)
@@ -78,6 +84,7 @@ public class SagaLedger {
             + "\", correlation_id: \"" + esc(correlationId)
             + "\", links: " + participants
             + ", link_namespace: \"" + esc(linkNamespace)
+            + "\", open_database: \"" + esc(openDatabase)
             + "\", status: \"RUNNING\", created_at: time::now()}", sagaSession(), null);
     }
 
@@ -89,6 +96,48 @@ public class SagaLedger {
             result = result.asArray().isEmpty() ? AxonValue.nul() : result.asArray().get(0);
         }
         return result.isObject() ? result.asObject() : null;
+    }
+
+    /**
+     * Recusa a identidade que não alcança a SAGA: o namespace e o banco de quem a abriu e o de cada passo local. Num
+     * passo gravado por DATABASE LINK vale o namespace de quem escreveu, porque o banco dele é do participante. Sem
+     * autenticação e com escopo root nada muda; uma correlação desconhecida não tem o que proteger.
+     */
+    void requireReach(AxonValue auth, String correlationId) {
+        if (!Authz.authenticated(auth) || Authz.scope(auth) == AuthCatalog.Scope.ROOT) {
+            return;
+        }
+        Map<String, AxonValue> record = transaction(correlationId);
+        boolean reached = true;
+        if (record != null) {
+            String namespace = strField(record, "link_namespace");
+            String database = strField(record, "open_database");
+            // passos de versões anteriores não têm o banco de abertura: vale o namespace e, abaixo, cada passo
+            if (!namespace.isEmpty()) {
+                reached = database.isEmpty() ? namespace.equals(Authz.ns(auth))
+                    : Authz.allows(auth, namespace, database);
+            }
+        }
+        AxonValue steps = ds.execute("SELECT * FROM saga_step WHERE correlation_id = \""
+            + esc(correlationId == null ? "" : correlationId) + "\"", sagaSession(), null);
+        if (steps.isArray()) {
+            for (AxonValue item : steps.asArray()) {
+                if (item.isObject()) {
+                    reached &= reaches(auth, item.asObject());
+                }
+            }
+        }
+        if (!reached) {
+            throw new AxonError(-32002, Messages.get("saga_scope_refused", correlationId));
+        }
+    }
+
+    private static boolean reaches(AxonValue auth, Map<String, AxonValue> step) {
+        String link = strField(step, "link_name");
+        if (link.isEmpty() || "local".equals(link)) {
+            return Authz.allows(auth, strField(step, "step_ns"), strField(step, "step_db"));
+        }
+        return strField(step, "link_ns").equals(Authz.ns(auth));
     }
 
     public void commitSaga(String sagaResource, String correlationId) {

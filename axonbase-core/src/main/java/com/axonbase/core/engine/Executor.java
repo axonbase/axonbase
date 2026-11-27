@@ -5699,6 +5699,8 @@ return score;
     }
 
     private AxonValue runShowSagaTransaction(ShowSagaTransaction st) {
+        // o ledger é lido com sessão interna: o escopo de quem pergunta é conferido antes
+        sagaLedger.requireReach(session.auth(), st.correlationId());
         // Query the saga ledger
         AxonValue saga = ds.execute(
             "SELECT * FROM saga WHERE correlation_id = \"" + SagaLedger.esc(st.correlationId()) + "\"",
@@ -5715,10 +5717,12 @@ return score;
 
     private AxonValue runBeginSaga(BeginSaga bs) {
         sagaLedger.ensureTables();
+        // reabrir a correlação de outro escopo tomaria a SAGA dele
+        sagaLedger.requireReach(session.auth(), bs.correlationId());
         Datastore.SagaDef definition = ds.saga(bs.name());
         String linkNamespace = session.namespace() == null ? "" : session.namespace();
         sagaLedger.beginSaga(bs.name(), bs.correlationId(), definition == null ? List.of() : definition.links(),
-            linkNamespace);
+            linkNamespace, session.database() == null ? "" : session.database());
         coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false, session.namespace());
         return AxonValue.object(Map.of(
             "saga", AxonValue.str(bs.name()),
@@ -5734,6 +5738,8 @@ return score;
      * @return o estado encontrado
      */
     private String requireSaga(String name, String correlationId, boolean resumable) {
+        // antes de tudo: o estado e o nome de uma SAGA fora do escopo não são revelados
+        sagaLedger.requireReach(session.auth(), correlationId);
         Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
         AxonValue value = record == null ? null : record.get("status");
         String status = value != null && value.isString() ? value.asString() : "";
