@@ -197,7 +197,8 @@ public final class Catalog {
          * inclui o {@code id}.
          */
         public List<String> primaryKey() {
-            return keyedById ? List.of()
+            // a tabela sem campos, comum na ingestão, não monta o stream a cada escrita
+            return keyedById || fields.isEmpty() ? List.of()
                 : fields.values().stream().filter(FieldDef::primaryKey).map(FieldDef::name).sorted().toList();
         }
 

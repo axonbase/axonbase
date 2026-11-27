@@ -98,7 +98,9 @@ public interface VersionedKvBackend extends KvBackend {
     }
 
     default Optional<VersionedValue> getVersioned(String key) {
-        return get(key).map(value -> new VersionedValue(value, versionOf(key)));
+        // a versão antes do valor: uma escrita no meio deixa a versão velha, e o commit conflita
+        long version = versionOf(key);
+        return get(key).map(value -> new VersionedValue(value, version));
     }
 
     /**

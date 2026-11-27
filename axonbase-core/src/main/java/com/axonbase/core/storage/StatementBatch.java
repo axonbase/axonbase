@@ -30,6 +30,9 @@ public final class StatementBatch implements KvBackend {
     /** Versões que precisam continuar iguais no commit; vazio no caso comum, de escrita cega. */
     private final Map<String, Long> expected = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Chaves que o commit exige ainda livres, sem leitura antes dele. */
+    private final Set<String> absent = new HashSet<>();
+
     public StatementBatch(VersionedKvBackend base) {
         this.base = base;
     }
@@ -52,9 +55,28 @@ public final class StatementBatch implements KvBackend {
         expected.putIfAbsent(key, version);
     }
 
+    /**
+     * Deixa para o commit a conferência de que a chave não existe: uma leitura só, sob a trava dela, e o lote inteiro
+     * falha com conflito se ela existir. Só vale sobre RocksDB e para uma chave em que este lote ainda não escreveu,
+     * apagou nem registrou versão; senão devolve {@code false}, e o chamador procura a chave ele mesmo.
+     */
+    public boolean expectAbsent(String key) {
+        if (!(base instanceof RocksDbBackend) || staged.containsKey(key) || deleted.contains(key)
+            || expected.containsKey(key)) {
+            return false;
+        }
+        absent.add(key);
+        return true;
+    }
+
+    /** O commit ainda precisa conferir que alguma chave está livre. */
+    public boolean checksAbsence() {
+        return !absent.isEmpty();
+    }
+
     /** O lote tem condições, e por isso o commit pode falhar com conflito. */
     public boolean conditional() {
-        return !expected.isEmpty();
+        return !expected.isEmpty() || !absent.isEmpty();
     }
 
     /** Ação a executar só depois que o lote foi gravado (ex.: notificações de live query). */
@@ -191,12 +213,18 @@ public final class StatementBatch implements KvBackend {
     public void commit() {
         // as condições valem mesmo sem escrita: um UPDATE que não achou a linha porque ela estava mudando de partição
         // precisa conflitar e ser refeito
-        if (!staged.isEmpty() || !deleted.isEmpty() || !expected.isEmpty()) {
-            base.commit(Map.copyOf(expected), staged, deleted, Set.of());
+        if (!staged.isEmpty() || !deleted.isEmpty() || conditional()) {
+            if (absent.isEmpty()) {
+                base.commit(Map.copyOf(expected), staged, deleted, Set.of());
+            } else {
+                // expectAbsent só registra chaves quando a base é o RocksDB
+                ((RocksDbBackend) base).commitIfAbsent(absent, Map.copyOf(expected), staged, deleted);
+            }
         }
         staged.clear();
         deleted.clear();
         expected.clear();
+        absent.clear();
         List<Runnable> actions = List.copyOf(afterCommit);
         afterCommit.clear();
         for (Runnable action : actions) {
@@ -210,5 +238,6 @@ public final class StatementBatch implements KvBackend {
         deleted.clear();
         afterCommit.clear();
         expected.clear();
+        absent.clear();
     }
 }
