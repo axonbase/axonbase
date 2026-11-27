@@ -962,6 +962,7 @@ public final class Render {
         switch (v.type()) {
             case STRING -> sb.append('"').append(escape(v.asString())).append('"');
             case TABLE -> sb.append(v.asTable());
+            case RECORD_ID -> sb.append(v);
             default -> value(sb, v);
         }
     }
@@ -969,12 +970,17 @@ public final class Render {
     /**
      * Literal AxonQL que, avaliado, devolve o mesmo valor com o mesmo tipo. É o que o dump lógico usa no conteúdo
      * dos registros: o JSON escreveria decimais, datas e outros tipos num objeto marcado, que a AxonQL lê como
-     * objeto.
+     * objeto. A exceção é a referência a registro, que sai como o texto que o armazenamento guarda.
      */
     public static String value(AxonValue v) {
         StringBuilder sb = new StringBuilder();
         value(sb, v);
         return sb.toString();
+    }
+
+    /** Chave de um record id como texto que volta a ser lido na posição de chave. */
+    public static String key(Expr key) {
+        return key instanceof Expr.Literal lit && lit.value().isNumber() ? numberKey(lit.value()) : expr(key);
     }
 
     /**
@@ -1029,7 +1035,8 @@ public final class Render {
                 sb.append('}');
             }
             case TABLE -> sb.append("type::table(").append(AxonJson.write(AxonValue.str(v.asTable()))).append(')');
-            case RECORD_ID -> sb.append(v);
+            // sem aspas, uma chave com espaço ou hífen seria lida como outra expressão
+            case RECORD_ID -> sb.append(AxonJson.write(v));
         }
     }
 
@@ -1039,7 +1046,8 @@ public final class Render {
             sb.append('(').append(Long.MIN_VALUE + 1).append(" - 1)");
             return;
         }
-        if (number instanceof Double real && real < 0) {
+        // compare também separa o zero negativo, que "real < 0" não pega
+        if (number instanceof Double real && Double.compare(real, 0.0) < 0) {
             // o menos unário transforma real em decimal; o cast devolve o tipo
             sb.append("<float> ");
         }

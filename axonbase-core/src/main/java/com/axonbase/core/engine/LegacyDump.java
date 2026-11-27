@@ -32,9 +32,17 @@ final class LegacyDump {
     private static Statement restoreStatement(Statement statement) {
         if (statement instanceof Statement.Create create && create.data() instanceof Statement.Data.Content data) {
             return new Statement.Create(create.only(), create.target(),
-                new Statement.Data.Content(restoreExpr(data.content())), create.ret());
+                new Statement.Data.Content(restoreContent(data.content())), create.ret());
         }
         return statement;
+    }
+
+    /**
+     * O conteúdo é o próprio registro: só os valores dos campos podem ser objetos marcados, mesmo quando o único
+     * campo tem o nome de um envelope.
+     */
+    private static Expr restoreContent(Expr content) {
+        return content instanceof Expr.ObjectLit fields ? restoreEntries(fields) : content;
     }
 
     private static Expr restoreExpr(Expr expr) {
@@ -43,14 +51,15 @@ final class LegacyDump {
         }
         if (expr instanceof Expr.ObjectLit object) {
             Expr typed = typedValue(object);
-            if (typed != null) {
-                return typed;
-            }
-            return new Expr.ObjectLit(object.entries().stream()
-                .map(entry -> new Expr.ObjectLit.Entry(entry.key(), restoreExpr(entry.value())))
-                .toList());
+            return typed != null ? typed : restoreEntries(object);
         }
         return expr;
+    }
+
+    private static Expr restoreEntries(Expr.ObjectLit object) {
+        return new Expr.ObjectLit(object.entries().stream()
+            .map(entry -> new Expr.ObjectLit.Entry(entry.key(), restoreExpr(entry.value())))
+            .toList());
     }
 
     /** O valor de um objeto marcado, ou {@code null} quando o objeto é um objeto mesmo. */

@@ -1248,9 +1248,10 @@ public final class Datastore {
         }
         try {
             double real = Double.parseDouble(written);
-            if (Double.toString(real).equals(written)
-                && java.math.BigDecimal.valueOf(real).compareTo(number) == 0) {
-                return AxonValue.num(real);
+            if (Double.toString(real).equals(written)) {
+                // o id escreve como real também o decimal: se o real não guarda o valor exato, era um decimal
+                return java.math.BigDecimal.valueOf(real).compareTo(number) == 0
+                    ? AxonValue.num(real) : AxonValue.num(number);
             }
         } catch (NumberFormatException notReal) {
             // segue para as outras formas
