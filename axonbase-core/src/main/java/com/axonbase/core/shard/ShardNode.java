@@ -52,6 +52,10 @@ public final class ShardNode implements ShardMember {
         // manutenção roda sem usuário: o transporte já conferiu que a credencial é root
         Session session = request.system() ? Session.create() : caller;
         clock.receive(request.stamp());
+        if (ShardRequest.AUTHENTICATE.equals(request.sql())) {
+            // qualquer nó responde: não lê nem grava dados
+            return new ShardReply(AxonValue.bool(true), clock.now());
+        }
         boolean definitions = ShardRequest.DEFINITIONS.equals(request.sql());
         boolean permissions = ShardRequest.PERMISSIONS.equals(request.sql());
         if (permissions && !request.system()) {

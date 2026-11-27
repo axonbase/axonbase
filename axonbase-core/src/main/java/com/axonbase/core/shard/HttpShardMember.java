@@ -25,6 +25,7 @@ public final class HttpShardMember implements ShardMember {
     private final HttpClient http;
     private final Duration timeout;
     private final Supplier<String> credential;
+    private final String secret;
 
     /**
      * @param endpoint   endereço base do nó, como {@code http://10.0.0.1:8000}
@@ -33,6 +34,13 @@ public final class HttpShardMember implements ShardMember {
      */
     public HttpShardMember(String shard, String endpoint, HttpClient http, Duration timeout,
                            Supplier<String> credential) {
+        this(shard, endpoint, http, timeout, credential, null);
+    }
+
+    /** @param secret segredo do gateway que o nó exige, ou {@code null} */
+    public HttpShardMember(String shard, String endpoint, HttpClient http, Duration timeout,
+                           Supplier<String> credential, String secret) {
+        this.secret = secret;
         this.shard = shard;
         this.execute = URI.create(endpoint.replaceAll("/+$", "") + ShardHttp.EXECUTE);
         this.http = http;
@@ -46,6 +54,9 @@ public final class HttpShardMember implements ShardMember {
             .timeout(timeout)
             .header("Content-Type", ShardHttp.CONTENT_TYPE)
             .POST(HttpRequest.BodyPublishers.ofByteArray(ShardCodec.encode(request)));
+        if (secret != null) {
+            message.header(ShardHttp.SECRET_HEADER, secret);
+        }
         // o nó confere a credencial contra estes cabeçalhos, e recusa um corpo que peça outro banco
         if (request.namespace() != null) {
             message.header("Axon-Ns", request.namespace());
@@ -76,7 +87,8 @@ public final class HttpShardMember implements ShardMember {
     }
 
     private RuntimeException interrupted(ShardRequest request, Exception cause) {
-        boolean wrote = request.atomic() || !request.partial() && Datastore.isMutation(request.sql());
+        boolean wrote = request.atomic() || !request.partial()
+            && !ShardRequest.AUTHENTICATE.equals(request.sql()) && Datastore.isMutation(request.sql());
         return wrote ? new CommitOutcomeUnknownException(shard, cause)
             : new ShardUnreachableException(execute + ": " + cause.getMessage(), cause);
     }

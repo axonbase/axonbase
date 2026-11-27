@@ -22,6 +22,10 @@ public final class GatewaySession {
     private final String authorization;
     private final Map<String, AxonValue> vars = new LinkedHashMap<>();
     private Saga saga;
+    /** A credencial já foi conferida num shard, nesta requisição e neste banco. */
+    private boolean authenticated;
+    /** Quanto do orçamento de cálculo local a requisição já usou. */
+    private long spent;
     /** Shards em que a saga corrente já foi aberta por esta sessão. */
     private final Set<String> sagaShards = new LinkedHashSet<>();
 
@@ -51,7 +55,31 @@ public final class GatewaySession {
         return vars;
     }
 
+    boolean authenticated() {
+        return authenticated;
+    }
+
+    void authenticated(boolean value) {
+        authenticated = value;
+    }
+
+    long spent() {
+        return spent;
+    }
+
+    void spend(long size) {
+        spent += size;
+    }
+
+    /** Uma requisição nova confere a credencial de novo e tem o orçamento inteiro. */
+    void newRequest() {
+        authenticated = false;
+        spent = 0;
+    }
+
     void use(String nextNamespace, String nextDatabase) {
+        // a credencial vale por banco
+        authenticated = false;
         if (nextNamespace != null) {
             namespace = nextNamespace;
         }

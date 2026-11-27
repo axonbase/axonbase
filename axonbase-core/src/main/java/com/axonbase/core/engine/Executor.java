@@ -154,6 +154,9 @@ public final class Executor {
         if (webVars != null) {
             webVars.forEach(scope.vars()::set);
         }
+        if (!bypassAudit && rawSql != null) {
+            interceptWithAiAudit(rawSql, select);
+        }
         partialRequested = true;
         try {
             return runStatement(select);
@@ -1766,6 +1769,10 @@ public final class Executor {
             }
             return ShardPartial.groups(aggregation);
         }
+        // a resposta parcial leva a chave do registro e os valores do ORDER BY, que a máscara da linha não cobre
+        if (masksColumns() && !MaskedOrder.safe(sel, orders, this::maskedColumn)) {
+            throw errorStmt(ShardPartial.maskedOrder());
+        }
         long window = docs.size();
         if (sel.limit() != null) {
             long start = sel.start() != null ? eval(sel.start()).asLong() : 0;
@@ -1791,6 +1798,18 @@ public final class Executor {
         for (String ruleName : dataRuleNames(auth)) {
             Catalog.DataRuleDef def = db().catalog().dataRule(ruleName);
             if (def != null && !def.maskPatterns().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Alguma Data Rule do usuário mascara uma coluna com este nome. */
+    private boolean maskedColumn(String name) {
+        for (String ruleName : dataRuleNames(session.auth())) {
+            Catalog.DataRuleDef def = db().catalog().dataRule(ruleName);
+            if (def != null && def.maskPatterns().stream()
+                .anyMatch(pattern -> name.toLowerCase().matches(sqlLikeToRegex(pattern)))) {
                 return true;
             }
         }

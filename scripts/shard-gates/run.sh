@@ -12,11 +12,13 @@
 #   2. Em cada nó de shard (SHARD=s0, s1 ou s2; NODE=n1, n2 ou n3; PEERS são os outros dois, porta 9000):
 #        SHARD=s0 NODE=n1 IP=<ip interno> PEERS=<ip2>:9000,<ip3>:9000 DATA=/mnt/ssd/axon \
 #        AXON_SECRET=<segredo longo, o mesmo em todos> AXON_ROOT_PASSWORD=<senha> \
+#        AXON_SHARD_SECRET=<outro segredo longo, o mesmo nos nós e no gateway> \
 #        axon-shard-gates/run.sh node
 #
 #   3. Linha de base, um shard. Na máquina do gateway:
 #        AXON_GATEWAY_SHARDS='s0=http://a1:8000,http://a2:8000,http://a3:8000' \
-#        AXON_GATEWAY_SHARD_USER=root AXON_GATEWAY_SHARD_PASS=<senha> axon-shard-gates/run.sh gateway
+#        AXON_GATEWAY_SHARD_USER=root AXON_GATEWAY_SHARD_PASS=<senha> AXON_SHARD_SECRET=<segredo> \
+#        axon-shard-gates/run.sh gateway
 #      No gerador:
 #        axon-shard-gates/run.sh measure --gateways http://<gateway>:8080 --label um-shard --out um.json \
 #          --user root --pass <senha>
@@ -81,6 +83,7 @@ run_java() {
 node() {
     : "${SHARD:?defina SHARD}" "${NODE:?defina NODE}" "${IP:?defina IP}" "${PEERS:?defina PEERS}"
     : "${DATA:?defina DATA}" "${AXON_SECRET:?defina AXON_SECRET}" "${AXON_ROOT_PASSWORD:?defina AXON_ROOT_PASSWORD}"
+    : "${AXON_SHARD_SECRET:?defina AXON_SHARD_SECRET}"
     # um diretório novo a cada subida; nada é apagado
     mkdir -p "$DATA"
     local data
@@ -97,6 +100,7 @@ case "$command" in
     bundle) bundle ;;
     node) node ;;
     gateway)
+        : "${AXON_SHARD_SECRET:?defina AXON_SHARD_SECRET}"
         export AXON_GATEWAY_BIND="${AXON_GATEWAY_BIND:-0.0.0.0}"
         run_java com.axonbase.server.Main gateway
         ;;

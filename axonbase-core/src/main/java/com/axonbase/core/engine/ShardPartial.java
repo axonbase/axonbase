@@ -45,6 +45,14 @@ public final class ShardPartial {
             : "agregação entre shards não é suportada com mascaramento de dados para este usuário";
     }
 
+    static String maskedOrder() {
+        return "en".equals(Messages.language())
+            ? "this ORDER BY across shards would expose data masked for this user: order only by columns that are "
+                + "not masked"
+            : "este ORDER BY entre shards exporia dados mascarados para este usuário: ordene só por colunas sem "
+                + "máscara";
+    }
+
     private static AxonValue envelope(String kind, AxonValue items) {
         Map<String, AxonValue> out = new LinkedHashMap<>();
         out.put("kind", AxonValue.str(kind));

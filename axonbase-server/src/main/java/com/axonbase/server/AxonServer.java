@@ -59,6 +59,7 @@ public final class AxonServer {
     private static final String READ_CONSISTENCY_HEADER = "Axon-Read-Consistency";
     private volatile com.axonbase.core.cluster.ClusterRuntime clusterRuntime;
     private volatile com.axonbase.core.shard.backup.BackupMember shardBackup;
+    private volatile String shardSecret;
     private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicLong inflight = new java.util.concurrent.atomic.AtomicLong();
     private final ServerMetrics metrics = new ServerMetrics();
@@ -271,7 +272,7 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new ShardMoveServlet()), "/admin/shard/move");
         // rota interna do gateway de shards (docs/shards.md)
         ctx.addServlet(new ServletHolder(new ShardNodeServlet(ds, this::withNames, requireAuth, () -> clusterRuntime,
-            () -> shardBackup)), "/shard/v1/*");
+            () -> shardBackup, () -> shardSecret, this::trackShard)), "/shard/v1/*");
         ServletHolder adminV1 = new ServletHolder(new AdminV1Servlet(this));
         adminV1.setAsyncSupported(true);
         adminV1.getRegistration().setMultipartConfig(new jakarta.servlet.MultipartConfigElement(
@@ -495,6 +496,14 @@ public final class AxonServer {
 
     com.axonbase.core.cluster.ClusterRuntime clusterRuntime() {
         return clusterRuntime;
+    }
+
+    /**
+     * Torna este nó um shard: liga a rota interna {@code /shard/v1/*}, que passa a exigir este segredo do gateway.
+     * Vazio ou {@code null} mantém a rota desligada.
+     */
+    public void shardSecret(String secret) {
+        this.shardSecret = secret == null || secret.isBlank() ? null : secret.trim();
     }
 
     /** Liga as rotas de backup de shard a este nó ({@code null} quando o journal de cluster está desligado). */
@@ -1316,14 +1325,69 @@ public final class AxonServer {
         }
     }
 
-    /** Executa ligando a consulta à thread, para o motor poder checar o cancelamento. */
-    private AxonValue executeTracked(ActivityRegistry.Running run, String sql, Session s) {
-        com.axonbase.core.engine.QueryContext.Handle previous = com.axonbase.core.engine.QueryContext.attach(run.handle());
+    /**
+     * O que a rota dos shards tem em comum com o {@code /sql}: a consulta aparece na atividade, pode ser cancelada,
+     * conta nas métricas e respeita o prazo de consulta. A manutenção dos shards (só root) não tem prazo, porque a
+     * cópia de uma movimentação de slots lê tabelas inteiras.
+     */
+    private com.axonbase.core.shard.ShardReply trackShard(HttpServletRequest req, Session s,
+            com.axonbase.core.shard.ShardRequest request,
+            java.util.function.Supplier<com.axonbase.core.shard.ShardReply> work) {
+        ActivityRegistry.Running run = activity.begin(ActivityRegistry.userOf(s), request.namespace(),
+            request.database(), request.sql(), "shard", req.getRemoteAddr(), null, s);
+        run.handle().requestWorkload(req.getHeader("Axon-Workload"));
+        long startedNanos = System.nanoTime();
+        long timeout = request.system() ? 0 : config.queryTimeout();
+        boolean failed = true;
         try {
-            return ds.execute(sql, s, null);
+            com.axonbase.core.shard.ShardReply reply = timeout > 0
+                ? within(timeout, run, work) : attached(run, work);
+            failed = false;
+            return reply;
+        } finally {
+            activity.end(run, failed, run.handle().cancelled());
+            metrics.query(System.nanoTime() - startedNanos, failed);
+        }
+    }
+
+    /** Executa em outra thread e desiste no prazo, cancelando a consulta de verdade. */
+    private <T> T within(long timeoutMillis, ActivityRegistry.Running run, java.util.function.Supplier<T> work) {
+        Future<T> future = queryExecutor.submit(() -> attached(run, work));
+        try {
+            return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            run.handle().cancel("timeout");
+            future.cancel(true);
+            throw new com.axonbase.common.AxonError(-32028, Messages.get("query_timeout"));
+        } catch (InterruptedException e) {
+            run.handle().cancel("shutdown");
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new com.axonbase.common.AxonError(-32000, Messages.get("query_cancelled"));
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException failure) {
+                throw failure;
+            }
+            if (e.getCause() instanceof Error fatal) {
+                throw fatal;
+            }
+            throw new IllegalStateException(e.getCause());
+        }
+    }
+
+    private static <T> T attached(ActivityRegistry.Running run, java.util.function.Supplier<T> work) {
+        com.axonbase.core.engine.QueryContext.Handle previous =
+            com.axonbase.core.engine.QueryContext.attach(run.handle());
+        try {
+            return work.get();
         } finally {
             com.axonbase.core.engine.QueryContext.detach(previous);
         }
+    }
+
+    /** Executa ligando a consulta à thread, para o motor poder checar o cancelamento. */
+    private AxonValue executeTracked(ActivityRegistry.Running run, String sql, Session s) {
+        return attached(run, () -> ds.execute(sql, s, null));
     }
 
     private final class TableServlet extends HttpServlet {

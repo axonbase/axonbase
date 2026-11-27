@@ -35,6 +35,18 @@ final class GatewayExpressions {
         return check(expr, vars, false);
     }
 
+    /** Só literais e coleções de literais: o resultado não passa do tamanho do texto recebido. */
+    static boolean literal(Expr expr) {
+        return switch (expr) {
+            case Expr.Literal value -> true;
+            case Expr.ArrayLit array -> array.items().stream().allMatch(GatewayExpressions::literal);
+            case Expr.SetLit set -> set.items().stream().allMatch(GatewayExpressions::literal);
+            case Expr.ObjectLit object -> object.entries().stream().allMatch(e -> literal(e.value()));
+            case Expr.RecordId id -> id.table() instanceof Expr.Ident && literal(id.key());
+            default -> false;
+        };
+    }
+
     /** Pode ser calculada sobre uma linha já agrupada (colunas, HAVING e ORDER BY de uma agregação espalhada). */
     static boolean overRow(Expr expr, Set<String> vars) {
         return check(expr, vars, true);
