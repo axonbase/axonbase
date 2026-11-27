@@ -4824,6 +4824,8 @@ return score;
                     throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
                 }
                 records(db).put(own, new byte[0]);
+                // a mesma chave que a escrita normal grava: o índice construído fica igual ao mantido desde o começo
+                records(db).put(uniqueClaimKey(db, table, index, prefix), new byte[0]);
             }
         }
         onlyIndex = index;
@@ -7405,8 +7407,8 @@ return score;
         // entrada mora na partição da linha e a marca não existe
         boolean contended = db.catalog().partitioning(rid.table()) == null;
         if (next != null) {
-            if (contended && rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
-                pending.expect(next);
+            if (contended) {
+                contend(db, next);
             }
             if (!session.restoring() && records(db).keysWithPrefix(next).stream()
                 .anyMatch(key -> !key.equals(next) && !key.equals(next + own))) {
@@ -7424,6 +7426,21 @@ return score;
                 records(db).put(next, new byte[0]);
             }
             records(db).put(next + own, new byte[0]);
+        }
+    }
+
+    /**
+     * Prende o commit à versão que a chave disputada tem agora. Chame antes de procurar quem tem o valor: a versão
+     * registrada só na gravação já seria a de quem confirmou depois da procura, e as duas escritas passariam. Vale
+     * para o lote de um comando e para a transação, que é por onde o cluster executa um comando avulso e onde a
+     * leitura da faixa não é conferida.
+     */
+    private void contend(Database db, String key) {
+        KvBackend target = rawRecords(db);
+        if (target instanceof com.axonbase.core.storage.StatementBatch pending) {
+            pending.expect(key);
+        } else if (target instanceof Transaction tx) {
+            tx.get(key);
         }
     }
 
@@ -7510,10 +7527,8 @@ return score;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
             if (nextPrefix != null) {
-                // antes de ler: se outra escrita tomar ou soltar o valor no meio, o commit deste lote conflita
-                if (rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
-                    pending.expect(uniqueClaimKey(db, rid.table(), ix, nextPrefix));
-                }
+                // antes de ler: se outra escrita tomar ou soltar o valor no meio, este commit conflita
+                contend(db, uniqueClaimKey(db, rid.table(), ix, nextPrefix));
                 String ownEntry = nextPrefix + rid.key().keyString();
                 var existing = records(db).keysWithPrefix(nextPrefix);
                 if (existing.stream().anyMatch(key -> !key.equals(ownEntry))) {

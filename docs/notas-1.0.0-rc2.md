@@ -65,7 +65,8 @@ Tire um backup antes de atualizar.
 - `DROP INDEX nome ON TABLE tabela` (ou `ON tabela`) apaga o índice só daquela tabela e devolve erro quando ela não o tem. Antes a tabela era ignorada e o índice de mesmo nome de outra tabela podia ser apagado. Sem a cláusula `ON`, continua valendo o primeiro índice encontrado com o nome.
 - `DROP ANALYZER` é recusado enquanto um índice usa o analisador. Apague o índice antes.
 - Escritas simultâneas do mesmo valor `UNIQUE`, fora de transação, passam a aceitar uma só. As demais recebem a violação de índice único. Duplicatas que a rc1 já aceitou continuam gravadas e precisam ser corrigidas à mão.
-- Cada valor `UNIQUE` gravado ou trocado passa a custar uma leitura de versão e uma chave a mais no armazenamento. Trocar ou apagar o valor remove a chave antiga. Uma atualização que não muda o valor só paga a leitura.
+- Em cluster, `UNIQUE` e `PRIMARY KEY` também aceitavam duplicatas em escritas simultâneas. A escrita agora fica presa ao estado do valor no momento da conferência.
+- Cada valor `UNIQUE` gravado ou trocado passa a custar uma leitura de versão e uma chave a mais no armazenamento. Trocar ou apagar o valor remove a chave antiga. Uma atualização que não muda o valor só paga a leitura. A construção de um índice sobre dados existentes grava a mesma chave por valor. Índices criados antes desta versão não precisam ser reconstruídos.
 
 ### Segurança do servidor
 
@@ -180,6 +181,7 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 ## Limitações conhecidas
 
 - Num armazenamento em memória, um índice `UNIQUE` ainda pode aceitar duplicatas em escritas simultâneas feitas fora de transação.
+- Numa tabela particionada, apagar uma partição não remove as chaves por valor `UNIQUE` das linhas dela. Elas não recusam escritas, mas ocupam espaço até um `DROP INDEX` ou `DROP TABLE`.
 - `CANCEL SAGA` ainda não desfaz `UNRELATE` nem repõe as arestas que um `DELETE` removeu junto com o registro. Desfazer a criação de um registro remove também as arestas ligadas a ele.
 - Um `ROLLBACK TO` de ponto de salvamento não retira os passos de SAGA das escritas que ele desfez.
 - Num armazenamento em memória, um comando que falha no meio de várias linhas mantém as linhas anteriores.
