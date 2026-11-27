@@ -2,6 +2,7 @@ package com.axonbase.core;
 
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.engine.IndexBuilder;
+import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.value.AxonValue;
 import org.junit.jupiter.api.DisplayName;
@@ -85,9 +86,7 @@ class GeoLatencyGateTest {
             Function<String, String> near = c -> "SELECT id FROM g WHERE geo::distance(pos, " + c + ") <= " + radius
                 + " LIMIT " + limit;
             Function<String, String> all = c -> "SELECT id FROM g WHERE geo::distance(pos, " + c + ") <= " + radius;
-            String probe = center(new Random(1));
-            assertTrue("GEO_KNN".equals(strategy(ds, knn.apply(probe))), "os mais próximos não usam o índice");
-            assertTrue("GEO".equals(strategy(ds, near.apply(probe))), "o raio não usa o índice");
+            checkStrategies(knn, near);
 
             printSize(backend, db, "depois da carga");
             double knnP99 = measure(ds, "mais próximos", knn, queries);
@@ -105,8 +104,19 @@ class GeoLatencyGateTest {
         }
     }
 
-    private static String strategy(Datastore ds, String sql) {
-        return ds.execute("EXPLAIN " + sql, GeoTestData.session(), null).asObject().get("strategy").asString();
+    /**
+     * As consultas medidas precisam usar o índice. A conferência é feita numa base pequena em memória, porque o
+     * {@code EXPLAIN} estima as linhas lendo a tabela inteira para a memória.
+     */
+    private void checkStrategies(Function<String, String> knn, Function<String, String> near) {
+        Datastore small = new Datastore(new MemoryBackend());
+        small.createDatabase("test", "dev");
+        String probe = center(new Random(1));
+        GeoTestData.run(small, "DEFINE TABLE g SCHEMALESS; " + GeoTestData.INDEX);
+        GeoTestData.run(small, "CREATE g:0 SET pos = " + probe);
+        assertTrue("GEO_KNN".equals(GeoTestData.strategy(small, knn.apply(probe))),
+            "os mais próximos não usam o índice");
+        assertTrue("GEO".equals(GeoTestData.strategy(small, near.apply(probe))), "o raio não usa o índice");
     }
 
     private String center(Random rnd) {
