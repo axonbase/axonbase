@@ -102,7 +102,8 @@ public final class ShardNode implements ShardMember {
 
     private AxonValue run(ShardRequest request, Session session) {
         if (request.partial()) {
-            return datastore.executePartial(select(request), session, new LinkedHashMap<>(request.vars()));
+            return datastore.executePartial(request.sql(), select(request), session,
+                new LinkedHashMap<>(request.vars()));
         }
         return datastore.execute(request.sql(), session, new LinkedHashMap<>(request.vars()));
     }

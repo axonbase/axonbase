@@ -950,6 +950,23 @@ public final class Datastore {
         return new Executor(this).executePartial(select, session, vars);
     }
 
+    /**
+     * O mesmo, passando pela prioridade por tipo de carga: a parte de um shard disputa vaga e processador como a
+     * consulta inteira faria.
+     *
+     * @param sql o texto recebido, que o governador usa para classificar a consulta
+     */
+    public AxonValue executePartial(String sql, Statement.Select select, Session session,
+                                    Map<String, AxonValue> vars) {
+        var governor = workloadGovernor;
+        if (governor == null) {
+            return executePartial(select, session, vars);
+        }
+        try (var admitted = governor.admit(sql, session)) {
+            return executePartial(select, session, vars);
+        }
+    }
+
     /** Tentativas de um comando avulso no cluster quando outro confirma antes sobre as mesmas chaves. */
     private static final int AUTOCOMMIT_ATTEMPTS = 100;
 
