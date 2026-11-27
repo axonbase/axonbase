@@ -16,7 +16,8 @@ case "$*" in
   "status --porcelain")
     [[ ${GIT_DIRTY:-0} == 1 ]] && printf ' M pom.xml\n'
     ;;
-  "describe --exact-match --tags HEAD") echo "v${FAKE_VERSION:-0.2.0}" ;;
+  # o publish-maven.sh filtra as tags com --match 'v*'; o publish-docker.sh não
+  "describe --exact-match --tags HEAD" | "describe --exact-match --tags HEAD --match v*") echo "v${FAKE_VERSION:-0.2.0}" ;;
   *) exit 1 ;;
 esac
 EOF
