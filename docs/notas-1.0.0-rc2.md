@@ -242,6 +242,21 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 - Um texto só com a data vira meia-noite em UTC (Coordinated Universal Time). Data com hora e sem fuso é erro.
 - Converter uma data para texto sai sem o marcador `d'...'`.
 
+## Conectores e ferramentas
+
+**Segurança:** parâmetros de texto no driver JDBC e no conector Python (DBAPI, a interface padrão de banco de dados do Python) não conseguem mais virar comando. Quem usa a rc1 com texto vindo de usuários deve atualizar.
+
+- Driver JDBC: `executeBatch` executa o lote e lança `BatchUpdateException` na primeira falha. Antes nada era enviado.
+- Com auto-commit desligado, cada comando depois de `commit` ou `rollback` abre uma nova transação. Antes as escritas seguintes eram confirmadas sozinhas.
+- `DELETE` informa a quantidade apagada. Exclusões muito grandes devem ser feitas em partes.
+- Passam a dar erro: chaves geradas, `cancel`, troca de banco ou de namespace, parâmetros binários ou em fluxo e leitura numérica de um texto não numérico.
+- O SDK Java aceita respostas de até 256 MiB.
+- `axon export` gera a cópia pela rota `/export` e sai com código diferente de zero quando falha. Um usuário com Data Rules recebe recusa.
+- Na CLI, `--user` e `--password` autenticam a sessão, `--vars` é aplicado e um erro de uso sai com código 2.
+- Hibernate com `sql.translate=true`: busca, alteração e remoção pelo identificador funcionam em entidade de tabela única. Relacionamentos e paginação seguem sem suporte.
+- O servidor MCP (Model Context Protocol) atende `initialize` e responde no formato JSON-RPC. A autenticação continua exigida, e mensagens sem o campo `jsonrpc` mantêm o formato anterior.
+- O script da demonstração de SAGA com SQLAlchemy monta o caminho de classes completo.
+
 ## Correções de perda ou corrupção de dados
 
 ### Catálogo e reinício
