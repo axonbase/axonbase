@@ -358,8 +358,11 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 
 - **`EXPLAIN`.** Sem `ANALYZE`, as linhas de uma tabela são contadas em fluxo, sem carregar os registros. Dentro de uma transação, essa contagem não conta como leitura. Subconsulta e `DATABASE LINK` ainda materializam o resultado para contar.
 - **Índice geográfico.** As metas de latência com 10 milhões de pontos foram atendidas em uma rodada, em nó único, sem rede e sem sincronizar o disco a cada escrita. O p99 (percentil 99) foi de 33,88 ms nos 20 vizinhos mais próximos e de 12,45 ms no raio de 500 m com `LIMIT 100`, para uma meta de 50 ms. As condições estão em [índice geográfico](indice-geografico.md#portão-de-latência).
+- **Escrita mais lenta que na 0.10.1.** `CREATE` passou a recusar um registro que já existe, o que custa uma conferência por gravação. Na ingestão de registros novos em um nó, medida três vezes no GCP (Google Cloud Platform), a perda foi de cerca de 12% com 1 thread e de 6% com 8 threads. Tabelas com índice, restrição, evento, permissão, Data Rule, SAGA ou auditoria, transações e clusters não usam o atalho que reduz esse custo e podem perder mais; esses casos não foram medidos.
 
 ## Limitações conhecidas
+
+- `USE DB nome` troca o namespace em vez do banco, e `USE NS a DB b` dá erro de sintaxe. Para escolher os dois, use `USE a b`.
 
 - Num armazenamento em memória, um índice `UNIQUE` ainda pode aceitar duplicatas em escritas simultâneas feitas fora de transação.
 - Numa tabela particionada, apagar uma partição não remove as chaves por valor `UNIQUE` das linhas dela. Elas não recusam escritas, mas ocupam espaço até um `DROP INDEX` ou `DROP TABLE`.
