@@ -4948,8 +4948,9 @@ return score;
                 write.unlock();
             }
             if (removed != null) {
-                control(db, ControlCommand.Kind.INDEX, di.name(),
-                    "DROP INDEX " + di.name());
+                // o plano de controle só sabe substituir: a definição sai dele, senão o reinício a recriaria
+                ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.INDEX,
+                    def.name() + ":" + removed.name());
                 return AxonValue.nul();
             }
         }

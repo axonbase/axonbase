@@ -102,9 +102,31 @@ public final class Datastore {
         this.controlStore = new ControlStore(this.backend);
         synchronized (controlLock) {
             controlState.restore(controlStore.load());
+            repairControl();
             replayControl();
             registerLegacyEdgeKinds();
         }
+    }
+
+    /**
+     * Ao abrir a base, tira do plano de controle o que versões anteriores gravaram e que não pode ser reexecutado
+     * (ver {@link LegacyIndexDrops}), e grava o resultado.
+     */
+    private void repairControl() {
+        if (removeLegacyIndexDrops()) {
+            controlStore.save(controlState, backend);
+            backend.flush();
+        }
+    }
+
+    private boolean removeLegacyIndexDrops() {
+        List<ControlCommand> stored = controlState.snapshot().commands();
+        List<ControlCommand> kept = LegacyIndexDrops.clean(stored, backend);
+        if (kept.size() == stored.size()) {
+            return false;
+        }
+        controlState.restore(new ControlSnapshot(kept));
+        return true;
     }
 
     /** Nome simples de tabela: o único que o RELATE registra e que a migração aceita (relê sem aspas). */
@@ -730,6 +752,8 @@ public final class Datastore {
      * evita que a reexecução grave de novo o que acabou de ler.</p>
      */
     private void replayControl() {
+        // um restore ou um lote replicado também podem trazer um plano de controle gravado por uma versão anterior
+        removeLegacyIndexDrops();
         ControlSnapshot snapshot = controlState.snapshot();
         catalogRebuilds.incrementAndGet();
         replaying.set(true);
@@ -1465,6 +1489,7 @@ public final class Datastore {
     public void reloadFromBackend() {
         synchronized (controlLock) {
             controlState.restore(controlStore.load());
+            repairControl();
             replayControl();
             registerLegacyEdgeKinds();
         }
