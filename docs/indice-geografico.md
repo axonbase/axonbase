@@ -104,7 +104,7 @@ Todos os nós do cluster precisam rodar a mesma versão: cluster com versões mi
 
 ## Portão de latência
 
-Proposta para o portão da fase E4, ainda sem medida:
+Metas do portão da fase E4:
 
 | Consulta, com 10 milhões de pontos | Meta p99 (percentil 99) |
 |---|---|
@@ -112,6 +112,19 @@ Proposta para o portão da fase E4, ainda sem medida:
 | Raio de 500 m com `LIMIT 100` | 50 ms |
 
 Condições: pontos uniformes em um quadrado de 1 grau de lado (cerca de 900 por km²), RocksDB local, 8 threads, depois do aquecimento. O raio sem `LIMIT` é medido e impresso sem reprovar, porque o custo cresce com o número de pontos devolvidos.
+
+### Medida de 27 de novembro de 2026
+
+Uma rodada em máquina dedicada no GCP (Google Cloud Platform), em nó único, sem rede, com 20 GB de memória para o Java e o RocksDB sem sincronizar o disco a cada escrita. p99 em milissegundos, resolução 10:
+
+| Consulta | Logo após a carga | Depois de repetir e parar 3 minutos |
+|---|---|---|
+| 20 vizinhos mais próximos | 33,88 | 12,44 |
+| Raio de 500 m com `LIMIT 100` | 12,45 | 6,25 |
+
+No mesmo teste, 1 milhão de movimentos de 30 m saíram a 46.175 atualizações por segundo, e a base ocupava cerca de 4,5 GB depois da carga. Essa taxa não inclui o custo de gravar com segurança no disco.
+
+Uma rodada anterior, com uma versão do teste que enchia a memória logo antes das consultas, mediu 70,71 ms nos mais próximos, acima da meta. Trate os números como referência: são poucas rodadas, com uma só densidade e pontos distribuídos por igual.
 
 Em máquina dedicada Linux:
 
@@ -129,9 +142,10 @@ mvn -B -pl axonbase-core -am test -Dtest=GeoLatencyGateTest -Dsurefire.failIfNoS
 | `neighbours` | 20 |
 | `p99.knn` e `p99.radius` (ms) | 50 e 50 |
 | `moves` e `step` (metros) | um décimo dos pontos (0 desliga) e 30 |
+| `settle` (segundos) | 0; informado, pausa e mede mais uma vez antes dos movimentos |
 | `dir` | diretório temporário; informado, reaproveita a carga |
 
-As metas de p99 valem para as consultas feitas antes dos movimentos. Depois delas o teste move registros em passos curtos, mede as atualizações e repete as consultas, e imprime o tamanho da base nos dois momentos.
+As metas de p99 valem só para a primeira medida, feita logo depois da carga. Em seguida o teste repete as mesmas consultas (efeito do cache) e, com `settle`, repete de novo depois da pausa (efeito da compactação). Só então move registros em passos curtos, mede as atualizações e consulta mais uma vez. Em cada momento ele imprime o tamanho da base e a quantidade de tabelas SST (Sorted String Table), os arquivos de dados do RocksDB.
 
 Para comparar resoluções de armazenamento, o roteiro abaixo copia o repositório para cada resolução, troca a constante só na cópia e junta os números em `resumo.txt`. O diretório de saída precisa ser novo e ficar fora do repositório.
 
