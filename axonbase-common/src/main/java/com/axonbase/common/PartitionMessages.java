@@ -20,6 +20,9 @@ final class PartitionMessages {
         Map.entry("partition_cold_after_invalid", "COLD AFTER precisa ser menor que RETENTION"),
         Map.entry("partition_redefine", "a tabela %s já tem partições: campo e intervalo não podem mudar"),
         Map.entry("partition_in_write", "comandos de partição não podem rodar dentro de uma escrita (evento ou bloco)"),
+        Map.entry("partition_create_in_write", "a partição %s ainda não existe e não pode ser criada por uma "
+            + "transação confirmada dentro de outra escrita (uma procedure chamada por um evento): crie a partição "
+            + "antes, com uma escrita comum nessa faixa"),
         Map.entry("partition_none_found", "nenhuma partição de %s cobre o instante %s"),
         Map.entry("partition_time_invalid", "o instante precisa ser um datetime: %s"),
         Map.entry("partition_index_orphan", "índice sem registro na tabela particionada %s: %s"),
@@ -50,6 +53,9 @@ final class PartitionMessages {
         Map.entry("partition_cold_after_invalid", "COLD AFTER must be shorter than RETENTION"),
         Map.entry("partition_redefine", "table %s already has partitions: field and interval cannot change"),
         Map.entry("partition_in_write", "partition commands cannot run inside a write (event or block)"),
+        Map.entry("partition_create_in_write", "partition %s does not exist yet and cannot be created by a "
+            + "transaction committed inside another write (a procedure called from an event): create the partition "
+            + "first, with a plain write in that range"),
         Map.entry("partition_none_found", "no partition of %s covers instant %s"),
         Map.entry("partition_time_invalid", "the instant must be a datetime: %s"),
         Map.entry("partition_index_orphan", "index entry without a record in partitioned table %s: %s"),

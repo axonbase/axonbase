@@ -108,6 +108,7 @@ O custo é constante no número de linhas: o lote tem poucas chaves. O espaço e
 - `DROP PARTITION` dentro de uma transação explícita vale no `COMMIT`. Depois dele, a própria transação já não vê as linhas, e o que ela tinha gravado naquela faixa antes do comando também sai. Pode regravar na mesma faixa.
 - Como o id não diz a partição, duas escritas avulsas sobre a mesma linha particionada não são mais "a última vence" às cegas: o commit confere que os lugares olhados continuam iguais e, se não, refaz o comando (até 100 vezes). Isso impede que mover e editar a mesma linha, ou criar o mesmo id em dias diferentes, deixe duas cópias.
 - Numa transação, o mesmo id ou o mesmo valor único gravado por outra numa partição que não existia quando a primeira procurou faz o segundo `COMMIT` falhar. Um commit que cria partição corre sozinho.
+- Em nó único, uma transação confirmada de dentro de outra escrita (uma procedure chamada por um `DEFINE EVENT`) não pode **criar** partição: o comando é recusado com erro e nada é gravado. Crie a partição antes, com uma escrita comum nessa faixa de tempo, o que em partições por tempo se repete a cada faixa nova. Para eventos que gravam em tabela particionada, prefira o `CREATE` direto no `THEN`, sem procedure.
 - `DEFINE PARTITION` dentro de transação (em cluster, sempre) só vale no `COMMIT`: até lá as outras sessões recebem conflito ao escrever na tabela, e o commit confere que ela continua vazia.
 
 Dois limites conhecidos:
