@@ -1248,6 +1248,9 @@ public final class Executor {
             }
         }
         boolean retNone = u.ret() != null && u.ret().kind() == ReturnKind.NONE;
+        if (u.target() instanceof Expr.Ident table) {
+            ensureTable(db, table.name());
+        }
         List<RecordId> targets;
         try (var scope = prunePartitions(u.target(), u.cond())) {
             targets = resolveMutationTargets(db, u.target(), u.cond());
@@ -3110,6 +3113,9 @@ return score;
             return sourceDocsQualifiedRecordId(q, rid);
         }
         List<Document> docs = new ArrayList<>();
+        if (from instanceof Expr.Ident table) {
+            ensureTable(db, table.name());
+        }
         for (RecordId rid2 : resolveTargets(from)) {
             Document doc = loadDoc(db, rid2);
             if (doc != null) {
@@ -5222,9 +5228,9 @@ return score;
         if (target instanceof Expr.RecordId rid) {
             return List.of(configRecordId(rid));
         }
+        // não registra a tabela: um DELETE de um nome errado não pode criá-la
         if (target instanceof Expr.Ident ident) {
             String table = ident.name();
-            ensureTable(db, table);
             String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
             List<RecordId> out = new ArrayList<>();
             for (String k : records(db).keysWithPrefix(prefix)) {

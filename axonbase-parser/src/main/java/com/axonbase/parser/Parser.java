@@ -839,6 +839,16 @@ public final class Parser {
 
     private Statement parseDelete() {
         pos++;
+        // TABLE e FROM só valem como palavra quando um alvo vem depois: "DELETE table:1" e "DELETE from" continuam
+        // falando das tabelas com esses nomes
+        if (atKeyword("table") && targetFollows()) {
+            Token start = peek(1);
+            String name = start.isKeyword("if") ? "<tabela>" : start.text();
+            throw error(Messages.get("parser_delete_table", name, name));
+        }
+        if (atKeyword("from") && targetFollows()) {
+            pos++;
+        }
         Expr target = parseTarget();
         consumeAlias();
         Expr cond = null;
@@ -847,6 +857,13 @@ public final class Parser {
         }
         ReturnSpec ret = parseReturnSpec();
         return new Statement.Delete(target, cond, ret);
+    }
+
+    /** O token seguinte ao atual começa um alvo (nome, texto ou parâmetro), e não uma cláusula nem o fim. */
+    private boolean targetFollows() {
+        Token next = peek(1);
+        return next.is(IDENT) || next.is(PARAM) || next.is(TokenType.STRING)
+            || (next.is(KEYWORD) && !next.isKeyword("where") && !next.isKeyword("return"));
     }
 
     private Statement parseSelect() {
