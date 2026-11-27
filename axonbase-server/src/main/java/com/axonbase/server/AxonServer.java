@@ -208,7 +208,29 @@ public final class AxonServer {
         return srv;
     }
 
+    /**
+     * Modo do certificado do cliente ({@code AXON_TLS_CLIENT_AUTH}, ou a propriedade {@code axon.tls.clientAuth}):
+     * {@code optional}, o padrão, pede e aceita a conexão sem ele; {@code require} o exige. Exigir sem TLS completo, ou
+     * com a porta sem TLS aberta, não protegeria nada: a subida é recusada.
+     */
+    private static boolean clientCertificateRequired(ServerConfig config) {
+        String raw = System.getProperty("axon.tls.clientAuth", System.getenv("AXON_TLS_CLIENT_AUTH"));
+        String mode = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (mode.isEmpty() || mode.equals("optional")) {
+            return false;
+        }
+        if (!mode.equals("require")) {
+            throw new IllegalArgumentException(Messages.get("config_tls_client_auth_invalid", raw));
+        }
+        if (config.tlsCert().isBlank() || config.tlsKey().isBlank() || config.tlsCa().isBlank()
+            || config.plainPort() > 0) {
+            throw new IllegalArgumentException(Messages.get("config_tls_client_auth_incomplete"));
+        }
+        return true;
+    }
+
     private void listen() throws Exception {
+        boolean requireClientCertificate = clientCertificateRequired(config);
         QueuedThreadPool pool = new QueuedThreadPool(config.httpThreads(), 1, config.httpQueue());
         Server jetty = new Server(pool);
 
@@ -221,7 +243,11 @@ public final class AxonServer {
             if (!config.tlsCa().isBlank()) {
                 ssl.setTrustStorePath(config.tlsCa());
                 ssl.setTrustStorePassword(config.tlsKey());
-                ssl.setWantClientAuth(true);
+                if (requireClientCertificate) {
+                    ssl.setNeedClientAuth(true);
+                } else {
+                    ssl.setWantClientAuth(true);
+                }
             }
             ServerConnector connector = new ServerConnector(jetty, ssl);
             connector.setHost(bind);
