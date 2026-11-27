@@ -17,8 +17,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -68,6 +70,13 @@ final class ColdMover {
                     return false; // alguém desistiu ou removeu a partição durante o envio
                 }
                 String prefix = PartitionKeys.partitionPrefix(db.ns(), db.db(), table, start);
+                // a faixa apagada precisa conter exatamente o que foi enviado: com outra linha ali, nada sai, e a
+                // rodada seguinte envia de novo
+                if (!holdsOnly(db, prefix, upload.recordKeys())) {
+                    System.err.println("{\"event\":\"partition_freeze_mismatch\",\"target\":\"" + db.ns() + "."
+                        + db.db() + "." + table + " " + start + "\"}");
+                    return false;
+                }
                 PartitionChanges changes = new PartitionChanges();
                 // só os registros (n, s, x) saem; os índices locais, que vêm antes na ordem, ficam
                 changes.deleteRange(new RangeDelete.Range(prefix + "n", prefix + "y"));
@@ -138,7 +147,24 @@ final class ColdMover {
         return saved ? Optional.of(reserved) : Optional.empty();
     }
 
-    private record Upload(long rows, long bytes, BloomFilter filter) {
+    private record Upload(long rows, long bytes, BloomFilter filter, Set<String> recordKeys) {
+    }
+
+    /** {@code true} quando os registros locais da partição são exatamente os de {@code sent}. */
+    private static boolean holdsOnly(Database db, String prefix, Set<String> sent) {
+        int[] found = {0};
+        boolean[] unknown = {false};
+        for (String lead : List.of("n", "s", "x")) {
+            db.records().scanPrefix(prefix + lead, physical -> {
+                found[0]++;
+                unknown[0] = !sent.contains(physical.substring(prefix.length()));
+                return !unknown[0];
+            });
+            if (unknown[0]) {
+                return false;
+            }
+        }
+        return found[0] == sent.size();
     }
 
     private Upload upload(Database db, String table, long start, String key) throws IOException {
@@ -152,6 +178,7 @@ final class ColdMover {
         }
         recordKeys.sort(Arrays::compareUnsigned); // o objeto segue a ordem dos bytes
         BloomFilter filter = BloomFilter.sizedFor(recordKeys.size());
+        Set<String> sent = new HashSet<>();
         Path written = Files.createTempFile("axon-freeze-", ".gz");
         Path readBack = Files.createTempFile("axon-freeze-check-", ".gz");
         try {
@@ -164,6 +191,7 @@ final class ColdMover {
                         () -> new IOException("registro sumiu de uma partição congelada: " + recordKey));
                     writer.add(recordKey, value);
                     filter.add(recordKey);
+                    sent.add(recordKey);
                 }
                 rows = writer.rows();
                 bytes = writer.bytes();
@@ -177,7 +205,7 @@ final class ColdMover {
             if (!ds.coldTier().store().download(key, readBack) || Files.mismatch(written, readBack) != -1L) {
                 throw new IOException("o objeto enviado não confere: " + key);
             }
-            return new Upload(rows, bytes, filter);
+            return new Upload(rows, bytes, filter, sent);
         } finally {
             Files.deleteIfExists(written);
             Files.deleteIfExists(readBack);

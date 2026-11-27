@@ -1635,6 +1635,11 @@ public final class Datastore {
         if (tx == null || !tx.isOpen()) {
             throw AxonError.internal(Messages.get("txn_inactive"));
         }
+        // As condições leem o que este nó já aplicou. Em cluster, a barreira vem antes delas, para que um líder recém
+        // eleito (ou uma escrita sem desfecho) não as faça conferir um estado atrasado; a mesma marca vai à
+        // confirmação, e qualquer mudança entre os dois passos vira conflito.
+        CommitCoordinator coordinator = commitCoordinator;
+        Long validated = coordinator != null && tx.hasGuards() ? beginValidation(coordinator, session) : null;
         Transaction.Held guards;
         try {
             guards = tx.enterGuards();
@@ -1643,7 +1648,17 @@ public final class Datastore {
             throw changed;
         }
         try (guards) {
-            commitGuarded(session, tx);
+            commitGuarded(session, tx, validated);
+        }
+    }
+
+    /** A barreira de validação do cluster; sem ela a transação não pode confirmar e é desfeita. */
+    private long beginValidation(CommitCoordinator coordinator, Session session) {
+        try {
+            return coordinator.beginValidation();
+        } catch (RuntimeException unavailable) {
+            cancelSession(session);
+            throw unavailable;
         }
     }
 
@@ -1655,12 +1670,12 @@ public final class Datastore {
         session.discardLive();
     }
 
-    private void commitGuarded(Session session, Transaction tx) {
+    private void commitGuarded(Session session, Transaction tx, Long validated) {
         Database current = session.namespace() == null || session.database() == null ? null
             : findDatabase(session.namespace(), session.database());
         if (current == null || session.txIndexEpoch() < 0
             || (tx.stagedWriteCount() == 0 && tx.stagedDeleteCount() == 0)) {
-            commitLocked(session, tx);
+            commitLocked(session, tx, validated);
             return;
         }
         // o registro de índice novo toma o lado de escrita; segurar o de leitura até o fim do commit impede
@@ -1672,18 +1687,18 @@ public final class Datastore {
                 discardConflicted(session, tx);
                 throw new com.axonbase.core.storage.VersionConflictException(Messages.get("txn_index_changed"));
             }
-            commitLocked(session, tx);
+            commitLocked(session, tx, validated);
         } finally {
             read.unlock();
         }
     }
 
-    private void commitLocked(Session session, Transaction tx) {
+    private void commitLocked(Session session, Transaction tx, Long validated) {
         CommitCoordinator coordinator = commitCoordinator;
         if (coordinator == null) {
             tx.commit();
         } else {
-            commitReplicated(coordinator, session, tx);
+            commitReplicated(coordinator, session, tx, validated);
         }
         session.tx(null);
         backend.flush();
@@ -1699,15 +1714,10 @@ public final class Datastore {
      * juntas (e dividem o fsync do log), e duas sobre a mesma chave se enfileiram, de modo que a segunda valida
      * contra o que a primeira escreveu.</p>
      */
-    private void commitReplicated(CommitCoordinator coordinator, Session session, Transaction tx) {
+    private void commitReplicated(CommitCoordinator coordinator, Session session, Transaction tx, Long validated) {
         try (KeyLocks.Held held = replicationLocks.lock(tx.touchedKeys())) {
-            long validation;
-            try {
-                validation = coordinator.beginValidation();
-            } catch (RuntimeException unavailable) {
-                cancelSession(session);
-                throw unavailable;
-            }
+            // sem condições, a barreira continua aqui, depois das travas por chave
+            long validation = validated != null ? validated : beginValidation(coordinator, session);
             tx.validate();
             String transactionId = java.util.UUID.randomUUID().toString();
             // Registrar antes de confirmar: o listener do consenso precisa reconhecer o batch

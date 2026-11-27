@@ -103,6 +103,7 @@ O custo é constante no número de linhas: o lote tem poucas chaves. O espaço e
 
 - A mudança de estado ou a remoção de uma partição pega o lado de escrita da trava de índices do banco durante o commit. Os statements e os commits de escrita seguram o lado de leitura, então nunca há uma escrita pela metade.
 - Uma transação anota as partições em que escreveu. No `COMMIT`, se alguma sumiu ou deixou de ser `HOT`, ela falha com conflito e nada é gravado.
+- Em cluster, essas conferências esperam antes o nó aplicar as entradas pendentes do log (um líder recém eleito, ou uma escrita anterior sem desfecho). Se a liderança mudar, ou outra escrita ficar sem desfecho, entre a conferência e a confirmação, o commit falha com conflito. Um comando avulso é refeito pelo motor sobre o estado novo.
 - Criar uma partição dentro de uma transação não gera conflito entre transações que criam a mesma.
 - `DROP PARTITION` dentro de uma transação explícita vale no `COMMIT`. Depois dele, a própria transação já não vê as linhas, e o que ela tinha gravado naquela faixa antes do comando também sai. Pode regravar na mesma faixa.
 - Como o id não diz a partição, duas escritas avulsas sobre a mesma linha particionada não são mais "a última vence" às cegas: o commit confere que os lugares olhados continuam iguais e, se não, refaz o comando (até 100 vezes). Isso impede que mover e editar a mesma linha, ou criar o mesmo id em dias diferentes, deixe duas cópias.
@@ -143,7 +144,7 @@ Um objeto por partição, **imutável**, de nome único: `parts/<ns>/<db>/<tabel
 
 1. **Congelar:** commit que passa o estado para `FREEZING`. A partir daí nenhuma escrita entra.
 2. **Enviar:** lê os registros, grava o objeto, baixa de volta e confere o SHA-256. Sem trava: o resto do banco continua gravando.
-3. **Trocar:** um único lote com a remoção por faixa dos registros, o descritor `COLD` e o filtro de Bloom.
+3. **Trocar:** um único lote com a remoção por faixa dos registros, o descritor `COLD` e o filtro de Bloom. Antes disso o motor confere que os registros locais são exatamente os enviados. Com qualquer diferença nada é apagado, o evento `partition_freeze_mismatch` vai para o registro do servidor e a rodada seguinte envia de novo.
 
 Cada tentativa usa um nome de objeto novo, e quem envia nunca apaga objeto: outro nó, ou uma base restaurada, pode estar usando o mesmo armazenamento. Uma tentativa que sobra vira órfã e sai pela coleta de lixo. Toda troca de estado confere que o descritor não mudou desde que foi lido.
 
