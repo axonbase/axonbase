@@ -128,7 +128,16 @@ mvn -B -pl axonbase-core -am test -Dtest=GeoLatencyGateTest -Dsurefire.failIfNoS
 | `radius` (metros) e `limit` | 500 e 100 |
 | `neighbours` | 20 |
 | `p99.knn` e `p99.radius` (ms) | 50 e 50 |
+| `moves` e `step` (metros) | um décimo dos pontos (0 desliga) e 30 |
 | `dir` | diretório temporário; informado, reaproveita a carga |
+
+As metas de p99 valem para as consultas feitas antes dos movimentos. Depois delas o teste move registros em passos curtos, mede as atualizações e repete as consultas, e imprime o tamanho da base nos dois momentos.
+
+Para comparar resoluções de armazenamento, o roteiro abaixo copia o repositório para cada resolução, troca a constante só na cópia e junta os números em `resumo.txt`. O diretório de saída precisa ser novo e ficar fora do repositório.
+
+```bash
+RESOLUCOES="9 10 12" scripts/geo-comparar-resolucoes.sh /data/geo-resolucoes
+```
 
 ## Limites conhecidos
 
