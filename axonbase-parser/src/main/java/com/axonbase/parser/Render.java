@@ -23,6 +23,9 @@ public final class Render {
 
     private static final Set<String> NOT_CALLABLE = Set.of("true", "false", "null", "none", "not", "select");
 
+    /** Palavras que, logo depois de CREATE, começam outro comando. */
+    private static final Set<String> AFTER_CREATE = Set.of("table", "saga", "ai", "jks", "data", "database");
+
     private static final Set<String> STATEMENT_WORDS = Set.of("select", "create", "update", "delete", "insert",
         "define", "let", "return", "if", "for", "info", "relate", "begin", "commit", "cancel", "alter", "drop",
         "grant", "revoke", "unrelate", "reembed");
@@ -50,15 +53,13 @@ public final class Render {
     private static void statement(StringBuilder sb, Statement s) {
         switch (s) {
             case Statement.Use u -> {
-                sb.append("USE ");
+                // posicional: "NS" e "DB" não são palavras-chave e o analisador os lê como nomes
+                sb.append("USE");
                 if (u.ns() != null) {
-                    sb.append("NS ").append(expr(u.ns()));
+                    sb.append(' ').append(useName(u.ns()));
                 }
                 if (u.db() != null) {
-                    if (u.ns() != null) {
-                        sb.append(' ');
-                    }
-                    sb.append("DB ").append(expr(u.db()));
+                    sb.append(' ').append(useName(u.db()));
                 }
             }
             case Statement.Let l -> sb.append("LET $").append(l.name()).append(" = ").append(expr(l.value()));
@@ -67,7 +68,7 @@ public final class Render {
                 if (c.only()) {
                     sb.append("ONLY ");
                 }
-                sb.append(expr(c.target()));
+                sb.append(createTarget(c.target()));
                 data(sb, c.data());
                 ret(sb, c.ret());
             }
@@ -115,7 +116,9 @@ public final class Render {
                 if (i.relation()) {
                     sb.append("RELATION ");
                 }
-                sb.append("INTO ").append(id(i.table())).append(' ').append(expr(i.data()));
+                sb.append("INTO ").append(id(i.table())).append(' ');
+                // entre parênteses o SELECT seria lido como lista de colunas
+                sb.append(i.data() instanceof Expr.SubQuery rows ? query(rows.query()) : expr(i.data()));
                 ret(sb, i.ret());
             }
             case Statement.Update u -> {
@@ -146,12 +149,16 @@ public final class Render {
                     if (i > 0) {
                         sb.append(", ");
                     }
-                    sb.append(expr(s2.fields().get(i)));
+                    Expr field = s2.fields().get(i);
+                    sb.append(i == 0 && !s2.valueOnly() ? firstField(field) : expr(field));
                 }
                 if (s2.only()) {
                     sb.append(" ONLY");
                 }
-                sb.append(" FROM ").append(expr(s2.from()));
+                // SELECT VALUE sem FROM
+                if (s2.from() != null) {
+                    sb.append(" FROM ").append(expr(s2.from()));
+                }
                 if (s2.timeTravel() != null) {
                     var travel = s2.timeTravel();
                     sb.append(travel.mode() == Statement.TimeTravelMode.AT ? " AT (" : " BEFORE (")
@@ -160,7 +167,8 @@ public final class Render {
                 for (var join : s2.joins()) {
                     sb.append(" JOIN ").append(expr(join.source()))
                         .append(" ON ").append(expr(join.left()))
-                        .append(" = ").append(expr(join.right()));
+                        .append(" = ")
+                        .append(grouped(join.right(), precedence(join.right()) <= precedence(Expr.BinaryOp.EQ)));
                 }
                 if (s2.cond() != null) {
                     sb.append(" WHERE ").append(expr(s2.cond()));
@@ -199,7 +207,7 @@ public final class Render {
                     sb.append(" START ").append(expr(s2.start()));
                 }
                 if (!s2.fetch().isEmpty()) {
-                    sb.append(" FETCH ").append(paths(s2.fetch()));
+                    sb.append(" FETCH ").append(names(s2.fetch()));
                 }
             }
             case Statement.Live lv -> {
@@ -381,7 +389,7 @@ public final class Render {
             }
             case Statement.DefineUser du -> {
                 sb.append("DEFINE USER ");
-                if (du.name().matches("[\\p{L}_][\\p{L}\\p{N}_!]*")) {
+                if (du.name().matches("[\\p{L}_][\\p{L}\\p{N}_!]*") && !changesCase(du.name())) {
                     sb.append(du.name());
                 } else {
                     sb.append('"').append(escape(du.name())).append('"');
@@ -575,7 +583,9 @@ public final class Render {
             }
             case Statement.DropEvent de -> sb.append("DROP EVENT ").append(id(de.name()));
             case Statement.CreateAnalyzer ca -> {
-                sb.append("CREATE ANALYZER ").append(id(ca.name()));
+                // CREATE ANALYZER sem opção alguma seria lido como a criação de um registro
+                boolean bare = !ca.lowercase() && !ca.stemming() && ca.stopwords().isEmpty();
+                sb.append(bare ? "ALTER ANALYZER " : "CREATE ANALYZER ").append(id(ca.name()));
                 if (ca.lowercase()) sb.append(" LOWERCASE");
                 if (!ca.stopwords().isEmpty()) {
                     sb.append(" STOPWORDS ");
@@ -589,7 +599,7 @@ public final class Render {
             case Statement.DropAnalyzer da -> sb.append("DROP ANALYZER ").append(id(da.name()));
             case Statement.CreateUser cu -> {
                 sb.append("CREATE USER ");
-                if (cu.name().matches("[\\p{L}_][\\p{L}\\p{N}_!]*")) {
+                if (cu.name().matches("[\\p{L}_][\\p{L}\\p{N}_!]*") && !changesCase(cu.name())) {
                     sb.append(cu.name());
                 } else {
                     sb.append('"').append(escape(cu.name())).append('"');
@@ -798,7 +808,9 @@ public final class Render {
                     if (i > 0) {
                         sb.append(", ");
                     }
-                    expr(sb, s2.items().get(i));
+                    // no começo, "{t:1, ..." seria lido como objeto
+                    Expr item = s2.items().get(i);
+                    sb.append(grouped(item, i == 0 && startsWithRecordId(item)));
                 }
                 sb.append('}');
             }
@@ -1039,6 +1051,46 @@ public final class Render {
         return AxonQlText.identifier(name);
     }
 
+    /** Palavra-chave com maiúsculas: sem aspas ou crases o lexer a devolveria em minúsculas. */
+    private static boolean changesCase(String name) {
+        String lower = name.toLowerCase(java.util.Locale.ROOT);
+        return !lower.equals(name) && AxonQlText.KEYWORDS.contains(lower);
+    }
+
+    private static String useName(Expr name) {
+        return name instanceof Expr.Ident ident ? scopeName(ident.name()) : expr(name);
+    }
+
+    private static String createTarget(Expr target) {
+        if (target instanceof Expr.Ident table && AFTER_CREATE.contains(table.name())) {
+            return "`" + table.name() + "`";
+        }
+        if (target instanceof Expr.RecordId record && record.table() instanceof Expr.Ident table
+            && AFTER_CREATE.contains(table.name())) {
+            StringBuilder sb = new StringBuilder("`").append(table.name()).append("`:");
+            renderRecordKey(sb, record.key());
+            return sb.toString();
+        }
+        return expr(target);
+    }
+
+    /** {@code SELECT value} é o modificador VALUE: o campo com esse nome leva crases. */
+    private static String firstField(Expr field) {
+        if (field instanceof Expr.Ident ident && ident.name().equalsIgnoreCase("value")) {
+            return "`" + ident.name() + "`";
+        }
+        if (field instanceof Expr.Alias alias && alias.expr() instanceof Expr.Ident ident
+            && ident.name().equalsIgnoreCase("value")) {
+            return "`" + ident.name() + "` AS " + id(alias.name());
+        }
+        return expr(field);
+    }
+
+    private static boolean startsWithRecordId(Expr item) {
+        return item instanceof Expr.RecordId
+            || item instanceof Expr.Idiom idiom && idiom.base() instanceof Expr.RecordId;
+    }
+
     /** Namespace ou banco numa cláusula ON: ali o parser só aceita identificador, então palavra-chave leva crases. */
     private static String scopeName(String name) {
         return AxonQlText.KEYWORDS.contains(name.toLowerCase(java.util.Locale.ROOT)) ? "`" + name + "`" : id(name);
@@ -1080,7 +1132,7 @@ public final class Render {
     /** Chave de objeto: no começo de um objeto, uma palavra de comando abriria um bloco. */
     private static String objectKey(String key) {
         boolean bare = key.matches("[\\p{L}_][\\p{L}\\p{Nd}_]*")
-            && !STATEMENT_WORDS.contains(key.toLowerCase(java.util.Locale.ROOT));
+            && !STATEMENT_WORDS.contains(key.toLowerCase(java.util.Locale.ROOT)) && !changesCase(key);
         return bare ? key : AxonQlText.string(key);
     }
 
