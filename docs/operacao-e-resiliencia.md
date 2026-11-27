@@ -65,7 +65,7 @@ Se algo falhar no prazo, o líder solta as escritas e continua no cargo. O alvo 
 
 ### Drenar um nó
 
-`POST /admin/v1/cluster/drain` leva o nó a `DRAINING`: o `/ready` passa a responder `503`, o líder transfere o cargo, o nó deixa de disputar eleições (continua votando), espera `AXON_DRAIN_GRACE_MS` para o balanceador perceber e depois as requisições de dados terminarem. Se o nó receber o cargo durante a espera, transfere de novo. Aí o estado é `DRAINED` e o processo pode ser parado. `GET` consulta o estado e `DELETE` desfaz. Com `AXON_DRAIN_ON_SHUTDOWN=true`, o desligamento normal do processo drena antes de parar.
+`POST /admin/v1/cluster/drain` leva o nó a `DRAINING`: o `/ready` passa a responder `503`, o líder transfere o cargo, o nó deixa de disputar eleições (continua votando), espera `AXON_DRAIN_GRACE_MS` para o balanceador perceber e depois as requisições de dados terminarem. Se o nó receber o cargo durante a espera, transfere de novo. Aí o estado é `DRAINED` e o processo pode ser parado. `GET` consulta o estado e `DELETE` desfaz. Se o nó não conseguir sair sem erro no prazo, o estado é `FAILED`: o `/ready` continua em `503` até o `DELETE` ou uma nova drenagem. Com `AXON_DRAIN_ON_SHUTDOWN=true`, o desligamento normal do processo drena antes de parar.
 
 `GET /admin/v1/cluster/health` devolve versão, protocolo, papel, prontidão, estado de drenagem, índice aplicado e, no líder, o atraso e o protocolo de cada membro.
 

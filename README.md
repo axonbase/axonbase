@@ -14,7 +14,7 @@ Release candidate notes for 1.0.0-rc1 (in Portuguese): [docs/notas-1.0.0-rc1.md]
 - **Search engines**: BM25 full-text with configurable analyzers, HNSW vector search (cosine/Euclidean/Manhattan), geo spatial with an H3 hierarchical hexagonal index, graph traversal, and columnar indexes for direct aggregation (count/sum/avg/min/max)
 - **Multi-model indexes**: unique, count, full-text (SEARCH ANALYZER), HNSW vector, GEO spatial, and COLUMNAR analytical
 - **MVCC transactions**: snapshot isolation, savepoints, optimistic retry, phantom protection via read ranges, and `VersionConflictException`
-- **Raft consensus**: TCP Raft with leader election, quorum, dynamic membership (join/leave via joint consensus), catch-up, snapshots, and consistent hash sharding
+- **Raft consensus**: TCP Raft with leader election, quorum, dynamic membership (join/leave as one log entry per change, without joint consensus; run one change at a time), catch-up, snapshots, and consistent hash sharding
 - **Authentication**: JWT (HS256) with root/namespace/database scope, certificate-based (ICP-Brasil compatible), mTLS, and Data Rules from JWT claims
 - **Protocols**: JSON-RPC over WebSocket and HTTP, REST (`/sql`, `/table`), GraphQL, MCP (Model Context Protocol), and JDBC
 - **Observability**: Prometheus metrics (`/metrics`), health/ready/status endpoints, structured JSON logging, S3 backup with AES-256-GCM encryption
