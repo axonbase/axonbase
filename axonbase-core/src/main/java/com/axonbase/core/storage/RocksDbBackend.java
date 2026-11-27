@@ -131,6 +131,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
 
     private final ReentrantLock[] stripes = new ReentrantLock[STRIPES];
     private final ReentrantReadWriteLock rangeLock = new ReentrantReadWriteLock();
+    private final java.util.concurrent.atomic.LongAdder occupiedKeyRefusals =
+        new java.util.concurrent.atomic.LongAdder();
 
     private final HybridClock hlc;
     private final CeilingRecord ceiling;
@@ -613,10 +615,32 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
                        Set<String> readPrefixes) {
         gate.enter();
         try {
-            commitGated(expectedVersions, puts, deletes, readPrefixes, writeOptions);
+            commitGated(Set.of(), expectedVersions, puts, deletes, readPrefixes, writeOptions);
         } finally {
             gate.exit();
         }
+    }
+
+    /**
+     * Commit de um lote de statement que também exige livres as chaves de {@code absentKeys}: uma leitura dos dados por
+     * chave, sob a trava da faixa dela, e nada é gravado se alguma existe. Toda escrita pega essa trava (ou a exclusiva
+     * do conjunto), então ninguém cria a chave entre a leitura e a gravação.
+     */
+    void commitIfAbsent(Set<String> absentKeys,
+                        Map<String, Long> expectedVersions,
+                        Map<String, byte[]> puts,
+                        Set<String> deletes) {
+        gate.enter();
+        try {
+            commitGated(absentKeys, expectedVersions, puts, deletes, Set.of(), writeOptions);
+        } finally {
+            gate.exit();
+        }
+    }
+
+    /** Quantos commits foram recusados porque uma chave que deveria estar livre já existia. */
+    public long occupiedKeyRefusals() {
+        return occupiedKeyRefusals.sum();
     }
 
     @Override
@@ -628,7 +652,7 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
     public void applyReplicated(Map<String, byte[]> puts, Set<String> deletes) {
         gate.enter();
         try {
-            commitGated(Map.of(), puts, deletes, Set.of(), unsyncedOptions);
+            commitGated(Set.of(), Map.of(), puts, deletes, Set.of(), unsyncedOptions);
         } finally {
             gate.exit();
         }
@@ -639,7 +663,8 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         syncWal();
     }
 
-    private void commitGated(Map<String, Long> expectedVersions,
+    private void commitGated(Set<String> absentKeys,
+                             Map<String, Long> expectedVersions,
                              Map<String, byte[]> puts,
                              Set<String> deletes,
                              Set<String> readPrefixes,
@@ -650,10 +675,17 @@ public final class RocksDbBackend implements VersionedKvBackend, AutoCloseable {
         var lock = exclusive ? rangeLock.writeLock() : rangeLock.readLock();
         lock.lock();
         TreeSet<Integer> touched = exclusive ? new TreeSet<>()
-            : stripeIndexes(expectedVersions.keySet(), puts.keySet(), deletes);
+            : stripeIndexes(absentKeys, expectedVersions.keySet(), puts.keySet(), deletes);
         List<ReentrantLock> held = lockStripes(touched);
         CommitSequencer.Ticket ticket;
         try {
+            for (String key : absentKeys) {
+                if (getGated(key).isPresent()) {
+                    occupiedKeyRefusals.increment();
+                    // sem a chave no ConflictStats: um id repetido não é disputa entre escritores
+                    throw new VersionConflictException(Messages.get("storage_version_conflict", key));
+                }
+            }
             for (var expected : expectedVersions.entrySet()) {
                 long current = versionOf(expected.getKey());
                 if (current != expected.getValue()) {

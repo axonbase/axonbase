@@ -266,6 +266,10 @@ public final class Executor {
     /** Escritas do statement em curso, gravadas de uma vez (um lote atômico) quando não há transação explícita. */
     private com.axonbase.core.storage.StatementBatch batch;
 
+    /** O statement do lote na primeira tentativa dele, e a contagem de {@link ExternalCalls} no começo dela. */
+    private Statement firstAttempt;
+    private long firstAttemptOutbound;
+
     private static boolean batchable(Statement s) {
         return s instanceof Statement.Create || s instanceof Statement.Insert || s instanceof Statement.Update
             || s instanceof Statement.Delete || s instanceof Statement.Relate || s instanceof Statement.Unrelate;
@@ -294,6 +298,9 @@ public final class Executor {
             batch = mine;
             batchSagaUndo.clear();
             long outbound = ExternalCalls.count();
+            // uma repetição procura o registro antes de escrever, como qualquer statement
+            firstAttempt = attempt == 1 ? s : null;
+            firstAttemptOutbound = outbound;
             try {
                 AxonValue result;
                 try {
@@ -308,15 +315,19 @@ public final class Executor {
                 return result;
             } catch (com.axonbase.core.storage.VersionConflictException conflict) {
                 discardBatchSagaSteps();
-                // só um lote com condições (partição, chave primária, UNIQUE) conflita. Nada foi gravado, então refaz
-                // sobre o estado novo, a menos que o statement já tenha chamado para fora
+                // só um lote com condições (id livre, partição, chave primária, UNIQUE) conflita. Nada foi gravado,
+                // então refaz sobre o estado novo, a menos que o statement já tenha chamado para fora
                 if (!mine.conditional() || attempt >= CONDITIONAL_ATTEMPTS || ExternalCalls.count() != outbound) {
                     throw conflict;
                 }
-                java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
-                    .nextLong(1_000_000L * Math.min(attempt, 10)));
+                // um id já ocupado não é disputa: a repetição que o recusa não precisa esperar
+                if (!mine.checksAbsence()) {
+                    java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
+                        .nextLong(1_000_000L * Math.min(attempt, 10)));
+                }
             } finally {
                 batch = null;
+                firstAttempt = null;
                 mine.discard();
             }
         }
@@ -1397,7 +1408,7 @@ public final class Executor {
         ensureTable(db, table);
         AxonValue explicitKey = c.target() instanceof Expr.RecordId rid
             ? recordKey(rid.key()) : null;
-        AxonValue record = createRecord(db, table, evalData(c.data(), table), explicitKey, onExisting(false));
+        AxonValue record = createRecord(db, table, evalData(c.data(), table), explicitKey, onExisting(false), c);
         if (c.ret() != null && c.ret().kind() == ReturnKind.NONE) {
             return AxonValue.nul();
         }
@@ -1565,6 +1576,12 @@ public final class Executor {
      */
     private AxonValue createRecord(Database db, String table, AxonValue input, AxonValue explicitKey,
                                    Existing existing) {
+        return createRecord(db, table, input, explicitKey, existing, null);
+    }
+
+    /** @param create o CREATE que pede este registro, ou {@code null} quando quem cria é outro statement */
+    private AxonValue createRecord(Database db, String table, AxonValue input, AxonValue explicitKey,
+                                   Existing existing, Statement.Create create) {
         Map<String, AxonValue> obj = new LinkedHashMap<>();
         if (input.isObject()) {
             obj.putAll(input.asObject());
@@ -1575,7 +1592,8 @@ public final class Executor {
         // um id recém-gerado não existe em lugar algum: não precisa ser procurado
         boolean generated = explicitKey == null && idKey == null;
         String storageKey = rid.storageKey(db.ns(), db.db());
-        AxonValue previous = generated ? null : existingRecord(db, rid, storageKey);
+        AxonValue previous = generated || leaveAbsenceToCommit(create, db, table, storageKey, existing)
+            ? null : existingRecord(db, rid, storageKey);
         if (previous != null) {
             // antes de pular ou de dizer que existe: sobre um registro oculto pela regra a recusa é sempre a mesma
             refuseHiddenRecord(db, rid);
@@ -1634,6 +1652,35 @@ public final class Executor {
         notifyLive(db, rid, LiveBus.CREATE, null, record);
         fireEvents(db, rid, LiveBus.CREATE, null, record);
         return record;
+    }
+
+    /**
+     * O atalho da ingestão: o CREATE do próprio lote, numa tabela em que nada depende do registro anterior, não procura
+     * o id antes de escrever. O commit confere uma vez, sob a trava da chave, que ele está livre; se não está, nada é
+     * gravado e a repetição procura o registro e o recusa. Qualquer condição nova sobre a escrita que precise saber se o
+     * id existe, ou que tenha efeito fora do lote, tem de entrar aqui.
+     *
+     * @return {@code false} quando o chamador precisa procurar o registro
+     */
+    private boolean leaveAbsenceToCommit(Statement.Create create, Database db, String table, String storageKey,
+                                         Existing existing) {
+        if (create == null || create != firstAttempt || existing != Existing.REFUSE
+            || ExternalCalls.count() != firstAttemptOutbound || batch == null || rawRecords(db) != batch) {
+            return false;
+        }
+        if (ds.clustered() || ds.isReplaying() || ds.auditEnabled() || sagaCorrelation() != null
+            || com.axonbase.core.security.Authz.hasDataRules(session.auth()) || !dataRulePredicates().isEmpty()
+            || !ds.liveBus().forTable(db.ns(), db.db(), table).isEmpty()) {
+            return false;
+        }
+        Catalog.TableDef def = db.catalog().table(table);
+        // sem campos não há chave primária, NOT NULL, default nem embedding
+        if (def == null || !def.fields().isEmpty() || !def.checks().isEmpty() || !def.indexes().isEmpty()
+            || !def.events().isEmpty() || restricts(def.permissions())
+            || db.catalog().partitioning(table) != null || db.catalog().ttl(table) != null) {
+            return false;
+        }
+        return batch.expectAbsent(storageKey);
     }
 
     /**
