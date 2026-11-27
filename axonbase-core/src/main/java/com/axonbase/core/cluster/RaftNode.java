@@ -207,13 +207,14 @@ public final class RaftNode implements AutoCloseable {
      * foi aplicado e eles pedem para rever ({@link ReplicationHooks#replayFrom}).
      */
     public synchronized void hooks(ReplicationHooks hooks) {
-        this.hooks = hooks == null ? ReplicationHooks.NONE : hooks;
-        FileRaftLog.Entry tail = log.entry(log.lastIndex());
-        if (tail != null) {
-            this.hooks.recovered(tail.batch());
-        }
+        // a aplicação espera a reentrega terminar: os ganchos recebem as entradas em ordem de índice
         applyLock.lock();
         try {
+            this.hooks = hooks == null ? ReplicationHooks.NONE : hooks;
+            FileRaftLog.Entry tail = log.entry(log.lastIndex());
+            if (tail != null) {
+                this.hooks.recovered(tail.batch());
+            }
             for (long i = Math.max(this.hooks.replayFrom(), log.firstIndex());
                  i <= Math.min(applied, log.lastIndex()); i++) {
                 FileRaftLog.Entry entry = log.entry(i);
