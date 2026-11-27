@@ -1102,7 +1102,9 @@ public final class Executor {
         if (previous != null && existing == Existing.REFUSE) {
             throw errorStmt(Messages.get("stmt_record_exists", ridAsValue(rid).asRecordId()));
         }
+        checkConstraints(db, rid, obj);
         bindPartition(db, rid, record, generated);
+        enforcePrimaryKey(db, rid, previous, record);
         enforceUnique(db, rid, previous, record);
         records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));
         indexSearch(db, rid, previous, record);
@@ -1319,9 +1321,11 @@ public final class Executor {
             keepRecordId(current, rid, doc.initial());
             applyFieldSchema(db, tableName(u.target()), current, true, doc.initial());
             injectDataRuleFields(current);
+            checkConstraints(db, rid, current);
             AxonValue next = AxonValue.object(current);
             doc.setCurrent(next);
             bindPartition(db, rid, next, false);
+            enforcePrimaryKey(db, rid, doc.initial(), next);
             enforceUnique(db, rid, doc.initial(), next);
             records(db).put(rid.storageKey(db.ns(), db.db()), encode(next));
             indexSearch(db, rid, doc.initial(), next);
@@ -1407,6 +1411,7 @@ public final class Executor {
                 sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "DELETE");
             }
             records(db).delete(rid.storageKey(db.ns(), db.db()));
+            enforcePrimaryKey(db, rid, doc.current(), null);
             enforceUnique(db, rid, doc.current(), null);
             if (edges) {
                 removeEdgesOf(db, rid);
@@ -3943,6 +3948,8 @@ return score;
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());
             def.events().putAll(previous.events());
+            def.checks(previous.checks());
+            def.keyedById(previous.keyedById());
         }
         def.permissions(dt.permissions());
         def.shardBy(dt.shardBy());
@@ -3969,15 +3976,19 @@ return score;
         List<Statement.ColumnDef> columns = def.fields().values().stream()
             .filter(field -> !fieldDefinitions.contains(table + ":" + field.name()))
             .sorted(java.util.Comparator.comparing(Catalog.FieldDef::name))
-            .map(field -> new Statement.ColumnDef(field.name(), field.type() == null ? "any" : field.type(), false,
-                false, field.defaultExpr(), field.assertExpr(), field.references()))
-            .toList();
+            .map(field -> new Statement.ColumnDef(field.name(), field.type() == null ? "any" : field.type(),
+                field.primaryKey(), field.notNull(), field.defaultExpr(), field.assertExpr(), field.references()))
+            .collect(java.util.stream.Collectors.toList());
+        if (def.keyedById()) {
+            // a coluna id não vira campo, mas precisa voltar para a chave composta continuar sendo a mesma
+            columns.add(0, new Statement.ColumnDef("id", "string", true, false, null, null, null));
+        }
         String definition = com.axonbase.parser.Render.stmt(new DefineTable(table, def.schemafull(), def.drop(),
             def.permissions(), def.shardBy()));
-        if (!columns.isEmpty()) {
+        if (!columns.isEmpty() || !def.checks().isEmpty()) {
             // o CREATE TABLE vem primeiro: o DEFINE TABLE mantém as colunas e repõe as opções da tabela
             definition = com.axonbase.parser.Render.stmt(new Statement.CreateTable(table, false, def.schemafull(),
-                columns)) + ";\n" + definition;
+                columns, def.checks())) + ";\n" + definition;
         }
         control(db, ControlCommand.Kind.TABLE, table, definition);
     }
@@ -3999,11 +4010,19 @@ return score;
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());
             def.events().putAll(previous.events());
+            def.checks(previous.checks());
+            def.keyedById(previous.keyedById());
         }
+        List<Expr> checks = new ArrayList<>(def.checks());
+        ct.checks().stream().filter(check -> !checks.contains(check)).forEach(checks::add);
+        def.checks(checks);
         db.catalog().defineTable(def);
 
         for (Statement.ColumnDef col : ct.columns()) {
             if ("id".equalsIgnoreCase(col.name())) {
+                if (col.primaryKey()) {
+                    def.keyedById(true);
+                }
                 continue;
             }
             Catalog.FieldDef fd = new Catalog.FieldDef(
@@ -4014,11 +4033,12 @@ return score;
                 col.defaultExpr(),
                 col.references()
             );
-            def.fields().put(col.name(), fd);
+            def.fields().put(col.name(), fd.constrained(col.notNull(), col.primaryKey()));
             forgetFieldDefinition(db, ct.name(), col.name());
         }
 
         persistTable(db, ct.name());
+        refreshPrimaryKey(db, ct.name());
         return AxonValue.nul();
     }
 
@@ -4983,6 +5003,7 @@ return score;
         }
         // se a tabela era um tipo de aresta (RELATE), as arestas dele saem junto
         removeEdgesOfKind(db, table);
+        records(db).delete(primaryKeyMarker(db, table));
         ds.removeTableControl(session, db.ns(), db.db(), table);
         return AxonValue.nul();
     }
@@ -5019,7 +5040,8 @@ return score;
             switch (op) {
                 case Statement.AddColumn ac -> {
                     def.fields().put(ac.name(), new Catalog.FieldDef(ac.name(), ac.type(), false,
-                        ac.checkExpr(), ac.defaultExpr(), ac.references()));
+                        ac.checkExpr(), ac.defaultExpr(), ac.references())
+                        .constrained(ac.notNull(), ac.primaryKey()));
                     forgetFieldDefinition(db, at.name(), ac.name());
                 }
                 case Statement.DropColumn dc -> {
@@ -5032,12 +5054,15 @@ return score;
                         existing != null && existing.readonly(),
                         mc.checkExpr() != null || existing == null ? mc.checkExpr() : existing.assertExpr(),
                         mc.defaultExpr() != null || existing == null ? mc.defaultExpr() : existing.defaultExpr(),
-                        existing == null ? null : existing.references()));
+                        existing == null ? null : existing.references())
+                        .constrained(mc.notNull() || existing != null && existing.notNull(),
+                            existing != null && existing.primaryKey()));
                     forgetFieldDefinition(db, at.name(), mc.name());
                 }
             }
         }
         persistTable(db, at.name());
+        refreshPrimaryKey(db, at.name());
         return AxonValue.nul();
     }
 
@@ -6473,6 +6498,170 @@ return score;
 
     private AxonValue decode(byte[] b) {
         return AxonJson.decode(b);
+    }
+
+    // ------------------------------------------------------------------
+    // Restrições de tabela: NOT NULL, PRIMARY KEY e CHECK
+    // ------------------------------------------------------------------
+
+    /**
+     * NOT NULL e CHECK de tabela valem nas escritas novas; o que já estava gravado não é conferido, e quem repõe dados
+     * (importação, saga, movimentação de shard) não passa por aqui. Como o CHECK de coluna, o de tabela não é avaliado
+     * quando um campo citado está ausente.
+     */
+    private void checkConstraints(Database db, RecordId rid, Map<String, AxonValue> record) {
+        Catalog.TableDef def = db.catalog().table(rid.table());
+        if (def == null || session.restoring()) {
+            return;
+        }
+        for (Catalog.FieldDef field : def.fields().values()) {
+            if (!field.notNull() && !field.primaryKey()) {
+                continue;
+            }
+            AxonValue value = record.get(field.name());
+            if (value == null || value.isNull() || value.isNone()) {
+                throw errorStmt(Messages.get("stmt_not_null_violation", field.name(), rid.table()));
+            }
+        }
+        for (Expr check : def.checks()) {
+            java.util.Set<String> cited = new java.util.HashSet<>();
+            citedFields(check, cited);
+            if (record.keySet().containsAll(cited)
+                && !truthy(evalExprInDoc(check, new Document(rid, AxonValue.object(record))))) {
+                throw errorStmt(Messages.get("stmt_table_check_violation", rid.table(),
+                    com.axonbase.parser.Render.expr(check)));
+            }
+        }
+    }
+
+    private static void citedFields(Expr expr, java.util.Set<String> out) {
+        switch (expr) {
+            case Expr.Ident ident -> out.add(ident.name());
+            case Expr.Binary binary -> {
+                citedFields(binary.left(), out);
+                citedFields(binary.right(), out);
+            }
+            case Expr.Unary unary -> citedFields(unary.operand(), out);
+            case Expr.Cast cast -> citedFields(cast.operand(), out);
+            case Expr.Call call -> call.args().forEach(argument -> citedFields(argument, out));
+            case Expr.ArrayLit array -> array.items().forEach(item -> citedFields(item, out));
+            case Expr.Idiom idiom -> citedFields(idiom.base(), out);
+            default -> { }
+        }
+    }
+
+    /**
+     * Mantém as entradas da chave primária ({@code !uidx\0!pk\0colunas\0valores\0chave}) e recusa um valor que outro
+     * registro já tem. Uma escrita que não muda o valor passa: dados antigos repetidos continuam regraváveis.
+     */
+    private void enforcePrimaryKey(Database db, RecordId rid, AxonValue before, AxonValue after) {
+        Catalog.TableDef def = db.catalog().table(rid.table());
+        List<String> columns = def == null ? List.of() : def.primaryKey();
+        if (columns.isEmpty()) {
+            return;
+        }
+        String previous = primaryKeySlot(db, rid.table(), columns, before);
+        String next = primaryKeySlot(db, rid.table(), columns, after);
+        if (next != null && next.equals(previous)) {
+            return;
+        }
+        String own = rid.key().keyString();
+        // a marca disputada faz duas escritas simultâneas do mesmo valor conflitarem; numa tabela particionada a
+        // entrada mora na partição da linha e a marca não existe
+        boolean contended = db.catalog().partitioning(rid.table()) == null;
+        if (next != null) {
+            if (contended && rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
+                pending.expect(next);
+            }
+            if (!session.restoring() && records(db).keysWithPrefix(next).stream()
+                .anyMatch(key -> !key.equals(next) && !key.equals(next + own))) {
+                throw errorStmt(Messages.get("stmt_primary_key_violation", rid.table(), String.join(", ", columns)));
+            }
+        }
+        if (previous != null) {
+            records(db).delete(previous + own);
+            if (contended && records(db).keysWithPrefix(previous).stream().allMatch(previous::equals)) {
+                records(db).delete(previous);
+            }
+        }
+        if (next != null) {
+            if (contended) {
+                records(db).put(next, new byte[0]);
+            }
+            records(db).put(next + own, new byte[0]);
+        }
+    }
+
+    private static String primaryKeyPrefix(Database db, String table) {
+        return db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000!uidx\u0000!pk\u0000";
+    }
+
+    private static String primaryKeyMarker(Database db, String table) {
+        return "PKB|" + db.ns() + "|" + db.db() + "|" + table;
+    }
+
+    /** O prefixo das entradas de um valor, ou {@code null} quando o registro não tem a chave inteira. */
+    private static String primaryKeySlot(Database db, String table, List<String> columns, AxonValue record) {
+        if (record == null || !record.isObject()) {
+            return null;
+        }
+        List<AxonValue> values = new ArrayList<>();
+        for (String column : columns) {
+            AxonValue value = record.asObject().get(column);
+            if (value == null || value.isNull() || value.isNone()) {
+                return null;
+            }
+            // 1 e 1.0 são o mesmo valor; 1 e '1' não
+            values.add(AxonValue.str(value.keyString()));
+        }
+        return primaryKeyPrefix(db, table) + AxonJson.write(AxonValue.array(columns.stream().map(AxonValue::str)
+            .toList())) + "\u0000" + AxonJson.write(AxonValue.array(values)) + "\u0000";
+    }
+
+    /** Depois de um DDL, ou ao abrir uma base de versão anterior: refaz as entradas se a chave primária mudou. */
+    private void refreshPrimaryKey(Database db, String table) {
+        if (ds.isReplaying()) {
+            return;
+        }
+        java.util.concurrent.locks.Lock write = exclusiveIndexLock(db);
+        write.lock();
+        try {
+            rebuildPrimaryKey(db, table);
+        } finally {
+            write.unlock();
+        }
+    }
+
+    /** Grava as entradas das linhas que já existem, sem conferir se elas se repetem. */
+    void rebuildPrimaryKey(Database db, String table) {
+        Catalog.TableDef def = db.catalog().table(table);
+        List<String> columns = def == null ? List.of() : def.primaryKey();
+        String marker = primaryKeyMarker(db, table);
+        String wanted = String.join(",", columns);
+        String built = records(db).get(marker)
+            .map(raw -> new String(raw, java.nio.charset.StandardCharsets.UTF_8)).orElse("");
+        if (built.equals(wanted)) {
+            return;
+        }
+        deleteAll(db, primaryKeyPrefix(db, table));
+        if (columns.isEmpty()) {
+            records(db).delete(marker);
+        } else {
+            boolean contended = db.catalog().partitioning(table) == null;
+            for (RecordId rid : resolveTargets(new Expr.Ident(table))) {
+                Document doc = loadDoc(db, rid);
+                String slot = doc == null ? null : primaryKeySlot(db, table, columns, doc.current());
+                if (slot != null) {
+                    if (contended) {
+                        records(db).put(slot, new byte[0]);
+                    }
+                    records(db).put(slot + rid.key().keyString(), new byte[0]);
+                }
+            }
+            records(db).put(marker, wanted.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        // uma transação aberta antes disso montou as escritas sem estas entradas
+        bumpIndexEpoch(db);
     }
 
     private void enforceUnique(Database db, RecordId rid, AxonValue before, AxonValue after) {

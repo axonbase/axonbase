@@ -82,8 +82,16 @@ final class DdlPlanner {
                 checkColumn(map, session, field.table(), field.name(), field.type(), field.valueExpr() != null);
                 checkReference(map, session, field.table(), field.references());
             }
-            case Statement.CreateTable table -> table.columns().forEach(column ->
-                checkColumn(map, session, table.name(), column.name(), column.type(), false));
+            case Statement.CreateTable table -> {
+                table.columns().forEach(column ->
+                    checkColumn(map, session, table.name(), column.name(), column.type(), false));
+                // a chave primária só é conferida dentro do shard: precisa conter a chave de divisão
+                List<String> key = table.columns().stream().filter(Statement.ColumnDef::primaryKey)
+                    .map(Statement.ColumnDef::name).toList();
+                if (!key.isEmpty() && !key.contains("id")) {
+                    checkIndex(map, session, "PRIMARY KEY", table.name(), key, true);
+                }
+            }
             case Statement.AlterTable alter -> alter.operations()
                 .forEach(operation -> checkOperation(map, session, alter.name(), operation));
             case Statement.CreateDataRule rule -> keys(map, session).forEach((table, key) ->
@@ -170,6 +178,10 @@ final class DdlPlanner {
         for (AxonValue item : definitions.asArray()) {
             Map<String, AxonValue> command = item.asObject();
             String text = command.get("definition").asString();
+            if (command.get("ns").asString().equals(session.namespace())
+                && command.get("db").asString().equals(session.database())) {
+                requireKeyInPrimaryKey(text, table, field);
+            }
             if (!command.get("ns").asString().equals(session.namespace())
                 || !command.get("db").asString().equals(session.database())
                 || CHECKED_DEFINITIONS.stream().noneMatch(p -> text.regionMatches(true, 0, p, 0, p.length()))) {
@@ -186,6 +198,21 @@ final class DdlPlanner {
                 } else if (StatementScan.of(statement).identifiers().contains(table)) {
                     throw ShardException.refused("cross_event", table);
                 }
+            }
+        }
+    }
+
+    /** Uma chave primária já declarada na tabela precisa conter a chave de divisão, como um índice UNIQUE. */
+    private static void requireKeyInPrimaryKey(String definition, String table, String field) {
+        if (!definition.startsWith("CREATE TABLE ")) {
+            return;
+        }
+        if (AxonQl.parse(definition).statements().get(0) instanceof Statement.CreateTable created
+            && created.name().equals(table)) {
+            List<String> key = created.columns().stream().filter(Statement.ColumnDef::primaryKey)
+                .map(Statement.ColumnDef::name).toList();
+            if (!key.isEmpty() && !key.contains("id") && !key.contains(field)) {
+                throw ShardException.refused("unique_without_key", "PRIMARY KEY", field);
             }
         }
     }
@@ -233,6 +260,9 @@ final class DdlPlanner {
     private void checkOperation(ShardMap map, GatewaySession session, String table, Statement.AlterOp operation) {
         switch (operation) {
             case Statement.AddColumn add -> {
+                if (add.primaryKey()) {
+                    checkIndex(map, session, "PRIMARY KEY", table, List.of(add.name()), true);
+                }
                 checkColumn(map, session, table, add.name(), add.type(), false);
                 checkReference(map, session, table, add.references());
             }

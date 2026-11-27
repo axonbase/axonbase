@@ -601,6 +601,7 @@ public final class Parser {
 
         List<Statement.ColumnDef> columns = new ArrayList<>();
         List<String> primaryKeyCols = new ArrayList<>();
+        List<Expr> checks = new ArrayList<>();
 
         while (!at(TokenType.RPAREN) && !at(TokenType.EOF)) {
             // Check for table-level constraints
@@ -618,7 +619,7 @@ public final class Parser {
                 expect(TokenType.RPAREN);
             } else if (matchKeyword("check")) {
                 expect(TokenType.LPAREN);
-                parseExpr(); // table check
+                checks.add(parseExpr());
                 expect(TokenType.RPAREN);
             } else if (matchKeyword("foreign")) {
                 expectKeyword("key");
@@ -711,7 +712,7 @@ public final class Parser {
             columns = updated;
         }
 
-        return new Statement.CreateTable(table, ifNotExists, schemafull, columns);
+        return new Statement.CreateTable(table, ifNotExists, schemafull, columns, checks);
     }
 
     private String parseSqlColumnType() {

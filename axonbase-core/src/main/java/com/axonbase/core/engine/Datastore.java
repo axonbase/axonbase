@@ -107,7 +107,26 @@ public final class Datastore {
             repairControl();
             replayControl();
             registerLegacyEdgeKinds();
+            buildPrimaryKeys();
         }
+    }
+
+    /** Grava as entradas de chave primária que faltam: bases da rc1 declaravam a chave sem mantê-las. */
+    private void buildPrimaryKeys() {
+        namespaces.forEach((ns, databases) -> databases.forEach((name, database) -> {
+            for (com.axonbase.core.catalog.Catalog.TableDef table : database.catalog().tables()) {
+                if (!table.primaryKey().isEmpty()) {
+                    try {
+                        new Executor(this).forBuild(new Session(ns, name)).rebuildPrimaryKey(database, table.name());
+                    } catch (RuntimeException e) {
+                        // sem o marcador, a próxima abertura tenta de novo
+                        LOG.log(System.Logger.Level.ERROR, "chave primária de " + ns + "/" + name + "."
+                            + table.name() + " não foi refeita", e);
+                    }
+                }
+            }
+        }));
+        backend.flush();
     }
 
     /**
@@ -1164,19 +1183,7 @@ public final class Datastore {
                 embedding.sendDimension(), embedding.authHeader()))).append(";\n");
         }
         for (Catalog.TableDef def : database.catalog().tables()) {
-            sb.append("DEFINE TABLE ").append(def.name());
-            if (def.schemafull()) {
-                sb.append(" SCHEMAFULL");
-            } else {
-                sb.append(" SCHEMALESS");
-            }
-            if (def.drop()) {
-                sb.append(" DROP");
-            }
-            if (def.shardBy() != null) {
-                sb.append(" SHARD BY ").append(def.shardBy());
-            }
-            sb.append(";\n");
+            appendTable(sb, def);
             for (Catalog.IndexDef ix : def.indexes().values()) {
                 sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineIndex(ix.name(), def.name(),
                     ix.columns(), ix.unique(), ix.count(), ix.searchAnalyzer(), ix.geo(), ix.columnar(),
@@ -1271,14 +1278,56 @@ public final class Datastore {
         }
     }
 
+    /** A tabela com as opções dela; as permissões não vão no dump. */
+    private static void appendTable(StringBuilder sb, Catalog.TableDef def) {
+        sb.append("DEFINE TABLE ").append(def.name()).append(def.schemafull() ? " SCHEMAFULL" : " SCHEMALESS");
+        if (def.drop()) {
+            sb.append(" DROP");
+        }
+        if (def.shardBy() != null) {
+            sb.append(" SHARD BY ").append(def.shardBy());
+        }
+        sb.append(";\n");
+    }
+
     private static void appendFields(StringBuilder sb, Database database) {
         for (Catalog.TableDef def : database.catalog().tables()) {
+            appendConstraints(sb, def);
             for (Catalog.FieldDef field : def.fields().values()) {
+                if (constrained(field)) {
+                    continue;
+                }
                 sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineField(field.name(), def.name(),
                     field.type(), field.assertExpr(), field.readonly(), null, field.defaultExpr(), field.references(),
                     field.embeddingName(), field.embeddingFrom()))).append(";\n");
             }
         }
+    }
+
+    private static boolean constrained(Catalog.FieldDef field) {
+        return field.notNull() || field.primaryKey();
+    }
+
+    /**
+     * NOT NULL, PRIMARY KEY e CHECK de tabela só se escrevem num CREATE TABLE. Vem depois dos dados; o DEFINE TABLE em
+     * seguida repõe as opções que o CREATE TABLE não leva.
+     */
+    private static void appendConstraints(StringBuilder sb, Catalog.TableDef def) {
+        List<Statement.ColumnDef> columns = new ArrayList<>();
+        if (def.keyedById()) {
+            columns.add(new Statement.ColumnDef("id", "string", true, false, null, null, null));
+        }
+        def.fields().values().stream().filter(Datastore::constrained)
+            .sorted(java.util.Comparator.comparing(Catalog.FieldDef::name))
+            .forEach(field -> columns.add(new Statement.ColumnDef(field.name(),
+                field.type() == null ? "any" : field.type(), field.primaryKey(), field.notNull(), field.defaultExpr(),
+                field.assertExpr(), field.references())));
+        if (columns.isEmpty() && def.checks().isEmpty()) {
+            return;
+        }
+        sb.append(com.axonbase.parser.Render.stmt(new Statement.CreateTable(def.name(), false, def.schemafull(),
+            columns, def.checks()))).append(";\n");
+        appendTable(sb, def);
     }
 
     private static void appendEvents(StringBuilder sb, Database database) {
@@ -1486,6 +1535,7 @@ public final class Datastore {
         if (restoredControl) {
             replayControl();
             controlStore.save(controlState, backend);
+            buildPrimaryKeys();
         }
         backend.flush();
         backend.delete(RESTORE_PENDING_KEY);
@@ -1588,6 +1638,7 @@ public final class Datastore {
             repairControl();
             replayControl();
             registerLegacyEdgeKinds();
+            buildPrimaryKeys();
         }
     }
 
@@ -1633,6 +1684,7 @@ public final class Datastore {
                 new String(lastCtrl[0], java.nio.charset.StandardCharsets.UTF_8)));
             replayControl();
             controlStore.save(controlState, backend);
+            buildPrimaryKeys();
         }
         backend.flush();
         backend.delete(RESTORE_PENDING_KEY);
