@@ -58,6 +58,11 @@ public final class TcpRaftCommitCoordinator implements CommitCoordinator {
     }
 
     @Override
+    public long leadershipTerm() {
+        return runtime == null ? 0 : runtime.leadershipTerm();
+    }
+
+    @Override
     public long confirm(String nodeId, CommittedBatch batch, long validation) {
         return runtime == null ? confirmDirectly(nodeId, batch) : runtime.confirm(nodeId, batch, validation);
     }
