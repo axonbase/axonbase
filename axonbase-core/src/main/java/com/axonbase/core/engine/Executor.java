@@ -830,10 +830,11 @@ public final class Executor {
     }
 
     /**
-     * Numa expressão de esquema ou de política, e num corpo de evento, {@code banco.tabela} só vale para o próprio
-     * banco, e nunca para um DATABASE LINK.
+     * Passagem de todo {@code banco.tabela}. Numa expressão de esquema ou de política, e num corpo de evento, só vale o
+     * próprio banco, e nunca um DATABASE LINK. Fora disso, outro banco do namespace exige que o escopo da identidade o
+     * alcance, antes de o banco ser lido ou criado.
      */
-    private void requireInEventScope(String qualifier) {
+    private void requireInReach(String qualifier) {
         Session.EventScope definition = session.definitionScope();
         if (definition != null && leaves(definition, qualifier)) {
             throw outsideDefinitionScope();
@@ -841,6 +842,12 @@ public final class Executor {
         Session.EventScope scope = session.eventScope();
         if (scope != null && leaves(scope, qualifier)) {
             throw outsideEventScope();
+        }
+        String ns = session.namespace();
+        if (ns != null && !qualifier.equals(session.database()) && ds.databaseLink(ns, qualifier) == null
+            && !com.axonbase.core.security.Authz.allows(session.auth(), ns, qualifier)) {
+            throw new com.axonbase.common.AxonError(-32002,
+                Messages.get("database_scope_refused", ns + "/" + qualifier));
         }
     }
 
@@ -3729,7 +3736,7 @@ return score;
      */
     private AxonValue runSelectViaLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q,
                                         Statement.Select sel) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         // Render the SELECT, then replace qualified FROM with unqualified one
         String rendered = com.axonbase.parser.Render.stmt(sel);
         String qualifiedFrom = q.link() + "." + q.table();
@@ -3750,7 +3757,7 @@ return score;
         }
     }
     private List<Document> sourceDocsQualified(Expr.Qualified q) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3786,7 +3793,7 @@ return score;
 
     /** O banco do namespace citado em {@code banco.tabela}, já com a tabela garantida. */
     private Database localQualifiedDatabase(String ns, Expr.Qualified q) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         Database targetDb = ds.ensureDatabase(session, ns, q.link());
         ensureTable(targetDb, q.table());
         return targetDb;
@@ -3823,7 +3830,7 @@ return score;
 
     /** Resolve a qualified record ID {@code "link"."table":key}. */
     private List<Document> sourceDocsQualifiedRecordId(Expr.Qualified q, Expr.RecordId rid) {
-        requireInEventScope(q.link());
+        requireInReach(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -6248,7 +6255,7 @@ return score;
             String table = q.link().equals(ns) ? q.table() : q.link();
             Database targetDb = db();
             if (!q.link().equals(ns)) {
-                requireInEventScope(q.link());
+                requireInReach(q.link());
                 targetDb = ds.ensureDatabase(session, ns, q.link());
             }
             String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + table + "\u0000";
