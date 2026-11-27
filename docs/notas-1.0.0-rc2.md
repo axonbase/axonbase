@@ -60,6 +60,13 @@ Tire um backup antes de atualizar.
 - `UPDATE` e `UPSERT` preservam o `id`. Um conteúdo com id diferente é recusado.
 - Um registro que perdeu o campo `id` na rc1 o recebe de volta na próxima atualização, e a exportação o inclui.
 
+### Índices, analisadores e `UNIQUE`
+
+- `DROP INDEX nome ON TABLE tabela` (ou `ON tabela`) apaga o índice só daquela tabela e devolve erro quando ela não o tem. Antes a tabela era ignorada e o índice de mesmo nome de outra tabela podia ser apagado. Sem a cláusula `ON`, continua valendo o primeiro índice encontrado com o nome.
+- `DROP ANALYZER` é recusado enquanto um índice usa o analisador. Apague o índice antes.
+- Escritas simultâneas do mesmo valor `UNIQUE`, fora de transação, passam a aceitar uma só. As demais recebem a violação de índice único. Duplicatas que a rc1 já aceitou continuam gravadas e precisam ser corrigidas à mão.
+- Cada valor `UNIQUE` gravado ou trocado passa a custar uma leitura de versão e uma chave a mais no armazenamento. Trocar ou apagar o valor remove a chave antiga. Uma atualização que não muda o valor só paga a leitura.
+
 ### Segurança do servidor
 
 - O armazenamento de chave e valor, ou KV (Key-Value), passa a conferir o escopo do token contra o namespace e o banco informados na chamada.
@@ -106,7 +113,10 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 - **`DROP INDEX` impedia o servidor de subir.** Uma base afetada volta a abrir. Um índice apagado e recriado na rc1 é mantido quando suas entradas ainda existem. Sem entradas, ele fica apagado. Um índice comum não grava entradas, então precisa ser criado de novo. Um índice `UNIQUE` sem nenhuma linha a indexar é mantido. Confira com `INFO FOR TABLE`.
 - **`CANCEL` depois de um `DROP INDEX` derrubava a autenticação.** Uma falha ao reconstruir o catálogo também já não deixa o nó sem usuários.
 - **O reinício perdia partes do esquema.** `ALTER TABLE`, `DEFINE TABLE` ou um segundo `CREATE TABLE` substituíam a definição gravada, e `ALTER TABLE ... DROP COLUMN` podia impedir o servidor de subir. A base volta a abrir, mas o que a rc1 já tinha substituído não pode ser recuperado: confira o esquema.
-- **Eventos e analisadores apagados voltavam.** Os que foram apagados na rc1 continuam gravados e precisam ser apagados de novo.
+- **Eventos e analisadores apagados voltavam.** Os que foram apagados na rc1 continuam gravados e precisam ser apagados de novo. Um índice cujo analisador já tinha sido apagado continua abrindo.
+- **`REVOKE ACCESS` não era gravado.** O acesso voltava no reinício, nas réplicas e na restauração de backup. Repita todo `REVOKE ACCESS` feito em versão anterior, inclusive os feitos antes desta atualização: ela reinicia o servidor e traz o acesso de volta.
+- **`CREATE TABLE` sobre uma tabela existente apagava as permissões** e a opção `DROP` dela. As duas passam a ser mantidas. Permissões já perdidas precisam ser declaradas de novo com `DEFINE TABLE`.
+- **Uma tabela definida com a opção `DROP` impedia a base de reabrir** e o dump dela de ser importado. As duas formas, antes ou depois de `SCHEMAFULL` ou `SCHEMALESS`, são aceitas.
 - Definições de SAGA, remoção de ligações entre bancos, de usuários e de Data Rules, e a auditoria por IA, deixaram de se perder ou de impedir o reinício.
 
 ### Dados
@@ -117,11 +127,19 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 
 ### SAGA e arestas
 
+- `INSERT`, `UPSERT` que cria um registro e `RELATE` passam a registrar um passo, e `CANCEL SAGA` os desfaz. Antes o cancelamento informava sucesso e deixava os dados. Um `RELATE` sobre uma aresta existente volta às propriedades anteriores. Escritas já feitas sem passo por uma versão anterior não são desfeitas. Os passos que ela gravou continuam valendo.
+- O passo de uma escrita que não chegou a ser gravada (comando em lote recusado ou transação cancelada ou em conflito) sai do registro da SAGA.
+- Dentro de uma SAGA, `RELATE` por `DATABASE LINK` é recusado, porque não haveria como desfazer a aresta remota.
+- Um `UPSERT` por `DATABASE LINK` que cria o registro é desfeito apagando esse registro.
 - A compensação preserva a chave, com o tipo dela, e o `id` do registro, e segue a ordem dos passos também depois de um reinício ou de uma troca de líder.
 - `CANCEL SAGA` retoma uma compensação que parou no meio.
 - Confirmar ou cancelar uma SAGA sem transação ativa, sem definição ou com o nome de outra devolve erro. Antes informava sucesso.
 - O cancelamento pela API de gestão alcança os participantes pelas ligações do namespace de quem abriu a SAGA.
 - A leitura `->aresta.campo` alcança a propriedade da aresta quando o registro de destino não tem o campo.
+
+## Publicação
+
+- O script `scripts/publish-docker.sh` deixa de mover a tag `latest` quando a versão tem sufixo, como `1.0.0-rc2`. O fluxo de publicação do repositório já fazia assim.
 
 ## Desempenho
 
@@ -130,7 +148,9 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 
 ## Limites conhecidos
 
-- Um índice `UNIQUE` ainda aceita duplicatas em escritas simultâneas feitas fora de transação num nó único.
+- Num armazenamento em memória, um índice `UNIQUE` ainda pode aceitar duplicatas em escritas simultâneas feitas fora de transação.
+- `CANCEL SAGA` ainda não desfaz `UNRELATE` nem repõe as arestas que um `DELETE` removeu junto com o registro. Desfazer a criação de um registro remove também as arestas ligadas a ele.
+- Um `ROLLBACK TO` de ponto de salvamento não retira os passos de SAGA das escritas que ele desfez.
 - Num armazenamento em memória, um comando que falha no meio de várias linhas mantém as linhas anteriores.
 - `DEFINE EVENT` não exige administrador, e o corpo do evento roda na sessão de quem dispara a escrita. Um editor pode, assim, fazer o root executar comandos que ele mesmo não poderia.
 - A estimativa do `EXPLAIN` conta também as linhas que uma Data Rule oculta.
