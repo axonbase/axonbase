@@ -517,8 +517,15 @@ public sealed interface Statement {
     /** Permisos dunha táboa, por acción (select/create/update/delete). */
     record Permissions(Expr select, Expr create, Expr update, Expr delete) {
 
+        /** Sem cláusula {@code PERMISSIONS}: nenhuma restrição. Não é o {@code PERMISSIONS NONE}. */
         public static Permissions none() {
             return new Permissions(null, null, null, null);
+        }
+
+        /** {@code PERMISSIONS NONE}: todas as ações negadas. */
+        public static Permissions denied() {
+            var f = new Expr.Literal(com.axonbase.value.AxonValue.bool(false));
+            return new Permissions(f, f, f, f);
         }
 
         public static Permissions full() {

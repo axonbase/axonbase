@@ -1074,6 +1074,10 @@ public final class Parser {
     }
 
     private Statement.Permissions parsePermissions() {
+        // NONE vira WHERE false nas quatro ações, para valer, exportar e reiniciar como qualquer outra condição
+        if (matchKeyword("none")) {
+            return Statement.Permissions.denied();
+        }
         Expr sel = null;
         Expr crt = null;
         Expr upd = null;
