@@ -66,66 +66,71 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
     @Override
     public int executeUpdate() throws SQLException { return super.executeUpdate(buildSql()); }
 
-    private void setParam(int index, Object value) {
+    private void setParam(int index, Object value) throws SQLException {
         if (index < 1) throw new IllegalArgumentException("parameter index must be >= 1, got " + index);
+        // sem conversão própria, o texto gravado seria o nome do objeto Java, e não o conteúdo
+        if (value != null && (value.getClass().isArray() || value instanceof InputStream || value instanceof Reader
+            || value instanceof Blob || value instanceof Clob || value instanceof Array || value instanceof Ref
+            || value instanceof SQLXML || value instanceof RowId)) {
+            throw unsupported("parameter type " + value.getClass().getSimpleName());
+        }
         while (params.size() < index) params.add(null);
         params.set(index - 1, value);
     }
 
-    @Override public void setNull(int index, int sqlType) { setParam(index, null); }
-    @Override public void setNull(int index, int sqlType, String typeName) { setParam(index, null); }
-    @Override public void setBoolean(int index, boolean x) { setParam(index, x); }
-    @Override public void setByte(int index, byte x) { setParam(index, (int)x); }
-    @Override public void setShort(int index, short x) { setParam(index, (int)x); }
-    @Override public void setInt(int index, int x) { setParam(index, x); }
-    @Override public void setLong(int index, long x) { setParam(index, x); }
-    @Override public void setFloat(int index, float x) { setParam(index, (double)x); }
-    @Override public void setDouble(int index, double x) { setParam(index, x); }
-    @Override public void setString(int index, String x) { setParam(index, x); }
-    @Override public void setBytes(int index, byte[] x) { setParam(index, x); }
-    @Override public void setDate(int index, java.sql.Date x) { setParam(index, x); }
-    @Override public void setTime(int index, java.sql.Time x) { setParam(index, x); }
-    @Override public void setTime(int index, java.sql.Time x, java.util.Calendar cal) { setParam(index, x); }
-    @Override public void setTimestamp(int index, java.sql.Timestamp x) { setParam(index, x); }
-    @Override public void setTimestamp(int index, java.sql.Timestamp x, java.util.Calendar cal) { setParam(index, x); }
-    @Override public void setBigDecimal(int index, BigDecimal x) { setParam(index, x); }
-    @Override public void setArray(int index, Array x) { setParam(index, x); }
-    @Override public void setRef(int index, Ref x) { setParam(index, x); }
-    @Override public void setURL(int index, URL x) { setParam(index, x); }
-    @Override public void setObject(int index, Object x) { setParam(index, x); }
-    @Override public void setObject(int index, Object x, int targetSqlType) { setParam(index, x); }
-    @Override public void setObject(int index, Object x, int targetSqlType, int scale) { setParam(index, x); }
-    @Override public void setRowId(int index, RowId x) { setParam(index, x); }
-    @Override public void setSQLXML(int index, SQLXML x) { setParam(index, x); }
-    @Override public void setAsciiStream(int index, InputStream x) { setParam(index, x); }
-    @Override public void setAsciiStream(int index, InputStream x, int length) { setParam(index, x); }
-    @Override public void setAsciiStream(int index, InputStream x, long length) { setParam(index, x); }
-    @Override public void setBinaryStream(int index, InputStream x) { setParam(index, x); }
-    @Override public void setBinaryStream(int index, InputStream x, int length) { setParam(index, x); }
-    @Override public void setBinaryStream(int index, InputStream x, long length) { setParam(index, x); }
-    @Override public void setCharacterStream(int index, Reader x) { setParam(index, x); }
-    @Override public void setCharacterStream(int index, Reader x, int length) { setParam(index, x); }
-    @Override public void setCharacterStream(int index, Reader x, long length) { setParam(index, x); }
-    @Override public void setNCharacterStream(int index, Reader x) { setParam(index, x); }
-    @Override public void setNCharacterStream(int index, Reader x, long length) { setParam(index, x); }
-    @Override public void setNString(int index, String x) { setParam(index, x); }
-    @Override public void setNClob(int index, NClob x) { setParam(index, x); }
-    @Override public void setNClob(int index, Reader x) { setParam(index, x); }
-    @Override public void setNClob(int index, Reader x, long length) { setParam(index, x); }
-    @Override public void setClob(int index, Clob x) { setParam(index, x); }
-    @Override public void setClob(int index, Reader x) { setParam(index, x); }
-    @Override public void setClob(int index, Reader x, long length) { setParam(index, x); }
-    @Override public void setBlob(int index, Blob x) { setParam(index, x); }
-    @Override public void setBlob(int index, InputStream x) { setParam(index, x); }
-    @Override public void setBlob(int index, InputStream x, long length) { setParam(index, x); }
-    @Override public void setUnicodeStream(int index, InputStream x, int length) { setParam(index, x); }
+    @Override public void setNull(int index, int sqlType) throws SQLException { setParam(index, null); }
+    @Override public void setNull(int index, int sqlType, String typeName) throws SQLException { setParam(index, null); }
+    @Override public void setBoolean(int index, boolean x) throws SQLException { setParam(index, x); }
+    @Override public void setByte(int index, byte x) throws SQLException { setParam(index, (int)x); }
+    @Override public void setShort(int index, short x) throws SQLException { setParam(index, (int)x); }
+    @Override public void setInt(int index, int x) throws SQLException { setParam(index, x); }
+    @Override public void setLong(int index, long x) throws SQLException { setParam(index, x); }
+    @Override public void setFloat(int index, float x) throws SQLException { setParam(index, (double)x); }
+    @Override public void setDouble(int index, double x) throws SQLException { setParam(index, x); }
+    @Override public void setString(int index, String x) throws SQLException { setParam(index, x); }
+    @Override public void setBytes(int index, byte[] x) throws SQLException { setParam(index, x); }
+    @Override public void setDate(int index, java.sql.Date x) throws SQLException { setParam(index, x); }
+    @Override public void setTime(int index, java.sql.Time x) throws SQLException { setParam(index, x); }
+    @Override public void setTime(int index, java.sql.Time x, java.util.Calendar cal) throws SQLException { setParam(index, x); }
+    @Override public void setTimestamp(int index, java.sql.Timestamp x) throws SQLException { setParam(index, x); }
+    @Override public void setTimestamp(int index, java.sql.Timestamp x, java.util.Calendar cal) throws SQLException { setParam(index, x); }
+    @Override public void setBigDecimal(int index, BigDecimal x) throws SQLException { setParam(index, x); }
+    @Override public void setArray(int index, Array x) throws SQLException { setParam(index, x); }
+    @Override public void setRef(int index, Ref x) throws SQLException { setParam(index, x); }
+    @Override public void setURL(int index, URL x) throws SQLException { setParam(index, x); }
+    @Override public void setObject(int index, Object x) throws SQLException { setParam(index, x); }
+    @Override public void setObject(int index, Object x, int targetSqlType) throws SQLException { setParam(index, x); }
+    @Override public void setObject(int index, Object x, int targetSqlType, int scale) throws SQLException { setParam(index, x); }
+    @Override public void setRowId(int index, RowId x) throws SQLException { setParam(index, x); }
+    @Override public void setSQLXML(int index, SQLXML x) throws SQLException { setParam(index, x); }
+    @Override public void setAsciiStream(int index, InputStream x) throws SQLException { setParam(index, x); }
+    @Override public void setAsciiStream(int index, InputStream x, int length) throws SQLException { setParam(index, x); }
+    @Override public void setAsciiStream(int index, InputStream x, long length) throws SQLException { setParam(index, x); }
+    @Override public void setBinaryStream(int index, InputStream x) throws SQLException { setParam(index, x); }
+    @Override public void setBinaryStream(int index, InputStream x, int length) throws SQLException { setParam(index, x); }
+    @Override public void setBinaryStream(int index, InputStream x, long length) throws SQLException { setParam(index, x); }
+    @Override public void setCharacterStream(int index, Reader x) throws SQLException { setParam(index, x); }
+    @Override public void setCharacterStream(int index, Reader x, int length) throws SQLException { setParam(index, x); }
+    @Override public void setCharacterStream(int index, Reader x, long length) throws SQLException { setParam(index, x); }
+    @Override public void setNCharacterStream(int index, Reader x) throws SQLException { setParam(index, x); }
+    @Override public void setNCharacterStream(int index, Reader x, long length) throws SQLException { setParam(index, x); }
+    @Override public void setNString(int index, String x) throws SQLException { setParam(index, x); }
+    @Override public void setNClob(int index, NClob x) throws SQLException { setParam(index, x); }
+    @Override public void setNClob(int index, Reader x) throws SQLException { setParam(index, x); }
+    @Override public void setNClob(int index, Reader x, long length) throws SQLException { setParam(index, x); }
+    @Override public void setClob(int index, Clob x) throws SQLException { setParam(index, x); }
+    @Override public void setClob(int index, Reader x) throws SQLException { setParam(index, x); }
+    @Override public void setClob(int index, Reader x, long length) throws SQLException { setParam(index, x); }
+    @Override public void setBlob(int index, Blob x) throws SQLException { setParam(index, x); }
+    @Override public void setBlob(int index, InputStream x) throws SQLException { setParam(index, x); }
+    @Override public void setBlob(int index, InputStream x, long length) throws SQLException { setParam(index, x); }
+    @Override public void setUnicodeStream(int index, InputStream x, int length) throws SQLException { setParam(index, x); }
     @Override public void clearParameters() { params.clear(); }
     @Override public ResultSetMetaData getMetaData() { return null; }
     @Override public ParameterMetaData getParameterMetaData() { return null; }
-    @Override public boolean execute(String sql, String[] columnNames) { return false; }
-    @Override public void addBatch() {}
-    @Override public void addBatch(String sql) {}
-    @Override public int[] executeBatch() { return new int[0]; }
-    @Override public void clearBatch() {}
-    @Override public void setDate(int index, java.sql.Date x, java.util.Calendar cal) { setParam(index, x); }
+    @Override public void addBatch() throws SQLException { queue(buildSql()); }
+    @Override public void addBatch(String sql) throws SQLException {
+        throw new SQLException(Messages.get("jdbc_batch_sql_on_prepared"));
+    }
+    @Override public void setDate(int index, java.sql.Date x, java.util.Calendar cal) throws SQLException { setParam(index, x); }
 }

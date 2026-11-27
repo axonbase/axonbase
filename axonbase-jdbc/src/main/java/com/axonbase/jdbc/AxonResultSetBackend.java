@@ -14,6 +14,7 @@ public class AxonResultSetBackend {
     private final List<String> columns = new ArrayList<>();
     private int rowIndex = -1;
     private boolean closed;
+    private boolean lastWasNull;
 
     public AxonResultSetBackend(AxonValue value) {
         if (value == null) return;
@@ -55,7 +56,12 @@ public class AxonResultSetBackend {
     }
     public void close() { closed = true; rows.clear(); columns.clear(); }
     public boolean isClosed() { return closed; }
-    public boolean wasNull() { return false; }
+    public boolean wasNull() { return lastWasNull; }
+
+    /** Aplica o {@code setMaxRows} do statement; zero é sem limite. */
+    void limit(int maxRows) {
+        if (maxRows > 0 && rows.size() > maxRows) rows.subList(maxRows, rows.size()).clear();
+    }
 
     private Map<String, AxonValue> currentRow() throws SQLException {
         if (closed) throw new SQLException("ResultSet is closed");
@@ -68,6 +74,7 @@ public class AxonResultSetBackend {
         Map<String, AxonValue> row = currentRow();
         AxonValue v = row.get(label);
         if (v == null && label.indexOf('.') > 0) v = row.get(label.substring(label.indexOf('.') + 1));
+        lastWasNull = v == null || v.isNull() || v.isNone();
         return v;
     }
     private String colLabel(int i) throws SQLException {
@@ -80,7 +87,7 @@ public class AxonResultSetBackend {
     public String getString(int i) throws SQLException { return getString(colLabel(i)); }
     public String getString(String label) throws SQLException {
         AxonValue v = col(label);
-        if (v == null) return null;
+        if (lastWasNull) return null;
         if (v.isString()) return v.asString();
         if (v.isDatetime()) return v.asInstant().toString();
         return v.isRecordId() ? v.asRecordId().toString() : v.toString();
