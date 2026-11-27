@@ -13,6 +13,12 @@ Tire um backup antes de atualizar.
 - Instalações fora de contêiner e as que usam `--path /data/db` com volume em `/data` não precisam desse passo.
 - O passo a passo, inclusive como voltar atrás, está em [cluster Raft](cluster-raft.md#contêiner-com-o-comando-padrão-copiar-antes-de-recriar).
 
+## Atenção: chave primária durante a atualização de um cluster
+
+> **Enquanto um nó da rc1 for o líder, a `PRIMARY KEY` não é conferida: a rc1 aceita valores repetidos.** Atualize primeiro os seguidores, transfira a liderança para um nó já atualizado e atualize por último o antigo líder. Evite escrever em tabelas com chave primária até a transferência. Depois dela, confira se há repetidos: eles continuam gravados.
+
+> **Voltar para a rc1 exige restaurar o backup feito antes da atualização.** A rc1 não mantém os registros internos da chave primária.
+
 ## Mudanças de comportamento
 
 ### `CREATE` e `INSERT` recusam um registro que já existe
@@ -36,6 +42,8 @@ Tire um backup antes de atualizar.
 - `ALTER TABLE ... MODIFY COLUMN` mantém o `NOT NULL` e a chave primária que a coluna já tinha. `DEFINE FIELD` sobre uma coluna a redefine por inteiro, sem essas restrições.
 - Em tabela dividida por shards, a chave primária precisa conter a chave de shard.
 - Ao abrir uma base da rc1, o motor percorre uma vez cada tabela com chave primária para registrar os valores existentes.
+- Em cluster, o líder confere esses registros de novo na primeira escrita de cada tabela com chave primária em cada mandato, e depois de um reinício. Veja [chave primária e `UNIQUE` na troca de líder](cluster-raft.md#chave-primária-e-unique-na-troca-de-líder).
+- `DEFINE FIELD` sobre uma coluna da chave primária retira também os registros internos da chave antiga.
 - A rc1 não guardava o `CHECK` de tabela. Declare-o de novo com `CREATE TABLE`.
 - A tradução de SQL (Structured Query Language) do driver JDBC (`sql.translate=true`) continua descartando as restrições do `CREATE TABLE`.
 
