@@ -32,6 +32,15 @@ class ClusterMembershipRestartTest {
         return cluster.nodes().stream().filter(node -> node != leader).toList();
     }
 
+    /**
+     * Logo depois da eleição o líder pode só ter ouvido quem lhe deu o voto (com o log vazio, a convergência não prova
+     * resposta alguma), e recusa mudar os membros enquanto não alcança o quórum da lista nova.
+     */
+    private static void awaitLeaderHeardEveryone(ClusterRuntime leader) {
+        ClusterHarness.await("o líder não ouviu todos os membros", 10_000,
+            () -> leader.peerInfos().stream().allMatch(ClusterRuntime.PeerInfo::active));
+    }
+
     @Test
     @DisplayName("depois de uma saída, o seguidor reiniciado vê o líder e não conta a si mesmo")
     void restartedFollowerAfterLeaveSeesTheLeaderAndNotItself() {
@@ -43,8 +52,10 @@ class ClusterMembershipRestartTest {
             String stays = followers(cluster, leader).get(0).config().nodeId();
             String leaves = followers(cluster, leader).get(1).config().nodeId();
 
-            assertTrue(leader.removePeer(text(cluster.address(leaves))));
+            awaitLeaderHeardEveryone(leader);
+            // quem sai para antes: de pé e sem batimentos, abriria uma eleição enquanto a saída é confirmada
             cluster.stop(leaves);
+            assertTrue(leader.removePeer(text(cluster.address(leaves))));
             cluster.awaitConverged();
             cluster.stop(stays);
             ClusterRuntime restarted = cluster.start(stays);
@@ -66,6 +77,7 @@ class ClusterMembershipRestartTest {
             String other = followers(cluster, leader).get(1).config().nodeId();
             InetSocketAddress joining = cluster.address("d");
 
+            awaitLeaderHeardEveryone(leader);
             assertTrue(leader.addPeer("d", joining));
             cluster.awaitConverged();
             cluster.stop(follower);
