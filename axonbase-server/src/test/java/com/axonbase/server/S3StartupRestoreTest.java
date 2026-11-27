@@ -17,7 +17,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -143,6 +145,23 @@ class S3StartupRestoreTest {
         Datastore restarted = new Datastore(backend);
         assertThrows(IllegalStateException.class,
             () -> Main.restoreAtStartup(restarted, backend, manager(restarted, good, "")));
+    }
+
+    @Test
+    @DisplayName("com a base pela metade, nenhum backup vai para o balde por cima do histórico")
+    void interruptedRestoreBlocksBackups() {
+        // uma linha estragada para a restauração no meio, como a pedida pela rota de administração com o servidor no ar
+        assertThrows(RuntimeException.class,
+            () -> ds.restoreCluster("--axonbase-backup-v1--\nchave-ruim\t###\n"));
+        InMemoryBackupStore store = withBackup("");
+        byte[] good = store.download("bucket", BACKUP);
+        S3SyncManager periodic = new S3SyncManager(ds, store, "bucket", "", 60_000L, 10, "", () -> 0L,
+            () -> "20000000-030302");
+
+        assertFalse(periodic.backupNow());
+
+        assertEquals(1, store.listObjects("bucket", "cluster-").size());
+        assertArrayEquals(good, store.download("bucket", BACKUP));
     }
 
     @Test

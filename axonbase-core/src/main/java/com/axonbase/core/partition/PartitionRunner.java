@@ -211,6 +211,10 @@ public record PartitionRunner(Datastore ds, Session session, Database db, KvBack
                 if (m.cold() && !ds.coldTier().configured()) {
                     throw AxonError.internal(Messages.get("cold_not_configured"));
                 }
+                if (next.state() == PartitionDescriptor.State.THAWING && ds.clustered() && !ds.coldTier()
+                    .fitsClusterEntry(db, m.table(), partition.rows(), partition.bytes())) {
+                    throw AxonError.internal(ds.coldTier().tooLargeForCluster(m.table(), partition.start()));
+                }
                 PartitionChanges changes = new PartitionChanges();
                 changes.save(db, m.table(), next);
                 changes.apply(db, m.table(), records);

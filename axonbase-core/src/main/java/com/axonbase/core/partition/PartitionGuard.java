@@ -1,5 +1,6 @@
 package com.axonbase.core.partition;
 
+import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.core.catalog.Database;
 import com.axonbase.core.storage.KvBackend;
@@ -10,6 +11,7 @@ import java.time.Instant;
 import java.util.Set;
 import java.util.function.BiPredicate;
 import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Condições de commit que ordenam escritas e mudanças de partição. Usam a trava de índices do banco: escritas seguram
@@ -19,6 +21,23 @@ import java.util.concurrent.locks.Lock;
 final class PartitionGuard {
 
     private PartitionGuard() {
+    }
+
+    /**
+     * O lado de escrita da trava de índices, para uma condição exclusiva.
+     *
+     * @param start a partição que seria criada, ou {@code null} numa mudança de partições
+     * @throws com.axonbase.common.AxonError quando esta thread já segura a leitura (uma transação confirmada de dentro
+     *         de uma escrita, como a de uma procedure chamada por um evento): a trava não promove leitura para
+     *         escrita, e pedir travaria o banco para sempre
+     */
+    private static Lock writeLock(Database db, String table, Long start) {
+        ReentrantReadWriteLock lock = db.indexLock();
+        if (lock.getReadHoldCount() > 0 && !lock.isWriteLockedByCurrentThread()) {
+            throw AxonError.internal(start == null ? Messages.get("partition_in_write")
+                : Messages.get("partition_create_in_write", table + " " + Instant.ofEpochMilli(start)));
+        }
+        return lock.writeLock();
     }
 
     /**
@@ -37,7 +56,7 @@ final class PartitionGuard {
 
             @Override
             public Transaction.Held enter() {
-                Lock lock = created ? db.indexLock().writeLock() : db.indexLock().readLock();
+                Lock lock = created ? writeLock(db, table, start) : db.indexLock().readLock();
                 lock.lock();
                 var current = db.records().get(key).map(PartitionDescriptor::decode);
                 boolean valid = current.map(PartitionDescriptor::writable).orElse(created);
@@ -92,7 +111,7 @@ final class PartitionGuard {
 
             @Override
             public Transaction.Held enter() {
-                Lock lock = db.indexLock().writeLock();
+                Lock lock = writeLock(db, table, null);
                 lock.lock();
                 return lock::unlock;
             }

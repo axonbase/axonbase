@@ -41,7 +41,7 @@ Regras:
 
 ## Catálogo
 
-A definição (campo, intervalo, retenção, prazo frio, TTL) fica no plano de controle, em dois tipos novos (`PARTITIONING` e `TTL`), com o texto AxonQL da própria instrução. É replicada e reexecutada como as demais definições.
+A definição (campo, intervalo, retenção, prazo frio, TTL) fica no plano de controle, em dois tipos novos (`PARTITIONING` e `TTL`), com o texto AxonQL da própria instrução. É replicada e reexecutada como as demais definições, com uma diferença de ordem: na releitura do catálogo, as duas vêm logo depois da tabela e antes dos índices, para que uma construção de índice retomada já saiba que a tabela é particionada.
 
 A lista de partições fica em **chaves de dados**, não no plano de controle. Assim ela entra no mesmo lote atômico das linhas, e vai de graça para o journal, a replicação e os backups.
 
@@ -103,10 +103,12 @@ O custo é constante no número de linhas: o lote tem poucas chaves. O espaço e
 
 - A mudança de estado ou a remoção de uma partição pega o lado de escrita da trava de índices do banco durante o commit. Os statements e os commits de escrita seguram o lado de leitura, então nunca há uma escrita pela metade.
 - Uma transação anota as partições em que escreveu. No `COMMIT`, se alguma sumiu ou deixou de ser `HOT`, ela falha com conflito e nada é gravado.
+- Em cluster, essas conferências esperam antes o nó aplicar as entradas pendentes do log (um líder recém eleito, ou uma escrita anterior sem desfecho). Se a liderança mudar, ou outra escrita ficar sem desfecho, entre a conferência e a confirmação, o commit falha com conflito. Um comando avulso é refeito pelo motor sobre o estado novo.
 - Criar uma partição dentro de uma transação não gera conflito entre transações que criam a mesma.
 - `DROP PARTITION` dentro de uma transação explícita vale no `COMMIT`. Depois dele, a própria transação já não vê as linhas, e o que ela tinha gravado naquela faixa antes do comando também sai. Pode regravar na mesma faixa.
 - Como o id não diz a partição, duas escritas avulsas sobre a mesma linha particionada não são mais "a última vence" às cegas: o commit confere que os lugares olhados continuam iguais e, se não, refaz o comando (até 100 vezes). Isso impede que mover e editar a mesma linha, ou criar o mesmo id em dias diferentes, deixe duas cópias.
 - Numa transação, o mesmo id ou o mesmo valor único gravado por outra numa partição que não existia quando a primeira procurou faz o segundo `COMMIT` falhar. Um commit que cria partição corre sozinho.
+- Em nó único, uma transação confirmada de dentro de outra escrita (uma procedure chamada por um `DEFINE EVENT`) não pode **criar** partição: o comando é recusado com erro e nada é gravado. Crie a partição antes, com uma escrita comum nessa faixa de tempo, o que em partições por tempo se repete a cada faixa nova. Para eventos que gravam em tabela particionada, prefira o `CREATE` direto no `THEN`, sem procedure.
 - `DEFINE PARTITION` dentro de transação (em cluster, sempre) só vale no `COMMIT`: até lá as outras sessões recebem conflito ao escrever na tabela, e o commit confere que ela continua vazia.
 
 Dois limites conhecidos:
@@ -143,13 +145,15 @@ Um objeto por partição, **imutável**, de nome único: `parts/<ns>/<db>/<tabel
 
 1. **Congelar:** commit que passa o estado para `FREEZING`. A partir daí nenhuma escrita entra.
 2. **Enviar:** lê os registros, grava o objeto, baixa de volta e confere o SHA-256. Sem trava: o resto do banco continua gravando.
-3. **Trocar:** um único lote com a remoção por faixa dos registros, o descritor `COLD` e o filtro de Bloom.
+3. **Trocar:** um único lote com a remoção por faixa dos registros, o descritor `COLD` e o filtro de Bloom. Antes disso o motor confere que os registros locais são exatamente os enviados. Com qualquer diferença nada é apagado, o evento `partition_freeze_mismatch` vai para o registro do servidor e a rodada seguinte envia de novo.
 
 Cada tentativa usa um nome de objeto novo, e quem envia nunca apaga objeto: outro nó, ou uma base restaurada, pode estar usando o mesmo armazenamento. Uma tentativa que sobra vira órfã e sai pela coleta de lixo. Toda troca de estado confere que o descritor não mudou desde que foi lido.
 
 Uma queda entre os passos deixa a partição em `FREEZING`, com os dados locais intactos; a rodada seguinte recomeça. A volta (`THAWING`) grava os registros e o estado `HOT` num lote só.
 
 Um objeto vai até 2 GB sem compressão. Uma partição maior que isso não é movida (a manutenção registra a falha e ela fica em `FREEZING` até um `TO HOT`): use um `INTERVAL` menor. A volta da camada fria monta um lote com a partição inteira em memória (em cluster, uma única entrada do log Raft), então partições grandes pedem memória na mesma proporção.
+
+**Teto em cluster:** como a volta é uma única entrada do log Raft, que não passa de 1 GiB, em cluster a partição só vai para a camada fria e volta dela até um tamanho estimado de 256 MiB (os bytes do objeto sem compressão mais o custo das chaves de cada linha). Acima disso, no envio a partição volta a `HOT`, fica fixada como local e o evento `partition_too_large_for_cluster` vai para o registro do servidor; `TO HOT` de uma partição fria é recusado com erro; e uma volta que já estava pedida fica em `THAWING`, legível pelo objeto, até um `TO COLD`. Uma partição acima do teto que já esteja fria num cluster continua consultável, e ainda não há como trazê-la de volta em cluster. Use um `INTERVAL` menor. Em nó único o limite continua o de 2 GB.
 
 ### Cache
 

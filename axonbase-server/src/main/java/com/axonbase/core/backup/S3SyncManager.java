@@ -198,6 +198,10 @@ public final class S3SyncManager implements AutoCloseable {
             long startedAt = System.currentTimeMillis();
             long t0 = System.nanoTime();
             try {
+                if (datastore.restoreInterrupted()) {
+                    // enviar a base pela metade faria a retenção apagar os backups bons
+                    throw new IllegalStateException(Messages.get("server_s3_restore_interrupted"));
+                }
                 // Marca d'água lida ANTES do dump. A versão do backend é a mesma grandeza que
                 // backupIncremental compara; o índice de commit do Raft é outra e não serve aqui.
                 long current = datastore.backupVersion();

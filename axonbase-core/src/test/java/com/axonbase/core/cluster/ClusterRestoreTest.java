@@ -156,6 +156,33 @@ class ClusterRestoreTest {
     }
 
     @Test
+    @DisplayName("sem instante, a marca à frente do último lote prova que falta o fim do histórico")
+    void lostTailStopsRecoveryWithoutInstant() {
+        Path backups = backup();
+        Path directory = dir.resolve("journal-cauda");
+        AtomicReference<CommitWatermark> mark = new AtomicReference<>(CommitWatermark.NONE);
+        JournalOptions options = JournalOptions.defaults().withIdleHeartbeat(Duration.ZERO);
+        try (PitrJournal journal = PitrJournal.open(directory, options, mark::get)) {
+            for (long index : new long[] {6, 7}) {
+                journal.offer(index, new CommittedBatch("tx" + index,
+                    Map.of("k" + index, bytes("v" + index)), Set.of(), false, stamp(index)));
+                mark.set(new CommitWatermark(stamp(index), index));
+            }
+            journal.seal();
+            // os lotes 8 e 9 foram confirmados com a fila do journal cheia: só a marca andou
+            mark.set(new CommitWatermark(stamp(9), 9));
+            journal.seal();
+        }
+        Path target = dir.resolve("restaurada");
+
+        ClusterRestore.Unreachable failure = assertThrows(ClusterRestore.Unreachable.class,
+            () -> ClusterRestore.prepare(backups, 1, List.of(directory), target, null));
+
+        assertEquals(stamp(7), failure.latest());
+        assertFalse(java.nio.file.Files.exists(target.resolve("CURRENT")), "ficou uma base pela metade");
+    }
+
+    @Test
     @DisplayName("um instante depois do que os segmentos provam é recusado")
     void beyondCoverage() {
         Path backups = backup();

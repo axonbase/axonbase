@@ -205,12 +205,15 @@ public final class ClusterRestore {
             if (finished) {
                 return;
             }
-            boolean beyond = !ahead.isEmpty() || sources.stream()
-                .anyMatch(s -> s.info().batches() > 0 && s.info().lastIndex() >= next);
             if (until == null) {
+                // um lote adiante, ou a marca de um segmento que diz que o log chegou ao índice que falta: o lote
+                // existiu e se perdeu (a fila do journal pode estourar justamente nos últimos)
+                boolean beyond = !ahead.isEmpty() || sources.stream().anyMatch(s ->
+                    s.info().complete().index() >= next
+                        || s.info().batches() > 0 && s.info().lastIndex() >= next);
                 if (beyond) {
-                    throw new Unreachable("falta o lote " + next + " em todos os segmentos, e há lotes depois dele",
-                        lastStamp);
+                    throw new Unreachable("falta o lote " + next + " em todos os segmentos, e o journal registra que "
+                        + "o log chegou até ele: informe um instante anterior à perda", lastStamp);
                 }
                 return;
             }

@@ -17,8 +17,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -68,6 +70,13 @@ final class ColdMover {
                     return false; // alguém desistiu ou removeu a partição durante o envio
                 }
                 String prefix = PartitionKeys.partitionPrefix(db.ns(), db.db(), table, start);
+                // a faixa apagada precisa conter exatamente o que foi enviado: com outra linha ali, nada sai, e a
+                // rodada seguinte envia de novo
+                if (!holdsOnly(db, prefix, upload.recordKeys())) {
+                    System.err.println("{\"event\":\"partition_freeze_mismatch\",\"target\":\"" + db.ns() + "."
+                        + db.db() + "." + table + " " + start + "\"}");
+                    return false;
+                }
                 PartitionChanges changes = new PartitionChanges();
                 // só os registros (n, s, x) saem; os índices locais, que vêm antes na ordem, ficam
                 changes.deleteRange(new RangeDelete.Range(prefix + "n", prefix + "y"));
@@ -76,15 +85,49 @@ final class ColdMover {
                 changes.apply(db, table, tx);
                 return true;
             });
+        } catch (TooLarge refused) {
+            keepLocal(db, table, start, key);
+            logTooLarge(db, table, start);
+            return false;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /** Em cluster, uma partição que não conseguiria voltar não vai: ela fica local, fixada, e volta a aceitar escrita. */
+    private void keepLocal(Database db, String table, long start, String key) {
+        change(db, table, start, tx -> {
+            PartitionDescriptor current = PartitionStore.track(db, tx, table, start).orElse(null);
+            if (current == null || current.state() != PartitionDescriptor.State.FREEZING
+                || !key.equals(current.object())) {
+                return false;
+            }
+            PartitionChanges changes = new PartitionChanges();
+            changes.save(db, table, current.requestHot());
+            changes.apply(db, table, tx);
+            return true;
+        });
+    }
+
+    private void logTooLarge(Database db, String table, long start) {
+        System.err.println("{\"event\":\"partition_too_large_for_cluster\",\"target\":\"" + db.ns() + "."
+            + db.db() + "." + table + "\",\"error\":\"" + ds.coldTier().tooLargeForCluster(table, start) + "\"}");
+    }
+
+    /** A partição passa do teto de uma entrada do log Raft. */
+    private static final class TooLarge extends IOException {
     }
 
     /** @return {@code true} quando a partição voltou para o armazenamento local */
     boolean thaw(Database db, String table, long start) {
         PartitionDescriptor thawing = PartitionStore.read(db, db.records(), table, start).orElse(null);
         if (thawing == null || thawing.state() != PartitionDescriptor.State.THAWING) {
+            return false;
+        }
+        if (ds.clustered()
+            && !ds.coldTier().fitsClusterEntry(db, table, thawing.rows(), thawing.bytes())) {
+            // uma volta pedida antes (ou antes de o nó entrar no cluster) fica lida do objeto; TO COLD a encerra
+            logTooLarge(db, table, start);
             return false;
         }
         ColdObject.Reader reader = ds.coldTier().cache().open(thawing.object());
@@ -138,7 +181,24 @@ final class ColdMover {
         return saved ? Optional.of(reserved) : Optional.empty();
     }
 
-    private record Upload(long rows, long bytes, BloomFilter filter) {
+    private record Upload(long rows, long bytes, BloomFilter filter, Set<String> recordKeys) {
+    }
+
+    /** {@code true} quando os registros locais da partição são exatamente os de {@code sent}. */
+    private static boolean holdsOnly(Database db, String prefix, Set<String> sent) {
+        int[] found = {0};
+        boolean[] unknown = {false};
+        for (String lead : List.of("n", "s", "x")) {
+            db.records().scanPrefix(prefix + lead, physical -> {
+                found[0]++;
+                unknown[0] = !sent.contains(physical.substring(prefix.length()));
+                return !unknown[0];
+            });
+            if (unknown[0]) {
+                return false;
+            }
+        }
+        return found[0] == sent.size();
     }
 
     private Upload upload(Database db, String table, long start, String key) throws IOException {
@@ -152,6 +212,7 @@ final class ColdMover {
         }
         recordKeys.sort(Arrays::compareUnsigned); // o objeto segue a ordem dos bytes
         BloomFilter filter = BloomFilter.sizedFor(recordKeys.size());
+        Set<String> sent = new HashSet<>();
         Path written = Files.createTempFile("axon-freeze-", ".gz");
         Path readBack = Files.createTempFile("axon-freeze-check-", ".gz");
         try {
@@ -164,6 +225,7 @@ final class ColdMover {
                         () -> new IOException("registro sumiu de uma partição congelada: " + recordKey));
                     writer.add(recordKey, value);
                     filter.add(recordKey);
+                    sent.add(recordKey);
                 }
                 rows = writer.rows();
                 bytes = writer.bytes();
@@ -171,13 +233,16 @@ final class ColdMover {
                     throw new IOException("a partição passa de 2 GB e não cabe num objeto frio: "
                         + "use um INTERVAL menor");
                 }
+                if (ds.clustered() && !ds.coldTier().fitsClusterEntry(db, table, rows, bytes)) {
+                    throw new TooLarge();
+                }
                 writer.finish();
             }
             ds.coldTier().store().upload(key, written);
             if (!ds.coldTier().store().download(key, readBack) || Files.mismatch(written, readBack) != -1L) {
                 throw new IOException("o objeto enviado não confere: " + key);
             }
-            return new Upload(rows, bytes, filter);
+            return new Upload(rows, bytes, filter, sent);
         } finally {
             Files.deleteIfExists(written);
             Files.deleteIfExists(readBack);

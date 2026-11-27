@@ -20,6 +20,9 @@ final class PartitionMessages {
         Map.entry("partition_cold_after_invalid", "COLD AFTER precisa ser menor que RETENTION"),
         Map.entry("partition_redefine", "a tabela %s já tem partições: campo e intervalo não podem mudar"),
         Map.entry("partition_in_write", "comandos de partição não podem rodar dentro de uma escrita (evento ou bloco)"),
+        Map.entry("partition_create_in_write", "a partição %s ainda não existe e não pode ser criada por uma "
+            + "transação confirmada dentro de outra escrita (uma procedure chamada por um evento): crie a partição "
+            + "antes, com uma escrita comum nessa faixa"),
         Map.entry("partition_none_found", "nenhuma partição de %s cobre o instante %s"),
         Map.entry("partition_time_invalid", "o instante precisa ser um datetime: %s"),
         Map.entry("partition_index_orphan", "índice sem registro na tabela particionada %s: %s"),
@@ -33,7 +36,9 @@ final class PartitionMessages {
         Map.entry("cold_restore_unconfigured",
             "a base referencia %s objeto(s) na camada fria, que não está configurada: defina AXON_COLD_DIR ou "
                 + "AXON_COLD_S3 e repita a restauração (nada foi alterado)"),
-        Map.entry("cold_hold_failed", "não foi possível bloquear os objetos frios do backup: %s")
+        Map.entry("cold_hold_failed", "não foi possível bloquear os objetos frios do backup: %s"),
+        Map.entry("cold_partition_too_large", "a partição %s é grande demais para a camada fria em cluster: a volta "
+            + "é uma única entrada do log Raft, com teto estimado de %s MiB. Ela não é movida; use um INTERVAL menor")
     );
 
     static final Map<String, String> EN = Map.ofEntries(
@@ -50,6 +55,9 @@ final class PartitionMessages {
         Map.entry("partition_cold_after_invalid", "COLD AFTER must be shorter than RETENTION"),
         Map.entry("partition_redefine", "table %s already has partitions: field and interval cannot change"),
         Map.entry("partition_in_write", "partition commands cannot run inside a write (event or block)"),
+        Map.entry("partition_create_in_write", "partition %s does not exist yet and cannot be created by a "
+            + "transaction committed inside another write (a procedure called from an event): create the partition "
+            + "first, with a plain write in that range"),
         Map.entry("partition_none_found", "no partition of %s covers instant %s"),
         Map.entry("partition_time_invalid", "the instant must be a datetime: %s"),
         Map.entry("partition_index_orphan", "index entry without a record in partitioned table %s: %s"),
@@ -62,7 +70,9 @@ final class PartitionMessages {
         Map.entry("cold_restore_unconfigured",
             "the database references %s object(s) in the cold tier, which is not configured: set AXON_COLD_DIR or "
                 + "AXON_COLD_S3 and restore again (nothing was changed)"),
-        Map.entry("cold_hold_failed", "could not hold the backup's cold objects: %s")
+        Map.entry("cold_hold_failed", "could not hold the backup's cold objects: %s"),
+        Map.entry("cold_partition_too_large", "partition %s is too large for the cold tier in a cluster: bringing it "
+            + "back is a single Raft log entry, capped at an estimated %s MiB. It is not moved; use a smaller INTERVAL")
     );
 
     private PartitionMessages() {

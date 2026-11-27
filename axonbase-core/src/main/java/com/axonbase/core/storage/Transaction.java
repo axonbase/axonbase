@@ -187,6 +187,11 @@ public final class Transaction implements KvBackend {
         guards.putIfAbsent(id, guard);
     }
 
+    /** Há condições a conferir no commit. */
+    public boolean hasGuards() {
+        return !guards.isEmpty();
+    }
+
     /** Entra em todas as condições. Se uma falhar, solta as anteriores e relança. */
     public Held enterGuards() {
         java.util.Deque<Held> held = new java.util.ArrayDeque<>();

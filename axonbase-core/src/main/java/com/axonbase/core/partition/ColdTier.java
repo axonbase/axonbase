@@ -28,22 +28,33 @@ import java.util.function.BiPredicate;
  */
 public final class ColdTier implements AutoCloseable {
 
-    /** Padrões: 35 dias de carência (o máximo da restauração a um instante) e coleta de lixo de hora em hora. */
-    public record Settings(long cacheBytes, Duration grace, Duration gcInterval, Duration logicalHold) {
+    /**
+     * Padrões: 35 dias de carência (o máximo da restauração a um instante) e coleta de lixo de hora em hora.
+     *
+     * @param clusterBytes em cluster, o maior tamanho estimado de uma partição que pode ir para a camada fria ou
+     *                     voltar dela: a volta é uma única entrada do log Raft, que não passa de 1 GiB
+     */
+    public record Settings(long cacheBytes, Duration grace, Duration gcInterval, Duration logicalHold,
+                           long clusterBytes) {
         public static Settings defaults() {
-            return new Settings(1024L << 20, Duration.ofDays(35), Duration.ofHours(1), Duration.ofDays(35));
+            return new Settings(1024L << 20, Duration.ofDays(35), Duration.ofHours(1), Duration.ofDays(35),
+                256L << 20);
         }
 
         public Settings withGrace(Duration value) {
-            return new Settings(cacheBytes, value, gcInterval, logicalHold);
+            return new Settings(cacheBytes, value, gcInterval, logicalHold, clusterBytes);
         }
 
         public Settings withGcInterval(Duration value) {
-            return new Settings(cacheBytes, grace, value, logicalHold);
+            return new Settings(cacheBytes, grace, value, logicalHold, clusterBytes);
         }
 
         public Settings withCacheBytes(long value) {
-            return new Settings(value, grace, gcInterval, logicalHold);
+            return new Settings(value, grace, gcInterval, logicalHold, clusterBytes);
+        }
+
+        public Settings withClusterBytes(long value) {
+            return new Settings(cacheBytes, grace, gcInterval, logicalHold, value);
         }
     }
 
@@ -100,7 +111,8 @@ public final class ColdTier implements AutoCloseable {
             number(env, "AXON_COLD_CACHE_MB", d.cacheBytes() >> 20) << 20,
             Duration.ofDays(grace),
             Duration.ofSeconds(number(env, "AXON_COLD_GC_INTERVAL_SECONDS", d.gcInterval().toSeconds())),
-            Duration.ofDays(number(env, "AXON_COLD_LOGICAL_HOLD_DAYS", d.logicalHold().toDays())));
+            Duration.ofDays(number(env, "AXON_COLD_LOGICAL_HOLD_DAYS", d.logicalHold().toDays())),
+            d.clusterBytes());
         String cache = value(env, "AXON_COLD_CACHE_DIR");
         return of(store, Path.of(cache != null ? cache : System.getProperty("java.io.tmpdir")), settings);
     }
@@ -142,6 +154,21 @@ public final class ColdTier implements AutoCloseable {
 
     public Settings settings() {
         return settings;
+    }
+
+    /**
+     * A volta de uma partição deste tamanho cabe, com folga, numa entrada do log Raft. A estimativa soma o que está
+     * no objeto às chaves físicas que cada linha ganha de volta (registro e validade).
+     */
+    boolean fitsClusterEntry(Database db, String table, long rows, long bytes) {
+        long perRow = 2L * (db.ns().length() + db.db().length() + table.length()) + 96;
+        return bytes + rows * perRow <= settings.clusterBytes();
+    }
+
+    /** A mensagem de recusa de uma partição que não passa em {@link #fitsClusterEntry}. */
+    String tooLargeForCluster(String table, long start) {
+        return Messages.get("cold_partition_too_large", table + " " + java.time.Instant.ofEpochMilli(start),
+            settings.clusterBytes() >> 20);
     }
 
     public String engineId() {
