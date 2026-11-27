@@ -298,6 +298,17 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 - O servidor MCP (Model Context Protocol) atende `initialize` e responde no formato JSON-RPC. A autenticação continua exigida, e mensagens sem o campo `jsonrpc` mantêm o formato anterior.
 - O script da demonstração de SAGA com SQLAlchemy monta o caminho de classes completo.
 
+### Dados nos comandos montados pelos conectores
+
+- A injeção fica fechada nos caminhos de SAGA do driver JDBC (`joinSaga`), do `AxonSagaTemplate` e do `capture` do SDK Java: nome, correlação, tabela e chave entram como dados.
+- Nos conectores, nome e correlação de SAGA com aspa, barra invertida ou quebra de linha funcionam. O nome vai entre aspas quando não é um identificador simples.
+- No `capture` do SDK Java, a tabela precisa ser um identificador simples, a chave é passada crua, sem aspas nem crases, e cada chamada grava um único passo.
+- No driver JDBC e no driver Python, um parâmetro numérico negativo ganha um espaço antes, para não formar o comentário `--`, e a quebra de linha de um texto vai como `\n`.
+- Com `sql.translate=true`, só um comando iniciado por `CREATE TABLE` vira definição de tabela. O mesmo texto dentro de um literal continua sendo dado.
+- O `vectorstore` do conector Python envia como texto a chave de registro que não é numérica e recusa um nome de coleção com `--`.
+- O participante de SAGA do SDK PHP (PHP: Hypertext Preprocessor) passa a gravar em `$saga_corr` a correlação correta. Antes gravava o texto `{}`.
+- O exemplo de microsserviços recusa, com o código 422, identificadores com algo além de letras, números, `_` e `-`.
+
 ## Correções de perda ou corrupção de dados
 
 ### Catálogo e reinício
@@ -330,6 +341,7 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 - A compensação preserva a chave, com o tipo dela, e o `id` do registro, e segue a ordem dos passos também depois de um reinício ou de uma troca de líder.
 - `CANCEL SAGA` retoma uma compensação que parou no meio.
 - A compensação deixa de montar comandos por texto. Nome de tabela, chave, propriedade e valor, inclusive os de passos gravados por versões anteriores, são tratados só como dados. O texto enviado a um participante remoto é conferido antes de seguir, e tem de ser uma única sentença do tipo esperado.
+- A compensação e a coordenação de participantes por `DATABASE LINK` passam pela mesma conferência das escritas encaminhadas. Um passo remoto antigo cuja tabela, aresta ou propriedade não tenha nome simples não é enviado: o `CANCEL SAGA` devolve erro e a SAGA fica em `COMPENSATING`.
 - A compensação local repõe o estado anterior sem passar pelas `PERMISSIONS` de escrita, pelas Data Rules, por `DEFAULT`, `ASSERT`, `REFERENCES` ou embedding da tabela do passo. Antes uma tabela com `PERMISSIONS` de alteração por condição deixava a SAGA presa em `COMPENSATING`, e uma criação sem permissão de apagar era dada como desfeita sem ter sido. Índices `UNIQUE` continuam valendo.
 - A compensação roda no banco do passo com a identidade e o teto de papel de quem cancela. Os eventos que ela dispara continuam confinados ao banco da tabela, rodam com essa identidade e não herdam a dispensa: um evento barrado por `PERMISSIONS` interrompe o cancelamento.
 - Uma escrita feita por `DATABASE LINK` é desfeita por um comando comum no participante, com a credencial da ligação, então as `PERMISSIONS` e as Data Rules de lá valem. Quando barram, a SAGA fica em `COMPENSATING`: libere a credencial no participante e repita o `CANCEL SAGA`. Depois de um `DELETE` remoto o motor procura o registro, e essa conferência não enxerga uma linha que a credencial não pode ler.
@@ -358,6 +370,10 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 - `FETCH` e o acesso por ponto não seguem uma ligação gravada num campo.
 - No `JOIN`, um filtro sobre a tabela ligada pode zerar o resultado, o `ORDER BY` é ignorado, `LEFT JOIN` se comporta como junção interna e o apelido devolve nulo.
 - Uma consulta com `AT` devolve o valor atual quando não há histórico para o instante pedido.
+- Uma escrita feita direto por `DATABASE LINK` continua sujeita às `PERMISSIONS` e às Data Rules do servidor remoto quando é compensada.
+- Correlações que só diferem em caracteres que não sejam letras sem acento, números, `_` ou `-` podem dividir o mesmo registro de transação da SAGA.
+- Enquanto um nó da rc1 liderar o cluster, a `PRIMARY KEY` não é conferida.
+- Um usuário com papel `viewer` ainda grava a definição de uma tabela ao consultar uma tabela que não existe.
 - `SHOW SAGA TRANSACTION` mostra o estado anterior dos registros a quem alcança a SAGA, sem aplicar `PERMISSIONS` de leitura, Data Rules ou máscaras.
 - Quem alcança uma SAGA e pode gravar consegue cancelá-la, e o cancelamento repõe o estado anterior mesmo que as `PERMISSIONS` negassem essa escrita.
 - Informar `$saga_corr` ou o cabeçalho `X-Correlation-Id` não confere escopo. Um passo gravado em outro banco por quem conhece a correlação impede que o dono com escopo de banco a leia ou conclua: use uma identidade de namespace ou root.
