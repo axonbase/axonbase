@@ -138,7 +138,10 @@ jobs:
             echo "npm: @axonbase/sdk@${VERSION} already published, skipping"
             exit 0
           fi
-          npm ci && npm publish --access public
+          # pré-lançamento sai com a marca rc; sem ela o npm o publicaria como latest
+          dist_tag=latest
+          if [[ "$VERSION" == *-* ]]; then dist_tag=rc; fi
+          npm ci && npm publish --access public --tag "$dist_tag"
 
   publish-python:
     needs: [validate]
@@ -180,7 +183,9 @@ jobs:
           GEM_HOST_API_KEY: ${{ secrets.GEM_HOST_API_KEY }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          if gem list -r -a axonbase-sdk 2>/dev/null | grep -q "axonbase-sdk (${VERSION}"; then
+          # o RubyGems escreve o pré-lançamento com ponto (1.0.0.rc1) e só o lista com --prerelease
+          gem_version="${VERSION/-/.}"
+          if gem list -r -a --prerelease axonbase-sdk 2>/dev/null | grep -qE "[( ]${gem_version//./\\.}([,)]| )"; then
             echo "rubygems: axonbase-sdk@${VERSION} already published, skipping"
             exit 0
           fi
@@ -243,7 +248,12 @@ jobs:
           git fetch --tags
           tag="v${VERSION}"
           git rev-parse "$tag" >/dev/null 2>&1 || git tag -a "$tag" -m "SDK PHP v${VERSION}"
-          git push origin main --follow-tags
+          # pré-lançamento publica só a tag, sem mover a branch principal do repositório do SDK
+          if [[ "$VERSION" == *-* ]]; then
+            git push origin "$tag"
+          else
+            git push origin main --follow-tags
+          fi
 
   release:
     needs: [version, publish-java, publish-nodejs, publish-python, publish-dotnet, publish-ruby, publish-rust, publish-go, publish-php]
@@ -257,5 +267,7 @@ jobs:
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             echo "Release v${VERSION} already exists, skipping creation"
           else
-            gh release create "v${VERSION}" --generate-notes --title "AxonBase ${VERSION}"
+            flags=()
+            if [[ "$VERSION" == *-* ]]; then flags=(--prerelease --latest=false); fi
+            gh release create "v${VERSION}" --generate-notes --title "AxonBase ${VERSION}" "${flags[@]}"
           fi

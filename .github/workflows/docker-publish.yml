@@ -91,7 +91,8 @@ jobs:
           TAGS=(-t "axonbase/axonbase:${VERSION}")
           # `latest` só acompanha uma tag de versão. O push na main publica X.Y.Z-dev e não pode mover o latest
           # (a execução da main terminava depois da execução da tag e deixava o latest apontando para o -dev).
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          # Pré-lançamento (versão com hífen, como 1.0.0-rc1) também não move o latest.
+          if [ "${{ github.ref_type }}" = "tag" ] && [[ "${VERSION}" != *-* ]]; then
             TAGS+=(-t "axonbase/axonbase:latest")
           fi
           docker buildx imagetools create "${TAGS[@]}" \
