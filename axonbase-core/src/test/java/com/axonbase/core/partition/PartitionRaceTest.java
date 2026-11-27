@@ -428,9 +428,20 @@ class PartitionRaceTest {
                     int base = round * 10;
                     String id = "r" + round;
 
-                    concurrently(6, worker -> db.run(TimeData.newSession(), "CREATE events:" + id + " CONTENT {at: d\""
-                        + Instant.parse(DAY1).plus(Duration.ofDays(base + worker)) + "\"}"));
+                    AtomicLong accepted = new AtomicLong();
 
+                    concurrently(6, worker -> {
+                        try {
+                            db.run(TimeData.newSession(), "CREATE events:" + id + " CONTENT {at: d\""
+                                + Instant.parse(DAY1).plus(Duration.ofDays(base + worker)) + "\"}");
+                            accepted.incrementAndGet();
+                        } catch (AxonError refused) {
+                            // só uma criação vale: as outras encontram o registro
+                            assertTrue(refused.getMessage().contains("events:" + id), refused.getMessage());
+                        }
+                    });
+
+                    assertEquals(1, accepted.get(), "rodada " + round);
                     assertEquals(1, copies(db, "s" + id), "rodada " + round);
                 }
             }

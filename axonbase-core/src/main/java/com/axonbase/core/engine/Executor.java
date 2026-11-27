@@ -1165,6 +1165,16 @@ public final class Executor {
         }
         checkConstraints(db, rid, obj);
         bindPartition(db, rid, record, generated);
+        if (previous == null && !generated && db.catalog().partitioning(table) != null) {
+            // numa tabela particionada outra criação pode ter confirmado entre a procura e a escolha da partição
+            previous = existingRecord(db, rid);
+            if (previous != null && existing != Existing.REPLACE) {
+                if (existing == Existing.SKIP) {
+                    return null;
+                }
+                throw errorStmt(Messages.get("stmt_record_exists", ridAsValue(rid).asRecordId()));
+            }
+        }
         enforcePrimaryKey(db, rid, previous, record);
         enforceUnique(db, rid, previous, record);
         records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));

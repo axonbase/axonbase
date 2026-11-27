@@ -118,6 +118,7 @@ public final class Datastore {
                 if (!table.primaryKey().isEmpty()) {
                     try {
                         new Executor(this).forBuild(new Session(ns, name)).rebuildPrimaryKey(database, table.name());
+                        backend.flush();
                     } catch (RuntimeException e) {
                         // sem o marcador, a próxima abertura tenta de novo
                         LOG.log(System.Logger.Level.ERROR, "chave primária de " + ns + "/" + name + "."
@@ -126,7 +127,6 @@ public final class Datastore {
                 }
             }
         }));
-        backend.flush();
     }
 
     /**
