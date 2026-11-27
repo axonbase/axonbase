@@ -79,6 +79,16 @@ public class SqlTranslator {
         };
     }
 
+    /** Só o começo do comando decide que ele é um DDL: o texto dentro de um literal é dado. */
+    private static final Pattern CREATE_TABLE = Pattern.compile(
+        "CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
+
+    /** Um literal de texto inteiro (grupo 1) ou um COUNT(...) fora de literal. */
+    private static final Pattern LITERAL_OR_COUNT = Pattern.compile(
+        "('[^'\\\\]*+(?:\\\\.[^'\\\\]*+)*+'|\"[^\"\\\\]*+(?:\\\\.[^\"\\\\]*+)*+\")"
+            + "|COUNT\\s*\\(\\s*(?:[^()'\"]++|'[^'\\\\]*+(?:\\\\.[^'\\\\]*+)*+'|\"[^\"\\\\]*+(?:\\\\.[^\"\\\\]*+)*+\")++\\)",
+        Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
     // ------------------------------------------------------------------
     // CREATE TABLE
     // ------------------------------------------------------------------
@@ -92,10 +102,8 @@ public class SqlTranslator {
                 if (depth == 0) {
                     // Find table name: skip "CREATE TABLE [IF NOT EXISTS] "
                     String prefix = sql.substring(0, i);
-                    java.util.regex.Matcher tm = java.util.regex.Pattern.compile(
-                        "CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+(\\w+)", java.util.regex.Pattern.CASE_INSENSITIVE
-                    ).matcher(prefix);
-                    if (tm.find()) table = tm.group(1);
+                    Matcher tm = CREATE_TABLE.matcher(prefix);
+                    if (tm.lookingAt()) table = tm.group(1);
                     startParen = i;
                 }
                 depth++;
@@ -243,8 +251,7 @@ public class SqlTranslator {
         String offset = m.group(6);
 
         // Normalize COUNT(*) → count(), COUNT(1) → count()
-        cols = cols.replaceAll("(?i)COUNT\\s*\\(\\s*\\*\\s*\\)", "count()");
-        cols = cols.replaceAll("(?i)COUNT\\s*\\(\\s*[^)]+\\s*\\)", "count()");
+        cols = translateCount(cols);
 
         // Remove table alias prefix from columns (e.g. p.name → name)
         // Only outside string literals to avoid corrupting literal text
@@ -324,6 +331,11 @@ public class SqlTranslator {
         Matcher m = TRUNCATE.matcher(sql);
         if (!m.matches()) return sql;
         return "DELETE " + m.group(1);
+    }
+
+    private static String translateCount(String cols) {
+        return LITERAL_OR_COUNT.matcher(cols).replaceAll(match ->
+            Matcher.quoteReplacement(match.group(1) != null ? match.group(1) : "count()"));
     }
 
     private static String removeAliasPrefixes(String cols) {

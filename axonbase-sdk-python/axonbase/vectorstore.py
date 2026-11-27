@@ -6,6 +6,7 @@ import re
 from typing import Any, Protocol, Sequence
 
 from .client import Axon
+from .literals import quote_literal
 
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
@@ -105,7 +106,7 @@ class AxonBaseVectorStore:
             if record.chunk_index is not None:
                 content["chunk_index"] = record.chunk_index
             await self.axon.query(
-                f"UPSERT {self.collection}:{record.id} CONTENT $record",
+                f"UPSERT {self.collection}:{record_key(record.id)} CONTENT $record",
                 {"record": content},
             )
 
@@ -145,13 +146,19 @@ class AxonBaseVectorStore:
 
 
 def _validate_identifier(value: str, name: str) -> None:
-    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+    # "--" abre um comentário no AxonQL
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value) or "--" in value:
         raise ValueError(f"{name} must contain only letters, digits, underscores, hyphens, and dots")
 
 
 def _validate_record_id(value: str) -> None:
     if not isinstance(value, str) or not _RECORD_IDENTIFIER.fullmatch(value):
         raise ValueError("record id must contain only letters, digits, underscores, hyphens, and dots")
+
+
+def record_key(record_id: str) -> str:
+    """A validated record id as it goes into a statement: digits stay a number, the rest is a string literal."""
+    return record_id if record_id.isdigit() else quote_literal(record_id)
 
 
 def _rows(response: Any) -> list[dict[str, Any]]:

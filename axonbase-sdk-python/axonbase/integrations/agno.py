@@ -115,10 +115,10 @@ class AxonBaseAgnoVectorDb(VectorDb):
         raise NotImplementedError("Use async_delete_by_id() with this async-first adapter.")
 
     async def async_delete_by_id(self, id: str) -> bool:
-        from ..vectorstore import _validate_record_id
+        from ..vectorstore import _validate_record_id, record_key
 
         _validate_record_id(id)
-        await self.store.axon.query(f"DELETE {self.store.collection}:{id}")
+        await self.store.axon.query(f"DELETE {self.store.collection}:{record_key(id)}")
         return True
 
     def delete_by_name(self, name: str) -> bool:
