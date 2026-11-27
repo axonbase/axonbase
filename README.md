@@ -90,7 +90,7 @@ export AXON_ROOT_PASSWORD='choose-a-strong-password'
 export AXON_SECRET="$(openssl rand -hex 32)"
 docker run -d --name axonbase -p 8000:8000 \
   -e AXON_ROOT_PASSWORD -e AXON_SECRET \
-  axonbase/axonbase:latest
+  axonbase/axonbase:1.0.0-rc2
 
 # Sign in (returns a JWT valid for 30 minutes)
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/signin \

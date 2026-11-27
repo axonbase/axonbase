@@ -7,7 +7,7 @@ x-cluster-env: &cluster_env
 
 services:
   n1:
-    image: axonbase/axonbase:latest
+    image: axonbase/axonbase:${AXONBASE_IMAGE_TAG:-1.0.0-rc2}
     hostname: n1
     environment:
       <<: *cluster_env
@@ -17,7 +17,7 @@ services:
     volumes: [n1-data:/data]
     ports: ["18001:8000"]
   n2:
-    image: axonbase/axonbase:latest
+    image: axonbase/axonbase:${AXONBASE_IMAGE_TAG:-1.0.0-rc2}
     hostname: n2
     environment:
       <<: *cluster_env
@@ -27,7 +27,7 @@ services:
     volumes: [n2-data:/data]
     ports: ["18002:8000"]
   n3:
-    image: axonbase/axonbase:latest
+    image: axonbase/axonbase:${AXONBASE_IMAGE_TAG:-1.0.0-rc2}
     hostname: n3
     environment:
       <<: *cluster_env
