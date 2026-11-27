@@ -5,6 +5,7 @@ import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ExportRecreatesEverythingTest {
 
     private final Datastore source = new Datastore(new MemoryBackend());
+
+    /** As funções de chave-valor não criam o banco: a exportação precisa que ele exista. */
+    @BeforeEach
+    void createDatabase() {
+        source.createDatabase("n", "d");
+    }
 
     private static AxonValue run(Datastore ds, String sql) {
         Session s = Session.create();
