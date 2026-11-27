@@ -99,6 +99,7 @@ O gateway recusa, com uma mensagem que diz o motivo, em vez de devolver um resul
 | índice `UNIQUE` sem o campo de shard | a unicidade só vale dentro de um shard |
 | blocos `{ }` | as instruções de dentro escapariam das recusas |
 | `PERMISSIONS` em tabela dividida | a cópia de uma movimentação deixaria registros para trás |
+| [partição por tempo](particoes-e-camada-fria.md) e TTL (Time To Live) em tabela dividida, inclusive `SHARD BY` numa tabela que já os tenha | a regra ficaria só no shard base |
 | `LET` dentro de `BEGIN` | o gateway não saberia o valor que decide o shard |
 | cabeçalho `Axon-Role-Cap` | o gateway não o aplica, e ignorá-lo daria mais poder do que o pedido |
 
