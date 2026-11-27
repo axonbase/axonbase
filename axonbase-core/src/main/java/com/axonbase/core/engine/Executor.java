@@ -2138,7 +2138,11 @@ public final class Executor {
             Window window = streamable ? windowFor(db, sel) : null;
             // WHERE a = 1 AND b > 2: um índice que atende só uma das partes já reduz a leitura; o WHERE inteiro
             // é reavaliado abaixo sobre os candidatos.
-            docs = conjunctIndexDocs(db, sel, window);
+            // a busca textual vem antes: um índice de outra parte não leva o analisador do @@
+            docs = combinedSearchDocs(db, sel);
+            if (docs == null) {
+                docs = conjunctIndexDocs(db, sel, window);
+            }
             if (docs == null) {
                 docs = uniqueLookupSourceDocs(db, sel,
                     () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel, window,
@@ -2167,7 +2171,10 @@ public final class Executor {
                 docs.removeIf(doc -> !truthy(evalCond(sel.cond(), doc)));
             }
             applyDataRulesFilter(docs);
-            applySearchScores(sel, docs);
+            if (hy == null) {
+                // a busca híbrida já pontuou os documentos
+                applySearchScores(sel, docs);
+            }
             docs.removeIf(doc -> sel.from() != null && !allowed(doc, tableName(sel.from()), "select"));
         }
         boolean joined = !sel.joins().isEmpty();
@@ -3301,32 +3308,96 @@ public final class Executor {
      * Os termos da consulta saen do analyzer do índice, non de un split cru.
      */
     private void applySearchScores(Statement.Select sel, List<Document> docs) {
-        if (!(sel.cond() instanceof Expr.Binary match) || match.op() != Expr.BinaryOp.MATCH
-            || !(match.left() instanceof Expr.Ident field)) {
+        if (sel.from() == null) {
             return;
         }
-        Catalog.IndexDef index = searchIndexFor(db(), tableName(sel.from()), sel);
-        if (index == null) {
-            return;
-        }
-        Catalog.AnalyzerDef analyzer = db().catalog().analyzer(index.searchAnalyzer());
-        if (analyzer == null) {
-            return;
-        }
-        AxonValue query = eval(match.right());
-        if (!query.isString()) {
-            return;
-        }
-        List<String> terms = analyze(query.asString(), analyzer).stream().distinct().toList();
+        List<TextSearch> searches = textSearches(db(), sel);
+        List<String> terms = searches.stream().flatMap(search -> search.terms().stream()).distinct().toList();
         if (terms.isEmpty()) {
             return;
         }
         String table = tableName(sel.from());
-        Bm25Stats stats = bm25Stats(db(), table, index);
-        for (Document doc : docs) {
-            doc.searchScore(bm25Score(db(), table, index, stats, terms, doc));
-            doc.searchTerms(terms);
+        double[] scores = new double[docs.size()];
+        for (TextSearch search : searches) {
+            Bm25Stats stats = bm25Stats(db(), table, search.index());
+            List<String> wanted = search.terms().stream().distinct().toList();
+            for (int i = 0; i < scores.length; i++) {
+                scores[i] += bm25Score(db(), table, search.index(), stats, wanted, docs.get(i));
+            }
         }
+        for (int i = 0; i < scores.length; i++) {
+            docs.get(i).searchScore(scores[i]);
+            docs.get(i).searchTerms(terms);
+        }
+    }
+
+    /** Um {@code campo @@ "texto"} atendido pelo índice SEARCH do campo, com os termos já passados pelo analisador. */
+    private record TextSearch(Catalog.IndexDef index, List<String> terms) {
+    }
+
+    /** As buscas textuais indexadas do WHERE: ele próprio ou as partes ligadas por AND no topo. */
+    private List<TextSearch> textSearches(Database db, Statement.Select sel) {
+        String table = tableName(sel.from());
+        Catalog.TableDef def = table == null || table.isBlank() ? null : db.catalog().table(table);
+        if (def == null || sel.cond() == null) {
+            return List.of();
+        }
+        List<TextSearch> out = new ArrayList<>();
+        for (Expr part : conjuncts(sel.cond())) {
+            if (!(part instanceof Expr.Binary match) || match.op() != Expr.BinaryOp.MATCH
+                || !(match.left() instanceof Expr.Ident field) || !isRowIndependent(match.right())) {
+                continue;
+            }
+            Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
+                .filter(i -> i.search() && i.columns().contains(field.name())).findFirst().orElse(null);
+            Catalog.AnalyzerDef analyzer = index == null ? null : db.catalog().analyzer(index.searchAnalyzer());
+            if (analyzer == null) {
+                continue;
+            }
+            AxonValue query = eval(match.right());
+            if (query.isString()) {
+                out.add(new TextSearch(index, analyze(query.asString(), analyzer)));
+            }
+        }
+        return out;
+    }
+
+    /** Chaves dos registros que têm todos os termos no índice; vazio quando não há termo. */
+    private java.util.Set<String> postingKeys(Database db, String table, Catalog.IndexDef index, List<String> terms) {
+        java.util.Set<String> keys = null;
+        for (String term : terms) {
+            java.util.Set<String> termKeys = records(db).keysWithPrefix(
+                searchPrefix(db, table, index.name(), term)).stream()
+                .map(key -> key.substring(key.lastIndexOf('|') + 1))
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+            if (keys == null) {
+                keys = termKeys;
+            } else {
+                keys.retainAll(termKeys);
+            }
+        }
+        return keys == null ? new java.util.LinkedHashSet<>() : keys;
+    }
+
+    /**
+     * Candidatos de {@code campo @@ "texto" AND ...} sobre tabela simples: os registros que todos os índices de busca
+     * devolvem, ou {@code null} quando o WHERE não é um AND com busca indexada. O WHERE inteiro é reavaliado depois.
+     */
+    private List<Document> combinedSearchDocs(Database db, Statement.Select sel) {
+        if (!(sel.from() instanceof Expr.Ident table) || !sel.joins().isEmpty()
+            || !(sel.cond() instanceof Expr.Binary and) || and.op() != Expr.BinaryOp.AND) {
+            return null;
+        }
+        java.util.Set<String> keys = null;
+        for (TextSearch search : textSearches(db, sel)) {
+            java.util.Set<String> found = postingKeys(db, table.name(), search.index(), search.terms());
+            if (keys == null) {
+                keys = found;
+            } else {
+                keys.retainAll(found);
+            }
+        }
+        return keys == null ? null : docsFromKeys(db, table.name(), keys);
     }
 
     /** Agrega o conxunto de FTLEN do índice: nº de docs e lonxitude media. */
@@ -3804,6 +3875,14 @@ return score;
      * vector, geo, full-text e por último varrido completo.
      */
     private ExplainPlan planExplain(Database db, Statement.Select sel) {
+        // @@ junto de outra condição: o índice de busca abre a leitura, como na execução
+        if (sel.from() instanceof Expr.Ident table && sel.joins().isEmpty()
+            && sel.cond() instanceof Expr.Binary and && and.op() == Expr.BinaryOp.AND && hybridSearch(sel) == null) {
+            List<TextSearch> searches = textSearches(db, sel);
+            if (!searches.isEmpty()) {
+                return new ExplainPlan(PS_FULLTEXT, searches.get(0).index(), table.name());
+            }
+        }
         // WHERE a AND b: se uma das partes tem índice (UNIQUE, columnar ou GEO) é ela que abre a leitura
         List<Expr> parts = sel.cond() == null || !(sel.from() instanceof Expr.Ident) ? List.of() : conjuncts(sel.cond());
         if (parts.size() > 1) {
@@ -4043,7 +4122,10 @@ return score;
         }
         List<Document> docs = switch (plan.strategy()) {
             case PS_UNIQUE -> loadUniqueDocs(db, sel, plan.index());
-            case PS_FULLTEXT -> searchSourceDocs(db, sel);
+            case PS_FULLTEXT -> {
+                List<Document> combined = combinedSearchDocs(db, sel);
+                yield combined != null ? combined : searchSourceDocs(db, sel);
+            }
             case PS_GEO, PS_GEO_KNN -> geoSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_VECTOR -> vectorSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_HYBRID -> hybridSourceDocs(db, sel, hybridSearch(sel));
