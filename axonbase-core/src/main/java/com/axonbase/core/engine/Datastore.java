@@ -52,6 +52,8 @@ import java.util.function.UnaryOperator;
  */
 public final class Datastore {
 
+    private static final System.Logger LOG = System.getLogger(Datastore.class.getName());
+
     private final KvBackend backend;
     private final ConcurrentMap<String, ConcurrentMap<String, Database>> namespaces =
         new ConcurrentHashMap<>();
@@ -750,6 +752,9 @@ public final class Datastore {
      * <p>Os comandos vêm ordenados por dependência, então um índice com analyzer
      * encontra o analyzer, e um campo encontra a tabela. O flag {@code replaying}
      * evita que a reexecução grave de novo o que acabou de ler.</p>
+     *
+     * <p>Um comando que falha não interrompe a reconstrução: os demais são reexecutados, os usuários de arranque
+     * voltam e só então a primeira falha é lançada. Sem isso um CANCEL deixava o nó sem ninguém para autenticar.</p>
      */
     private void replayControl() {
         // um restore ou um lote replicado também podem trazer um plano de controle gravado por uma versão anterior
@@ -757,19 +762,33 @@ public final class Datastore {
         ControlSnapshot snapshot = controlState.snapshot();
         catalogRebuilds.incrementAndGet();
         replaying.set(true);
+        RuntimeException failure = null;
         try {
             namespaces.clear();
             authCatalog.clear();
             for (ControlCommand command : snapshot.commands()) {
-                replay(command);
+                try {
+                    replay(command);
+                } catch (RuntimeException e) {
+                    LOG.log(System.Logger.Level.ERROR, "falha ao reexecutar a definição " + command.kind() + " '"
+                        + command.name() + "' de " + command.namespace() + "/" + command.database(), e);
+                    if (failure == null) {
+                        failure = e;
+                    } else if (failure != e) {
+                        failure.addSuppressed(e);
+                    }
+                }
                 java.util.function.Consumer<ControlCommand> hook = replayHook;
                 if (hook != null) {
                     hook.accept(command);
                 }
             }
-            authCatalog.restoreBootstrap();
         } finally {
+            authCatalog.restoreBootstrap();
             replaying.set(false);
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
