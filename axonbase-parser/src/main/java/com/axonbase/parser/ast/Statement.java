@@ -374,8 +374,8 @@ public sealed interface Statement {
         }
     }
 
-    /** DROP INDEX {@code <name>} */
-    record DropIndex(String name) implements Statement {
+    /** DROP INDEX {@code <name>} [ON [TABLE] {@code <table>}]; sem a tabela, {@code table} é {@code null}. */
+    record DropIndex(String name, String table) implements Statement {
     }
 
     /** CREATE EVENT SQL padrão */

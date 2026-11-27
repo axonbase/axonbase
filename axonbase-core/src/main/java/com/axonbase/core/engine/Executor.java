@@ -5472,6 +5472,9 @@ return score;
     private AxonValue runDropIndex(Statement.DropIndex di) {
         Database db = db();
         for (Catalog.TableDef def : db.catalog().tables()) {
+            if (di.table() != null && !di.table().equals(def.name())) {
+                continue;
+            }
             java.util.concurrent.locks.Lock write = db.indexLock().writeLock();
             write.lock();
             Catalog.IndexDef removed;
@@ -5492,7 +5495,8 @@ return score;
                 return AxonValue.nul();
             }
         }
-        throw errorStmt(Messages.get("stmt_index_missing", di.name()));
+        throw errorStmt(di.table() == null ? Messages.get("stmt_index_missing", di.name())
+            : Messages.get("stmt_index_missing_on_table", di.name(), di.table()));
     }
 
     private AxonValue runDropEvent(Statement.DropEvent de) {
