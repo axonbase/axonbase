@@ -26,6 +26,8 @@ A data rule filters rows in `SELECT` (including `JOIN`), `UPDATE` and `DELETE`, 
 
 Table `PERMISSIONS` follow the same principle for token data: a condition that mentions a missing `$auth` or `$token` value denies. The database export carries table permissions and data rules, never users, passwords, tokens, accesses or link credentials.
 
+In an authenticated session, a database administrator is required to drop a table, to declare `PERMISSIONS`, and to change an existing one (`DEFINE`, `CREATE` or `ALTER TABLE`, `DROP INDEX`, partitions and TTL (Time To Live), and replacing a field or index, or adding one to a table with permissions). Creating a new table without permissions, adding fields and indexes to an unprotected table and repeating a definition unchanged stay open to writers.
+
 `$auth` and `$token` hold the claims of the session token (`$auth.id` is the user name). An authenticated session cannot set them.
 
 The following paths are **not** covered, so a data rule is not a complete isolation boundary:
@@ -35,9 +37,9 @@ The following paths are **not** covered, so a data rule is not a complete isolat
 - masks do not reach nested fields such as `address.cpf`
 - edge properties read through graph traversal are not masked
 - a record id stored in a field is read back as text, so a predicate such as `owner.team = 'a'` does not follow it and denies the row. Graph traversal (`->member->team.name`) is followed
-- event bodies (`DEFINE EVENT`, which requires an administrator) receive `$before` and `$after` without masks
+- event bodies (`DEFINE EVENT`, which requires an administrator) receive `$before` and `$after` without masks. They run as the writer but only read and write data of the table's database: schema, user, access, saga and link statements are refused, and so is any other database
 - functions that read storage directly, such as `kv::`, and queries sent through a database link
-- schema statements such as `DROP TABLE`, as well as `RELATE` and `UNRELATE`, are not restricted by data rules
+- schema statements, as well as `RELATE` and `UNRELATE`, are not restricted by data rules (dropping or changing an existing table requires a database administrator, see below)
 - error messages, such as a unique index or primary key violation, can reveal that a hidden value exists
 - a program declared `SECURITY DEFINER` runs with the rules of its owner
 - backup and management routes, which require an administrative role

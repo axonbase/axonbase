@@ -133,6 +133,42 @@ public final class Session {
         return copy;
     }
 
+    /** Banco ao qual o corpo de um evento fica confinado. */
+    public record EventScope(String namespace, String database) {
+    }
+
+    private EventScope eventScope;
+
+    /**
+     * O banco do evento em execução, ou {@code null} fora de um evento. Só o motor liga isto. Vale seja qual for a
+     * identidade da sessão, inclusive a trocada por uma função {@code SECURITY DEFINER}.
+     */
+    public EventScope eventScope() {
+        return eventScope;
+    }
+
+    public void eventScope(EventScope scope) {
+        this.eventScope = scope;
+    }
+
+    private java.util.Set<String> importedTables;
+
+    /** Começa a anotar as tabelas que uma importação cria. */
+    public void trackImportedTables() {
+        this.importedTables = new java.util.HashSet<>();
+    }
+
+    public void tableCreated(String ns, String db, String table) {
+        if (importedTables != null) {
+            importedTables.add(ns + "\u0000" + db + "\u0000" + table);
+        }
+    }
+
+    /** A tabela foi criada pela importação em curso, que ainda está completando a definição dela. */
+    public boolean importedTable(String ns, String db, String table) {
+        return importedTables != null && importedTables.contains(ns + "\u0000" + db + "\u0000" + table);
+    }
+
     // ------------------------------------------------------------------
     // transação activa
     // ------------------------------------------------------------------

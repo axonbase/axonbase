@@ -1585,6 +1585,8 @@ public final class Datastore {
         requireImportSize(dump.getBytes(StandardCharsets.UTF_8).length, limit);
         Session s = session.restoringCopy();
         Supplier<AxonValue> work = () -> {
+            // a cada tentativa: no cluster um conflito refaz a importação inteira
+            s.trackImportedTables();
             AxonValue result = execute(dump, s, null, query -> {
                 refuseTransactionControl(query);
                 return LegacyDump.restoreTypes(query);

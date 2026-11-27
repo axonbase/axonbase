@@ -429,6 +429,7 @@ public final class Executor {
         if (def == null) {
             def = new Catalog.TableDef(name, false, false);
             db.catalog().defineTable(def);
+            session.tableCreated(db.ns(), db.db(), name);
             control(db, ControlCommand.Kind.TABLE, name, "DEFINE TABLE " + name + " SCHEMALESS");
         }
         return def;
@@ -471,6 +472,9 @@ public final class Executor {
             throw new com.axonbase.common.AxonError(-32002,
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
         }
+        if (changesSchema(s) && !administersDatabase(auth)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_role_required", "admin"));
+        }
         // definir ou remover usuário muda a atribuição de auditoria, mesmo quando o texto não a cita
         if (com.axonbase.core.security.Authz.audited(auth)
             && (s instanceof Statement.DefineAiAudit || s instanceof Statement.DropAiAudit
@@ -478,6 +482,98 @@ public final class Executor {
                 || s instanceof Statement.DropUser)) {
             throw refusedToAudited();
         }
+    }
+
+    private boolean administersDatabase(AxonValue auth) {
+        return com.axonbase.core.security.Authz.atLeast(auth, com.axonbase.core.security.Authz.Role.ADMIN)
+            && com.axonbase.core.security.Authz.allows(auth, session.namespace(), session.database());
+    }
+
+    /**
+     * Apagar tabela, mudar a definição de uma que existe e declarar PERMISSIONS são tarefas do administrador do banco.
+     * Criar tabela, campo ou índice que ainda não existe continua livre, salvo numa tabela com PERMISSIONS. Repetir a
+     * definição em vigor não muda nada.
+     */
+    private boolean changesSchema(Statement s) {
+        return switch (s) {
+            case Statement.DropTable ignored -> true;
+            case Statement.RemoveTable ignored -> true;
+            case Statement.DropIndex ignored -> true;
+            case DefineTable dt -> restricts(dt.permissions()) || redefines(dt);
+            case Statement.CreateTable ct -> !ct.ifNotExists() && settledTable(ct.name()) != null;
+            case Statement.AlterTable at -> settledTable(at.name()) != null;
+            case DefineField df -> changesField(df);
+            case DefineIndex di -> changesIndex(di.table(), new Catalog.IndexDef(di.name(), di.columns(),
+                di.unique(), di.count(), di.searchAnalyzer(), di.geo(), di.columnar(), di.vectorDimension(),
+                di.vectorDistance(), di.m(), di.efConstruction(), di.efSearch()));
+            case Statement.CreateIndex ci -> changesIndex(ci.table(), new Catalog.IndexDef(ci.name(), ci.columns(),
+                ci.unique(), ci.count(), ci.searchAnalyzer(), ci.geo(), ci.columnar(), ci.vectorDimension(),
+                ci.vectorDistance(), ci.m(), ci.efConstruction(), ci.efSearch()));
+            // partição e TTL mudam a tabela, e DROP PARTITION apaga linhas sem passar pelas PERMISSIONS
+            case Statement.Partition p -> !p.command().readOnly() && settledTable(p.command().table()) != null;
+            default -> false;
+        };
+    }
+
+    /** A tabela que já existe no banco da sessão; {@code null} se é nova ou criada pela importação em curso. */
+    private Catalog.TableDef settledTable(String name) {
+        if (session.namespace() == null || session.database() == null) {
+            return null;
+        }
+        Database db = ds.findDatabase(session.namespace(), session.database());
+        if (db == null || session.importedTable(db.ns(), db.db(), name)) {
+            return null;
+        }
+        return db.catalog().table(name);
+    }
+
+    private static boolean restricts(Statement.Permissions perms) {
+        return perms != null && (perms.select() != null || perms.create() != null || perms.update() != null
+            || perms.delete() != null);
+    }
+
+    private boolean redefines(DefineTable dt) {
+        Catalog.TableDef current = settledTable(dt.name());
+        return current != null && (restricts(current.permissions()) || current.schemafull() != dt.schemafull()
+            || current.drop() != dt.drop() || !java.util.Objects.equals(current.shardBy(), dt.shardBy()));
+    }
+
+    private boolean changesField(DefineField df) {
+        Catalog.TableDef table = settledTable(df.table());
+        if (table == null) {
+            return false;
+        }
+        Catalog.FieldDef current = table.fields().get(df.name());
+        if (current == null) {
+            return restricts(table.permissions());
+        }
+        // o DEFINE FIELD tira o NOT NULL e a PRIMARY KEY de uma coluna
+        return current.notNull() || current.primaryKey() || current.readonly() != df.readonly()
+            || !java.util.Objects.equals(current.type(), df.type())
+            || !java.util.Objects.equals(current.assertExpr(), df.assertExpr())
+            || !java.util.Objects.equals(current.defaultExpr(), df.defaultExpr())
+            || !java.util.Objects.equals(current.references(), df.references())
+            || !java.util.Objects.equals(current.embeddingName(), df.embeddingName())
+            || !java.util.Objects.equals(current.embeddingFrom(), df.embeddingFrom());
+    }
+
+    private boolean changesIndex(String tableName, Catalog.IndexDef wanted) {
+        Catalog.TableDef table = settledTable(tableName);
+        if (table == null) {
+            return false;
+        }
+        Catalog.IndexDef current = table.indexes().get(wanted.name());
+        if (current == null) {
+            return restricts(table.permissions());
+        }
+        return !current.columns().equals(wanted.columns()) || current.unique() != wanted.unique()
+            || current.count() != wanted.count() || current.geo() != wanted.geo()
+            || current.columnar() != wanted.columnar()
+            || !java.util.Objects.equals(current.searchAnalyzer(), wanted.searchAnalyzer())
+            || !java.util.Objects.equals(current.vectorDimension(), wanted.vectorDimension())
+            || !java.util.Objects.equals(current.vectorDistance(), wanted.vectorDistance())
+            || current.hnswM() != wanted.hnswM() || current.hnswEfc() != wanted.hnswEfc()
+            || current.hnswEfs() != wanted.hnswEfs();
     }
 
     private static com.axonbase.common.AxonError refusedToAudited() {
@@ -530,6 +626,7 @@ public final class Executor {
     private AxonValue runStatementUnbatched(Statement s) {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
+        requireAllowedInEvent(s);
         authorize(s);
         requireWritableIfNeeded(s);
         return switch (s) {
@@ -637,6 +734,57 @@ public final class Executor {
     /** AxonPL: CREATE/DROP FUNCTION|PROCEDURE|PACKAGE e CALL (a lógica fica em {@code core.pl}). */
     private AxonValue runProgram(Statement s) {
         return ds.programs().run(s, session, this::eval);
+    }
+
+    /**
+     * O corpo de um evento roda com a identidade de quem grava, que pode ter mais poder do que quem pode definir o
+     * evento (um administrador do banco). Por isso ele só lê e grava dados do banco da tabela.
+     */
+    private void requireAllowedInEvent(Statement s) {
+        if (session.eventScope() != null && !allowedInEvent(s)) {
+            throw outsideEventScope();
+        }
+    }
+
+    private static boolean allowedInEvent(Statement s) {
+        if (s instanceof Info info) {
+            return !"root".equals(info.kind()) && !"namespace".equals(info.kind());
+        }
+        return s instanceof Statement.Select || s instanceof Statement.Create || s instanceof Statement.Insert
+            || s instanceof Statement.Update || s instanceof Statement.Delete || s instanceof Statement.Relate
+            || s instanceof Statement.Unrelate || s instanceof Statement.Let || s instanceof Statement.Return
+            || s instanceof Statement.IfElse || s instanceof Statement.ErrorStmt || s instanceof Statement.Explain
+            || s instanceof Statement.CallProgram || s instanceof Statement.DescribeTable
+            || s instanceof Statement.ShowDataRules || s instanceof Statement.Savepoint
+            || s instanceof Statement.Release || s instanceof Statement.RollbackTo;
+    }
+
+    /** Esta é a subconsulta de uma PERMISSIONS ou Data Rule: quem a escreveu não foi o corpo de um evento. */
+    private boolean withinPolicy;
+
+    /** Um DATABASE LINK leva a outro servidor: o corpo de um evento não o usa. */
+    private void refuseLinkInEvent() {
+        if (session.eventScope() != null) {
+            throw outsideEventScope();
+        }
+    }
+
+    /**
+     * Num corpo de evento, {@code banco.tabela} só vale para o próprio banco, e nunca para um DATABASE LINK. As leituras
+     * de uma PERMISSIONS ou Data Rule valem como numa escrita direta.
+     */
+    private void requireInEventScope(String qualifier) {
+        Session.EventScope scope = session.eventScope();
+        if (scope != null && !withinPolicy && evaluatingPolicy.get() == null
+            && (!qualifier.equals(scope.database()) || ds.databaseLink(scope.namespace(), qualifier) != null)) {
+            throw outsideEventScope();
+        }
+    }
+
+    private com.axonbase.common.AxonError outsideEventScope() {
+        Session.EventScope scope = session.eventScope();
+        return new com.axonbase.common.AxonError(-32002,
+            Messages.get("event_scope_refused", scope.namespace() + "/" + scope.database()));
     }
 
     /** Sessão somente leitura: só passam instruções de leitura (subconsultas e blocos também passam por aqui). */
@@ -803,6 +951,13 @@ public final class Executor {
         // o que um evento escreve é escrita nova, mesmo quando quem o disparou está repondo dados
         boolean restoring = session.restoring();
         session.restoring(false);
+        // a condição e o corpo enxergam só o banco da tabela, mesmo quando a escrita veio de outro
+        Session.EventScope outerScope = session.eventScope();
+        String writerNamespace = session.namespace();
+        String writerDatabase = session.database();
+        session.eventScope(new Session.EventScope(db.ns(), db.db()));
+        session.namespace(db.ns());
+        session.database(db.db());
         try {
             for (Catalog.EventDef ev : def.events().values()) {
                 if (ev.then().isEmpty()) {
@@ -817,6 +972,9 @@ public final class Executor {
                 }
             }
         } finally {
+            session.eventScope(outerScope);
+            session.namespace(writerNamespace);
+            session.database(writerDatabase);
             session.restoring(restoring);
             restoreVar("event", prevEvent);
             restoreVar("before", prevBefore);
@@ -1486,6 +1644,7 @@ public final class Executor {
             String sessionNs = session.namespace();
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
+                refuseLinkInEvent();
                 // Saga: capture BEFORE state for remote write
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && qRid == null) {
@@ -1590,6 +1749,7 @@ public final class Executor {
             String sessionNs = session.namespace();
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
+                refuseLinkInEvent();
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && dqRid == null) {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
@@ -3466,6 +3626,7 @@ return score;
      */
     private AxonValue runSelectViaLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q,
                                         Statement.Select sel) {
+        requireInEventScope(q.link());
         // Render the SELECT, then replace qualified FROM with unqualified one
         String rendered = com.axonbase.parser.Render.stmt(sel);
         String qualifiedFrom = q.link() + "." + q.table();
@@ -3486,6 +3647,7 @@ return score;
         }
     }
     private List<Document> sourceDocsQualified(Expr.Qualified q) {
+        requireInEventScope(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3521,6 +3683,7 @@ return score;
 
     /** O banco do namespace citado em {@code banco.tabela}, já com a tabela garantida. */
     private Database localQualifiedDatabase(String ns, Expr.Qualified q) {
+        requireInEventScope(q.link());
         Database targetDb = ds.ensureDatabase(session, ns, q.link());
         ensureTable(targetDb, q.table());
         return targetDb;
@@ -3532,6 +3695,7 @@ return score;
      * do link removido e é enviada ao endpoint {@code /sql} do link.
      */
     private AxonValue runWriteViaLink(Expr.Qualified q, String renderedSql) {
+        refuseLinkInEvent();
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3556,6 +3720,7 @@ return score;
 
     /** Resolve a qualified record ID {@code "link"."table":key}. */
     private List<Document> sourceDocsQualifiedRecordId(Expr.Qualified q, Expr.RecordId rid) {
+        requireInEventScope(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -4338,6 +4503,9 @@ return score;
         def.permissions(dt.permissions());
         def.shardBy(dt.shardBy());
         db.catalog().defineTable(def);
+        if (previous == null) {
+            session.tableCreated(db.ns(), db.db(), dt.name());
+        }
         persistTable(db, dt.name());
         return AxonValue.nul();
     }
@@ -4403,6 +4571,9 @@ return score;
         ct.checks().stream().filter(check -> !checks.contains(check)).forEach(checks::add);
         def.checks(checks);
         db.catalog().defineTable(def);
+        if (previous == null) {
+            session.tableCreated(db.ns(), db.db(), ct.name());
+        }
 
         for (Statement.ColumnDef col : ct.columns()) {
             if ("id".equalsIgnoreCase(col.name())) {
@@ -5974,6 +6145,7 @@ return score;
             String table = q.link().equals(ns) ? q.table() : q.link();
             Database targetDb = db();
             if (!q.link().equals(ns)) {
+                requireInEventScope(q.link());
                 targetDb = ds.ensureDatabase(session, ns, q.link());
             }
             String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + table + "\u0000";
@@ -7005,6 +7177,7 @@ return score;
         try {
             Executor sub = new Executor(ds);
             sub.identitySession = identitySession;
+            sub.withinPolicy = withinPolicy || evaluatingPolicy.get() != null;
             // as variáveis já estão na sessão: nada a repassar
             return sub.execute(sq.query(), session, null);
         } finally {
