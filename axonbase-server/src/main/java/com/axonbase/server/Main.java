@@ -140,21 +140,7 @@ public final class Main {
         // backend non-empty and skip the restore).
         if (!config.s3Bucket().isBlank() && !config.s3Endpoint().isBlank()) {
             java.util.function.Supplier<Long> commitIndex = () -> null;
-            var s3 = new S3SyncManager(ds, config, commitIndex);
-            try {
-                if (backend.keysWithPrefix("").isEmpty()) {
-                    boolean restored = s3.restoreFromS3();
-                    if (restored) {
-                        System.out.println(Messages.get("server_s3_restored"));
-                    } else {
-                        System.out.println(Messages.get("server_s3_empty"));
-                        ds.createDatabase("axonbase", "main");
-                        ds.createDatabase("app", "main");
-                    }
-                }
-            } catch (Exception e) {
-                System.out.println(Messages.get("server_s3_empty"));
-            }
+            restoreAtStartup(ds, backend, new S3SyncManager(ds, config, commitIndex));
         } else {
             ds.createDatabase("axonbase", "main");
             ds.createDatabase("app", "main");
@@ -244,6 +230,24 @@ public final class Main {
         }
 
         Thread.currentThread().join();
+    }
+
+    /** Numa base vazia, restaura o que houver no S3; sem restaurar, cria os bancos iniciais. */
+    static void restoreAtStartup(Datastore ds, KvBackend backend, S3SyncManager s3) {
+        try {
+            if (backend.keysWithPrefix("").isEmpty()) {
+                boolean restored = s3.restoreFromS3();
+                if (restored) {
+                    System.out.println(Messages.get("server_s3_restored"));
+                } else {
+                    System.out.println(Messages.get("server_s3_empty"));
+                    ds.createDatabase("axonbase", "main");
+                    ds.createDatabase("app", "main");
+                }
+            }
+        } catch (Exception e) {
+            System.out.println(Messages.get("server_s3_empty"));
+        }
     }
 
     /**
