@@ -4320,8 +4320,10 @@ return score;
             return AxonValue.nul();
         }
         Catalog.TableDef previous = db.catalog().table(ct.name());
-        Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), false);
+        Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), previous != null && previous.drop());
         if (previous != null) {
+            def.permissions(previous.permissions());
+            def.indexFailures().putAll(previous.indexFailures());
             def.shardBy(previous.shardBy());
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());

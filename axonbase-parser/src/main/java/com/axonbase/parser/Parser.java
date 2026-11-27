@@ -1237,6 +1237,8 @@ public final class Parser {
             } else {
                 matchKeyword("schemaless");
             }
+            // o texto gravado no plano de controle e no dump traz o DROP depois do esquema
+            drop |= matchKeyword("drop");
             String shardBy = null;
             // "shard" não é palavra reservada: vale só aqui, depois do esquema
             if (atWord("shard")) {
