@@ -50,7 +50,7 @@ async def test_upsert_uses_safe_record_ids_and_bound_content():
     await store.upsert([record])
 
     assert axon.queries == [
-        ("UPSERT chunks:doc_1-chunk.0 CONTENT $record", {
+        ("UPSERT chunks:'doc_1-chunk.0' CONTENT $record", {
             "record": {
                 "content": "The content",
                 "metadata": {"topic": "tests"},
@@ -119,3 +119,18 @@ def test_openai_adapter_reports_missing_optional_dependency():
     with patch("builtins.__import__", side_effect=ImportError("missing openai")):
         with pytest.raises(ImportError, match=r"axonbase-sdk\[openai\]"):
             OpenAIEmbedder()
+
+
+@pytest.mark.asyncio
+async def test_record_id_never_opens_a_comment():
+    axon = FakeAxon()
+    store = AxonBaseVectorStore(axon, "chunks", dimensions=3)
+
+    await store.upsert([VectorRecord(id="alice--x", content="c", embedding=[0.1, 0.2, 0.3])])
+
+    assert axon.queries[0][0] == "UPSERT chunks:'alice--x' CONTENT $record"
+
+
+def test_collection_name_with_comment_marker_is_refused():
+    with pytest.raises(ValueError):
+        AxonBaseVectorStore(FakeAxon(), "chunks--x", dimensions=3)
