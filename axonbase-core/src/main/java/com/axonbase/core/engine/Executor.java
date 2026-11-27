@@ -4756,44 +4756,50 @@ return score;
         ));
     }
 
-    /** A transação precisa estar ativa, ter sido aberta com este nome e ainda ter a definição que usou no BEGIN. */
-    private void requireActiveSaga(String name, String correlationId) {
+    /**
+     * A transação precisa estar ativa, ter sido aberta com este nome e ainda ter a definição que usou no BEGIN.
+     *
+     * @param resumable aceita também a transação parada em {@code COMPENSATING}, para o CANCEL terminar o serviço
+     * @return o estado encontrado
+     */
+    private String requireSaga(String name, String correlationId, boolean resumable) {
         Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
-        AxonValue status = record == null ? null : record.get("status");
-        if (status == null || !status.isString() || !"RUNNING".equals(status.asString())) {
+        AxonValue value = record == null ? null : record.get("status");
+        String status = value != null && value.isString() ? value.asString() : "";
+        if (!"RUNNING".equals(status) && !(resumable && "COMPENSATING".equals(status))) {
             throw errorStmt(Messages.get("stmt_saga_inactive", correlationId));
         }
-        requireSameSaga(record, name, correlationId);
-    }
-
-    private void requireSameSaga(Map<String, AxonValue> record, String name, String correlationId) {
         AxonValue opened = record.get("name");
         if (opened != null && opened.isString() && !opened.asString().equals(name)) {
             throw errorStmt(Messages.get("stmt_saga_other_name", name, correlationId, opened.asString()));
         }
         AxonValue links = record.get("links");
         // sem a definição, os participantes não seriam avisados e o comando informaria um sucesso falso
-        if (links != null && links.isArray() && !links.asArray().isEmpty() && ds.saga(name) == null) {
+        if ("RUNNING".equals(status) && links != null && links.isArray() && !links.asArray().isEmpty()
+            && ds.saga(name) == null) {
             throw errorStmt(Messages.get("stmt_saga_missing", name));
         }
+        return status;
     }
 
     private AxonValue runCommitSaga(CommitSaga cs) {
-        requireActiveSaga(cs.name(), cs.correlationId());
+        requireSaga(cs.name(), cs.correlationId(), false);
         coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false);
         sagaLedger.commitSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("COMMITTED")));
     }
 
     private AxonValue runCancelSaga(CancelSaga cs) {
-        requireActiveSaga(cs.name(), cs.correlationId());
-        coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true);
+        // em COMPENSATING os participantes já responderam: falta só terminar a compensação local
+        if ("RUNNING".equals(requireSaga(cs.name(), cs.correlationId(), true))) {
+            coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true);
+        }
         sagaLedger.cancelSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
     }
 
     private AxonValue runJoinSaga(JoinSaga js) {
-        requireActiveSaga(js.name(), js.correlationId());
+        requireSaga(js.name(), js.correlationId(), false);
         session.sagaBegin(js.name(), js.correlationId());
         session.vars().set("saga_corr", AxonValue.str(js.correlationId()));
         return AxonValue.object(Map.of("status", AxonValue.str("RUNNING")));

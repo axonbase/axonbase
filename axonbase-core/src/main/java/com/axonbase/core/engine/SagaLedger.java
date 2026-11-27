@@ -3,7 +3,7 @@ package com.axonbase.core.engine;
 import com.axonbase.common.Messages;
 import com.axonbase.core.Session;
 import com.axonbase.core.catalog.RecordId;
-import com.axonbase.value.AxonJson;
+import com.axonbase.parser.Render;
 import com.axonbase.value.AxonValue;
 
 import java.util.ArrayList;
@@ -24,8 +24,8 @@ public class SagaLedger {
 
     private final Datastore ds;
     private final DatabaseLinkClient linkClient = new DatabaseLinkClient();
-    private static final java.util.concurrent.atomic.AtomicInteger stepCounter =
-        new java.util.concurrent.atomic.AtomicInteger(0);
+    private static final java.util.concurrent.atomic.AtomicLong stepCounter =
+        new java.util.concurrent.atomic.AtomicLong();
 
     public SagaLedger(Datastore ds) {
         this.ds = ds;
@@ -49,6 +49,7 @@ public class SagaLedger {
         ds.execute("DEFINE FIELD link_name ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD table_name ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD record_key ON TABLE saga_step TYPE string;", sagaSession(), null);
+        ds.execute("DEFINE FIELD record_literal ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD before ON TABLE saga_step TYPE object;", sagaSession(), null);
         ds.execute("DEFINE FIELD operation ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD status ON TABLE saga_step TYPE string;", sagaSession(), null);
@@ -64,7 +65,7 @@ public class SagaLedger {
 
     /** @param links participantes da definição no momento do BEGIN; vazio quando a SAGA não tem definição. */
     public void beginSaga(String sagaResource, String correlationId, List<String> links) {
-        String participants = com.axonbase.parser.Render.value(
+        String participants = Render.value(
             AxonValue.array(links.stream().map(AxonValue::str).toList()));
         ds.execute("UPSERT saga:" + escKey(correlationId)
             + " CONTENT {name: \"" + esc(sagaResource)
@@ -108,9 +109,8 @@ public class SagaLedger {
                             String linkNamespace, String linkName, String table,
                             RecordId rid, AxonValue beforeValue, String operation) {
         if (correlationId == null || correlationId.isBlank()) return;
-        String beforeJson = beforeValue != null && beforeValue.isObject()
-            ? AxonJson.write(beforeValue) : "{}";
-        int order = nextStepOrder(correlationId);
+        String beforeLiteral = beforeLiteral(beforeValue);
+        long order = nextStepOrder();
         ds.execute("CREATE saga_step CONTENT {"
             + "correlation_id: \"" + esc(correlationId) + "\","
             + "step_order: " + order + ","
@@ -120,7 +120,8 @@ public class SagaLedger {
             + "link_name: \"" + esc(linkName) + "\","
             + "table_name: \"" + esc(table) + "\","
             + "record_key: \"" + esc(recordKey(rid)) + "\","
-            + "before: " + beforeJson + ","
+            + "record_literal: \"" + esc(keyLiteral(rid)) + "\","
+            + "before: " + beforeLiteral + ","
             + "operation: \"" + esc(operation) + "\","
             + "status: \"PREPARED\"}", sagaSession(), null);
     }
@@ -136,22 +137,22 @@ public class SagaLedger {
             if (!value.isObject()) continue;
             Map<String, AxonValue> step = value.asObject();
             if (!"local".equals(strField(step, "link_name"))) continue;
-            int participantOrder = (int) longField(step, "step_order");
+            long participantOrder = longField(step, "step_order");
             if (participantOrder <= 0 || participantStepReported(correlationId, linkNamespace, linkName, participantOrder)) {
                 continue;
             }
-            AxonValue before = step.get("before");
-            String beforeJson = before != null && before.isObject() ? AxonJson.write(before) : "{}";
+            String beforeLiteral = beforeLiteral(step.get("before"));
             ds.execute("CREATE saga_step CONTENT {"
                 + "correlation_id: \"" + esc(correlationId) + "\","
-                + "step_order: " + nextStepOrder(correlationId) + ","
+                + "step_order: " + nextStepOrder() + ","
                 + "step_ns: \"" + esc(strField(step, "step_ns")) + "\","
                 + "step_db: \"" + esc(strField(step, "step_db")) + "\","
                 + "link_ns: \"" + esc(linkNamespace) + "\","
                 + "link_name: \"" + esc(linkName) + "\","
                 + "table_name: \"" + esc(strField(step, "table_name")) + "\","
                 + "record_key: \"" + esc(strField(step, "record_key")) + "\","
-                + "before: " + beforeJson + ","
+                + "record_literal: \"" + esc(strField(step, "record_literal")) + "\","
+                + "before: " + beforeLiteral + ","
                 + "operation: \"" + esc(strField(step, "operation")) + "\","
                 + "status: \"REPORTED\","
                 + "participant_step_order: " + participantOrder + ","
@@ -159,7 +160,7 @@ public class SagaLedger {
         }
     }
 
-    private boolean participantStepReported(String correlationId, String linkNamespace, String linkName, int participantOrder) {
+    private boolean participantStepReported(String correlationId, String linkNamespace, String linkName, long participantOrder) {
         AxonValue existing = ds.execute(
             "SELECT * FROM saga_step WHERE correlation_id = \"" + esc(correlationId)
                 + "\" AND link_ns = \"" + esc(linkNamespace)
@@ -206,7 +207,7 @@ public class SagaLedger {
         String stepDb = strField(step, "step_db");
         String linkNamespace = strField(step, "link_ns");
         String linkName = strField(step, "link_name");
-        int stepOrder = (int) longField(step, "step_order");
+        long stepOrder = longField(step, "step_order");
 
         Session targetSession = Session.create();
         targetSession.namespace(stepNs.isEmpty() ? SAGA_NS : stepNs);
@@ -220,32 +221,23 @@ public class SagaLedger {
             }
         }
 
+        String key = storedKeyLiteral(step);
         if (before == null || !before.isObject() || before.asObject().isEmpty()) {
-            if ("CREATE".equalsIgnoreCase(operation)) {
-                String recordKey = strField(step, "record_key");
-                if (!recordKey.isEmpty()) {
-                    executeCompensation(linkDef, "DELETE " + tableName + ":" + recordKey, targetSession);
-                }
+            if ("CREATE".equalsIgnoreCase(operation) && !key.isEmpty()) {
+                executeCompensation(linkDef, "DELETE " + tableName + ":" + key, targetSession);
             }
             markCompensated(corrId, stepOrder);
             return;
         }
 
-        AxonValue beforeId = before.asObject().get("id");
-        String keyStr = beforeId != null ? extractKey(beforeId) : "";
-
-        Map<String, AxonValue> restoreData = new LinkedHashMap<>(before.asObject());
-        restoreData.remove("id");
-        String restoreJson = AxonJson.write(AxonValue.object(restoreData));
-
-        String restoreSql = "UPSERT " + tableName + ":" + keyStr
-            + " CONTENT " + restoreJson;
+        // o id vai junto: o CONTENT substitui o registro inteiro
+        String restoreSql = "UPSERT " + tableName + ":" + key + " CONTENT " + beforeLiteral(before);
         executeCompensation(linkDef, restoreSql, targetSession);
 
         markCompensated(corrId, stepOrder);
     }
 
-    private void markCompensated(String corrId, int stepOrder) {
+    private void markCompensated(String corrId, long stepOrder) {
         ds.execute("UPDATE saga_step SET status = 'COMPENSATED' WHERE correlation_id = \""
             + esc(corrId) + "\" AND step_order = " + stepOrder, sagaSession(), null);
     }
@@ -263,24 +255,35 @@ public class SagaLedger {
         return key.isString() ? key.asString() : key.toString();
     }
 
-    /** Extrai a chave de um valor que pode ser string, record id ou object. */
-    private static String extractKey(AxonValue v) {
-        if (v.isRecordId()) {
-            Object key = v.asRecordId().key();
-            if (key instanceof AxonValue kv && kv.isString()) return kv.asString();
-            if (key instanceof AxonValue kv && kv.isNumber()) return kv.toString();
-            return String.valueOf(key);
-        }
-        if (v.isString()) {
-            String s = v.asString();
-            int i = s.indexOf(':');
-            return i >= 0 ? s.substring(i + 1) : s;
-        }
-        return v.toString();
+    /** A chave como literal AxonQL, que preserva o tipo (texto, número, uuid) e aceita hífen e espaço. */
+    private static String keyLiteral(RecordId recordId) {
+        AxonValue key = recordId.key();
+        return key.isNumber() ? Render.numberKey(key) : Render.value(key);
     }
 
-    private int nextStepOrder(String corrId) {
-        return stepCounter.incrementAndGet();
+    /**
+     * A chave de um passo. Passos gravados por versões anteriores só têm o texto cru: o que parece número continua
+     * sendo lido como número, como antes, e o resto é texto.
+     */
+    private static String storedKeyLiteral(Map<String, AxonValue> step) {
+        String literal = strField(step, "record_literal");
+        if (!literal.isEmpty()) return literal;
+        String raw = strField(step, "record_key");
+        if (raw.isEmpty() || raw.matches("-?\\d+(\\.\\d+)?")) return raw;
+        return Render.value(AxonValue.str(raw));
+    }
+
+    /** O estado anterior como literal AxonQL: em JSON, data e decimal voltariam como objetos. */
+    private static String beforeLiteral(AxonValue before) {
+        return before != null && before.isObject() ? Render.value(before) : "{}";
+    }
+
+    /**
+     * Ordem crescente também entre reinícios e trocas de líder: a compensação percorre os passos do maior para o
+     * menor, então um contador que recomeçasse restauraria os estados fora de ordem.
+     */
+    private static long nextStepOrder() {
+        return stepCounter.updateAndGet(previous -> Math.max(previous + 1, System.currentTimeMillis()));
     }
 
     private static Session sagaSession() {
