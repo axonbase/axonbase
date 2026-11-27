@@ -158,6 +158,10 @@ Continuam como antes: criar tabela sem `PERMISSIONS` (também ao gravar um regis
 
 - `LIVE SELECT * FROM t:chave` passa a notificar só as mudanças desse registro. Antes notificava as da tabela inteira. Quem dependia disso precisa assinar a tabela (`FROM t`).
 
+### `CREATE ... RETURN NONE`
+
+- `CREATE` com `RETURN NONE` grava e devolve nulo. Antes devolvia o registro criado.
+
 ### Conversões
 
 As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool>` passam a recusar entrada inválida em vez de gravar o instante atual, zero ou um texto com marcador. Um campo `int` recusa número com fração.

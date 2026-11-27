@@ -1261,6 +1261,9 @@ public final class Executor {
         AxonValue explicitKey = c.target() instanceof Expr.RecordId rid
             ? recordKey(rid.key()) : null;
         AxonValue record = createRecord(db, table, evalData(c.data(), table), explicitKey, onExisting(false));
+        if (c.ret() != null && c.ret().kind() == ReturnKind.NONE) {
+            return AxonValue.nul();
+        }
         AxonValue shown = visible(record);
         return c.only() ? shown : AxonValue.array(List.of(shown));
     }
