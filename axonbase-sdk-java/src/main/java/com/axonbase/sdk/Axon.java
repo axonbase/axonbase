@@ -99,6 +99,11 @@ public final class Axon implements AutoCloseable {
         return call("query", new Object[]{sql});
     }
 
+    /** Runs a query binding {@code $name} parameters from the map. */
+    public AxonValue query(String sql, Map<String, AxonValue> vars) {
+        return call("query", new Object[]{sql, AxonValue.object(vars)});
+    }
+
     /** Starts a local database transaction. */
     public void begin() {
         call("begin", new Object[]{});

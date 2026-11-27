@@ -5,6 +5,10 @@ import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
 
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
@@ -21,27 +25,47 @@ import java.util.Map;
  */
 public final class Main {
 
-    public static void main(String[] args) throws Exception {
+    private static final int OK = 0;
+    private static final int FAILURE = 1;
+    private static final int USAGE = 2;
+
+    public static void main(String[] args) {
+        int status;
+        try {
+            status = run(args);
+        } catch (Exception e) {
+            System.err.println("Erro: " + e.getMessage());
+            status = FAILURE;
+        }
+        System.out.flush();
+        System.exit(status);
+    }
+
+    private static int run(String[] args) throws Exception {
         if (args.length == 0) {
             usage();
-            return;
+            return OK;
         }
-        switch (args[0]) {
+        return switch (args[0]) {
             case "sql" -> sql(args);
-            case "repl" -> repl(args);
+            case "repl" -> {
+                repl(args);
+                yield OK;
+            }
             case "export" -> export(args);
             case "import" -> importCmd(args);
             default -> {
                 System.err.println("comando desconhecido: " + args[0]);
                 usage();
+                yield USAGE;
             }
-        }
+        };
     }
 
-    private static void sql(String[] args) throws Exception {
+    private static int sql(String[] args) throws Exception {
         if (args.length < 3) {
             System.err.println("uso: axon sql <url> <sql> [--vars JSON] [--ns ns] [--db db]");
-            return;
+            return USAGE;
         }
         String url = args[1];
         String sql = args[2];
@@ -50,43 +74,93 @@ public final class Main {
         String db = null;
         for (int i = 3; i < args.length; i++) {
             switch (args[i]) {
-                case "--vars" -> varsJson = args[++i];
-                case "--ns" -> ns = args[++i];
-                case "--db" -> db = args[++i];
+                case "--vars" -> varsJson = requiredValue(args, ++i, "--vars");
+                case "--ns" -> ns = requiredValue(args, ++i, "--ns");
+                case "--db" -> db = requiredValue(args, ++i, "--db");
+                default -> { }
             }
         }
+        if ((ns == null) != (db == null)) {
+            System.err.println("--ns e --db devem ser usados juntos");
+            return USAGE;
+        }
+        Map<String, AxonValue> vars = varsJson == null ? null : parseVars(varsJson);
         try (Axon axon = Axon.connect(url)) {
-            authenticate(axon, authentication(args, 3));
-            if (ns != null && db != null) {
+            // o banco é escolhido antes: o usuário de banco só autentica no próprio escopo
+            if (ns != null) {
                 axon.use(ns, db);
             }
-            Map<String, AxonValue> vars = varsJson != null
-                ? Map.of()
-                : null;
-            AxonValue result = varsJson != null
-                ? axon.query(sql)
-                : axon.query(sql);
+            authenticate(axon, authentication(args, 3));
+            AxonValue result = vars == null ? axon.query(sql) : axon.query(sql, vars);
             System.out.println(AxonJson.write(result));
         }
+        return OK;
     }
 
-    private static void export(String[] args) throws Exception {
+    private static int export(String[] args) throws Exception {
         if (args.length < 4) {
             System.err.println("uso: axon export <url> <ns> <db>");
-            return;
+            return USAGE;
         }
-        try (Axon axon = Axon.connect(args[1])) {
-            authenticate(axon, authentication(args, 4));
-            axon.use(args[2], args[3]);
-            AxonValue dump = axon.query("SELECT * FROM __export");
-            System.out.println(dump);
+        Authentication auth = authentication(args, 4);
+        String token = auth.token();
+        if (token == null && auth.user() != null) {
+            try (Axon axon = Axon.connect(args[1])) {
+                axon.use(args[2], args[3]);
+                token = axon.signin(auth.user(), auth.password());
+            }
         }
+        return writeDump(args[1], args[2], args[3], token);
     }
 
-    private static void importCmd(String[] args) throws Exception {
+    /** Pede a cópia à rota HTTP /export; só escreve na saída padrão quando ela chega inteira. */
+    private static int writeDump(String url, String ns, String db, String token) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder()
+            .uri(exportUri(url))
+            .header("Axon-Ns", ns)
+            .header("Axon-Db", db)
+            .GET();
+        if (token != null) {
+            request.header("Authorization", "Bearer " + token);
+        }
+        HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
+        HttpResponse<byte[]> response = http.send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
+        byte[] dump = response.body();
+        if (response.statusCode() != 200) {
+            System.err.println("export falhou (HTTP " + response.statusCode() + "): "
+                + new String(dump, StandardCharsets.UTF_8));
+            return FAILURE;
+        }
+        if (dump.length == 0) {
+            System.err.println("aviso: o banco não tem definições nem registros a exportar");
+        }
+        // bytes UTF-8 sem passar pela codificação do terminal
+        System.out.write(dump, 0, dump.length);
+        System.out.flush();
+        if (System.out.checkError()) {
+            System.err.println("export falhou: não foi possível escrever a saída");
+            return FAILURE;
+        }
+        return OK;
+    }
+
+    private static URI exportUri(String url) {
+        URI server = URI.create(url);
+        String scheme = switch (String.valueOf(server.getScheme())) {
+            case "ws", "http" -> "http";
+            case "wss", "https" -> "https";
+            default -> throw new IllegalArgumentException("URL inválida: " + url);
+        };
+        String path = server.getRawPath() == null ? "" : server.getRawPath()
+            .replaceAll("/rpc/ws/?$", "")
+            .replaceAll("/$", "");
+        return URI.create(scheme + "://" + server.getRawAuthority() + path + "/export");
+    }
+
+    private static int importCmd(String[] args) throws Exception {
         if (args.length < 5) {
             System.err.println("uso: axon import <url> <ns> <db> <arquivo>");
-            return;
+            return USAGE;
         }
         String url = args[1];
         String ns = args[2];
@@ -94,10 +168,11 @@ public final class Main {
         String file = args[4];
         String dump = java.nio.file.Files.readString(java.nio.file.Path.of(file));
         try (Axon axon = Axon.connect(url)) {
-            authenticate(axon, authentication(args, 5));
             axon.use(ns, db);
+            authenticate(axon, authentication(args, 5));
             axon.query(dump);
         }
+        return OK;
     }
 
     private static void repl(String[] args) throws Exception {
@@ -108,8 +183,16 @@ public final class Main {
         try (Axon axon = Axon.connect(url)) {
             Authentication auth = authentication(args, hasUrl ? 2 : 1);
             authenticate(axon, auth);
+            String ns = null;
+            String db = null;
+            String token = auth.token();
             if (auth.configured()) {
-                axon.use("axonbase", "main");
+                ns = "axonbase";
+                db = "main";
+                axon.use(ns, db);
+                if (token == null) {
+                    token = axon.signin(auth.user(), auth.password());
+                }
             }
             System.out.println("Conectado. Digite '?' para ajuda, 'exit' para sair.");
             try (var scanner = new java.util.Scanner(System.in)) {
@@ -132,7 +215,11 @@ public final class Main {
                     }
                     if (line.startsWith("use ")) {
                         String[] parts = line.split("\\s+");
-                        if (parts.length >= 3) axon.use(parts[1], parts[2]);
+                        if (parts.length >= 3) {
+                            axon.use(parts[1], parts[2]);
+                            ns = parts[1];
+                            db = parts[2];
+                        }
                         continue;
                     }
                     if (line.startsWith("signin ")) {
@@ -142,7 +229,8 @@ public final class Main {
                             continue;
                         }
                         try {
-                            axon.signin(parts[1], parts[2]);
+                            token = axon.signin(parts[1], parts[2]);
+                            axon.authenticate(token);
                             System.out.println("Autenticado.");
                         } catch (Exception e) {
                             System.err.println("Erro: " + e.getMessage());
@@ -150,8 +238,15 @@ public final class Main {
                         continue;
                     }
                     if (line.equalsIgnoreCase("export")) {
-                        AxonValue dump = axon.query("SELECT * FROM __export");
-                        System.out.println(AxonJson.write(dump));
+                        if (ns == null) {
+                            System.err.println("escolha o banco antes: use <ns> <db>");
+                            continue;
+                        }
+                        try {
+                            writeDump(url, ns, db, token);
+                        } catch (Exception e) {
+                            System.err.println("Erro: " + e.getMessage());
+                        }
                         continue;
                     }
                     try {
@@ -168,7 +263,10 @@ public final class Main {
 
     private static Map<String, AxonValue> parseVars(String json) {
         AxonValue parsed = AxonJson.parseDocument(json);
-        return parsed.isObject() ? parsed.asObject() : Map.of();
+        if (!parsed.isObject()) {
+            throw new IllegalArgumentException("--vars requer um objeto JSON");
+        }
+        return parsed.asObject();
     }
 
     private static Authentication authentication(String[] args, int start) {
@@ -196,7 +294,8 @@ public final class Main {
 
     private static void authenticate(Axon axon, Authentication auth) {
         if (auth.token() != null) axon.authenticate(auth.token());
-        else if (auth.user() != null) axon.signin(auth.user(), auth.password());
+        // signin só devolve o token: quem autentica a sessão é o authenticate
+        else if (auth.user() != null) axon.authenticate(axon.signin(auth.user(), auth.password()));
     }
 
     private record Authentication(String token, String user, String password) {
