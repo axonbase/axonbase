@@ -1279,6 +1279,7 @@ public final class Executor {
             if (u.data() != null) {
                 applyMutate(current, u.data(), doc);
             }
+            keepRecordId(current, rid, doc.initial());
             applyFieldSchema(db, tableName(u.target()), current, true, doc.initial());
             injectDataRuleFields(current);
             AxonValue next = AxonValue.object(current);
@@ -1384,6 +1385,35 @@ public final class Executor {
             }
         }
         return deleted.isEmpty() ? AxonValue.array(List.of()) : AxonValue.array(deleted);
+    }
+
+    /**
+     * O id é a identidade do registro: CONTENT e REPLACE não o tiram, e nenhuma escrita o troca. O guardado fica (um
+     * registro que o perdeu o recebe de volta, pela chave).
+     */
+    private void keepRecordId(Map<String, AxonValue> current, RecordId rid, AxonValue before) {
+        AxonValue stored = before.asObject().get("id");
+        if (stored != null && (stored.isNull() || stored.isNone())) {
+            stored = null;
+        }
+        AxonValue given = current.get("id");
+        if (given != null && !given.isNull() && !given.isNone() && !given.equals(stored) && !refersTo(given, rid)) {
+            throw errorStmt(Messages.get("stmt_record_id_immutable", ridAsValue(rid).asRecordId(), given));
+        }
+        current.put("id", stored != null ? stored : ridAsValue(rid));
+    }
+
+    /** O valor nomeia este registro: o record id, o texto {@code tabela:chave} ou a própria chave, no mesmo tipo. */
+    private boolean refersTo(AxonValue value, RecordId rid) {
+        AxonValue.RecordId self = ridAsValue(rid).asRecordId();
+        if (value.isRecordId()) {
+            return value.asRecordId().equals(self);
+        }
+        if (value.isString()) {
+            return value.asString().equals(self.toString())
+                || (rid.key().isString() && value.asString().equals(rid.key().asString()));
+        }
+        return value.isNumber() && rid.key().isNumber() && value.keyString().equals(rid.key().keyString());
     }
 
     private void applyMutate(Map<String, AxonValue> current, Data data, Document doc) {

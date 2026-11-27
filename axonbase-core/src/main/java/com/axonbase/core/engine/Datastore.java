@@ -1233,10 +1233,11 @@ public final class Datastore {
 
     private void appendCreate(StringBuilder sb, String table, String keyStr, byte[] raw) {
         AxonValue record = AxonJson.decode(raw);
-        if (!record.isObject() || !record.asObject().containsKey("id")) {
+        if (!record.isObject()) {
             return;
         }
-        // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>
+        // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>. A identidade vem da chave física,
+        // então um registro que perdeu o campo id (rc1, UPDATE CONTENT) também sai no dump
         Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
         AxonValue id = m.remove("id");
         sb.append("CREATE ").append(table).append(":").append(literalKey(table, keyStr, id))
