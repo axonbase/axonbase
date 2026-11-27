@@ -110,10 +110,11 @@ class AiAuditInterceptorTest {
         Session s = sessionAudited("dora", "protect");
         s.database("outro");
 
-        assertThrows(AxonError.class, () -> ds.execute("SELECT * FROM users", s, null));
+        String read = "SELECT * FROM users WHERE idade = 1";
+        assertThrows(AxonError.class, () -> ds.execute(read, s, null));
         ds.execute("USE test dev", s, null);
 
-        assertNotNull(ds.execute("SELECT * FROM users", s, null));
+        assertNotNull(ds.execute(read, s, null));
     }
 
     @Test
