@@ -45,6 +45,27 @@ class InstallFilesTest {
     }
 
     @Test
+    void portasDoClusterSemAutenticacaoSaoPublicadasSoNoEnderecoLocal() throws IOException {
+        List<String> ports = lines("docker-compose.cluster.yml", "ports:");
+
+        assertEquals(3, ports.size());
+        for (String port : ports) {
+            assertTrue(port.startsWith("ports: [\"${AXON_PUBLISH_ADDRESS:-127.0.0.1}:1800"), port);
+        }
+    }
+
+    @Test
+    void autenticacaoDoClusterPodeSerLigadaPorVariaveis() throws IOException {
+        String compose = read("docker-compose.cluster.yml");
+
+        assertTrue(compose.contains("AXON_REQUIRE_AUTH: \"${AXON_REQUIRE_AUTH:-false}\""));
+        assertTrue(compose.contains("AXON_ROOT_PASSWORD: \"${AXON_ROOT_PASSWORD:-}\""));
+        assertTrue(compose.contains("AXON_SECRET: \"${AXON_SECRET:-}\""));
+        // o teste do cluster chama as rotas sem token, então não pode herdar a autenticação do ambiente
+        assertTrue(read("tests/cluster/cluster.sh").contains("export AXON_REQUIRE_AUTH=false"));
+    }
+
+    @Test
     void conferenciaDeVersoesIncluiOComposeEOReadme() throws IOException {
         String script = read("scripts/check-versions.sh");
 
