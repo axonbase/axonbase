@@ -21,8 +21,20 @@ public final class AuthService {
     private final Map<String, Long> revokedJwts = new ConcurrentHashMap<>();
     private final Map<String, Long> lastCredentialIssuance = new ConcurrentHashMap<>();
 
-    /** Cache JWT por credencial temporária para reuso na mesma sessão. */
-    private final Map<String, String> credentialJwts = new ConcurrentHashMap<>();
+    /** Primeiro login de cada credencial temporária, para reconectar com o mesmo usuário e escopo até ela expirar. */
+    private final Map<String, CredentialLogin> credentialLogins = new ConcurrentHashMap<>();
+
+    private record CredentialLogin(String jwt, String user, String namespace, String database, String access,
+                                   long expiresAt) {
+        boolean boundTo(String requestedUser, String ns, String db, String requestedAccess) {
+            return java.util.Objects.equals(user, requestedUser) && java.util.Objects.equals(namespace, ns)
+                && java.util.Objects.equals(database, db) && java.util.Objects.equals(access, requestedAccess);
+        }
+
+        boolean expired() {
+            return System.currentTimeMillis() > expiresAt;
+        }
+    }
 
     private record TemporaryCredential(String user, String certificate, String fingerprint,
                                        boolean identityFromCertificate, long expiresAt) {
@@ -50,21 +62,22 @@ public final class AuthService {
      * access method, quando informado, também precisa existir no mesmo escopo.
      *
      * <p>Credenciais temporárias ({@code axontc_*}) não são consumidas na
-     * primeira autenticação: ficam no mapa até expirar, e o JWT emitido é
-     * cacheado para reuso. Isso permite que o DataGrip (ou outro cliente)
-     * reconecte múltiplas vezes com a mesma senha temporária sem perder a
-     * sessão, mas impede uso simultâneo em outro cliente porque a credencial
-     * expira em 60 segundos.
+     * primeira autenticação: até expirar, 60 segundos depois da emissão, o mesmo
+     * usuário no mesmo namespace, banco e access method recebe o mesmo JWT, o que
+     * permite ao DataGrip (ou outro cliente) reconectar. Qualquer outro usuário
+     * ou escopo, ou um pedido depois do prazo, é recusado.
      */
     public String signin(String user, String pass, String namespace, String database, String access) {
         if (pass != null && pass.startsWith("axontc_")) {
-            String cached = credentialJwts.get(pass);
-            if (cached != null) {
-                Map<String, Object> claims = claims(cached);
-                if (claims != null) {
-                    return cached;
+            CredentialLogin first = credentialLogins.get(pass);
+            if (first != null) {
+                if (first.expired() || !first.boundTo(user, namespace, database, access)) {
+                    return null;
                 }
-                credentialJwts.remove(pass);
+                if (claims(first.jwt()) != null) {
+                    return first.jwt();
+                }
+                credentialLogins.remove(pass);
             }
         }
 
@@ -101,8 +114,10 @@ public final class AuthService {
         String jwt = Jwt.sign(secret, claims, 1_800_000L).value();
         trackSession(claims, 1_800_000L);
 
-        if (pass != null && pass.startsWith("axontc_")) {
-            credentialJwts.put(pass, jwt);
+        TemporaryCredential used = pass == null ? null : temporaryCredentials.get(pass);
+        if (used != null) {
+            credentialLogins.put(pass,
+                new CredentialLogin(jwt, user, namespace, database, access, used.expiresAt()));
         }
 
         return jwt;
@@ -165,10 +180,7 @@ public final class AuthService {
 
     private void cleanup() {
         temporaryCredentials.entrySet().removeIf(entry -> entry.getValue().expired());
-        credentialJwts.keySet().removeIf(key -> {
-            TemporaryCredential tc = temporaryCredentials.get(key);
-            return tc == null || tc.expired();
-        });
+        credentialLogins.values().removeIf(CredentialLogin::expired);
     }
 
     private static boolean matchesFingerprint(AuthCatalog.User identity, String fingerprint) {
@@ -202,7 +214,7 @@ public final class AuthService {
         TemporaryCredential credential = temporaryCredentials.get(pass);
         if (credential == null || credential.expired()) {
             temporaryCredentials.remove(pass);
-            credentialJwts.remove(pass);
+            credentialLogins.remove(pass);
             return null;
         }
         if (!credential.matches(user)) {
