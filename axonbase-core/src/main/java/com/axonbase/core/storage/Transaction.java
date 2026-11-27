@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.HashMap;
+import java.util.function.Predicate;
 
 /**
  * Transacción: unha vista {@link KvBackend} que bufferiza os writes e deixa ver
@@ -147,6 +148,78 @@ public final class Transaction implements KvBackend {
         }
         keys.removeAll(deleted);
         return List.copyOf(keys);
+    }
+
+    /**
+     * Vista só de leitura que não registra nada, nem chaves lidas nem faixas varridas, então o commit não passa a
+     * depender delas. {@code scanPrefix} entrega as chaves em fluxo, sem montar a lista. Para quem só conta (a
+     * estimativa do EXPLAIN) e não pode crescer com a tabela. A varredura mostra o que a transação gravou, apagou ou
+     * já viu ausente.
+     */
+    public KvBackend untrackedReads() {
+        ensureOpen();
+        return new KvBackend() {
+            @Override
+            public Optional<byte[]> get(String key) {
+                return peek(key);
+            }
+
+            @Override
+            public List<String> keysWithPrefix(String prefix) {
+                return peekKeys(prefix);
+            }
+
+            @Override
+            public void scanPrefix(String prefix, Predicate<String> visitor) {
+                streamKeys(prefix, visitor);
+            }
+
+            @Override
+            public void put(String key, byte[] value) {
+                throw new UnsupportedOperationException("vista só de leitura");
+            }
+
+            @Override
+            public boolean putIfAbsent(String key, byte[] value) {
+                throw new UnsupportedOperationException("vista só de leitura");
+            }
+
+            @Override
+            public boolean delete(String key) {
+                throw new UnsupportedOperationException("vista só de leitura");
+            }
+        };
+    }
+
+    /** Intercala, em ordem de chave, a varredura da base com o que a transação gravou. */
+    private void streamKeys(String prefix, Predicate<String> visitor) {
+        ensureOpen();
+        List<String> written = staged.tailMap(prefix, true).keySet().stream()
+            .takeWhile(k -> k.startsWith(prefix)).toList();
+        int[] next = {0};
+        boolean[] stopped = {false};
+        base.scanPrefix(prefix, key -> {
+            // a chave gravada aqui sai da lista das gravadas, e não duas vezes
+            if (staged.containsKey(key) || deleted.contains(key) || isDropped(key) || seenAbsent(key)) {
+                return true;
+            }
+            while (!stopped[0] && next[0] < written.size() && written.get(next[0]).compareTo(key) < 0) {
+                stopped[0] = !visitor.test(written.get(next[0]++));
+            }
+            if (!stopped[0]) {
+                stopped[0] = !visitor.test(key);
+            }
+            return !stopped[0];
+        });
+        while (!stopped[0] && next[0] < written.size()) {
+            stopped[0] = !visitor.test(written.get(next[0]++));
+        }
+    }
+
+    /** Leitura repetível: a transação já leu a chave e ela não existia. */
+    private boolean seenAbsent(String key) {
+        Optional<byte[]> seen = snapshot.get(key);
+        return seen != null && seen.isEmpty();
     }
 
     /**

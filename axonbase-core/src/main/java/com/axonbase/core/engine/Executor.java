@@ -3127,9 +3127,8 @@ return score;
             return rowsToDocs(rows, q.table());
         }
         // Local database (other db in same ns)
-        Database targetDb = ds.ensureDatabase(session, ns, q.link());
+        Database targetDb = localQualifiedDatabase(ns, q);
         String tableName = q.table();
-        ensureTable(targetDb, tableName);
         String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + tableName + "\u0000";
         List<Document> docs = new ArrayList<>();
         for (String k : records(targetDb).keysWithPrefix(prefix)) {
@@ -3141,6 +3140,19 @@ return score;
             }
         }
         return docs;
+    }
+
+    /** {@code banco.tabela} aponta para um banco do próprio namespace, e não para um DATABASE LINK. */
+    private boolean isLocalQualified(Expr.Qualified q) {
+        String ns = session.namespace();
+        return ns != null && !ns.isBlank() && ds.databaseLink(ns, q.link()) == null;
+    }
+
+    /** O banco do namespace citado em {@code banco.tabela}, já com a tabela garantida. */
+    private Database localQualifiedDatabase(String ns, Expr.Qualified q) {
+        Database targetDb = ds.ensureDatabase(session, ns, q.link());
+        ensureTable(targetDb, q.table());
+        return targetDb;
     }
 
     /**
@@ -3421,16 +3433,71 @@ return score;
             return 1;
         }
         if (PS_COLUMNAR_AGG.equals(plan.strategy())) {
-            return columnarEntryCount(db, plan);
+            return estimatedColumnarEntries(db, plan);
         }
-        return fullScanDocs(db, sel).size();
+        return countSourceRows(db, sel.from());
+    }
+
+    /**
+     * Quantos documentos {@link #sourceDocs} devolveria. Numa tabela, conta as chaves em fluxo, sem montar a lista
+     * nem ler os valores; as demais origens (registro, subconsulta, lista, DATABASE LINK) passam por
+     * {@code sourceDocs}. Como ele, não filtra por regra de acesso.
+     */
+    private long countSourceRows(Database db, Expr from) {
+        if (from instanceof Expr.Ident table) {
+            ensureTable(db, table.name());
+            return countRecords(db, table.name());
+        }
+        if (from instanceof Expr.Qualified q && isLocalQualified(q)) {
+            return countRecords(localQualifiedDatabase(session.namespace(), q), q.table());
+        }
+        return sourceDocs(db, from).size();
+    }
+
+    private long countRecords(Database db, String table) {
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        KvBackend kv = countingRecords(db);
+        long[] count = {0};
+        scanRecordKeys(kv, prefix, key -> {
+            // como a leitura por loadDoc: vale a chave que o id lido dela alcança. No caso normal é ela mesma, e
+            // nada é lido
+            String reached = new RecordId(table, parseKey(key.substring(prefix.length())))
+                .storageKey(db.ns(), db.db());
+            if (reached.equals(key) || kv.get(reached).isPresent()) {
+                count[0]++;
+            }
+            return true;
+        });
+        return count[0];
+    }
+
+    /** Como {@link #records}, para só contar: numa transação, não registra leituras nem guarda o que passa. */
+    private KvBackend countingRecords(Database db) {
+        KvBackend raw = rawRecords(db);
+        if (raw instanceof Transaction tx) {
+            raw = tx.untrackedReads();
+        }
+        return com.axonbase.core.partition.PartitionedKv.wrap(db, raw, partitions, ds.coldTier().records());
+    }
+
+    private long estimatedColumnarEntries(Database db, ExplainPlan plan) {
+        long[] count = {0};
+        countingRecords(db).scanPrefix(columnarCountPrefix(db, plan), key -> {
+            QueryContext.checkCancelled();
+            count[0]++;
+            return true;
+        });
+        return count[0];
     }
 
     /** Entradas de uma coluna do índice columnar (uma por linha da tabela). */
     private long columnarEntryCount(Database db, ExplainPlan plan) {
-        String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
+        return records(db).keysWithPrefix(columnarCountPrefix(db, plan)).size();
+    }
+
+    private String columnarCountPrefix(Database db, ExplainPlan plan) {
+        return com.axonbase.core.storage.ColumnarIndex.columnPrefix(
             db.ns(), db.db(), plan.table(), plan.index().name(), plan.index().columns().get(0));
-        return records(db).keysWithPrefix(prefix).size();
     }
 
     private long explainedRows(Database db, Statement.Select whole, ExplainPlan plan) {
