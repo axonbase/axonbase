@@ -29,6 +29,13 @@ class ShardAdminHttpTest {
 
     private static final HttpClient HTTP = HttpClient.newHttpClient();
     private static final String ADMIN = "Bearer token-de-teste";
+    private static final String SECRET = "segredo-do-gateway";
+
+    private static AxonServer shard() throws Exception {
+        AxonServer server = AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste");
+        server.shardSecret(SECRET);
+        return server;
+    }
 
     private static HttpResponse<String> call(int port, String method, String path, String body, String... headers)
         throws Exception {
@@ -48,6 +55,7 @@ class ShardAdminHttpTest {
         Map<String, String> env = new LinkedHashMap<>();
         env.put("AXON_GATEWAY_SHARDS", "s0=" + url(first) + ";s1=" + url(second));
         env.put("AXON_GATEWAY_PORT", "0");
+        env.put("AXON_SHARD_SECRET", SECRET);
         env.put("AXON_GATEWAY_ADMIN_TOKEN", adminToken);
         env.put("AXON_GATEWAY_MAP_TTL_MS", "0");
         env.put("AXON_GATEWAY_DEADLINE_MS", "500");
@@ -59,7 +67,7 @@ class ShardAdminHttpTest {
         List<AxonServer> shards = new ArrayList<>();
         try {
             for (int i = 0; i < 3; i++) {
-                shards.add(AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste"));
+                shards.add(shard());
             }
             try (GatewayServer gateway = GatewayMain.start(
                 GatewayMain.Config.from(environment(shards.get(0), shards.get(1), "token-de-teste")))) {
@@ -109,8 +117,8 @@ class ShardAdminHttpTest {
 
     @Test
     void semTokenDeAdministracaoAsRotasFicamDesligadas() throws Exception {
-        AxonServer first = AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste");
-        AxonServer second = AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste");
+        AxonServer first = shard();
+        AxonServer second = shard();
         try (GatewayServer gateway = GatewayMain.start(GatewayMain.Config.from(environment(first, second, "")))) {
             assertEquals(403, call(gateway.port(), "POST", "/admin/shard/move", "{}", "Authorization", "Bearer ")
                 .statusCode());

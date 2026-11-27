@@ -18,19 +18,22 @@ import com.axonbase.core.shard.backup.BackupMember;
 import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
+import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * A rota interna por onde o gateway de shards fala com este nó ({@value ShardHttp#EXECUTE}). Vale a mesma
- * autenticação do {@code /sql}, com a credencial que o gateway repassa.
+ * A rota interna por onde o gateway de shards fala com este nó ({@value ShardHttp#EXECUTE}). Só existe num nó
+ * configurado como shard ({@value ShardHttp#SECRET_VARIABLE}); nos demais responde 404. Exige o segredo do gateway e,
+ * além dele, a mesma autenticação do {@code /sql}, com a credencial que o gateway repassa.
  */
 final class ShardNodeServlet extends HttpServlet {
 
@@ -43,9 +46,11 @@ final class ShardNodeServlet extends HttpServlet {
     private final transient Supplier<ClusterRuntime> cluster;
     private final transient HybridClock clock;
     private final transient Supplier<BackupMember> backup;
+    private final transient Supplier<String> secret;
 
     ShardNodeServlet(Datastore datastore, Function<HttpServletRequest, Session> sessions, boolean requireAuth,
-                     Supplier<ClusterRuntime> cluster, Supplier<BackupMember> backup) {
+                     Supplier<ClusterRuntime> cluster, Supplier<BackupMember> backup, Supplier<String> secret) {
+        this.secret = secret;
         this.backup = backup;
         this.datastore = datastore;
         this.sessions = sessions;
@@ -53,6 +58,24 @@ final class ShardNodeServlet extends HttpServlet {
         this.cluster = cluster;
         // o relógio que carimba os commits do armazenamento; sem RocksDB basta o do sistema
         this.clock = datastore.rocksBackend().map(RocksDbBackend::clock).orElseGet(HybridClock::system);
+    }
+
+    @Override
+    protected void service(HttpServletRequest req, HttpServletResponse resp)
+        throws ServletException, IOException {
+        String expected = secret.get();
+        if (expected == null || expected.isBlank()) {
+            // nó que não é shard: como se a rota não existisse, para qualquer método
+            resp.sendError(404);
+            return;
+        }
+        String given = req.getHeader(ShardHttp.SECRET_HEADER);
+        if (given == null || !MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),
+            given.getBytes(StandardCharsets.UTF_8))) {
+            refuse(resp, 401, "segredo do gateway ausente ou inválido");
+            return;
+        }
+        super.service(req, resp);
     }
 
     @Override

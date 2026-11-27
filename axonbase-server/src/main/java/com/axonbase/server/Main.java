@@ -199,6 +199,7 @@ public final class Main {
         server.qos(System::getenv);
         server.operations(System::getenv);
         server.shardBackup(shardBackup);
+        server.shardSecret(System.getenv(com.axonbase.core.shard.ShardHttp.SECRET_VARIABLE));
         if (cluster != null) {
             server.clusterStatus(cluster);
         }

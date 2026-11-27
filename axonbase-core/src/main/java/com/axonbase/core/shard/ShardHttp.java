@@ -22,6 +22,10 @@ public final class ShardHttp {
 
     /** Rota de execução num nó de shard. */
     public static final String EXECUTE = "/shard/v1/execute";
+    /** Cabeçalho com o segredo do gateway, exigido em toda a rota interna além da credencial do cliente. */
+    public static final String SECRET_HEADER = "Axon-Shard-Secret";
+    /** Variável de ambiente do segredo, a mesma nos nós de shard e no gateway. Num nó, é ela que o torna um shard. */
+    public static final String SECRET_VARIABLE = "AXON_SHARD_SECRET";
     /** Tipo de conteúdo do corpo binário. */
     public static final String CONTENT_TYPE = "application/vnd.axonbase.shard";
 

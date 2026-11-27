@@ -59,6 +59,7 @@ public final class AxonServer {
     private static final String READ_CONSISTENCY_HEADER = "Axon-Read-Consistency";
     private volatile com.axonbase.core.cluster.ClusterRuntime clusterRuntime;
     private volatile com.axonbase.core.shard.backup.BackupMember shardBackup;
+    private volatile String shardSecret;
     private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicLong inflight = new java.util.concurrent.atomic.AtomicLong();
     private final ServerMetrics metrics = new ServerMetrics();
@@ -271,7 +272,7 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new ShardMoveServlet()), "/admin/shard/move");
         // rota interna do gateway de shards (docs/shards.md)
         ctx.addServlet(new ServletHolder(new ShardNodeServlet(ds, this::withNames, requireAuth, () -> clusterRuntime,
-            () -> shardBackup)), "/shard/v1/*");
+            () -> shardBackup, () -> shardSecret)), "/shard/v1/*");
         ServletHolder adminV1 = new ServletHolder(new AdminV1Servlet(this));
         adminV1.setAsyncSupported(true);
         adminV1.getRegistration().setMultipartConfig(new jakarta.servlet.MultipartConfigElement(
@@ -495,6 +496,14 @@ public final class AxonServer {
 
     com.axonbase.core.cluster.ClusterRuntime clusterRuntime() {
         return clusterRuntime;
+    }
+
+    /**
+     * Torna este nó um shard: liga a rota interna {@code /shard/v1/*}, que passa a exigir este segredo do gateway.
+     * Vazio ou {@code null} mantém a rota desligada.
+     */
+    public void shardSecret(String secret) {
+        this.shardSecret = secret == null || secret.isBlank() ? null : secret.trim();
     }
 
     /** Liga as rotas de backup de shard a este nó ({@code null} quando o journal de cluster está desligado). */

@@ -81,6 +81,10 @@ Cada shard recebe a consulta original e a executa em modo **parcial**:
 
 Assim o resultado de `count`, `sum`, `avg`, `min`, `max`, `count(DISTINCT x)`, `GROUP BY`, `GROUP ALL` e `HAVING` é o de um nó único. Duas diferenças possíveis, ambas fora da garantia da linguagem: sem `ORDER BY`, um nó único que use um índice pode devolver outra ordem, e a soma de números de ponto flutuante pode diferir na última casa porque a ordem das parcelas muda.
 
+Cada parte passa pela auditoria por IA do shard que a executa, como uma consulta em `/sql`. Com Data Rule que mascara colunas, a agregação espalhada é recusada, e o `ORDER BY` só aceita colunas sem máscara: a resposta de cada shard leva a chave do registro e os valores do `ORDER BY`. São recusados o `ORDER BY` que cite uma coluna mascarada (direta, por apelido ou dentro de expressão), construções que o motor não consegue conferir (subconsulta, grafo, `*`, programas) e qualquer consulta espalhada de um usuário cuja máscara alcance `id`.
+
+O catálogo de casos e de usuários bloqueados da auditoria é de cada shard. Um bloqueio num shard não vale nos outros, e `SHOW AI AUDIT`, `AUDIT_CASES` e a decisão de um caso vão ao shard base. Aprovar um caso executa a consulta só nele.
+
 `COUNT(DISTINCT x)` transfere o conjunto de valores de cada shard: a memória cresce com o número de valores distintos.
 
 ### Recusado em tabelas divididas
@@ -205,10 +209,11 @@ O resultado é consistente para tudo que é causalmente relacionado. Uma saga n�
 
 ### Nós de shard
 
-Cada shard é um cluster comum (veja [cluster-raft.md](cluster-raft.md)). O gateway usa a rota interna `/shard/v1/` dos nós, servida por HTTP (HyperText Transfer Protocol) com a mesma autenticação do `/sql`. As operações de manutenção (definições, movimentação, conferências de `SHARD BY` e backup) exigem um administrador root. Para o backup do cluster, ligue o journal em cada nó:
+Cada shard é um cluster comum (veja [cluster-raft.md](cluster-raft.md)). O gateway usa a rota interna `/shard/v1/` dos nós, servida por HTTP (HyperText Transfer Protocol). A rota só existe num nó com `AXON_SHARD_SECRET` definido: sem a variável, ela responde 404, como num nó comum. Com a variável, toda chamada precisa trazer o mesmo segredo no cabeçalho `Axon-Shard-Secret` e, além dele, passa pela mesma autenticação do `/sql`. Quem tem o segredo fala com o shard como o gateway, então guarde-o como uma senha, use um valor diferente de `AXON_SECRET` e, sem TLS (Transport Layer Security) nos nós, mantenha o tráfego em rede privada. As operações de manutenção (definições, movimentação, conferências de `SHARD BY` e backup) exigem um administrador root. Para o backup do cluster, ligue o journal em cada nó:
 
 | Variável | Padrão | O que faz |
 |---|---|---|
+| `AXON_SHARD_SECRET` | vazio | torna o nó um shard e é o segredo exigido do gateway |
 | `AXON_PITR` | desligado | `on` liga o journal de shard num nó de cluster com RocksDB |
 | `AXON_PITR_DIR` | `<dados>/.pitr-journal` | onde ficam os segmentos |
 | `AXON_SHARD_BACKUP_DIR` | `<dados>/.shard-backups` | onde ficam os backups físicos pedidos pelo coordenador |
@@ -216,13 +221,14 @@ Cada shard é um cluster comum (veja [cluster-raft.md](cluster-raft.md)). O gate
 ### Gateway
 
 ```bash
-AXON_GATEWAY_SHARDS='s0=http://a1:8000,http://a2:8000,http://a3:8000;s1=http://b1:8000,http://b2:8000,http://b3:8000' AXON_GATEWAY_SHARD_USER=root AXON_GATEWAY_SHARD_PASS=<senha> AXON_GATEWAY_ADMIN_TOKEN=<segredo> axonbase gateway
+AXON_GATEWAY_SHARDS='s0=http://a1:8000,http://a2:8000,http://a3:8000;s1=http://b1:8000,http://b2:8000,http://b3:8000' AXON_GATEWAY_SHARD_USER=root AXON_GATEWAY_SHARD_PASS=<senha> AXON_GATEWAY_ADMIN_TOKEN=<segredo> AXON_SHARD_SECRET=<segredo dos shards> axonbase gateway
 ```
 
 | Variável | Padrão | O que faz |
 |---|---|---|
 | `AXON_GATEWAY_SHARDS` | vazio | shards para criar o mapa na primeira subida. Depois disso vale o mapa gravado |
 | `AXON_GATEWAY_META` | nós do primeiro shard | nós do grupo de metadados |
+| `AXON_SHARD_SECRET` | obrigatória | o mesmo segredo dos nós de shard. Sem ela, o gateway não sobe |
 | `AXON_GATEWAY_SHARD_USER` e `AXON_GATEWAY_SHARD_PASS` | vazios | credencial do próprio gateway, usada no plano de controle, na movimentação e no backup, nunca em requisições de clientes |
 | `AXON_GATEWAY_ADMIN_TOKEN` | vazio | credencial das rotas de administração. Vazia, elas ficam desligadas |
 | `AXON_GATEWAY_BIND` e `AXON_GATEWAY_PORT` | `127.0.0.1` e 8080 | onde o gateway escuta |
@@ -230,7 +236,7 @@ AXON_GATEWAY_SHARDS='s0=http://a1:8000,http://a2:8000,http://a3:8000;s1=http://b
 | `AXON_GATEWAY_DEADLINE_MS` | 15000 | tempo máximo de uma requisição a um shard |
 | `AXON_GATEWAY_EXPLICIT_IDS` | `refuse` | `check` aceita record id escolhido em tabela dividida por outro campo |
 
-O gateway não tem TLS (Transport Layer Security) próprio: ponha-o atrás de um balanceador que termine a conexão cifrada, ou numa rede privada. Rode **uma** instância das rotas de administração por vez.
+O gateway não tem TLS próprio: ponha-o atrás de um balanceador que termine a conexão cifrada, ou numa rede privada. Rode **uma** instância das rotas de administração por vez.
 
 O cliente usa `POST /sql` com os cabeçalhos `Axon-Ns`, `Axon-Db` e `Authorization`, como num nó. A resposta traz `Axon-HLC`; devolva-o na próxima requisição para preservar a ordem entre gateways.
 
@@ -274,7 +280,7 @@ O roteiro opt-in em [scripts/shard-gates/run.sh](../scripts/shard-gates/run.sh) 
 |---|---|
 | nó único | nenhum. `SHARD BY` é aceito e ignorado na execução |
 | cluster de um grupo | nenhum. Pode virar o shard base de um conjunto |
-| conjunto de shards | exige gateway, o mesmo `AXON_SECRET` em todos os nós e relógios sincronizados |
+| conjunto de shards | exige gateway, o mesmo `AXON_SECRET` em todos os nós, o mesmo `AXON_SHARD_SECRET` nos nós e no gateway, e relógios sincronizados |
 
 Transformar um cluster existente em vários shards não redistribui dados de tabelas já criadas: elas ficam no shard base.
 

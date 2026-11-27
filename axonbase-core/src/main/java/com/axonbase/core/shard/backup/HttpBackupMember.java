@@ -29,6 +29,7 @@ public final class HttpBackupMember implements BackupMember {
     private final HttpClient http;
     private final Duration longOperation;
     private final Supplier<String> credential;
+    private final String secret;
     private volatile String node;
 
     /**
@@ -37,6 +38,13 @@ public final class HttpBackupMember implements BackupMember {
      */
     public HttpBackupMember(String shard, String endpoint, HttpClient http, Duration longOperation,
                             Supplier<String> credential) {
+        this(shard, endpoint, http, longOperation, credential, null);
+    }
+
+    /** @param secret segredo do gateway que o nó exige, ou {@code null} */
+    public HttpBackupMember(String shard, String endpoint, HttpClient http, Duration longOperation,
+                            Supplier<String> credential, String secret) {
+        this.secret = secret;
         this.shard = shard;
         this.base = endpoint.replaceAll("/+$", "") + BackupHttp.PREFIX;
         this.http = http;
@@ -89,6 +97,9 @@ public final class HttpBackupMember implements BackupMember {
             .POST(HttpRequest.BodyPublishers.ofString(AxonJson.write(AxonValue.object(body))));
         if (credential != null) {
             request.header("Authorization", credential.get());
+        }
+        if (secret != null) {
+            request.header(ShardHttp.SECRET_HEADER, secret);
         }
         try {
             HttpResponse<String> response = http.send(request.build(), HttpResponse.BodyHandlers.ofString());

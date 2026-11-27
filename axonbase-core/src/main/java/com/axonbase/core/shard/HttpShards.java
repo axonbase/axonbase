@@ -25,11 +25,18 @@ public final class HttpShards {
 
     public static ShardClient client(ShardInfo shard, HttpClient http, Duration deadline,
                                      Supplier<String> credential) {
+        return client(shard, http, deadline, credential, null);
+    }
+
+    /** @param secret segredo do gateway que os nós exigem, ou {@code null} */
+    public static ShardClient client(ShardInfo shard, HttpClient http, Duration deadline,
+                                     Supplier<String> credential, String secret) {
         if (shard.endpoints().isEmpty()) {
             throw ShardException.refused("shard_map_invalid", shard.id() + " sem endereço");
         }
         List<ShardMember> members = shard.endpoints().stream()
-            .map(endpoint -> (ShardMember) new HttpShardMember(shard.id(), endpoint, http, deadline, credential))
+            .map(endpoint -> (ShardMember) new HttpShardMember(shard.id(), endpoint, http, deadline, credential,
+                secret))
             .toList();
         return new GroupShardClient(shard.id(), () -> members, deadline);
     }

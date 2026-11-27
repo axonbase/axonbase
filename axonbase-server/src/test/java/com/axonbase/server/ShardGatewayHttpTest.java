@@ -38,6 +38,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ShardGatewayHttpTest {
 
     private static final HttpClient HTTP = HttpClient.newHttpClient();
+    private static final String SECRET = "segredo-do-gateway";
+
+    private static AxonServer shard(AxonServer server) {
+        server.shardSecret(SECRET);
+        return server;
+    }
 
     private static HttpResponse<String> post(int port, String path, String body, Map<String, String> headers)
         throws Exception {
@@ -51,6 +57,7 @@ class ShardGatewayHttpTest {
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("Axon-Ns", "n");
         headers.put("Axon-Db", "d");
+        headers.put("Axon-Shard-Secret", SECRET);
         for (int i = 0; i < extra.length; i += 2) {
             headers.put(extra[i], extra[i + 1]);
         }
@@ -66,6 +73,7 @@ class ShardGatewayHttpTest {
         }
         env.put("AXON_GATEWAY_SHARDS", spec.toString());
         env.put("AXON_GATEWAY_PORT", "0");
+        env.put("AXON_SHARD_SECRET", SECRET);
         env.put("AXON_GATEWAY_ADMIN_TOKEN", "token-de-teste");
         env.put("AXON_GATEWAY_MAP_TTL_MS", "0");
         env.put("AXON_GATEWAY_DEADLINE_MS", "2000");
@@ -83,7 +91,7 @@ class ShardGatewayHttpTest {
         List<AxonServer> shards = new ArrayList<>();
         try {
             for (int i = 0; i < 3; i++) {
-                shards.add(AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste"));
+                shards.add(shard(AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste")));
             }
             try (GatewayServer gateway = GatewayMain.start(GatewayMain.Config.from(environment(shards)))) {
                 sql(gateway, "DEFINE TABLE pedido SHARD BY cliente");
@@ -137,7 +145,7 @@ class ShardGatewayHttpTest {
         Datastore datastore = new Datastore(backend);
         runtime.appliedBatchListener(datastore.appliedBatchListener());
         datastore.commitCoordinator(runtime, "n1");
-        AxonServer server = AxonServer.startRandomPort(datastore, "segredo-de-teste");
+        AxonServer server = shard(AxonServer.startRandomPort(datastore, "segredo-de-teste"));
         server.clusterStatus(runtime);
         server.shardBackup(new ShardBackupNode(runtime, backend, hooks, dir.resolve("backups"),
             Duration.ofSeconds(30)));
@@ -181,7 +189,7 @@ class ShardGatewayHttpTest {
         setup.namespace("n");
         setup.database("d");
         datastore.execute("DEFINE USER dba ON DATABASE PASSWORD \"pw\" ROLES admin", setup, null);
-        AxonServer server = AxonServer.startRandomPort(datastore, "segredo-de-teste", "root", "pw", true);
+        AxonServer server = shard(AxonServer.startRandomPort(datastore, "segredo-de-teste", "root", "pw", true));
         try {
             String database = new com.axonbase.server.auth.AuthService("segredo-de-teste",
                 new com.axonbase.server.auth.UserStore(datastore.authCatalog()))
@@ -213,7 +221,8 @@ class ShardGatewayHttpTest {
 
     @Test
     void rotaInternaDoShardExigeCredencialEOMesmoBancoAutorizado() throws Exception {
-        AxonServer server = AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste", "root", "pw", true);
+        AxonServer server = shard(
+            AxonServer.startRandomPort(Datastore.memory(), "segredo-de-teste", "root", "pw", true));
         try {
             assertEquals(401, post(server.port(), "/shard/v1/execute", "x", scope()).statusCode());
             String token = AxonJson.parseDocument(post(server.port(), "/signin",
