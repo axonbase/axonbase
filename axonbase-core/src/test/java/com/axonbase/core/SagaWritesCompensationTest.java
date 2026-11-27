@@ -44,6 +44,13 @@ class SagaWritesCompensationTest {
         return run("SHOW SAGA TRANSACTION pedido '" + correlation + "'").asObject().get("steps").asArray().size();
     }
 
+    /** O valor de {@code v}: a leitura por id pode devolver o registro ou uma lista com ele. */
+    private long v(String record) {
+        AxonValue rows = run("SELECT * FROM " + record);
+        AxonValue row = rows.isArray() ? rows.asArray().get(0) : rows;
+        return row.asObject().get("v").asLong();
+    }
+
     private boolean edgeExists(String edge) {
         return !run("UNRELATE " + edge).asArray().isEmpty();
     }
@@ -78,7 +85,7 @@ class SagaWritesCompensationTest {
         cancel("i3");
 
         assertEquals(1, count("SELECT * FROM b"));
-        assertEquals(0, run("SELECT * FROM b:antigo").asArray().get(0).asObject().get("v").asLong());
+        assertEquals(0, v("b:antigo"));
     }
 
     @Test
@@ -109,7 +116,7 @@ class SagaWritesCompensationTest {
 
         cancel("u3");
 
-        assertEquals(1, run("SELECT * FROM b:1").asArray().get(0).asObject().get("v").asLong());
+        assertEquals(1, v("b:1"));
     }
 
     @Test
