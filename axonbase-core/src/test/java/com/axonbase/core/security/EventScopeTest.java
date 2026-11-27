@@ -129,6 +129,18 @@ class EventScopeTest {
     }
 
     @Test
+    void permissionsQueLemOutroBancoValemNaEscritaDoEventoComoNumaEscritaDireta() {
+        Datastore ds = ds();
+        ds.execute("DEFINE TABLE trilha SCHEMALESS PERMISSIONS FOR create WHERE 'alheio' IN "
+            + "(SELECT VALUE v FROM outro.segredo)", databaseAdmin(), null);
+        defineEvent(ds, "CREATE trilha CONTENT {ok: true}");
+
+        ds.execute("CREATE pedido:1", session("editor", "DATABASE", "editor"), null);
+
+        assertEquals(1, ds.execute("SELECT * FROM trilha", local(), null).asArray().size());
+    }
+
+    @Test
     void depoisDoEventoASessaoDeQuemGravaVoltaAoPoderDela() {
         Datastore ds = ds();
         defineEvent(ds, "CREATE trilha CONTENT {ok: true}");

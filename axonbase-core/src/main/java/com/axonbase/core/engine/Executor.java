@@ -759,6 +759,9 @@ public final class Executor {
             || s instanceof Statement.Release || s instanceof Statement.RollbackTo;
     }
 
+    /** Esta é a subconsulta de uma PERMISSIONS ou Data Rule: quem a escreveu não foi o corpo de um evento. */
+    private boolean withinPolicy;
+
     /** Um DATABASE LINK leva a outro servidor: o corpo de um evento não o usa. */
     private void refuseLinkInEvent() {
         if (session.eventScope() != null) {
@@ -766,11 +769,14 @@ public final class Executor {
         }
     }
 
-    /** Num corpo de evento, {@code banco.tabela} só vale para o próprio banco, e nunca para um DATABASE LINK. */
+    /**
+     * Num corpo de evento, {@code banco.tabela} só vale para o próprio banco, e nunca para um DATABASE LINK. As leituras
+     * de uma PERMISSIONS ou Data Rule valem como numa escrita direta.
+     */
     private void requireInEventScope(String qualifier) {
         Session.EventScope scope = session.eventScope();
-        if (scope != null && (!qualifier.equals(scope.database())
-            || ds.databaseLink(scope.namespace(), qualifier) != null)) {
+        if (scope != null && !withinPolicy && evaluatingPolicy.get() == null
+            && (!qualifier.equals(scope.database()) || ds.databaseLink(scope.namespace(), qualifier) != null)) {
             throw outsideEventScope();
         }
     }
@@ -3620,7 +3626,7 @@ return score;
      */
     private AxonValue runSelectViaLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q,
                                         Statement.Select sel) {
-        refuseLinkInEvent();
+        requireInEventScope(q.link());
         // Render the SELECT, then replace qualified FROM with unqualified one
         String rendered = com.axonbase.parser.Render.stmt(sel);
         String qualifiedFrom = q.link() + "." + q.table();
@@ -7171,6 +7177,7 @@ return score;
         try {
             Executor sub = new Executor(ds);
             sub.identitySession = identitySession;
+            sub.withinPolicy = withinPolicy || evaluatingPolicy.get() != null;
             // as variáveis já estão na sessão: nada a repassar
             return sub.execute(sq.query(), session, null);
         } finally {
