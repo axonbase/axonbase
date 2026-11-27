@@ -98,6 +98,18 @@ class SagaCaptureInjectionTest {
     }
 
     @Test
+    void capturaGravaUmUnicoPassoEMantemACorrelacaoDaSessao() {
+        inicia();
+
+        saga.capture("inventory", "sku1", NS, DB, "UPDATE");
+
+        assertEquals("corr-cap", axon.query("RETURN $saga_corr").asString());
+        axon.use("system", "saga");
+        assertEquals(1, axon.query("SELECT * FROM saga_step WHERE correlation_id = 'corr-cap'")
+            .asArray().size());
+    }
+
+    @Test
     void chaveMaliciosaDentroDoEstadoAnteriorNaoViraComando() {
         String chave = "x\": 1}}, k: 0}; DELETE inventory; CREATE lixo CONTENT {a: {b: {\"y";
         axon.query("CREATE inventory:mal CONTENT $doc",
