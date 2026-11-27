@@ -1545,7 +1545,7 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             Session s = withNames(req);
-            if (requireAuthenticated(s, resp)) {
+            if (requireAdmin(s, resp)) {
                 return;
             }
             if (s.readOnly()) {
@@ -1555,11 +1555,16 @@ public final class AxonServer {
             if (redirectWrites(req, resp)) {
                 return;
             }
-            String ns = s.namespace() != null ? s.namespace() : "";
-            String db = s.database() != null ? s.database() : "";
+            if (s.namespace() == null) {
+                s.namespace("");
+            }
+            if (s.database() == null) {
+                s.database("");
+            }
             String dump = readBody(req);
             try {
-                ds.importDatabase(ns, db, dump);
+                // a sessão da requisição leva identidade e teto de papel: cada comando do dump é autorizado
+                ds.importDatabase(s, dump);
                 json(resp, 200, "{\"status\":\"ok\"}");
             } catch (RuntimeException e) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(e.getMessage()) + "\"}");
