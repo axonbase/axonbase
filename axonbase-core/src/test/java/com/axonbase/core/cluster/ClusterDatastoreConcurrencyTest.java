@@ -167,6 +167,31 @@ class ClusterDatastoreConcurrencyTest {
     }
 
     @Test
+    @DisplayName("PRIMARY KEY: uma escrita aceita por valor em escritas simultâneas")
+    void concurrentPrimaryKeyValuesAreAcceptedOnce() throws Exception {
+        try (ClusterHarness cluster = ClusterHarness.rocks(dir, RaftOptions.defaults(), "n1", "n2", "n3")
+                .startAll()) {
+            ClusterRuntime leaderNode = cluster.awaitLeader();
+            Datastore leader = datastores(cluster).get(leaderNode.config().nodeId());
+            leader.execute("CREATE TABLE p (email STRING PRIMARY KEY)", session(), null);
+
+            concurrently(8, 20, (worker, i) -> {
+                try {
+                    leader.execute("CREATE p:w" + worker + "x" + i + " SET email = 'v" + i + "'", session(), null);
+                } catch (RuntimeException refused) {
+                    // recusado: é o esperado para todos menos um de cada valor
+                }
+                return 0;
+            });
+
+            assertEquals(20, leader.execute("SELECT * FROM p", session(), null).asArray().size());
+            cluster.awaitConverged();
+            Map<String, String> expected = ClusterHarness.data(leaderNode);
+            cluster.nodes().forEach(n -> assertEquals(expected, ClusterHarness.data(n), n.config().nodeId()));
+        }
+    }
+
+    @Test
     @DisplayName("inserções concorrentes de registros diferentes não conflitam entre si")
     void concurrentInsertsDoNotConflict() throws Exception {
         try (ClusterHarness cluster = ClusterHarness.rocks(dir, RaftOptions.defaults(), "n1", "n2", "n3")
