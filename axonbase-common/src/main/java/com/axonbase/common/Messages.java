@@ -78,6 +78,9 @@ public final class Messages {
         Map.entry("audit_self_decision", "usuário bloqueado não pode decidir o próprio caso de auditoria"),
         Map.entry("http_shard_not_implemented", "mover shard ainda não está implementado"),
         Map.entry("config_insecure_password", "a senha do root é a padrão (defina AXON_ROOT_PASSWORD)"),
+        Map.entry("config_root_password_blank", "%s está em branco: defina uma senha ou remova a configuração"),
+        Map.entry("config_tls_client_auth_invalid", "AXON_TLS_CLIENT_AUTH inválido: %s (use optional ou require)"),
+        Map.entry("config_tls_client_auth_incomplete", "AXON_TLS_CLIENT_AUTH=require precisa de AXON_TLS_CERT, AXON_TLS_KEY, AXON_TLS_CA e da porta sem TLS desligada"),
         Map.entry("config_insecure_secret", "o segredo JWT é o padrão (defina AXON_SECRET)"),
         Map.entry("config_insecure_defaults", "recusando subir em %s com credenciais padrão: %s. Para liberar, defina AXON_ALLOW_INSECURE_DEFAULTS=true"),
         Map.entry("auth_scope_escalation", "não é permitido criar identidade de escopo maior que o seu"),
@@ -116,6 +119,8 @@ public final class Messages {
         ,Map.entry("cert_store_required", "store JKS é obrigatório: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "parâmetros ns e db são obrigatórios")
         ,Map.entry("cert_user_missing", "usuário de certificado não existe no escopo ativo")
+        ,Map.entry("cert_user_mismatch", "o usuário informado não é o identificado pelo certificado")
+        ,Map.entry("cert_fingerprint_required", "o certificado não identifica o usuário: só entra o usuário definido com o FINGERPRINT deste certificado")
         ,Map.entry("cert_rate_limited", "Nova credencial disponível em %d segundos. Cada credencial só pode ser gerada a cada 10 minutos.")
 
         ,Map.entry("audit_not_configured", "AI Audit não configurado. Defina AXON_AI_PROVIDER, AXON_AI_MODEL e AXON_AI_API_KEY.")
@@ -311,6 +316,7 @@ public final class Messages {
          ,Map.entry("cert_signature_invalid", "assinatura de certificado inválida")
          ,Map.entry("cert_signature_verify_failed", "não foi possível verificar assinatura de certificado")
          ,Map.entry("auth_signup_user_invalid", "usuário inválido para signup")
+         ,Map.entry("auth_signup_user_exists", "o usuário já existe neste banco; signup não altera usuário existente")
          ,Map.entry("cert_store_name_path_required", "nome e caminho do JKS são obrigatórios")
          ,Map.entry("cert_store_password_required", "senha do JKS é obrigatória")
          ,Map.entry("cert_store_load_failed", "não foi possível carregar o JKS %s")
@@ -541,6 +547,9 @@ public final class Messages {
         Map.entry("audit_self_decision", "a blocked user cannot decide their own audit case"),
         Map.entry("http_shard_not_implemented", "moving shards is not implemented yet"),
         Map.entry("config_insecure_password", "the root password is the default (set AXON_ROOT_PASSWORD)"),
+        Map.entry("config_root_password_blank", "%s is blank: set a password or remove the setting"),
+        Map.entry("config_tls_client_auth_invalid", "invalid AXON_TLS_CLIENT_AUTH: %s (use optional or require)"),
+        Map.entry("config_tls_client_auth_incomplete", "AXON_TLS_CLIENT_AUTH=require needs AXON_TLS_CERT, AXON_TLS_KEY, AXON_TLS_CA and the plain port turned off"),
         Map.entry("config_insecure_secret", "the JWT secret is the default (set AXON_SECRET)"),
         Map.entry("config_insecure_defaults", "refusing to start on %s with default credentials: %s. To allow it, set AXON_ALLOW_INSECURE_DEFAULTS=true"),
         Map.entry("auth_scope_escalation", "creating an identity with a broader scope than your own is not allowed"),
@@ -579,6 +588,8 @@ public final class Messages {
         ,Map.entry("cert_store_required", "JKS store is required: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "ns and db parameters are required")
         ,Map.entry("cert_user_missing", "certificate user does not exist in the active scope")
+        ,Map.entry("cert_user_mismatch", "the given user is not the one identified by the certificate")
+        ,Map.entry("cert_fingerprint_required", "the certificate does not identify the user: only a user defined with the FINGERPRINT of this certificate may sign in")
         ,Map.entry("cert_rate_limited", "New credential available in %d seconds. Each credential can only be generated every 10 minutes.")
 
         ,Map.entry("audit_not_configured", "AI Audit not configured. Set AXON_AI_PROVIDER, AXON_AI_MODEL and AXON_AI_API_KEY.")
@@ -774,6 +785,7 @@ public final class Messages {
          ,Map.entry("cert_signature_invalid", "invalid certificate signature")
          ,Map.entry("cert_signature_verify_failed", "could not verify certificate signature")
          ,Map.entry("auth_signup_user_invalid", "invalid user for signup")
+         ,Map.entry("auth_signup_user_exists", "the user already exists in this database; signup does not change an existing user")
          ,Map.entry("cert_store_name_path_required", "JKS name and path are required")
          ,Map.entry("cert_store_password_required", "JKS password is required")
          ,Map.entry("cert_store_load_failed", "could not load JKS %s")

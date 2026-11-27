@@ -8,6 +8,7 @@ import com.axonbase.core.cluster.QuorumUnavailableException;
 import com.axonbase.core.cluster.ReadConsistency;
 import com.axonbase.core.cluster.StaleReadException;
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.security.Authz;
 import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.server.auth.AuthService;
@@ -277,6 +278,19 @@ public final class RpcDispatcher {
         Long ttl = args.size() > 4 && args.get(4).isNumber() ? args.get(4).asLong() : null;
         return ds.kvSet(session, args.get(0).asString(), args.get(1).asString(),
             args.get(2).asString(), args.get(3), ttl);
+    }
+
+    /**
+     * As chamadas kv_* trazem namespace e banco nos parâmetros: o escopo do token precisa cobrir esses, e não só os
+     * da sessão. Com menos de dois parâmetros a validação de cada método recusa adiante.
+     */
+    private boolean kvScopeAllowed(Map<String, AxonValue> obj, Session session) {
+        List<AxonValue> args = paramsOf(obj);
+        if (!authRequired() || args == null || args.size() < 2) {
+            return true;
+        }
+        return args.get(0).isString() && args.get(1).isString()
+            && auth.allows(claimsOf(session.auth()), args.get(0).asString(), args.get(1).asString());
     }
 
     private static String[] kvParams(String method, Map<String, AxonValue> obj, int min) {
@@ -647,11 +661,18 @@ public final class RpcDispatcher {
                     var verified = certificateChallenges.complete(new CertificateChallengeService.Challenge(
                         completion.id(), completion.challenge(), Instant.EPOCH), completion.store(),
                         session.namespace(), session.database(), completion.chain(), completion.signature(), trustStore);
+                    String declared = AxonServer.certificateIdentity(trustStores, completion.store(),
+                        verified.certificate());
+                    if (declared != null && !declared.equals(completion.user())) {
+                        throw new IllegalArgumentException(Messages.get("cert_user_mismatch"));
+                    }
                     long remainingSec = auth.remainingCooldown(completion.user(), completion.store());
                     if (remainingSec > 0) {
                         throw new IllegalArgumentException(Messages.get("cert_rate_limited", remainingSec));
                     }
-                    result = AxonValue.str(auth.issueTemporaryCredential(completion.user(), completion.store(), verified.fingerprint()));
+                    result = AxonValue.str(declared != null
+                        ? auth.issueCredentialForCertificate(declared, completion.store(), verified.fingerprint())
+                        : auth.issueTemporaryCredential(completion.user(), completion.store(), verified.fingerprint()));
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                 }
@@ -749,6 +770,12 @@ public final class RpcDispatcher {
                     error = Messages.get("rpc_signup_user_invalid");
                     break;
                 }
+                String refusal = signupRefusal(session, ns, db);
+                if (refusal != null) {
+                    error = refusal;
+                    errorCode = -32002;
+                    break;
+                }
                 try {
                     String token = auth.signup(user, pass, ns, db);
                     if (token == null) {
@@ -797,10 +824,15 @@ public final class RpcDispatcher {
                 ds.cancelSession(session);
                 result = AxonValue.nul();
             }
-            case "kv_get" -> result = kvRead("kv_get", obj, session);
-            case "kv_set" -> result = kvWrite("kv_set", obj, session);
-            case "kv_del" -> result = kvWrite("kv_del", obj, session);
-            case "kv_scan" -> result = kvRead("kv_scan", obj, session);
+            case "kv_get", "kv_set", "kv_del", "kv_scan" -> {
+                if (!kvScopeAllowed(obj, session)) {
+                    error = Messages.get("rpc_scope_forbidden");
+                    errorCode = -32002;
+                } else {
+                    result = READ_METHODS.contains(method)
+                        ? kvRead(method, obj, session) : kvWrite(method, obj, session);
+                }
+            }
             default -> {
                 error = Messages.get("rpc_method_unsupported", method);
                 errorCode = -32601;
@@ -810,6 +842,24 @@ public final class RpcDispatcher {
             return rpcError(id, errorCode, error);
         }
         return "{\"id\":" + idJson(id) + ",\"result\":" + AxonJson.write(result) + "}";
+    }
+
+    /**
+     * signup cria identidade: exige sessão que possa escrever, papel de administrador e escopo que cubra o destino.
+     * Sem namespace ou banco o próprio {@link AuthService#signup} devolve o erro de escopo ausente.
+     */
+    private String signupRefusal(Session session, String ns, String db) {
+        if (!authRequired()) {
+            return null;
+        }
+        if (session.readOnly()) {
+            return Messages.get("session_read_only");
+        }
+        if (!Authz.atLeast(session.auth(), Authz.Role.ADMIN)) {
+            return Messages.get("auth_role_required", "admin");
+        }
+        boolean complete = ns != null && !ns.isBlank() && db != null && !db.isBlank();
+        return complete && !Authz.allows(session.auth(), ns, db) ? Messages.get("rpc_scope_forbidden") : null;
     }
 
     private boolean authorizedForSession(Session session) {

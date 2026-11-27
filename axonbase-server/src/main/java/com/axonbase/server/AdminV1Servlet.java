@@ -282,8 +282,10 @@ final class AdminV1Servlet extends HttpServlet {
     // ------------------------------------------------------------------
 
     private Caller authenticate(HttpServletRequest req) {
+        // Teto de papel (Axon-Role-Cap): só rebaixa, como nas demais rotas. Valor inválido dá IllegalArgumentException.
+        Authz.Role cap = AxonServer.parseRoleCap(req.getHeader(AxonServer.ROLE_CAP_HEADER));
         if (!srv.requireAuth() || srv.auth() == null) {
-            return new Caller(null, null, Authz.Role.ADMIN);
+            return new Caller(null, null, cap == null ? Authz.Role.ADMIN : cap);
         }
         String header = req.getHeader("Authorization");
         if (header == null || !header.startsWith("Bearer ")) {
@@ -293,7 +295,8 @@ final class AdminV1Servlet extends HttpServlet {
         if (claims == null) {
             throw new ApiError(401, "UNAUTHENTICATED", Messages.get("auth_invalid"));
         }
-        AxonValue auth = AxonServer.claimsValue(claims);
+        // o auth rebaixado segue para o motor em exec() e na depuração
+        AxonValue auth = Authz.cap(AxonServer.claimsValue(claims), cap);
         return new Caller(claims, auth, Authz.role(auth));
     }
 

@@ -1333,12 +1333,20 @@ public final class Datastore {
         }
     }
 
-    /** Restaura um dump AxonQL executando-o. */
+    /** Restaura um dump AxonQL executando-o. Uso embutido: sem identidade, nada é restringido. */
     public void importDatabase(String ns, String db, String dump) {
         Session s = Session.create();
         s.namespace(ns);
         s.database(db);
-        execute(dump, s, null, LegacyDump::restoreTypes);
+        importDatabase(s, dump);
+    }
+
+    /**
+     * Restaura um dump no namespace/banco da sessão, com a identidade e o teto de papel dela: papel e escopo valem
+     * comando a comando, como no {@code /sql}. Quem atende requisições deve usar esta forma.
+     */
+    public void importDatabase(Session session, String dump) {
+        execute(dump, session, null, LegacyDump::restoreTypes);
     }
 
     // ------------------------------------------------------------------

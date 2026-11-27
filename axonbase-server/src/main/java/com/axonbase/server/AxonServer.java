@@ -208,7 +208,29 @@ public final class AxonServer {
         return srv;
     }
 
+    /**
+     * Modo do certificado do cliente ({@code AXON_TLS_CLIENT_AUTH}, ou a propriedade {@code axon.tls.clientAuth}):
+     * {@code optional}, o padrão, pede e aceita a conexão sem ele; {@code require} o exige. Exigir sem TLS completo, ou
+     * com a porta sem TLS aberta, não protegeria nada: a subida é recusada.
+     */
+    private static boolean clientCertificateRequired(ServerConfig config) {
+        String raw = System.getProperty("axon.tls.clientAuth", System.getenv("AXON_TLS_CLIENT_AUTH"));
+        String mode = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (mode.isEmpty() || mode.equals("optional")) {
+            return false;
+        }
+        if (!mode.equals("require")) {
+            throw new IllegalArgumentException(Messages.get("config_tls_client_auth_invalid", raw));
+        }
+        if (config.tlsCert().isBlank() || config.tlsKey().isBlank() || config.tlsCa().isBlank()
+            || config.plainPort() > 0) {
+            throw new IllegalArgumentException(Messages.get("config_tls_client_auth_incomplete"));
+        }
+        return true;
+    }
+
     private void listen() throws Exception {
+        boolean requireClientCertificate = clientCertificateRequired(config);
         QueuedThreadPool pool = new QueuedThreadPool(config.httpThreads(), 1, config.httpQueue());
         Server jetty = new Server(pool);
 
@@ -221,7 +243,11 @@ public final class AxonServer {
             if (!config.tlsCa().isBlank()) {
                 ssl.setTrustStorePath(config.tlsCa());
                 ssl.setTrustStorePassword(config.tlsKey());
-                ssl.setWantClientAuth(true);
+                if (requireClientCertificate) {
+                    ssl.setNeedClientAuth(true);
+                } else {
+                    ssl.setWantClientAuth(true);
+                }
             }
             ServerConnector connector = new ServerConnector(jetty, ssl);
             connector.setHost(bind);
@@ -378,7 +404,9 @@ public final class AxonServer {
         ctx.addFilter(asyncFilter(roleCapFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(metricsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(new LoggingFilter(auth)), "/*", EnumSet.of(DispatcherType.REQUEST));
-        ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
+        ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit(),
+            RateLimitFilter.trustedProxies(System.getenv("AXON_TRUSTED_PROXIES")))),
+            "/*", EnumSet.of(DispatcherType.REQUEST));
         // Mantém threads livres para /health, /ready e /admin mesmo com consultas lentas em andamento.
         admission = new AdmissionControl(AdmissionControl.limitFor(config.httpThreads()));
         ctx.addFilter(asyncFilter(new AdmissionFilter(admission)),
@@ -766,9 +794,24 @@ public final class AxonServer {
         return false;
     }
 
+    /** Operações que valem para o nó inteiro: administrador de escopo ROOT (401 sem sessão, 403 sem papel ou escopo). */
+    private boolean requireRootAdmin(Session session, HttpServletResponse resp) throws IOException {
+        if (requireAdmin(session, resp)) {
+            return true;
+        }
+        if (requireAuth && com.axonbase.core.security.Authz.scope(session.auth())
+            != com.axonbase.core.security.AuthCatalog.Scope.ROOT) {
+            json(resp, 403, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_forbidden")) + "\"}");
+            return true;
+        }
+        return false;
+    }
+
     private boolean requireRoot(Session session, HttpServletResponse resp) throws IOException {
         if (!requireAuth || session.auth() == null || !session.auth().isObject()
-            || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))) {
+            || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))
+            || !com.axonbase.core.security.Authz.atLeast(session.auth(),
+                com.axonbase.core.security.Authz.Role.ADMIN)) {
         json(resp, 403, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_forbidden")) + "\"}");
             return true;
         }
@@ -1012,7 +1055,7 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             Session s = withNames(req);
-            if (requireAdmin(s, resp)) {
+            if (requireRootAdmin(s, resp)) {
                 return;
             }
             var rt = clusterRuntime;
@@ -1157,12 +1200,16 @@ public final class AxonServer {
                     var fingerprint = certificateChallenges.verifyChain(
                         java.util.List.of(certChain), trustStore);
 
-                    String user = req.getParameter("user");
-                    if (user == null || user.isBlank()) {
-                        user = trustStores.usesIcpBrasilCollector(store)
-                            ? extractIcpBrasilUserId(certChain[0])
-                            : trustStores.collectUser(store, certChain[0]);
+                    // quem o certificado identifica manda; o parâmetro só vale quando ele não identifica ninguém
+                    String requested = req.getParameter("user");
+                    String declared = certificateIdentity(trustStores, store, certChain[0]);
+                    if (declared != null && requested != null && !requested.isBlank() && !declared.equals(requested)) {
+                        html.append("<div class=\"info\">").append(Messages.get("cert_user_mismatch")).append("</div>");
+                        html.append("</body></html>");
+                        html(resp, 200, html.toString());
+                        return;
                     }
+                    String user = declared != null ? declared : requested;
                     System.err.println("{\"event\":\"certificate_login\",\"subject\":\""
                         + esc(certChain[0].getSubjectX500Principal().getName())
                         + "\",\"issuer\":\"" + esc(certChain[0].getIssuerX500Principal().getName())
@@ -1198,7 +1245,9 @@ public final class AxonServer {
                         return;
                     }
 
-                    String credential = auth.issueTemporaryCredential(user, store, fingerprint.fingerprint());
+                    String credential = declared != null
+                        ? auth.issueCredentialForCertificate(user, store, fingerprint.fingerprint())
+                        : auth.issueTemporaryCredential(user, store, fingerprint.fingerprint());
 
                     String copyUserLabel = Messages.get("cert_copy_user");
                     String copyPassLabel = Messages.get("cert_copy_password");
@@ -1545,7 +1594,7 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             Session s = withNames(req);
-            if (requireAuthenticated(s, resp)) {
+            if (requireAdmin(s, resp)) {
                 return;
             }
             if (s.readOnly()) {
@@ -1555,11 +1604,16 @@ public final class AxonServer {
             if (redirectWrites(req, resp)) {
                 return;
             }
-            String ns = s.namespace() != null ? s.namespace() : "";
-            String db = s.database() != null ? s.database() : "";
+            if (s.namespace() == null) {
+                s.namespace("");
+            }
+            if (s.database() == null) {
+                s.database("");
+            }
             String dump = readBody(req);
             try {
-                ds.importDatabase(ns, db, dump);
+                // a sessão da requisição leva identidade e teto de papel: cada comando do dump é autorizado
+                ds.importDatabase(s, dump);
                 json(resp, 200, "{\"status\":\"ok\"}");
             } catch (RuntimeException e) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(e.getMessage()) + "\"}");
@@ -1684,6 +1738,14 @@ public final class AxonServer {
             }
         }
         return out.toString();
+    }
+
+    /** Usuário que o próprio certificado declara, pela regra do truststore; {@code null} quando não declara. */
+    static String certificateIdentity(TrustStoreRegistry stores, String store,
+                                      java.security.cert.X509Certificate certificate) {
+        return stores.usesIcpBrasilCollector(store)
+            ? extractIcpBrasilUserId(certificate)
+            : stores.collectUser(store, certificate);
     }
 
     /**

@@ -43,7 +43,11 @@ public record ServerConfig(String path, String secret, String user, String passw
     }
 
     public static ServerConfig load(Path file, Map<String, String> env) throws IOException {
-        ServerConfig base = fromMap(read(file), defaults());
+        Map<String, String> values = read(file);
+        // definida em branco não é o mesmo que ausente: cair na senha padrão abriria o root sem ninguém perceber
+        requireNotBlank(env.get("AXON_ROOT_PASSWORD"), "AXON_ROOT_PASSWORD");
+        requireNotBlank(values.get("root_password"), "root_password");
+        ServerConfig base = fromMap(values, defaults());
         return new ServerConfig(
             envOr(env, "AXON_PATH", base.path()),
             envOr(env, "AXON_SECRET", base.secret()),
@@ -84,6 +88,12 @@ public record ServerConfig(String path, String secret, String user, String passw
             envOr(env, "AXON_AUDIT_USER_FROM", base.auditUserFrom()),
             boolOr(env.get("AXON_AUDIT_SELECT"), base.auditSelect()),
             intOr(env.get("AXON_AUDIT_MAX_BODY"), base.auditMaxBody()));
+    }
+
+    private static void requireNotBlank(String value, String name) {
+        if (value != null && value.isBlank()) {
+            throw new IllegalArgumentException(Messages.get("config_root_password_blank", name));
+        }
     }
 
     private static boolean loopback(String bind) {
