@@ -31,6 +31,8 @@ import java.util.function.Supplier;
 public final class Axon implements AutoCloseable {
 
     private static final String VERSION = "0.2.3";
+    /** Teto de uma resposta; o padrão do WebSocket (64 KiB) derruba a conexão em consultas comuns. */
+    private static final long MAX_RESPONSE_BYTES = 256L * 1024 * 1024;
 
     private final Map<Integer, CompletableFuture<String>> pending = new ConcurrentHashMap<>();
     private final AtomicInteger nextId = new AtomicInteger(0);
@@ -74,6 +76,7 @@ public final class Axon implements AutoCloseable {
             } else {
                 client = new WebSocketClient();
             }
+            client.setMaxTextMessageSize(MAX_RESPONSE_BYTES);
             client.start();
             Axon axon = new Axon(client);
             client.connect(new Holder(axon), URI.create(url)).get(30, TimeUnit.SECONDS);
