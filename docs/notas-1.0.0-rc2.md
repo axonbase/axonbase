@@ -109,7 +109,7 @@ Atenção na atualização: certificado revogado passa a ser sempre recusado no 
 - Continuam aceitos: `SELECT`, `CREATE`, `INSERT`, `UPDATE`, `UPSERT`, `DELETE`, `RELATE`, `UNRELATE`, `LET`, `RETURN`, `IF`, `ERROR`, `EXPLAIN`, `DESCRIBE`, `SHOW DATA RULES`, `CALL`, pontos de salvamento e `INFO` do banco ou de seus objetos.
 - São recusados: definições e remoções (`DEFINE`, `CREATE TABLE`, `ALTER`, `DROP`), usuários, acessos, auditoria, comandos de SAGA, `USE`, `LIVE`, `KILL`, `BEGIN`, `COMMIT`, `CANCEL`, outro banco por `banco.tabela`, `DATABASE LINK` e `INFO` de root ou de namespace.
 - Um evento antigo, mesmo definido pelo root, que faça algo recusado continua gravado e passa a fazer falhar a escrita que o dispara, com a mensagem `an event body only reads and writes data of the table's database` (no idioma configurado). Em disco ou em cluster, fora de transação explícita, nada dessa escrita é gravado. Numa expiração por TTL, as linhas deixam de expirar até o evento ser corrigido. O que o evento fazia fora do banco precisa passar para a aplicação.
-- As `PERMISSIONS` e as Data Rules de quem grava valem como antes, inclusive as subconsultas delas que leem outro banco. Já um `DEFAULT` ou `ASSERT` de campo que leia outro banco é recusado quando a escrita parte de um evento.
+- As `PERMISSIONS` e as Data Rules de quem grava continuam valendo. O que elas podem ler está na seção [Expressões de esquema e de política só leem](#expressões-de-esquema-e-de-política-só-leem).
 
 ### Definição de tabela exige administrador do banco
 
@@ -125,6 +125,55 @@ Continuam como antes: criar tabela sem `PERMISSIONS` (também ao gravar um regis
 - Perdem essas ações o papel `operator` (inclusive o teto `Axon-Role-Cap: operator`) e os tokens sem papel reconhecido, como os de escopo de banco sem `ROLES`.
 - No driver JDBC com tradução de SQL, `DROP TABLE` exige administrador, e `CREATE TABLE` sobre uma tabela que já existe com outra definição é recusado.
 - A importação embutida por quem não é administrador completa as tabelas que ela mesma cria. Um dump com `PERMISSIONS`, ou que mude uma tabela já existente, é recusado por inteiro. `POST /import` já exigia administrador.
+
+### Expressões de esquema e de política só leem
+
+Antes, uma subconsulta podia ter várias sentenças, por exemplo `(SELECT ...; CREATE USER ... ON ROOT ...)`, e rodava na sessão de quem gravava ou consultava. Quem escrevia um `DEFAULT` podia fazer o root criar usuários.
+
+Agora, as expressões abaixo só leem, e só o banco da tabela:
+
+- `DEFAULT` e `ASSERT` de campo, `CHECK` de coluna e de tabela;
+- `PERMISSIONS`, o filtro e o valor injetado de uma Data Rule;
+- a condição `WHEN` de um evento;
+- o valor padrão de um parâmetro de função ou procedure;
+- o filtro e as colunas de um `LIVE SELECT`.
+
+A regra alcança subconsultas, blocos e os programas chamados pela expressão, inclusive `SECURITY DEFINER`:
+
+- Passam `SELECT`, `RETURN`, `IF`, `ERROR`, `DESCRIBE` e `INFO` do banco ou de seus objetos.
+- São recusados escritas, definições, usuários, acessos, comandos de SAGA, `USE`, transações, `LET`, `CALL`, `LIVE`, `KILL`, `kv::set`, `kv::del`, outro banco por `banco.tabela`, `DATABASE LINK`, `AUDIT_LOG` e `AUDIT_CASES`.
+- Uma leitura feita ali não cria a tabela que ainda não existe.
+
+O que muda ao atualizar:
+
+- Definições já gravadas continuam abrindo no reinício. A recusa aparece quando a expressão é avaliada, com a mensagem `a schema, policy or LIVE expression only reads data of the table's database` (no idioma configurado), e a escrita ou a consulta falha.
+- Um `DEFAULT` que gerava sequência com `kv::set`, ou que chamava uma procedure, precisa passar para a aplicação.
+- Uma `PERMISSIONS` ou Data Rule que consultava outro banco (por exemplo, uma tabela central de acessos) precisa ler uma cópia no próprio banco.
+- Um programa cujo padrão de parâmetro seja recusado abre marcado como quebrado: a chamada devolve o erro, e a exportação não o inclui. Recrie-o.
+- No `LIVE SELECT`, o filtro e as colunas passam a ser calculados com a identidade de quem assinou. Se pedirem algo recusado, o assinante fica sem o aviso, o log registra `live_query_refused` e a escrita vale.
+
+### Funções só leem, também em subconsultas
+
+A AxonPL já recusava escrita em função, mas conferia só a primeira camada do texto passado a `db.query`. Uma subconsulta escrevia com o poder de quem chamava a função. Agora a recusa vale na execução de cada sentença, com a mensagem `a function only reads data`. Procedures chamadas por `CALL` não mudam.
+
+Uma subconsulta de várias sentenças na consulta do próprio usuário continua aceita: cada sentença passa pelas mesmas conferências de papel e escopo.
+
+### Outro banco exige escopo que o alcance
+
+- `banco.tabela` apontando para outro banco do namespace exige identidade de escopo de namespace ou root. Um usuário de banco recebe `the token scope does not reach the database`, em `SELECT`, `JOIN`, subconsulta, contagem, `EXPLAIN` e nas escritas que leem outro banco.
+- O banco citado deixa de ser criado por uma leitura recusada.
+- Citar o próprio banco, o modo sem autenticação e as ligações entre bancos (`DATABASE LINK`) não mudam.
+
+### Embedding e analisador exigem administrador do banco
+
+- `DEFINE EMBEDDING`, `DROP EMBEDDING`, `DEFINE ANALYZER`, `CREATE ANALYZER` e `DROP ANALYZER` exigem administrador com escopo que cubra o banco. A URL (Uniform Resource Locator) de um embedding decide para onde o texto é enviado.
+- Repetir sem mudança a definição em vigor continua aberto a quem grava.
+- Perdem essas ações o papel `operator` (inclusive o teto `Axon-Role-Cap: operator`, usado pelo painel Enterprise) e os tokens sem papel reconhecido.
+- A importação embutida por quem não é administrador é recusada quando o dump traz um embedding ou analisador que o banco ainda não tem. `POST /import` já exigia administrador. Reinício e replicação não mudam.
+
+### `CREATE TABLE IF NOT EXISTS`
+
+A forma era recusada pelo analisador e passa a ser aceita. `exists` não virou palavra reservada.
 
 ### Conversões
 
@@ -186,6 +235,12 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 - `PERMISSIONS` de leitura não valem no acesso direto por id (`RETURN t:1.campo`), no `FETCH` e na leitura de um registro ligado.
 - Um record id guardado num campo volta como texto. Uma Data Rule como `dono.equipe = 'a'` não segue esse link e nega a linha. A travessia de grafo (`->pertence->u.equipe`) é seguida.
 - A auditoria de um usuário vem do token. Quem recebeu `AUDITED BY` depois de entrar só é alcançado no próximo login. Dois usuários auditados com papel de operador ainda podem aprovar os casos `WARNING` um do outro.
+- Numa consulta `banco.tabela` feita por identidade de namespace ou root, as `PERMISSIONS` e as Data Rules aplicadas são as do banco da sessão, não as do banco citado.
+- Um `LIVE SELECT` não aplica as `PERMISSIONS` de leitura aos avisos, e um `$parâmetro` do filtro é lido das variáveis de quem grava.
+- Um `DATABASE LINK` vale para todo o namespace: um usuário de banco consegue consultá-lo, com a credencial gravada na ligação.
+- Criar, substituir e apagar função, procedure ou pacote não exige papel de administrador. Um editor pode trocar uma procedure que o root chama com `CALL`, ou uma função citada numa `PERMISSIONS`.
+- `REEMBED` não exige administrador e regrava as linhas sem consultar as `PERMISSIONS`.
+- Uma Data Rule cuja subconsulta leia linhas sujeitas à própria regra entra em recursão e a consulta falha.
 - Pelo painel Enterprise, a pessoa auditada com papel de operador consegue decidir o próprio caso, porque o motor vê a conta do agente.
 - A estimativa do `EXPLAIN` conta também as linhas que uma Data Rule oculta.
 - Uma importação retida pela auditoria por IA e depois aprovada roda como um comando comum: não substitui registros existentes e, num nó único, não é tudo ou nada.

@@ -28,6 +28,10 @@ Table `PERMISSIONS` follow the same principle for token data: a condition that m
 
 In an authenticated session, a database administrator is required to drop a table, to declare `PERMISSIONS`, and to change an existing one (`DEFINE`, `CREATE` or `ALTER TABLE`, `DROP INDEX`, partitions and TTL (Time To Live), and replacing a field or index, or adding one to a table with permissions). Creating a new table without permissions, adding fields and indexes to an unprotected table and repeating a definition unchanged stay open to writers.
 
+Expressions that come from a schema or a policy (field `DEFAULT` and `ASSERT`, `CHECK`, `PERMISSIONS`, data rules, event conditions, program parameter defaults and `LIVE SELECT` filters and columns) only read, and only the database of the table. This holds for subqueries and for the programs they call: writes, schema, user, access, saga, `USE`, transaction, `KILL` and `LIVE` statements, `kv::set`, `kv::del`, other databases and database links are refused. Stored definitions still load on restart and fail when evaluated. An AxonPL function only reads, also through subqueries.
+
+Naming another database of the namespace (`database.table`) requires a namespace or root identity. In an authenticated session, `DEFINE`, `CREATE` and `DROP` of embeddings and analyzers require a database administrator, except repeating the current definition unchanged.
+
 `$auth` and `$token` hold the claims of the session token (`$auth.id` is the user name). An authenticated session cannot set them.
 
 The following paths are **not** covered, so a data rule is not a complete isolation boundary:
