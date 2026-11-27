@@ -1877,6 +1877,7 @@ public final class Executor {
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
                 refuseLinkInEvent();
+                requireForwardable(q, com.axonbase.parser.Render.stmt(u));
                 // Saga: capture BEFORE state for remote write
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && qRid == null) {
@@ -1982,6 +1983,7 @@ public final class Executor {
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
                 refuseLinkInEvent();
+                requireForwardable(q, com.axonbase.parser.Render.stmt(d));
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && dqRid == null) {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
@@ -4013,7 +4015,7 @@ return score;
         if (linkDef == null) {
             throw errorStmt(Messages.get("stmt_database_link_missing", q.link()));
         }
-        String axonql = renderedSql.replace(renderedQualified(q), q.table());
+        String axonql = forwardedText(q, renderedSql);
         try {
             List<AxonValue> rows = queryLink(linkDef, q, axonql, expected);
             if (rows.isEmpty()) return AxonValue.array(List.of());
@@ -4026,6 +4028,23 @@ return score;
         }
     }
 
+    /** O comando como segue para o participante: sem o nome da ligação. */
+    private static String forwardedText(Expr.Qualified q, String renderedSql) {
+        return renderedSql.replace(renderedQualified(q), q.table());
+    }
+
+    /** Antes de qualquer envio ou passo de SAGA: o comando recusado não lê o participante nem entra no ledger. */
+    private void requireForwardable(Expr.Qualified q, String renderedSql) {
+        requireForwardablePayload(forwardedText(q, renderedSql));
+    }
+
+    private void requireForwardablePayload(String axonql) {
+        Optional<String> refused = LinkPayload.refusal(axonql);
+        if (refused.isPresent()) {
+            throw errorStmt("comando não aceito num DATABASE LINK: " + refused.get());
+        }
+    }
+
     /** Como o Render escreve {@code link.tabela}. */
     private static String renderedQualified(Expr.Qualified q) {
         return com.axonbase.value.AxonQlText.identifier(q.link()) + "."
@@ -4033,8 +4052,9 @@ return score;
     }
 
     /**
-     * Envia ao servidor do DATABASE LINK, com a credencial dele, uma única sentença do tipo pedido. O nome da tabela
-     * precisa ser simples: o outro servidor pode ser de uma versão que não cita nomes ao gravar o catálogo.
+     * Envia ao servidor do DATABASE LINK, com a credencial dele, uma única sentença do tipo pedido, sem nada aninhado
+     * nem com efeito ({@link LinkPayload}). O nome da tabela precisa ser simples: o outro servidor pode ser de uma
+     * versão que não cita nomes ao gravar o catálogo.
      */
     private List<AxonValue> queryLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q, String axonql,
                                       Class<? extends Statement> expected) {
@@ -4050,6 +4070,7 @@ return score;
         if (refused.isPresent()) {
             throw errorStmt("nome não aceito num DATABASE LINK: " + refused.get());
         }
+        requireForwardablePayload(axonql);
         return linkClient.query(linkDef, axonql);
     }
 
