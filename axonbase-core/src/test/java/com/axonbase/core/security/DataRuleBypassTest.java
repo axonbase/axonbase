@@ -78,7 +78,7 @@ class DataRuleBypassTest {
         Datastore ds = ds();
         assertFalse(text(ds, "UPDATE o:1 SET nota = 1", v()).contains("111"));
         assertFalse(text(ds, "CREATE o:3 CONTENT {cpf: '444'}", v()).contains("444"));
-        assertFalse(text(ds, "INSERT INTO o [{cpf: '555'}]", v()).contains("555"));
+        assertFalse(text(ds, "INSERT INTO o [{id: 5, cpf: '555'}]", v()).contains("555"));
         assertFalse(text(ds, "DELETE o:1 RETURN BEFORE", v()).contains("111"));
     }
 
