@@ -781,7 +781,9 @@ public final class AxonServer {
 
     private boolean requireRoot(Session session, HttpServletResponse resp) throws IOException {
         if (!requireAuth || session.auth() == null || !session.auth().isObject()
-            || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))) {
+            || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))
+            || !com.axonbase.core.security.Authz.atLeast(session.auth(),
+                com.axonbase.core.security.Authz.Role.ADMIN)) {
         json(resp, 403, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_forbidden")) + "\"}");
             return true;
         }
