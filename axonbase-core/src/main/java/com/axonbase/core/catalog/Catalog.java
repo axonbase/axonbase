@@ -415,6 +415,10 @@ public final class Catalog {
         /** Marca o índice como em construção: as escritas o mantêm, as consultas não o usam. */
         public void markBuilding() { built.set(0); ready = false; }
         public void markReady() { ready = true; }
+        private volatile boolean resumed;
+        /** A construção foi retomada ao reler o catálogo, e não pedida por um comando deste nó. */
+        public boolean resumed() { return resumed; }
+        public void markResumed() { resumed = true; }
     }
 
     /** Definição de uma Data Rule (filtro no nível de linha e coluna). */

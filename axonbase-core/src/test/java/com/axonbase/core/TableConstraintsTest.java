@@ -191,6 +191,18 @@ class TableConstraintsTest {
     }
 
     @Test
+    @DisplayName("DEFINE FIELD sobre a coluna da chave primária retira as entradas antigas dela")
+    void defineFieldOverKeyColumnDropsItsEntries() {
+        run(PEOPLE);
+        run("CREATE t:1 SET codigo = 'X', nome = 'Ana'");
+
+        run("DEFINE FIELD codigo ON TABLE t TYPE string");
+
+        assertEquals(java.util.List.of(), backend.keysWithPrefix("n\u0000d\u0000t\u0000!uidx\u0000!pk\u0000"));
+        assertEquals(java.util.List.of(), backend.keysWithPrefix("PKB|"));
+    }
+
+    @Test
     @DisplayName("apagar e recriar a tabela não herda valores da chave primária")
     void dropTableForgetsKeys() {
         run(PEOPLE);

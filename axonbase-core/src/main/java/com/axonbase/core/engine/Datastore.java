@@ -111,6 +111,26 @@ public final class Datastore {
         }
     }
 
+    private final PrimaryKeyEntries primaryKeyEntries = new PrimaryKeyEntries(this);
+
+    PrimaryKeyEntries primaryKeyEntries() {
+        return primaryKeyEntries;
+    }
+
+    CommitCoordinator commitCoordinator() {
+        return commitCoordinator;
+    }
+
+    /**
+     * Depois de repor ou trocar a base: o marcador que veio junto não garante as entradas (o backup pode ser de um nó
+     * em que elas não batiam com os registros), então tudo é refeito.
+     */
+    private void rebuildRestoredPrimaryKeys() {
+        backend.keysWithPrefix("PKB|").forEach(backend::delete);
+        primaryKeyEntries.forget();
+        buildPrimaryKeys();
+    }
+
     /** Grava as entradas de chave primária que faltam: bases da rc1 declaravam a chave sem mantê-las. */
     private void buildPrimaryKeys() {
         namespaces.forEach((ns, databases) -> databases.forEach((name, database) -> {
@@ -833,6 +853,7 @@ public final class Datastore {
     public void commitCoordinator(CommitCoordinator coordinator, String nodeId) {
         this.commitCoordinator = coordinator;
         this.clusterNodeId = nodeId;
+        primaryKeyEntries.forget();
     }
 
     private static volatile java.util.function.Consumer<ControlCommand> replayHook;
@@ -1771,7 +1792,7 @@ public final class Datastore {
         if (restoredControl) {
             replayControl();
             controlStore.save(controlState, backend);
-            buildPrimaryKeys();
+            rebuildRestoredPrimaryKeys();
         }
         backend.flush();
         backend.delete(RESTORE_PENDING_KEY);
@@ -1874,7 +1895,7 @@ public final class Datastore {
             repairControl();
             replayControl();
             registerLegacyEdgeKinds();
-            buildPrimaryKeys();
+            rebuildRestoredPrimaryKeys();
         }
     }
 
@@ -1920,7 +1941,7 @@ public final class Datastore {
                 new String(lastCtrl[0], java.nio.charset.StandardCharsets.UTF_8)));
             replayControl();
             controlStore.save(controlState, backend);
-            buildPrimaryKeys();
+            rebuildRestoredPrimaryKeys();
         }
         backend.flush();
         backend.delete(RESTORE_PENDING_KEY);

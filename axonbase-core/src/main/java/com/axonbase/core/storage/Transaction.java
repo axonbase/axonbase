@@ -131,6 +131,12 @@ public final class Transaction implements KvBackend {
         dropped.add(range);
     }
 
+    /** Esta transação gravou ou apagou a chave. */
+    public boolean writes(String key) {
+        ensureOpen();
+        return staged.containsKey(key) || deleted.contains(key) || isDropped(key);
+    }
+
     /**
      * Lê como {@link #get}, mas sem registrar a leitura: outra transação que mude a chave não conflita com esta.
      * Serve para metadados cuja validade é conferida por uma {@link CommitGuard}.

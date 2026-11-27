@@ -168,6 +168,20 @@ Restaurar ou importar um backup físico pela API continua recusado em cluster: t
 
 Cada entrada do log leva um carimbo de um relógio híbrido, o HLC (Hybrid Logical Clock). O líder carimba ao propor, e seguidores e learners adotam o carimbo recebido, então a ordem do log é a ordem dos carimbos mesmo depois de uma troca de líder. Um lote que chegue mais de 500 ms à frente do relógio local é recusado e reenviado: sincronize os nós com o `chrony`. Com `AXON_PITR=on`, cada nó arquiva os lotes confirmados para a [recuperação de desastre](operacao-e-resiliencia.md#recuperação-de-desastre). Detalhes do carimbo em [pitr.md](pitr.md#o-carimbo-de-tempo).
 
+## Chave primária e `UNIQUE` na troca de líder
+
+> **Enquanto um nó da 1.0.0-rc1 for o líder, a `PRIMARY KEY` não é conferida.** Na atualização, atualize primeiro os seguidores, transfira a liderança para um nó atualizado e atualize por último o antigo líder. **Voltar para a rc1 exige restaurar o backup.**
+
+A unicidade é conferida por registros internos que apontam cada valor para a linha que o tem. A atualização nó a nó, uma parada total com entradas do log ainda não aplicadas e a entrada de um nó novo podiam deixá-los diferentes das linhas. A versão atual trata assim:
+
+- Na primeira escrita de cada tabela com chave primária em cada mandato, o líder espera aplicar o log, compara os registros internos com as linhas e replica só a diferença, em lotes de até 500 chaves. Reiniciar o nó ou assumir a liderança repete a conferência.
+- Essa primeira escrita percorre a tabela inteira, e as outras escritas da mesma tabela esperam. Em tabelas grandes ela pode estourar o tempo limite do cliente. Logo depois de uma troca de líder, vale fazer uma escrita de aquecimento em cada tabela grande. Os lotes já confirmados não se perdem se a conferência for interrompida.
+- Sem diferença, nada vai para o log. Tabelas sem chave primária não pagam nada.
+- Quando há diferença a corrigir, a transação que disparou a conferência e já tinha lido a tabela pode receber conflito de versão. Repita a transação.
+- Um nó retirado do cluster e aberto sozinho não refaz essa conferência. Antes de usá-lo assim, restaure nele um backup, o que reconstrói os registros internos.
+- Num índice `UNIQUE`, um registro interno que a linha não confirma é apagado quando atrapalha uma escrita. Isso não vale para tabela particionada.
+- Um índice `UNIQUE` grande é construído por cada nó. Se a liderança passar a um nó que ainda não terminou a construção, ele recusa gravar valores desse índice, com a mensagem `unique index '...' is still building on this node, retry the write shortly` (no idioma configurado), até terminar. Se a construção parar por falha da camada fria, redefina o índice.
+
 ## Compatibilidade na atualização
 
 O roteiro de atualização, a drenagem, a transferência de liderança e os riscos de misturar versões estão em [operacao-e-resiliencia.md](operacao-e-resiliencia.md). Da 0.10.x ou anterior, atualize só com os três nós parados: um nó de cada vez a partir dessas versões não é suportado, porque elas podem [confirmar escritas sem gravar](operacao-e-resiliencia.md#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar). Entre versões novas, atualize um nó de cada vez. O motor ainda entende o protocolo anterior (um líder novo fala com um membro antigo uma entrada por conexão, e um membro novo aceita um líder antigo), o que reduz o dano de uma mistura de versões, mas não a torna suportada. Enquanto houver nó antigo, a vazão de replicação para ele é a da versão anterior. Com líder antigo, os seguidores novos não atendem `linearizable` nem `max-lag` (o líder antigo não responde à consulta); `stale`, o padrão, continua funcionando. Requisições com outro `AXON_CLUSTER_ID` são recusadas.

@@ -649,6 +649,11 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         }
     }
 
+    @Override
+    public long leadershipTerm() {
+        return leaderTerm;
+    }
+
     /** Replica um batch do state machine e só retorna depois do commit por maioria. */
     @Override
     public long confirm(String nodeId, CommittedBatch batch) {

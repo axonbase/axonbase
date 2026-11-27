@@ -23,6 +23,11 @@ public interface CommitCoordinator {
         return confirm(nodeId, batch);
     }
 
+    /** O mandato em que este nó lidera. Quem não tem mandatos devolve sempre 0. */
+    default long leadershipTerm() {
+        return 0;
+    }
+
     /** {@code false} quando este nó sabidamente não pode confirmar escritas (não é o líder). */
     default boolean acceptsWrites(String nodeId) {
         return true;

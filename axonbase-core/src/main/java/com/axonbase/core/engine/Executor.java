@@ -4903,11 +4903,16 @@ return score;
         if (df.embeddingName() != null) {
             checkEmbeddingField(db, def, df);
         }
+        Catalog.FieldDef previous = def.fields().get(df.name());
         def.fields().put(df.name(),
             new Catalog.FieldDef(df.name(), df.type(), df.readonly(), df.assertExpr(), df.defaultExpr(),
                 df.references(), df.embeddingName(), df.embeddingFrom()));
         control(db, ControlCommand.Kind.FIELD, df.table() + ":" + df.name(),
             com.axonbase.parser.Render.stmt(df));
+        if (previous != null && previous.primaryKey()) {
+            // a coluna saiu da chave: as entradas e o marcador antigos não podem ficar
+            refreshPrimaryKey(db, df.table());
+        }
         return AxonValue.nul();
     }
 
@@ -4953,6 +4958,7 @@ return score;
                 : records(db).get(marker).isPresent();
             if (interrupted) {
                 newIndex.markBuilding();
+                newIndex.markResumed();
             }
             def.indexes().put(di.name(), newIndex);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
@@ -5118,12 +5124,17 @@ return score;
             String prefix = uniqueIndexPrefix(db, table, index, current);
             if (prefix != null) {
                 String own = prefix + rid.key().keyString();
-                if (records(db).keysWithPrefix(prefix).stream().anyMatch(k -> !k.equals(own))) {
-                    throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
+                if (!heldByAnother(db, table, index, prefix, own)) {
+                    records(db).put(own, new byte[0]);
+                    // a mesma chave que a escrita normal grava: o índice construído fica igual ao mantido desde o começo
+                    records(db).put(uniqueClaimKey(db, table, index, prefix), new byte[0]);
+                } else {
+                    // se um lote replicado mudou a linha depois da leitura, quem a mudou já a indexou
+                    Document now = loadDoc(db, rid);
+                    if (now != null && prefix.equals(uniqueIndexPrefix(db, table, index, now.current()))) {
+                        throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
+                    }
                 }
-                records(db).put(own, new byte[0]);
-                // a mesma chave que a escrita normal grava: o índice construído fica igual ao mantido desde o começo
-                records(db).put(uniqueClaimKey(db, table, index, prefix), new byte[0]);
             }
         }
         onlyIndex = index;
@@ -7740,6 +7751,8 @@ return score;
         if (next != null && next.equals(previous)) {
             return;
         }
+        // em cluster, as entradas deste nó são conferidas com os registros antes de valerem
+        ds.primaryKeyEntries().ensure(session, db, rid.table(), columns);
         String own = rid.key().keyString();
         // a marca disputada faz duas escritas simultâneas do mesmo valor conflitarem; numa tabela particionada a
         // entrada mora na partição da linha e a marca não existe
@@ -7782,11 +7795,11 @@ return score;
         }
     }
 
-    private static String primaryKeyPrefix(Database db, String table) {
+    static String primaryKeyPrefix(Database db, String table) {
         return db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000!uidx\u0000!pk\u0000";
     }
 
-    private static String primaryKeyMarker(Database db, String table) {
+    static String primaryKeyMarker(Database db, String table) {
         return "PKB|" + db.ns() + "|" + db.db() + "|" + table;
     }
 
@@ -7806,6 +7819,13 @@ return score;
         }
         return primaryKeyPrefix(db, table) + AxonJson.write(AxonValue.array(columns.stream().map(AxonValue::str)
             .toList())) + "\u0000" + AxonJson.write(AxonValue.array(values)) + "\u0000";
+    }
+
+    /** O prefixo das entradas do valor que o registro gravado sob {@code own} tem agora, ou {@code null}. */
+    static String storedKeySlot(KvBackend store, Database db, String table, List<String> columns, String own) {
+        return store.get(db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000" + own)
+            .map(raw -> primaryKeySlot(db, table, columns, AxonJson.decode(raw)))
+            .orElse(null);
     }
 
     /** Depois de um DDL, ou ao abrir uma base de versão anterior: refaz as entradas se a chave primária mudou. */
@@ -7838,16 +7858,23 @@ return score;
             records(db).delete(marker);
         } else {
             boolean contended = db.catalog().partitioning(table) == null;
-            for (RecordId rid : resolveTargets(new Expr.Ident(table))) {
-                Document doc = loadDoc(db, rid);
-                String slot = doc == null ? null : primaryKeySlot(db, table, columns, doc.current());
+            // em fluxo: uma tabela grande não vira uma lista de ids em memória
+            KvBackend store = records(db);
+            String rows = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+            store.scanPrefix(rows, key -> {
+                String own = key.substring(rows.length());
+                if (own.isEmpty() || own.charAt(0) == '!') {
+                    return true;
+                }
+                String slot = storedKeySlot(store, db, table, columns, own);
                 if (slot != null) {
                     if (contended) {
-                        records(db).put(slot, new byte[0]);
+                        store.put(slot, new byte[0]);
                     }
-                    records(db).put(slot + rid.key().keyString(), new byte[0]);
+                    store.put(slot + own, new byte[0]);
                 }
-            }
+                return true;
+            });
             records(db).put(marker, wanted.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
         // uma transação aberta antes disso montou as escritas sem estas entradas
@@ -7864,17 +7891,21 @@ return score;
                 continue;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
+            String previousPrefix = uniqueIndexPrefix(db, rid.table(), ix, before);
             if (nextPrefix != null) {
+                // construção retomada por este nó: sem as entradas das linhas antigas não há como conferir um valor
+                if (ds.clustered() && !ix.ready() && ix.resumed() && !session.restoring()
+                    && !nextPrefix.equals(previousPrefix)) {
+                    throw errorStmt(Messages.get("stmt_unique_index_building", ix.name()));
+                }
                 // antes de ler: se outra escrita tomar ou soltar o valor no meio, este commit conflita
                 contend(db, uniqueClaimKey(db, rid.table(), ix, nextPrefix));
                 String ownEntry = nextPrefix + rid.key().keyString();
-                var existing = records(db).keysWithPrefix(nextPrefix);
-                if (existing.stream().anyMatch(key -> !key.equals(ownEntry))) {
+                if (heldByAnother(db, rid.table(), ix, nextPrefix, ownEntry)) {
                     throw AxonError.internal(Messages.get("stmt_unique_index_violation", ix.name()));
                 }
             }
 
-            String previousPrefix = uniqueIndexPrefix(db, rid.table(), ix, before);
             if (previousPrefix != null) {
                 records(db).delete(previousPrefix + rid.key().keyString());
                 if (!previousPrefix.equals(nextPrefix)) {
@@ -7888,6 +7919,38 @@ return score;
                 }
             }
         }
+    }
+
+    /** Outro registro tem o valor. Em cluster, entradas que o registro não confirma são apagadas no caminho. */
+    private boolean heldByAnother(Database db, String table, Catalog.IndexDef index, String prefix, String ownEntry) {
+        boolean held = false;
+        for (String key : records(db).keysWithPrefix(prefix)) {
+            if (key.equals(ownEntry)) {
+                continue;
+            }
+            if (leftoverEntry(db, table, index, prefix, key.substring(prefix.length()))) {
+                records(db).delete(key);
+            } else {
+                held = true;
+            }
+        }
+        return held;
+    }
+
+    /**
+     * Um seguidor constrói o índice enquanto aplica o log, e pode sobrar a entrada de um valor que o registro já
+     * soltou. Na dúvida (tabela particionada, id que não se relê da chave) a entrada vale.
+     */
+    private boolean leftoverEntry(Database db, String table, Catalog.IndexDef index, String prefix, String other) {
+        if (!ds.clustered() || db.catalog().partitioning(table) != null || other.indexOf('\u0000') >= 0) {
+            return false;
+        }
+        RecordId owner = new RecordId(table, parseKey(other));
+        if (!owner.key().keyString().equals(other)) {
+            return false;
+        }
+        Document doc = loadDoc(db, owner);
+        return doc == null || !prefix.equals(uniqueIndexPrefix(db, table, index, doc.current()));
     }
 
     /**
