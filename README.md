@@ -29,7 +29,7 @@ A data rule filters rows in `SELECT` (including `JOIN`), `UPDATE` and `DELETE`, 
 The following paths are **not** covered, so a data rule is not a complete isolation boundary:
 
 - `WHERE` and `ORDER BY` on a masked field use the real value, which can therefore be inferred
-- a write that copies a masked field into another field of the same row (`SET copy = cpf`, `SET info.copy = cpf`) exposes the value. A `PATCH` list is stricter: `test`, `copy` and `move` are refused on a masked field and on the whole record
+- a write that copies a masked field into another field of the same row (`SET copy = cpf`, `SET extra.copy = cpf`) exposes the value. A `PATCH` list is stricter: `test`, `copy` and `move` are refused on a masked field and on the whole record
 - masks do not reach nested fields such as `address.cpf`
 - edge properties read through graph traversal are not masked
 - the `AUDIT_LOG` and `AUDIT_CASES` virtual tables show the original content

@@ -132,10 +132,10 @@ class DataRuleBypassTest {
     @Test
     void caminhosAninhadosDeEscritaRespeitamFiltroEMascara() {
         Datastore ds = ds();
-        assertFalse(text(ds, "UPDATE o SET info.a = 1", v()).contains("111"));
-        assertFalse(text(ds, "UPDATE o MERGE {info: {b: 2}}", v()).contains("111"));
-        assertFalse(text(ds, "UPDATE o PATCH [{op: 'add', path: '/info/c', value: 3}]", v()).contains("111"));
-        assertFalse(text(ds, "SELECT * FROM o:2", admin()).contains("info"));
+        assertFalse(text(ds, "UPDATE o SET dados.a = 1", v()).contains("111"));
+        assertFalse(text(ds, "UPDATE o MERGE {dados: {b: 2}}", v()).contains("111"));
+        assertFalse(text(ds, "UPDATE o PATCH [{op: 'add', path: '/dados/c', value: 3}]", v()).contains("111"));
+        assertFalse(text(ds, "SELECT * FROM o:2", admin()).contains("dados"));
         for (String patch : new String[] {"{op: 'copy', from: '/cpf', path: '/x'}",
             "{op: 'move', from: '/cpf', path: '/x'}", "{op: 'test', path: '/cpf', value: '111'}",
             "{op: 'copy', from: '', path: '/x'}", "{op: 'remove', path: '/cpf/0'}"}) {
