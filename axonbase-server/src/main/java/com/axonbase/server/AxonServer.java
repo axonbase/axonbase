@@ -1341,7 +1341,7 @@ public final class AxonServer {
         boolean failed = true;
         try {
             com.axonbase.core.shard.ShardReply reply = timeout > 0
-                ? within(timeout, run, work) : attached(run, work);
+                ? within(timeout, run, writes(request), work) : attached(run, work);
             failed = false;
             return reply;
         } finally {
@@ -1350,19 +1350,37 @@ public final class AxonServer {
         }
     }
 
-    /** Executa em outra thread e desiste no prazo, cancelando a consulta de verdade. */
-    private <T> T within(long timeoutMillis, ActivityRegistry.Running run, java.util.function.Supplier<T> work) {
+    /** O pedido do gateway pode gravar: um bloco atômico, ou um comando não parcial que não é só leitura. */
+    private static boolean writes(com.axonbase.core.shard.ShardRequest request) {
+        return request.atomic() || !request.partial() && !request.sql().startsWith("__axon_")
+            && Datastore.isMutation(request.sql());
+    }
+
+    /**
+     * Executa em outra thread e desiste no prazo, cancelando a consulta de verdade.
+     *
+     * @param write o trabalho pode gravar: a interrupção não garante que o commit pare, então desistir dele tem
+     *              desfecho desconhecido
+     */
+    private <T> T within(long timeoutMillis, ActivityRegistry.Running run, boolean write,
+                         java.util.function.Supplier<T> work) {
         Future<T> future = queryExecutor.submit(() -> attached(run, work));
         try {
             return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             run.handle().cancel("timeout");
             future.cancel(true);
+            if (write) {
+                throw new com.axonbase.core.cluster.CommitOutcomeUnknownException(outcomeGroup(), e);
+            }
             throw new com.axonbase.common.AxonError(-32028, Messages.get("query_timeout"));
         } catch (InterruptedException e) {
             run.handle().cancel("shutdown");
             future.cancel(true);
             Thread.currentThread().interrupt();
+            if (write) {
+                throw new com.axonbase.core.cluster.CommitOutcomeUnknownException(outcomeGroup(), e);
+            }
             throw new com.axonbase.common.AxonError(-32000, Messages.get("query_cancelled"));
         } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException failure) {
@@ -1373,6 +1391,11 @@ public final class AxonServer {
             }
             throw new IllegalStateException(e.getCause());
         }
+    }
+
+    /** O nome que a mensagem de desfecho desconhecido leva: o grupo do cluster, quando há um. */
+    private String outcomeGroup() {
+        return config.clusterId().isBlank() ? "shard" : config.clusterId();
     }
 
     private static <T> T attached(ActivityRegistry.Running run, java.util.function.Supplier<T> work) {
