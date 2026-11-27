@@ -1,6 +1,7 @@
 package com.axonbase.server;
 
 import com.axonbase.core.hlc.HlcTimestamp;
+import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.shard.backup.ClusterManifest;
 import com.axonbase.core.shard.backup.ClusterRestore;
 
@@ -20,6 +21,9 @@ import java.util.Map;
  *
  * <p>Cria {@code <destino>/<shard>} para cada shard. Copie cada um para o diretório de dados de todos os membros do
  * shard, com o diretório do Raft vazio. Sem {@code --source}, valem os caminhos anotados no manifesto.</p>
+ *
+ * <p>Se alguma base tiver partições na camada fria, defina {@code AXON_COLD_DIR} ou {@code AXON_COLD_S3} como nos
+ * nós: sem isso, ou faltando objeto, nada é restaurado.</p>
  */
 public final class ShardRestoreMain {
 
@@ -58,9 +62,11 @@ public final class ShardRestoreMain {
                 throw new IllegalArgumentException("opção desconhecida: " + args[i] + "\n" + USAGE);
             }
         }
-        ClusterRestore.restore(manifest, target, sources, destination).forEach((shard, restored) ->
-            System.out.println(shard + ": índice base " + restored.baseIndex() + ", " + restored.appliedBatches()
-                + " lotes reaplicados, até " + restored.restoredUntil() + " em " + destination.resolve(shard)));
+        try (ColdTier cold = ColdTier.fromEnvironment(System.getenv())) {
+            ClusterRestore.restore(manifest, target, sources, destination, cold).forEach((shard, restored) ->
+                System.out.println(shard + ": índice base " + restored.baseIndex() + ", " + restored.appliedBatches()
+                    + " lotes reaplicados, até " + restored.restoredUntil() + " em " + destination.resolve(shard)));
+        }
     }
 
     /** Um instante inclui todos os carimbos do milissegundo pedido. */

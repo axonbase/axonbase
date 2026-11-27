@@ -1,16 +1,17 @@
 package com.axonbase.core.shard.backup;
 
 import com.axonbase.core.cluster.RaftApplier;
-import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HlcTimestamp;
 import com.axonbase.core.journal.JournalRecord;
 import com.axonbase.core.journal.JournalSegments;
 import com.axonbase.core.journal.PitrException;
 import com.axonbase.core.journal.SegmentInfo;
+import com.axonbase.core.partition.ColdBackups;
+import com.axonbase.core.partition.ColdTier;
+import com.axonbase.core.shard.ShardException;
 import com.axonbase.core.shard.ShardMap;
 import com.axonbase.core.shard.ShardMapStore;
 import com.axonbase.core.shard.ShardMessages;
-import com.axonbase.core.shard.ShardNode;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.RocksDbBackend;
 
@@ -38,6 +39,10 @@ import java.util.stream.Stream;
  *
  * <p>A base preparada perde a posição do Raft: cada membro do shard recebe a mesma cópia e começa com o diretório do
  * Raft vazio.</p>
+ *
+ * <p>Uma base que referencia a camada fria só é aceita com ela configurada e com todos os objetos presentes. A
+ * restauração não abre um motor sobre as bases, então não constrói nem remove índices: uma construção interrompida
+ * continua interrompida, para o servidor retomar.</p>
  */
 public final class ClusterRestore {
 
@@ -62,6 +67,14 @@ public final class ClusterRestore {
      */
     public static Map<String, Restored> restore(ClusterManifest manifest, HlcTimestamp target,
                                                 Map<String, Source> sources, Path destination) {
+        return restore(manifest, target, sources, destination, ColdTier.NONE);
+    }
+
+    /**
+     * @param cold a camada fria que as bases referenciam; sem ela, uma base com partições frias é recusada
+     */
+    public static Map<String, Restored> restore(ClusterManifest manifest, HlcTimestamp target,
+                                                Map<String, Source> sources, Path destination, ColdTier cold) {
         HlcTimestamp instant = target == null ? manifest.cut() : target;
         if (instant.compareTo(manifest.cut()) < 0) {
             throw new PitrException(PitrException.Reason.BASE_TOO_NEW, "o instante " + instant
@@ -84,6 +97,8 @@ public final class ClusterRestore {
                 deleteTree(prepared);
                 staging.add(prepared);
                 out.put(shard.shard(), prepare(shard, sources.get(shard.shard()), prepared, instant));
+                // depois do journal: ele pode ter levado partições para a camada fria
+                ColdBackups.requireRestorable(cold, prepared);
             }
             String home = manifest.map().home().id();
             if (out.containsKey(home)) {
@@ -110,8 +125,9 @@ public final class ClusterRestore {
      */
     private static void requireSameLayout(ClusterManifest manifest, Path home) {
         try (RocksDbBackend db = new RocksDbBackend(home.toString(), RocksDbBackend.SyncMode.OFF)) {
-            ShardNode node = new ShardNode(new Datastore(db), null, db.clock());
-            ShardMap restored = new ShardMapStore(node::handle).require();
+            // lido direto das chaves: um motor gravaria na base e retomaria construções de índice
+            ShardMap restored = ShardMapStore.stored(db).orElseThrow(() -> new ShardException(
+                ShardException.Code.STALE_MAP, ShardMessages.get("shard_map_missing")));
             ShardMap expected = manifest.map();
             boolean same = restored.migration().isEmpty() && restored.shardIds().equals(expected.shardIds())
                 && expected.shardIds().stream().allMatch(id -> restored.slotsOf(id).equals(expected.slotsOf(id)));

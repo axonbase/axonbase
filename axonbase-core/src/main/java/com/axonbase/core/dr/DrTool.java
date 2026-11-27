@@ -3,6 +3,7 @@ package com.axonbase.core.dr;
 import com.axonbase.core.backup.S3BackupClient;
 import com.axonbase.core.cluster.ClusterRestore;
 import com.axonbase.core.hlc.HlcTimestamp;
+import com.axonbase.core.partition.ColdTier;
 
 import java.io.PrintStream;
 import java.nio.file.Path;
@@ -25,7 +26,9 @@ import java.util.function.ToIntFunction;
  *
  * <p>Comuns: {@code --prefix axon-dr} e {@code --group g}. Com {@code --store s3}, o endereço e as credenciais vêm de
  * {@code AXON_S3_ENDPOINT}, {@code AXON_S3_BUCKET}, {@code AXON_S3_ACCESS} e {@code AXON_S3_SECRET}; elas nunca são
- * impressas. {@code AXON_S3_ENCRYPT_KEY}, se presente, cifra e decifra os objetos. Cada linha de saída começa com
+ * impressas. {@code AXON_S3_ENCRYPT_KEY}, se presente, cifra e decifra os objetos. Uma base com partições na camada
+ * fria só é restaurada com {@code AXON_COLD_DIR} ou {@code AXON_COLD_S3} apontando para os objetos dela, que o
+ * arquivamento não copia. Cada linha de saída começa com
  * {@code DR}; o código de saída é 1 numa falha e 2 num uso errado.</p>
  */
 public final class DrTool {
@@ -153,9 +156,12 @@ public final class DrTool {
             }
         }
         long started = System.nanoTime();
-        DrRestore.Result result = DrRestore.restore(store(options, env), layout(options),
-            Path.of(required(options, "work")), Path.of(required(options, "target")), until,
-            Integer.parseInt(options.getOrDefault("transfers", Integer.toString(TRANSFERS))));
+        DrRestore.Result result;
+        try (ColdTier cold = ColdTier.fromEnvironment(env)) {
+            result = DrRestore.restore(store(options, env), layout(options),
+                Path.of(required(options, "work")), Path.of(required(options, "target")), until,
+                Integer.parseInt(options.getOrDefault("transfers", Integer.toString(TRANSFERS))), cold);
+        }
         ClusterRestore.Prepared prepared = result.prepared();
         out.println("DR restore backup=" + result.backupId() + " node=" + result.node() + " base_index="
             + prepared.baseIndex() + " last_index=" + prepared.lastIndex() + " batches=" + prepared.appliedBatches()

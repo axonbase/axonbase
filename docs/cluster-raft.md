@@ -111,7 +111,7 @@ AXON_RAFT_LEARNER=true
 AXON_RAFT_BOOTSTRAP_BACKUP=/caminho/do/diretorio/de/backup
 ```
 
-Com a base vazia, o servidor restaura o backup mais novo e pede ao líder só o que veio depois. Com uma base já existente, ela é usada como está. Se o log do líder não alcança mais o backup, o learner fica parado e o líder o lista em `learnersNeedingBackup`: apague a base do learner e entre com um backup mais novo.
+Com a base vazia, o servidor restaura o backup mais novo e pede ao líder só o que veio depois. Se o backup referenciar a [camada fria](particoes-e-camada-fria.md), o learner precisa de `AXON_COLD_DIR` ou `AXON_COLD_S3` como os outros nós: sem isso, ou faltando objeto, ele não restaura, não sobe e continua sem base. Com uma base já existente, ela é usada como está. Se o log do líder não alcança mais o backup, o learner fica parado e o líder o lista em `learnersNeedingBackup`: apague a base do learner e entre com um backup mais novo.
 
 Um learner no ar não pode ser promovido a votante pela API (Application Programming Interface) de membros. Reinicie-o sem `AXON_RAFT_LEARNER` antes de incluí-lo.
 

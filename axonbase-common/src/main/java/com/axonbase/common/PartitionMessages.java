@@ -30,6 +30,9 @@ final class PartitionMessages {
         Map.entry("cold_unavailable", "a camada fria não respondeu ao ler %s: %s"),
         Map.entry("cold_corrupted", "o objeto frio %s está corrompido ou incompleto"),
         Map.entry("cold_missing", "faltam objetos frios referenciados pela base: %s"),
+        Map.entry("cold_restore_unconfigured",
+            "a base referencia %s objeto(s) na camada fria, que não está configurada: defina AXON_COLD_DIR ou "
+                + "AXON_COLD_S3 e repita a restauração (nada foi alterado)"),
         Map.entry("cold_hold_failed", "não foi possível bloquear os objetos frios do backup: %s")
     );
 
@@ -56,6 +59,9 @@ final class PartitionMessages {
         Map.entry("cold_unavailable", "the cold tier did not answer while reading %s: %s"),
         Map.entry("cold_corrupted", "cold object %s is corrupted or incomplete"),
         Map.entry("cold_missing", "cold objects referenced by the database are missing: %s"),
+        Map.entry("cold_restore_unconfigured",
+            "the database references %s object(s) in the cold tier, which is not configured: set AXON_COLD_DIR or "
+                + "AXON_COLD_S3 and restore again (nothing was changed)"),
         Map.entry("cold_hold_failed", "could not hold the backup's cold objects: %s")
     );
 
