@@ -32,7 +32,9 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
             char c = sqlTemplate.charAt(i);
             if (inString) {
                 sb.append(c);
-                if (c == quote) {
+                if (c == '\\' && i + 1 < sqlTemplate.length()) {
+                    sb.append(sqlTemplate.charAt(++i));
+                } else if (c == quote) {
                     inString = false;
                 }
                 continue;
@@ -50,7 +52,7 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
                 Object val = params.get(p++);
                 if (val == null) sb.append("null");
                 else if (val instanceof Number || val instanceof Boolean) sb.append(val);
-                else sb.append('\'').append(val.toString().replace("'", "''")).append('\'');
+                else sb.append(literal(val.toString()));
             } else {
                 sb.append(c);
             }
@@ -65,6 +67,11 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
     public ResultSet executeQuery() throws SQLException { execute(); return getResultSet(); }
     @Override
     public int executeUpdate() throws SQLException { return super.executeUpdate(buildSql()); }
+
+    /** Literal de texto do AxonQL, em que a barra invertida é o caractere de escape (dobrar a aspa não vale). */
+    static String literal(String text) {
+        return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
 
     private void setParam(int index, Object value) throws SQLException {
         if (index < 1) throw new IllegalArgumentException("parameter index must be >= 1, got " + index);

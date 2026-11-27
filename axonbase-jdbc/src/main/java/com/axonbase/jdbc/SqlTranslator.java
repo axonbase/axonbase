@@ -123,7 +123,8 @@ public class SqlTranslator {
             char c = colDefs.charAt(i);
             if (inStr) {
                 cur.append(c);
-                if (c == quote && (i + 1 >= colDefs.length() || colDefs.charAt(i + 1) != quote)) inStr = false;
+                if (c == '\\' && i + 1 < colDefs.length()) cur.append(colDefs.charAt(++i));
+                else if (c == quote && (i + 1 >= colDefs.length() || colDefs.charAt(i + 1) != quote)) inStr = false;
                 continue;
             }
             if (c == '\'' || c == '"') { inStr = true; quote = c; cur.append(c); continue; }
@@ -182,6 +183,8 @@ public class SqlTranslator {
         String table = m.group(1);
         String[] colNames = m.group(2).split("\\s*,\\s*");
         String[] values = splitValues(m.group(3));
+        // quantidades diferentes (ou várias linhas) perderiam valores em silêncio: o servidor recusa o original
+        if (colNames.length != values.length) return sql;
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE ").append(table).append(" CONTENT {");
         for (int i = 0; i < colNames.length && i < values.length; i++) {
@@ -202,7 +205,8 @@ public class SqlTranslator {
             char c = vals.charAt(i);
             if (inStr) {
                 cur.append(c);
-                if (c == quote && (i + 1 >= vals.length() || vals.charAt(i + 1) != quote)) inStr = false;
+                if (c == '\\' && i + 1 < vals.length()) cur.append(vals.charAt(++i));
+                else if (c == quote && (i + 1 >= vals.length() || vals.charAt(i + 1) != quote)) inStr = false;
                 continue;
             }
             if (c == '\'' || c == '"') { inStr = true; quote = c; cur.append(c); continue; }
@@ -325,7 +329,8 @@ public class SqlTranslator {
             char c = cols.charAt(i);
             if (inStr) {
                 sb.append(c);
-                if (c == quote) inStr = false;
+                if (c == '\\' && i + 1 < cols.length()) sb.append(cols.charAt(++i));
+                else if (c == quote) inStr = false;
                 continue;
             }
             if (c == '\'' || c == '"') {
