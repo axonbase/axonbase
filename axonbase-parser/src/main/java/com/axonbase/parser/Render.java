@@ -435,10 +435,12 @@ public final class Render {
                 sb.append("DROP DATABASE LINK \"").append(escape(ddl2.name())).append('"');
             }
             case Statement.CreateSaga cs -> {
-                sb.append("CREATE SAGA ").append(cs.name()).append(" WITH DATABASES ");
+                sb.append("CREATE SAGA ").append(sagaName(cs.name())).append(" WITH DATABASES ");
                 for (int i = 0; i < cs.links().size(); i++) {
                     if (i > 0) sb.append(", ");
-                    sb.append('\'').append(escape(cs.links().get(i))).append('\'');
+                    String link = cs.links().get(i);
+                    char quote = link.indexOf('\'') < 0 ? '\'' : '"';
+                    sb.append(quote).append(escape(link)).append(quote);
                 }
             }
             case Statement.DescribeSaga ds -> sb.append("DESCRIBE SAGA ").append(ds.name());
@@ -1063,6 +1065,11 @@ public final class Render {
             separator = ", ";
         }
         sb.append(close);
+    }
+
+    /** Nome de SAGA como texto que volta a ser lido: fora do formato de identificador, vai entre aspas. */
+    public static String sagaName(String name) {
+        return name.matches("[A-Za-z_][A-Za-z0-9_]*") ? name : "\"" + escape(name) + "\"";
     }
 
     private static String escape(String s) {
