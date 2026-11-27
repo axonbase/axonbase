@@ -1095,6 +1095,43 @@ public final class Executor {
         return output(i.ret(), AxonValue.array(records));
     }
 
+    /**
+     * A parte de criação do UPSERT. Um registro que já está sob o id e não foi alterado (WHERE falso, PERMISSIONS ou
+     * Data Rule) fica como está.
+     */
+    private void upsertCreate(Database db, Statement.Update u, String table, AxonValue explicitKey,
+                              List<AxonValue> results) {
+        AxonValue data = evalData(u.data(), table);
+        AxonValue given = data.isObject() ? data.asObject().get("id") : null;
+        AxonValue key = explicitKey != null || given == null ? explicitKey : resolveKey(unwrapId(given));
+        if (key != null) {
+            RecordId rid = new RecordId(table, key);
+            Document existing = loadDoc(db, rid);
+            if (existing != null) {
+                refuseHiddenRecord(db, rid);
+                if (!allowed(existing, table, "update")) {
+                    throw errorStmt("permission denied");
+                }
+                return;
+            }
+        }
+        // com algo a conferir, um registro criado por outro neste intervalo também não é substituído
+        boolean guarded = u.cond() != null || restrictsWrite(db, table, "update");
+        results.add(createRecord(db, table, data, explicitKey, guarded ? Existing.REFUSE : Existing.REPLACE));
+    }
+
+    /** O usuário tem Data Rule ou a tabela tem PERMISSIONS para a ação. */
+    private boolean restrictsWrite(Database db, String table, String action) {
+        if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            return true;
+        }
+        Catalog.TableDef def = db.catalog().table(table);
+        if (def == null || def.permissions() == null) {
+            return false;
+        }
+        return ("create".equals(action) ? def.permissions().create() : def.permissions().update()) != null;
+    }
+
     /** O que uma criação faz quando o id já existe. */
     private enum Existing { REFUSE, SKIP, REPLACE }
 
@@ -1197,7 +1234,9 @@ public final class Executor {
             // antes de pular ou de dizer que existe: sobre um registro oculto pela regra a recusa é sempre a mesma
             refuseHiddenRecord(db, rid);
         }
-        if (previous != null && existing == Existing.SKIP) {
+        boolean skip = previous != null && existing == Existing.SKIP;
+        // sem nada a conferir, pula antes de validar a linha (e de chamar o provedor de embedding)
+        if (skip && !restrictsWrite(db, table, "create")) {
             return null;
         }
         obj.put("id", ridAsValue(rid));
@@ -1205,9 +1244,15 @@ public final class Executor {
         injectDataRuleFields(obj);
         AxonValue record = AxonValue.object(obj);
         Document document = new Document(rid, record);
-        ds.auditLog(session, "CREATE", table, rid, null, record);
+        if (!skip) {
+            ds.auditLog(session, "CREATE", table, rid, null, record);
+        }
         if (!dataRuleFilter(document) || !allowed(document, table, "create")) {
             throw errorStmt("permission denied");
+        }
+        // pular também diz que o id existe: só quem poderia criar a linha fica sabendo
+        if (skip) {
+            return null;
         }
         // depois da permissão: quem não pode criar não fica sabendo se o id existe
         if (previous != null && existing == Existing.REFUSE) {
@@ -1477,12 +1522,12 @@ public final class Executor {
             if (u.target() instanceof Expr.Ident idTarget) {
                 String table = idTarget.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data(), table), null, Existing.REPLACE));
+                upsertCreate(db, u, table, null, results);
             } else if (u.target() instanceof Expr.RecordId rid
                 && rid.table() instanceof Expr.Ident ridTable) {
                 String table = ridTable.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data(), table), recordKey(rid.key()), Existing.REPLACE));
+                upsertCreate(db, u, table, recordKey(rid.key()), results);
             }
         }
         results.replaceAll(this::visible);
