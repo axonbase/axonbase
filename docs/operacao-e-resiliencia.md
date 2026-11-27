@@ -206,7 +206,7 @@ A **época** separa histórias diferentes: um cluster restaurado reaproveita ín
 1. Escolhe o backup mais novo cujo carimbo não passe do instante pedido. Se a base dele já contiver escritas posteriores ao instante, tenta o anterior.
 2. Baixa o backup e os segmentos de todos os nós.
 3. Restaura o backup e reaplica o journal em ordem de índice, juntando os nós, até o instante. Um índice que falta em todos interrompe a restauração, com o último instante alcançável na mensagem.
-4. Grava o ponto do log e apaga a lista antiga de membros, e entrega um diretório pronto.
+4. Grava o ponto do log, apaga a lista antiga de membros e, se o grupo era um shard, a identificação da história antiga dele, e entrega um diretório pronto. Depois disso, tire um backup de shards novo.
 
 Copie o diretório para os dados de cada nó (ou restaure em cada nó: o resultado é o mesmo), com o diretório do Raft vazio, e suba o cluster.
 
