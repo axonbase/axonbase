@@ -4598,6 +4598,7 @@ return score;
         ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.USER, ns, database,
             identity(du.name(), du.scope(), ns, database),
             com.axonbase.parser.Render.stmt(replayable)));
+        ds.pruneUserControl(session, du.name());
         return AxonValue.nul();
     }
 
@@ -5032,13 +5033,32 @@ return score;
     }
 
     private AxonValue runDropUser(Statement.DropUser du) {
-        Database db = db();
         String ns = session.namespace();
         String database = session.database();
-        this.ds.authCatalog().removeUser(du.name(), ns, database);
-        control(db, ControlCommand.Kind.USER, du.name(),
-            com.axonbase.parser.Render.stmt(du));
+        if (ds.isReplaying()) {
+            replayDropUser(du.name(), ns, database);
+            return AxonValue.nul();
+        }
+        db();
+        if (this.ds.authCatalog().removeUser(du.name(), ns, database)) {
+            ds.pruneUserControl(session, du.name());
+        }
         return AxonValue.nul();
+    }
+
+    /**
+     * Um {@code DROP USER} gravado por versão anterior. O gravado pela API para escopo de namespace ou root não tem
+     * banco, e exigir um impedia o servidor de subir; sem banco, só o escopo exato é removido.
+     */
+    private void replayDropUser(String name, String ns, String database) {
+        if (database != null) {
+            ds.authCatalog().removeUser(name, ns, database);
+        } else {
+            ds.authCatalog().removeUserExact(name, ns == null
+                ? com.axonbase.core.security.AuthCatalog.Scope.ROOT
+                : com.axonbase.core.security.AuthCatalog.Scope.NAMESPACE, ns, null);
+        }
+        System.err.println(Messages.get("user_drop_legacy", name));
     }
 
     private AxonValue runRevokeAccess(Statement.RevokeAccess ra) {
