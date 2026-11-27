@@ -110,9 +110,30 @@ class DataRuleBypassTest {
     void regraQueAtravessaUmLinkContinuaValendo() {
         Datastore ds = ds();
         ds.execute("CREATE u:1 CONTENT {equipe: 'a'}", admin(), null);
+        ds.execute("CREATE u:2 CONTENT {equipe: 'b'}", admin(), null);
+        ds.execute("CREATE d:1 CONTENT {nome: 'um'}", admin(), null);
+        ds.execute("CREATE d:2 CONTENT {nome: 'dois'}", admin(), null);
+        ds.execute("RELATE d:1->pertence->u:1", admin(), null);
+        ds.execute("RELATE d:2->pertence->u:2", admin(), null);
+        ds.execute("CREATE DATA RULE equipe_a APPLY ->pertence->u.equipe = 'a'", admin(), null);
+
+        AxonValue rows = ds.execute("SELECT * FROM d", restricted("equipe_a", "main"), null);
+
+        assertEquals(1, rows.asArray().size());
+        assertEquals("um", rows.asArray().get(0).asObject().get("nome").asString());
+        // a regra lê o registro ligado; o usuário, a quem ela o esconde, não
+        assertTrue(ds.execute("RETURN u:1.equipe", restricted("equipe_a", "main"), null).isNull());
+        assertEquals(0, ds.execute("SELECT * FROM u", restricted("equipe_a", "main"), null).asArray().size());
+    }
+
+    @Test
+    void linkGuardadoEmCampoNaoESeguidoPelaRegraENega() {
+        // limite do motor, anterior a esta versão: o record id gravado num campo volta como texto
+        Datastore ds = ds();
+        ds.execute("CREATE u:1 CONTENT {equipe: 'a'}", admin(), null);
         ds.execute("CREATE d:1 CONTENT {dono: u:1}", admin(), null);
         ds.execute("CREATE DATA RULE equipe_a APPLY dono.equipe = 'a'", admin(), null);
-        assertEquals(1, ds.execute("SELECT * FROM d", restricted("equipe_a", "main"), null).asArray().size());
+        assertEquals(0, ds.execute("SELECT * FROM d", restricted("equipe_a", "main"), null).asArray().size());
     }
 
     @Test
