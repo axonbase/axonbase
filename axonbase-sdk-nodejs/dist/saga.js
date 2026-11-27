@@ -19,7 +19,7 @@ class SagaTransaction {
     async begin() {
         if (this.begun)
             throw new errors_js_1.AxonSdkError(`Saga already begun: ${this.correlationId}`);
-        const result = await this.axon.query(`BEGIN SAGA ${escapeSagaValue(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`);
+        const result = await this.axon.query(`BEGIN SAGA ${sagaNameText(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`);
         if (hasStatus(result, "RUNNING")) {
             this.begun = true;
             return;
@@ -33,7 +33,7 @@ class SagaTransaction {
     }
     async commit() {
         this.assertActive();
-        const result = await this.axon.query(`COMMIT SAGA ${escapeSagaValue(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`);
+        const result = await this.axon.query(`COMMIT SAGA ${sagaNameText(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`);
         this.finished = true;
         if (!hasStatus(result, "COMMITTED")) {
             throw new errors_js_1.AxonSdkError(`Saga commit failed: ${JSON.stringify(result)}`);
@@ -42,11 +42,11 @@ class SagaTransaction {
     async rollback() {
         if (!this.begun || this.finished)
             return;
-        await this.axon.query(`CANCEL SAGA ${escapeSagaValue(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`);
+        await this.axon.query(`CANCEL SAGA ${sagaNameText(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`);
         this.finished = true;
     }
     describe() {
-        return this.axon.query(`SHOW SAGA TRANSACTION ${escapeSagaValue(this.sagaName)} '${escapeSagaValue(this.correlationId)}'`);
+        return this.axon.query(`SHOW SAGA TRANSACTION ${sagaNameText(this.sagaName)} '${escapeSagaValue(this.correlationId)}'`);
     }
     assertActive() {
         if (!this.begun)
@@ -60,6 +60,11 @@ function hasStatus(result, expected) {
     return typeof result === "object" && result !== null && "status" in result
         && result.status === expected;
 }
+/** Body of an AxonQL string literal: the backslash is the escape character (doubling the quote is not). */
 function escapeSagaValue(value) {
-    return value.replace(/\\/g, "\\\\").replace(/'/g, "''");
+    return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+}
+/** A simple identifier goes as is; any other saga name goes as a string literal. */
+function sagaNameText(value) {
+    return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value) ? value : `'${escapeSagaValue(value)}'`;
 }

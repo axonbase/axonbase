@@ -23,7 +23,7 @@ module AxonBase
     def begin
       raise Error, "Saga already begun: #{@correlation_id}" if @begun
 
-      result = @axon.query("BEGIN SAGA #{escape(@saga_name)} WITH CORRELATION '#{escape(@correlation_id)}'")
+      result = @axon.query("BEGIN SAGA #{name_text(@saga_name)} WITH CORRELATION '#{escape(@correlation_id)}'")
       if result.is_a?(Hash) && result["status"] == "RUNNING"
         @begun = true
         return
@@ -40,7 +40,7 @@ module AxonBase
 
     def commit
       assert_active
-      result = @axon.query("COMMIT SAGA #{escape(@saga_name)} WITH CORRELATION '#{escape(@correlation_id)}'")
+      result = @axon.query("COMMIT SAGA #{name_text(@saga_name)} WITH CORRELATION '#{escape(@correlation_id)}'")
       @finished = true
       raise Error, "Saga commit failed: #{result}" unless result.is_a?(Hash) && result["status"] == "COMMITTED"
     end
@@ -48,12 +48,12 @@ module AxonBase
     def rollback
       return unless @begun && !@finished
 
-      @axon.query("CANCEL SAGA #{escape(@saga_name)} WITH CORRELATION '#{escape(@correlation_id)}'")
+      @axon.query("CANCEL SAGA #{name_text(@saga_name)} WITH CORRELATION '#{escape(@correlation_id)}'")
       @finished = true
     end
 
     def describe
-      @axon.query("SHOW SAGA TRANSACTION #{escape(@saga_name)} '#{escape(@correlation_id)}'")
+      @axon.query("SHOW SAGA TRANSACTION #{name_text(@saga_name)} '#{escape(@correlation_id)}'")
     end
 
     private
@@ -63,8 +63,14 @@ module AxonBase
       raise Error, "Saga already finished" if @finished
     end
 
+    # Body of an AxonQL string literal: the backslash is the escape character.
     def escape(value)
-      value.gsub("\\") { "\\\\\\\\" }.gsub("'") { "''" }
+      value.gsub("\\") { "\\\\" }.gsub("'") { "\\'" }.gsub("\n") { "\\n" }.gsub("\r") { "\\r" }
+    end
+
+    # A simple identifier goes as is; any other saga name goes as a string literal.
+    def name_text(value)
+      value.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/) ? value : "'#{escape(value)}'"
     end
   end
 end

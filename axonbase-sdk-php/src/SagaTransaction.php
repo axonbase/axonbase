@@ -15,9 +15,16 @@ final class SagaTransaction
         private readonly string $correlationId,
     ) {}
 
+    /** Body of an AxonQL string literal: the backslash is the escape character. */
     public static function escape(string $value): string
     {
-        return str_replace(['\\', '\''], ['\\\\', "''"], $value);
+        return str_replace(['\\', '\'', "\n", "\r"], ['\\\\', '\\\'', '\\n', '\\r'], $value);
+    }
+
+    /** A simple identifier goes as is; any other saga name goes as a string literal. */
+    public static function name(string $value): string
+    {
+        return preg_match('/\A[A-Za-z_][A-Za-z0-9_]*\z/', $value) === 1 ? $value : "'" . self::escape($value) . "'";
     }
 
     public function sagaName(): string { return $this->sagaName; }
@@ -31,7 +38,7 @@ final class SagaTransaction
             throw new SagaError("Saga already begun: {$this->correlationId}");
         }
         $result = $this->axon->query(
-            "BEGIN SAGA " . self::escape($this->sagaName)
+            "BEGIN SAGA " . self::name($this->sagaName)
             . " WITH CORRELATION '" . self::escape($this->correlationId) . "'"
         );
         if (is_array($result) && ($result['status'] ?? null) === 'RUNNING') {
@@ -51,7 +58,7 @@ final class SagaTransaction
     {
         $this->ensureActive();
         $result = $this->axon->query(
-            "COMMIT SAGA " . self::escape($this->sagaName)
+            "COMMIT SAGA " . self::name($this->sagaName)
             . " WITH CORRELATION '" . self::escape($this->correlationId) . "'"
         );
         $this->finished = true;
@@ -67,7 +74,7 @@ final class SagaTransaction
             return;
         }
         $this->axon->query(
-            "CANCEL SAGA " . self::escape($this->sagaName)
+            "CANCEL SAGA " . self::name($this->sagaName)
             . " WITH CORRELATION '" . self::escape($this->correlationId) . "'"
         );
         $this->finished = true;
@@ -76,7 +83,7 @@ final class SagaTransaction
     public function describe(): mixed
     {
         return $this->axon->query(
-            "SHOW SAGA TRANSACTION " . self::escape($this->sagaName)
+            "SHOW SAGA TRANSACTION " . self::name($this->sagaName)
             . " '" . self::escape($this->correlationId) . "'"
         );
     }

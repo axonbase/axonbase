@@ -23,6 +23,8 @@ Uso::
 
 import json
 
+from .literals import quote_literal, saga_name
+
 
 class SagaTransaction:
     """Transação SAGA sobre AxonBase.
@@ -43,8 +45,7 @@ class SagaTransaction:
         if self.begun:
             raise RuntimeError("Saga already begun")
         result = await self.axon.query(
-            f"BEGIN SAGA {_esc(self.saga_name)} WITH CORRELATION "
-            f"'{_esc(self.correlation_id)}'"
+            f"BEGIN SAGA {self._target()}"
         )
         if isinstance(result, dict) and result.get("status") == "RUNNING":
             self.begun = True
@@ -66,7 +67,7 @@ class SagaTransaction:
             raise RuntimeError("Saga already finished")
         # A variável de sessão faz o servidor capturar o before automaticamente
         await self.axon.query(
-            f"LET $saga_corr = '{_esc(self.correlation_id)}'"
+            f"LET $saga_corr = {quote_literal(self.correlation_id)}"
         )
         return await self.axon.query(axonql)
 
@@ -76,8 +77,7 @@ class SagaTransaction:
         if self.finished:
             raise RuntimeError("Saga already finished")
         result = await self.axon.query(
-            f"COMMIT SAGA {_esc(self.saga_name)} WITH CORRELATION "
-            f"'{_esc(self.correlation_id)}'"
+            f"COMMIT SAGA {self._target()}"
         )
         if not isinstance(result, dict) or result.get("status") != "COMMITTED":
             raise RuntimeError(f"Saga commit failed: {result}")
@@ -89,8 +89,7 @@ class SagaTransaction:
         if not self.begun or self.finished:
             return
         result = await self.axon.query(
-            f"CANCEL SAGA {_esc(self.saga_name)} WITH CORRELATION "
-            f"'{_esc(self.correlation_id)}'"
+            f"CANCEL SAGA {self._target()}"
         )
         if not isinstance(result, dict) or result.get("status") not in {"CANCELLED", "FAILED"}:
             raise RuntimeError(f"Saga rollback failed: {result}")
@@ -99,9 +98,13 @@ class SagaTransaction:
 
     async def describe(self):
         return await self.axon.query(
-            f"SHOW SAGA TRANSACTION {_esc(self.saga_name)} "
-            f"'{_esc(self.correlation_id)}'"
+            f"SHOW SAGA TRANSACTION {saga_name(self.saga_name)} "
+            f"{quote_literal(self.correlation_id)}"
         )
+
+    def _target(self) -> str:
+        """O nome e a correlação, já escritos como entram nos comandos do ciclo de vida."""
+        return f"{saga_name(self.saga_name)} WITH CORRELATION {quote_literal(self.correlation_id)}"
 
     async def __aenter__(self):
         await self.begin()
@@ -113,7 +116,3 @@ class SagaTransaction:
         else:
             await self.rollback()
         return False
-
-
-def _esc(s: str) -> str:
-    return s.replace("'", "''").replace("\\", "\\\\")

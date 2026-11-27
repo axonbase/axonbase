@@ -25,7 +25,7 @@ final class SagaParticipantTransaction
         }
         $this->axon->begin();
         try {
-            $this->axon->query("LET \$saga_corr = '{}'", ['{}' => $this->correlationId]);
+            $this->axon->query("LET \$saga_corr = '" . SagaTransaction::escape($this->correlationId) . "'");
         } catch (\Throwable $e) {
             $this->axon->cancel();
             throw $e;
