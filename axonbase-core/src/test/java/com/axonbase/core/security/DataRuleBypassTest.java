@@ -169,6 +169,20 @@ class DataRuleBypassTest {
     }
 
     @Test
+    void auditoriaNaoELidaPorUsuarioComRegra() {
+        Datastore ds = ds();
+        // as duas tabelas virtuais guardam o conteúdo original, sem filtro nem máscara
+        for (String read : new String[] {"SELECT * FROM AUDIT_LOG", "SELECT * FROM AUDIT_CASES",
+            "SELECT VALUE sql FROM audit_cases", "SELECT * FROM audit_log WHERE action = 'CREATE'",
+            "RETURN (SELECT * FROM AUDIT_CASES)"}) {
+            AxonError refused = assertThrows(AxonError.class, () -> ds.execute(read, v(), null), read);
+            assertTrue(refused.getMessage().contains("Data Rule") || refused.getMessage().contains("data rule"),
+                refused.getMessage());
+        }
+        assertTrue(ds.execute("SELECT * FROM AUDIT_CASES", admin(), null).isArray());
+    }
+
+    @Test
     void liveERecusadoAUsuarioComRegra() {
         Datastore ds = ds();
         assertThrows(AxonError.class, () -> ds.execute("LIVE SELECT * FROM o", v(), null));
