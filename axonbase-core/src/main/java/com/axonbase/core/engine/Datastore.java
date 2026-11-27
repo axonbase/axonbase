@@ -185,7 +185,7 @@ public final class Datastore {
     }
 
     /**
-     * Remove um usuário do escopo exato e registra o DROP no plano de controle.
+     * Remove um usuário do escopo exato e tira a definição dele do plano de controle.
      *
      * @return {@code false} quando o usuário não existe nesse escopo
      */
@@ -197,8 +197,66 @@ public final class Datastore {
         if (!authCatalog.removeUserExact(name, scope, ns, db)) {
             return false;
         }
-        applyControl(session, ControlCommand.of(ControlCommand.Kind.USER, ns, db, name, "DROP USER " + name));
+        pruneUserControl(session, name);
         return true;
+    }
+
+    /**
+     * Deixa o plano de controle igual às identidades em memória para este nome: sai a definição de quem não existe
+     * mais e também o {@code DROP USER} que versões anteriores gravavam, porque a releitura o aplicava fora de ordem
+     * (o usuário voltava, ou um usuário recriado sumia).
+     */
+    void pruneUserControl(Session session, String name) {
+        if (replaying.get()) {
+            return;
+        }
+        synchronized (controlLock) {
+            int removed = controlState.removeWhere(c -> c.kind() == ControlCommand.Kind.USER
+                && (c.name().equals(name) && c.definition().startsWith("DROP USER ") || definesMissingUser(c, name)));
+            if (removed == 0) {
+                return;
+            }
+            KvBackend target = session != null && session.inTransaction() ? session.tx() : backend;
+            controlStore.save(controlState, target);
+            if (target == backend) {
+                backend.flush();
+            }
+        }
+    }
+
+    /**
+     * Tira do plano de controle uma Data Rule, gravada sob {@code datarule:nome} ou, por versões anteriores, sob o
+     * próprio nome (o mesmo lugar da definição de uma tabela: por isso o texto também é conferido).
+     */
+    void removeDataRuleControl(Session session, String ns, String db, String name) {
+        if (replaying.get()) {
+            return;
+        }
+        synchronized (controlLock) {
+            int removed = controlState.removeWhere(c -> c.kind() == ControlCommand.Kind.TABLE
+                && c.namespace().equals(ns) && c.database().equals(db)
+                && (c.name().equals(name) || c.name().equals("datarule:" + name))
+                && c.definition().startsWith("CREATE DATA RULE "));
+            if (removed == 0) {
+                return;
+            }
+            KvBackend target = session != null && session.inTransaction() ? session.tx() : backend;
+            controlStore.save(controlState, target);
+            if (target == backend) {
+                backend.flush();
+            }
+        }
+    }
+
+    private boolean definesMissingUser(ControlCommand command, String name) {
+        for (AuthCatalog.Scope scope : AuthCatalog.Scope.values()) {
+            // mesma forma do nome que o Executor dá à definição: nome:ESCOPO:ns:db
+            String identity = name + ":" + scope + ":" + command.namespace() + ":" + command.database();
+            if (command.name().equals(identity)) {
+                return !authCatalog.hasUserExact(name, scope, command.namespace(), command.database());
+            }
+        }
+        return false;
     }
 
     /** Há algum registro de dados (chave de registro contém NUL)? Custo linear. */
@@ -561,6 +619,15 @@ public final class Datastore {
         sagas.remove(sagaName);
     }
 
+    /** Definições de SAGA cujas ligações existem todas neste namespace. As ligações (com credenciais) ficam de fora. */
+    private void appendSagas(StringBuilder sb, String ns) {
+        sagas.values().stream()
+            .filter(saga -> saga.links().stream().allMatch(link -> databaseLink(ns, link) != null))
+            .sorted(java.util.Comparator.comparing(SagaDef::name))
+            .forEach(saga -> sb.append(com.axonbase.parser.Render.stmt(
+                new Statement.CreateSaga(saga.name(), saga.links()))).append(";\n"));
+    }
+
     // ------------------------------------------------------------------
     // plano de controle
     // ------------------------------------------------------------------
@@ -739,6 +806,8 @@ public final class Datastore {
         replaying.set(true);
         try {
             namespaces.clear();
+            databaseLinks.clear();
+            sagas.clear();
             authCatalog.clear();
             for (ControlCommand command : snapshot.commands()) {
                 replay(command);
@@ -1175,6 +1244,7 @@ public final class Datastore {
             }
         }
         exportColdRecords(sb, database);
+        appendSagas(sb, ns);
         return sb.toString();
     }
 

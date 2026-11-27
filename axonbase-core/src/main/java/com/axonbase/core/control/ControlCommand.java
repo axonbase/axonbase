@@ -28,7 +28,9 @@ public record ControlCommand(Kind kind, String namespace, String database, Strin
         /** Truststore enviado pela API: guarda só nome e caminho do arquivo, nunca a senha. */
         JKS,
         /** Partição por tempo e prazo de validade de uma tabela (o nome é a tabela). Reexecutados logo depois dela. */
-        PARTITIONING, TTL
+        PARTITIONING, TTL,
+        /** Definição de SAGA: global (sem namespace nem banco), com o nome da SAGA. */
+        SAGA
     }
 
     public ControlCommand {
