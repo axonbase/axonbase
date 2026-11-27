@@ -418,6 +418,17 @@ public final class Executor {
             throw new com.axonbase.common.AxonError(-32002,
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
         }
+        // definir ou remover usuário muda a atribuição de auditoria, mesmo quando o texto não a cita
+        if (com.axonbase.core.security.Authz.audited(auth)
+            && (s instanceof Statement.DefineAiAudit || s instanceof Statement.DropAiAudit
+                || s instanceof Statement.DefineUser || s instanceof Statement.CreateUser
+                || s instanceof Statement.DropUser)) {
+            throw refusedToAudited();
+        }
+    }
+
+    private static com.axonbase.common.AxonError refusedToAudited() {
+        return new com.axonbase.common.AxonError(-32002, Messages.get("audit_user_restricted"));
     }
 
     /** Um usuário nunca cria identidade de escopo maior que o seu, nem fora do seu ns/db. */
@@ -8006,6 +8017,10 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (!"PENDING".equals(auditCase.status())) {
             throw errorStmt(Messages.get("audit_case_resolved", auditCase.status()));
         }
+        if (com.axonbase.core.security.Authz.audited(session.auth())
+            && !sessionUserId().equals(auditCase.userId())) {
+            throw refusedToAudited();
+        }
         auditCase.setReason(sra.reason(), sessionUserId());
         return AxonValue.object(java.util.Map.of(
             "hash", AxonValue.str(sra.hash()),
@@ -8025,6 +8040,12 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         // Quem está bloqueado por este caso não pode decidi-lo (nem outro caso sobre si).
         if (userId.equals(auditCase.userId()) && cat.isBlocked(userId)) {
             throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_self_decision"));
+        }
+        // quem pediu não decide, bloqueado ou não, e um auditado não desbloqueia ninguém
+        boolean unblocks = "AUTHORIZED".equals(sac.status()) && "DANGER".equals(auditCase.classification());
+        if (userId.equals(auditCase.userId())
+            || unblocks && com.axonbase.core.security.Authz.audited(session.auth())) {
+            throw refusedToAudited();
         }
         // montada antes de decidir: sem a identidade do autor o caso continua pendente
         Session author = "AUTHORIZED".equals(sac.status()) ? authorSession(auditCase) : null;

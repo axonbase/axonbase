@@ -34,6 +34,11 @@ public final class Authz {
         return rules.isArray() ? !rules.asArray().isEmpty() : rules.isString() && !rules.asString().isEmpty();
     }
 
+    /** O usuário está sob auditoria por IA ({@code AUDITED BY}). */
+    public static boolean audited(AxonValue auth) {
+        return !str(auth, "audit").isBlank();
+    }
+
     /** Escopo dos claims; ausente conta como ROOT por compatibilidade com tokens antigos. */
     public static AuthCatalog.Scope scope(AxonValue auth) {
         String s = str(auth, "scope");
