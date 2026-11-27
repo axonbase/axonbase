@@ -4,6 +4,7 @@ import com.axonbase.core.hlc.HlcTimestamp;
 import com.axonbase.core.journal.JournalRecord;
 import com.axonbase.core.journal.JournalSegments;
 import com.axonbase.core.journal.SegmentInfo;
+import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.shard.backup.ShardBackupNode;
 import com.axonbase.core.shard.backup.ShardJournalHooks;
 import com.axonbase.core.storage.PhysicalBackups;
@@ -98,6 +99,12 @@ public final class ClusterRestore {
                 PhysicalBackups.discardPrepared(target);
             }
         }
+    }
+
+    /** O mesmo, com a camada fria que a base restaurada pode referenciar (ainda não conferida). */
+    public static Prepared prepare(Path backupDir, int backupId, List<Path> journalDirs, Path target,
+                                   HlcTimestamp until, ColdTier cold) {
+        return prepare(backupDir, backupId, journalDirs, target, until);
     }
 
     private static Prepared replay(RocksDbBackend db, List<Path> journalDirs, Path target, HlcTimestamp until) {

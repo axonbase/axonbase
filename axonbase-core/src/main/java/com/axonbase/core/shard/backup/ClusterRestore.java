@@ -7,6 +7,7 @@ import com.axonbase.core.journal.JournalRecord;
 import com.axonbase.core.journal.JournalSegments;
 import com.axonbase.core.journal.PitrException;
 import com.axonbase.core.journal.SegmentInfo;
+import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.shard.ShardMap;
 import com.axonbase.core.shard.ShardMapStore;
 import com.axonbase.core.shard.ShardMessages;
@@ -102,6 +103,12 @@ public final class ClusterRestore {
                 staging.forEach(ClusterRestore::deleteTree);
             }
         }
+    }
+
+    /** O mesmo, com a camada fria que as bases restauradas podem referenciar (ainda não conferida). */
+    public static Map<String, Restored> restore(ClusterManifest manifest, HlcTimestamp target,
+                                                Map<String, Source> sources, Path destination, ColdTier cold) {
+        return restore(manifest, target, sources, destination);
     }
 
     /**

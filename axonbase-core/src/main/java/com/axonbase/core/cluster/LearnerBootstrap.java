@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 
+import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.RocksDbBackend;
 
@@ -64,6 +65,11 @@ public final class LearnerBootstrap {
         }
         PhysicalBackups.commitPrepared(dataDir);
         return applied;
+    }
+
+    /** O mesmo, com a camada fria que o backup pode referenciar (ainda não conferida). */
+    public static Optional<RaftApplier.Applied> restore(Path backupDir, Path dataDir, ColdTier cold) {
+        return restore(backupDir, dataDir);
     }
 
     /** Há uma base: algum arquivo que não seja do mecanismo de troca, cujos nomes começam com ponto. */
