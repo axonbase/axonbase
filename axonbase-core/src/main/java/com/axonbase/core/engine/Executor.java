@@ -5334,7 +5334,9 @@ return score;
             return false;
         }
         List<Expr.Part> fields = i.parts().stream().takeWhile(part -> part instanceof Expr.Part.Field).toList();
-        return isMissing(fields.isEmpty() ? eval(p) : eval(new Expr.Idiom(p, fields)));
+        Expr value = fields.isEmpty() ? p : new Expr.Idiom(p, fields);
+        // como avaliação de política: se o parâmetro for um record id, a leitura não volta a aplicar as regras
+        return isMissing(asPolicy(() -> eval(value)));
     }
 
     private static boolean isMissing(AxonValue v) {
