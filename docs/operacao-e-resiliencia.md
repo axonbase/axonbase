@@ -214,6 +214,8 @@ O RPO (Recovery Point Objective, perda tolerada) é o intervalo de arquivamento 
 
 Um instante só é alcançável se os segmentos provarem que não falta escrita até ele. Num cluster parado, a prova vai até a última escrita: para voltar ao estado mais novo, use `latest`.
 
+Com `latest` (sem instante), a restauração também falha quando a marca de algum segmento mostra que o log chegou a um lote que não está em segmento algum, por exemplo quando a fila do journal estourou nos últimos lotes. Antes ela terminava com sucesso sem essas escritas. Confira primeiro se o arquivamento de todos os nós terminou. Se o lote se perdeu mesmo, aceitar a perda exige um `--at` anterior ao instante `latest` impresso na falha; o instante é dado em milissegundos, então o que foi escrito naquele último milissegundo também fica de fora.
+
 ### Roteiro de arquivamento e restauração
 
 Em cada nó, com `AXON_PITR=on` no servidor e as variáveis `AXON_S3_ENDPOINT`, `AXON_S3_BUCKET`, `AXON_S3_ACCESS` e `AXON_S3_SECRET` no ambiente (e `AXON_S3_ENCRYPT_KEY` para cifrar):
