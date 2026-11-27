@@ -281,8 +281,9 @@ public class SagaLedger {
     /** Remove a aresta e, quando ela já existia, recria-a só com as propriedades anteriores. */
     private void compensateEdge(Datastore.DatabaseLinkDef linkDef, String kind, Map<String, AxonValue> edge,
                                 Session targetSession) {
-        String path = strField(edge, "from_table") + ":" + strField(edge, "from_key") + "->" + kind + "->"
-            + strField(edge, "to_table") + ":" + strField(edge, "to_key");
+        String path = Datastore.name(strField(edge, "from_table")) + ":" + strField(edge, "from_key")
+            + "->" + Datastore.name(kind) + "->"
+            + Datastore.name(strField(edge, "to_table")) + ":" + strField(edge, "to_key");
         executeCompensation(linkDef, "UNRELATE " + path, targetSession);
         AxonValue existed = edge.get("existed");
         if (existed == null || !existed.isBool() || !existed.asBool()) {

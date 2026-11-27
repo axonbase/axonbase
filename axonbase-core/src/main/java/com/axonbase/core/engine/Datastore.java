@@ -1339,7 +1339,7 @@ public final class Datastore {
         throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
     }
 
-    private static String name(String name) {
+    static String name(String name) {
         return PLAIN_NAME.matcher(name).matches() ? name : AxonJson.write(AxonValue.str(name));
     }
 
