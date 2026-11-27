@@ -141,6 +141,10 @@ const rows = await axon.select('person');
 
 For local experiments only, `AXON_ALLOW_INSECURE_DEFAULTS=true` lifts the startup check, and `--no-auth` turns authentication off.
 
+## Certificate revocation
+
+Certificate login (HTTP and RPC) always rejects a revoked certificate. The server asks the issuer through OCSP (Online Certificate Status Protocol) and falls back to the CRL (Certificate Revocation List) named in the certificate. When the status cannot be verified (service down, no network, certificate with no lookup address) the login is rejected. Setting `AXON_CERT_ALLOW_UNKNOWN_REVOCATION=true`, or `cert_allow_unknown_revocation = true` in `axonbase.conf`, accepts that case with a warning in the log. It never accepts a revoked certificate and never relaxes chain, validity or key usage checks. Details, in Portuguese: [certificate revocation](docs/operacao-e-resiliencia.md#revogação-de-certificado-no-login).
+
 ## Inspect a table
 
 Use `DESCRIBE <table>` to inspect a table definition. The result is a row set that JDBC clients can display directly. Every row contains the table name, its schema mode, and field metadata.

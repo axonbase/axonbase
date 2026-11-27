@@ -236,6 +236,27 @@ Suba cada nó com os dados em `/data/novo` (ou uma cópia dele) e sem diretório
 
 **Extensão para a E3:** o layout já separa os grupos. A restauração de vários shards repete o passo por grupo com o mesmo instante, e o manifesto de cluster da E3 entra ao lado de `groups/`.
 
+## Revogação de certificado no login
+
+Vale para o login por certificado nas duas rotas: HTTP (`/certificate/login`) e RPC (`certificate.complete`). Certificado revogado é sempre recusado.
+
+O servidor consulta primeiro o OCSP (Online Certificate Status Protocol), o serviço que responde a situação de um certificado. Sem resposta conclusiva, baixa a CRL (Certificate Revocation List), a lista de revogados publicada pela autoridade. Os endereços vêm do próprio certificado e a saída de rede do nó precisa alcançá-los. Não é preciso ligar `ocsp.enable` nem `com.sun.security.enableCRLDP` no Java.
+
+A consulta cobre o certificado do titular e cada autoridade intermediária. Uma autoridade do truststore cujo emissor não está no truststore é aceita sem consulta; para que uma intermediária cadastrada também seja verificada, cadastre a raiz junto.
+
+| Situação | Padrão | Com a opção ligada |
+|---|---|---|
+| Revogado, segundo o OCSP ou a lista | recusa | recusa |
+| Serviço fora do ar, sem rede, lista ausente, vencida ou ilegível | recusa | aceita e registra aviso |
+| Certificado sem endereço de consulta | recusa | aceita e registra aviso |
+| Cadeia, assinatura, validade ou uso inválidos | recusa | recusa |
+
+A opção é `cert_allow_unknown_revocation = true` no `axonbase.conf`, ou `AXON_CERT_ALLOW_UNKNOWN_REVOCATION=true` no ambiente, que prevalece sobre o arquivo. Ligada, quem conseguir bloquear a consulta consegue usar um certificado revogado, portanto trate-a como medida temporária.
+
+No log, `certificate_revoked` marca uma recusa por revogação e `revocation_unavailable` uma consulta que falhou (o campo `accepted` diz se o login seguiu).
+
+Cada conexão e cada leitura esperam no máximo 5 segundos. Para mudar, passe ao Java as propriedades `com.sun.security.ocsp.timeout`, `com.sun.security.ocsp.readtimeout`, `com.sun.security.crl.timeout` e `com.sun.security.crl.readtimeout`, em segundos. O limite é por operação, não pelo login inteiro: uma cadeia longa com serviços lentos soma as esperas. O Java guarda a lista baixada, ou a falha em obtê-la, por cerca de 30 segundos.
+
 ## Portões da E5
 
 Os portões são opt-in e rodam em máquinas separadas, com `scripts/resilience-gates/run.sh`. Cada linha de resultado começa com `E5`, o veredito é `E5 <portão> RESULT PASS|FAIL` e o comando sai com 1 quando reprova.

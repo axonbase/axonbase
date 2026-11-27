@@ -27,13 +27,44 @@ final class TestCertificates {
 
     private final Path dir;
     private final Path authority;
-    private final X509Certificate authorityCertificate;
+    private final String authorityAlias;
+    /** Certificado desta autoridade seguido dos que a assinam, até a raiz. */
+    private final List<Certificate> authorityChain;
 
     TestCertificates(Path dir) throws Exception {
         this.dir = dir;
         this.authority = dir.resolve("ca.p12");
+        this.authorityAlias = "ca";
         generate("ca", "CN=Autoridade de Teste", authority, "-ext", "bc:c=ca:true");
-        this.authorityCertificate = (X509Certificate) load(authority).getCertificate("ca");
+        this.authorityChain = List.of(load(authority).getCertificate("ca"));
+    }
+
+    private TestCertificates(Path dir, Path authority, String authorityAlias, List<Certificate> authorityChain) {
+        this.dir = dir;
+        this.authority = authority;
+        this.authorityAlias = authorityAlias;
+        this.authorityChain = authorityChain;
+    }
+
+    /** Autoridade intermediária assinada por esta; o que ela emite leva a cadeia inteira. */
+    TestCertificates intermediate(String alias, String... extensions) throws Exception {
+        List<String> all = new ArrayList<>(List.of("-ext", "bc:c=ca:true"));
+        all.addAll(List.of(extensions));
+        Identity identity = issue(alias, "CN=" + alias, all.toArray(String[]::new));
+        return new TestCertificates(dir, identity.file(), alias,
+            List.of(identity.keyStore().getCertificateChain(alias)));
+    }
+
+    /** Lista de revogação (DER) assinada por esta autoridade; o número de série 1 só evita a lista vazia. */
+    byte[] crl(X509Certificate... revoked) throws Exception {
+        Path file = Files.createTempFile(dir, "revogados", ".crl");
+        List<String> args = new ArrayList<>(List.of("-gencrl", "-alias", authorityAlias,
+            "-keystore", authority.toString(), "-storepass", PASSWORD, "-file", file.toString(), "-id", "1"));
+        for (X509Certificate certificate : revoked) {
+            args.addAll(List.of("-id", certificate.getSerialNumber().toString()));
+        }
+        keytool(args.toArray(String[]::new));
+        return Files.readAllBytes(file);
     }
 
     /** Emite um certificado assinado pela autoridade; {@code extensions} vão para o keytool -gencert. */
@@ -44,7 +75,8 @@ final class TestCertificates {
         generate(alias, dname, own);
         keytool("-certreq", "-alias", alias, "-keystore", own.toString(), "-storepass", PASSWORD,
             "-file", request.toString());
-        List<String> sign = new ArrayList<>(List.of("-gencert", "-alias", "ca", "-keystore", authority.toString(),
+        List<String> sign = new ArrayList<>(List.of("-gencert", "-alias", authorityAlias,
+            "-keystore", authority.toString(),
             "-storepass", PASSWORD, "-infile", request.toString(), "-outfile", signed.toString(), "-validity", "2"));
         sign.addAll(List.of(extensions));
         keytool(sign.toArray(String[]::new));
@@ -55,8 +87,9 @@ final class TestCertificates {
         PrivateKey key = (PrivateKey) load(own).getKey(alias, PASSWORD.toCharArray());
         KeyStore store = KeyStore.getInstance("PKCS12");
         store.load(null, null);
-        store.setKeyEntry(alias, key, PASSWORD.toCharArray(),
-            new Certificate[] {certificate, authorityCertificate});
+        List<Certificate> chain = new ArrayList<>(List.of(certificate));
+        chain.addAll(authorityChain);
+        store.setKeyEntry(alias, key, PASSWORD.toCharArray(), chain.toArray(Certificate[]::new));
         Path file = dir.resolve(alias + ".p12");
         try (OutputStream out = Files.newOutputStream(file)) {
             store.store(out, PASSWORD.toCharArray());
@@ -64,11 +97,11 @@ final class TestCertificates {
         return new Identity(store, key, certificate, file);
     }
 
-    /** JKS contendo só a autoridade. */
+    /** JKS contendo só a autoridade (a raiz, no caso de uma intermediária). */
     Path truststore() throws Exception {
         KeyStore store = KeyStore.getInstance("JKS");
         store.load(null, null);
-        store.setCertificateEntry("ca", authorityCertificate);
+        store.setCertificateEntry("ca", authorityChain.get(authorityChain.size() - 1));
         Path file = dir.resolve("trust.jks");
         try (OutputStream out = Files.newOutputStream(file)) {
             store.store(out, PASSWORD.toCharArray());

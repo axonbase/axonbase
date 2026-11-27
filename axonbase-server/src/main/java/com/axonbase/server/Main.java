@@ -88,7 +88,8 @@ public final class Main {
             config.plainPort(), config.lang(),
             config.aiProvider(), config.aiModel(), config.aiApiKey(), config.aiBaseUrl(),
             config.auditEnabled(), config.auditUserFrom(),
-            config.auditSelect(), config.auditMaxBody());
+            config.auditSelect(), config.auditMaxBody(),
+            config.certAllowUnknownRevocation());
 
         String insecure = ServerConfig.insecureDefaultsProblem(config, System.getenv());
         if (insecure != null) {
