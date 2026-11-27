@@ -1298,7 +1298,29 @@ public final class Datastore {
                 throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", key));
             }
             sb.append("RELATE ").append(endpoint(key, parts[0], parts[1])).append("->").append(name(parts[2]))
-                .append("->").append(endpoint(key, parts[3], parts[4])).append(";\n");
+                .append("->").append(endpoint(key, parts[3], parts[4]));
+            appendEdgeProperties(sb, key, database.records().get(key).orElse(null));
+            sb.append(";\n");
+        }
+    }
+
+    /** O valor da chave da aresta é o objeto de propriedades dela (vazio quando não há): volta no SET do RELATE. */
+    private static void appendEdgeProperties(StringBuilder sb, String edge, byte[] value) {
+        if (value == null || value.length == 0) {
+            return;
+        }
+        AxonValue properties = AxonJson.decode(value);
+        if (!properties.isObject()) {
+            throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
+        }
+        String separator = " SET ";
+        for (Map.Entry<String, AxonValue> property : properties.asObject().entrySet()) {
+            if (!PLAIN_NAME.matcher(property.getKey()).matches()) {
+                throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
+            }
+            sb.append(separator).append(property.getKey()).append(" = ")
+                .append(com.axonbase.parser.Render.value(property.getValue()));
+            separator = ", ";
         }
     }
 
