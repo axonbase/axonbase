@@ -190,6 +190,10 @@ public final class Datastore {
      * @return {@code false} quando o usuário não existe nesse escopo
      */
     public boolean dropUser(Session session, String name, AuthCatalog.Scope scope, String ns, String db) {
+        if (authCatalog.isInitialRoot(name, scope)) {
+            throw new com.axonbase.common.AxonError(-32002,
+                com.axonbase.common.Messages.get("auth_initial_root_protected"));
+        }
         if (!authCatalog.removeUserExact(name, scope, ns, db)) {
             return false;
         }

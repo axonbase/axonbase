@@ -399,6 +399,11 @@ public final class Executor {
 
     /** Um usuário nunca cria identidade de escopo maior que o seu, nem fora do seu ns/db. */
     private void authorizeUserScope(Statement.AuthScope target, String ns, String database) {
+        authorizeScope(target, ns, database, "auth_scope_escalation");
+    }
+
+    /** Nenhuma sessão autenticada age sobre algo de escopo maior que o seu, nem fora do seu ns/db. */
+    private void authorizeScope(Statement.AuthScope target, String ns, String database, String messageKey) {
         AxonValue auth = session.auth();
         if (!com.axonbase.core.security.Authz.authenticated(auth)) {
             return;
@@ -412,7 +417,7 @@ public final class Executor {
             || (caller == com.axonbase.core.security.AuthCatalog.Scope.DATABASE
                 && !java.util.Objects.equals(database, com.axonbase.core.security.Authz.db(auth)));
         if (broader || outside) {
-            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_scope_escalation"));
+            throw new com.axonbase.common.AxonError(-32002, Messages.get(messageKey));
         }
     }
 
@@ -4650,6 +4655,7 @@ return score;
         if (da.scope() == Statement.AuthScope.DATABASE && (database == null || database.isBlank())) {
             throw errorStmt(Messages.get("stmt_access_needs_db"));
         }
+        authorizeUserScope(da.scope(), ns, database);
         ds.authCatalog().defineAccess(da.name(), authScope(da.scope()), ns, database);
         ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.ACCESS, ns, database,
             identity(da.name(), da.scope(), ns, database),
@@ -4662,6 +4668,7 @@ return score;
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_link_needs_ns"));
         }
+        authorizeLink(ns);
         var def = new com.axonbase.core.engine.Datastore.DatabaseLinkDef(
             ddl.name(), ddl.url(), ddl.ns(), ddl.db(), ddl.user(), ddl.password());
         ds.defineDatabaseLink(ns, ddl.name(), def);
@@ -4675,6 +4682,7 @@ return score;
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_link_drop_needs_ns"));
         }
+        authorizeLink(ns);
         ds.dropDatabaseLink(ns, ddl.name());
         return AxonValue.nul();
     }
@@ -4683,7 +4691,18 @@ return score;
     // SAGA (stubs — implementação nas fases 2-3)
     // ------------------------------------------------------------------
 
+    /** O link vale para o namespace inteiro, então exige escopo que o cubra. */
+    private void authorizeLink(String ns) {
+        authorizeScope(Statement.AuthScope.NAMESPACE, ns, null, "auth_scope_forbidden");
+    }
+
+    /** A definição de saga é global ao servidor, então criar, substituir ou apagar exige escopo ROOT. */
+    private void authorizeSagaDefinition() {
+        authorizeScope(Statement.AuthScope.ROOT, null, null, "auth_scope_forbidden");
+    }
+
     private AxonValue runCreateSaga(CreateSaga cs) {
+        authorizeSagaDefinition();
         var def = new Datastore.SagaDef(cs.name(), cs.links());
         ds.defineSaga(cs.name(), def);
         return AxonValue.nul();
@@ -5045,7 +5064,23 @@ return score;
         Database db = db();
         String ns = session.namespace();
         String database = session.database();
-        this.ds.authCatalog().removeUser(du.name(), ns, database);
+        AuthCatalog catalog = this.ds.authCatalog();
+        // vale o escopo da identidade encontrada, que pode ser maior que o da sessão
+        AuthCatalog.User target = catalog.user(du.name(), ns, database);
+        if (target == null) {
+            // nada a remover: sem registrar um DROP que a reaplicação poderia aplicar a outra identidade
+            return AxonValue.nul();
+        }
+        authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
+            "auth_scope_forbidden");
+        if (catalog.isInitialRoot(target.name(), target.scope())) {
+            if (com.axonbase.core.security.Authz.authenticated(session.auth())) {
+                throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_initial_root_protected"));
+            }
+            // sem autenticação (modo embutido ou reaplicação do catálogo): não remove e não falha
+            return AxonValue.nul();
+        }
+        catalog.removeUser(du.name(), ns, database);
         control(db, ControlCommand.Kind.USER, du.name(),
             com.axonbase.parser.Render.stmt(du));
         return AxonValue.nul();
@@ -5054,11 +5089,17 @@ return score;
     private AxonValue runRevokeAccess(Statement.RevokeAccess ra) {
         String ns = session.namespace();
         String database = session.database();
-        this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+        AuthCatalog.Access target = this.ds.authCatalog().access(ra.name(), ns, database);
+        if (target != null) {
+            authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
+                "auth_scope_forbidden");
+            this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+        }
         return AxonValue.nul();
     }
 
     private AxonValue runDropSaga(Statement.DropSaga d) {
+        authorizeSagaDefinition();
         this.ds.dropSaga(d.name());
         return AxonValue.nul();
     }
