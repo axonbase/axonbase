@@ -5504,6 +5504,15 @@ return score;
 
     private AxonValue runDropAnalyzer(Statement.DropAnalyzer da) {
         Database db = db();
+        for (Catalog.TableDef def : db.catalog().tables()) {
+            for (Catalog.IndexDef index : def.indexes().values()) {
+                // sem o analyzer o índice deixa de ser mantido, e a exportação dele não importa
+                if (da.name().equals(index.searchAnalyzer()) && db.catalog().analyzer(da.name()) != null) {
+                    throw errorStmt(Messages.get("stmt_analyzer_in_use", da.name(), index.name(), def.name(),
+                        index.name(), def.name()));
+                }
+            }
+        }
         if (!db.catalog().removeAnalyzer(da.name())) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", da.name()));
         }
@@ -5563,6 +5572,11 @@ return score;
             authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
                 "auth_scope_forbidden");
             this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+            // sem tirar a definição do plano de controle, o reinício devolveria o acesso
+            String targetNs = target.namespace() == null ? "" : target.namespace();
+            String targetDb = target.database() == null ? "" : target.database();
+            ds.removeControl(session, targetNs, targetDb, ControlCommand.Kind.ACCESS, identity(target.name(),
+                Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database()));
         }
         return AxonValue.nul();
     }
