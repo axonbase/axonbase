@@ -156,6 +156,21 @@ public final class ColdTier implements AutoCloseable {
         return settings;
     }
 
+    /**
+     * A volta de uma partição deste tamanho cabe, com folga, numa entrada do log Raft. A estimativa soma o que está
+     * no objeto às chaves físicas que cada linha ganha de volta (registro e validade).
+     */
+    boolean fitsClusterEntry(Database db, String table, long rows, long bytes) {
+        long perRow = 2L * (db.ns().length() + db.db().length() + table.length()) + 96;
+        return bytes + rows * perRow <= settings.clusterBytes();
+    }
+
+    /** A mensagem de recusa de uma partição que não passa em {@link #fitsClusterEntry}. */
+    String tooLargeForCluster(String table, long start) {
+        return Messages.get("cold_partition_too_large", table + " " + java.time.Instant.ofEpochMilli(start),
+            settings.clusterBytes() >> 20);
+    }
+
     public String engineId() {
         return engineId;
     }

@@ -153,6 +153,8 @@ Uma queda entre os passos deixa a partição em `FREEZING`, com os dados locais 
 
 Um objeto vai até 2 GB sem compressão. Uma partição maior que isso não é movida (a manutenção registra a falha e ela fica em `FREEZING` até um `TO HOT`): use um `INTERVAL` menor. A volta da camada fria monta um lote com a partição inteira em memória (em cluster, uma única entrada do log Raft), então partições grandes pedem memória na mesma proporção.
 
+**Teto em cluster:** como a volta é uma única entrada do log Raft, que não passa de 1 GiB, em cluster a partição só vai para a camada fria e volta dela até um tamanho estimado de 256 MiB (os bytes do objeto sem compressão mais o custo das chaves de cada linha). Acima disso, no envio a partição volta a `HOT`, fica fixada como local e o evento `partition_too_large_for_cluster` vai para o registro do servidor; `TO HOT` de uma partição fria é recusado com erro; e uma volta que já estava pedida fica em `THAWING`, legível pelo objeto, até um `TO COLD`. Uma partição acima do teto que já esteja fria num cluster continua consultável, e ainda não há como trazê-la de volta em cluster. Use um `INTERVAL` menor. Em nó único o limite continua o de 2 GB.
+
 ### Cache
 
 O objeto lido é guardado em disco (`AXON_COLD_CACHE_DIR`), com limite de tamanho (`AXON_COLD_CACHE_MB`, 1024) e descarte do menos usado, o LRU (Least Recently Used). A leitura é transparente. Se o armazenamento de objetos estiver fora, a consulta que precisa dele falha com erro claro: nunca devolve resultado incompleto.

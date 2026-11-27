@@ -699,6 +699,11 @@ public final class Datastore {
         return coordinator == null || coordinator.acceptsWrites(clusterNodeId);
     }
 
+    /** {@code true} quando os commits passam pelo consenso. */
+    public boolean clustered() {
+        return commitCoordinator != null;
+    }
+
     /** Ativa confirmação de quórum antes dos commits locais. */
     public void commitCoordinator(CommitCoordinator coordinator, String nodeId) {
         this.commitCoordinator = coordinator;

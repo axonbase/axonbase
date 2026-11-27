@@ -36,7 +36,9 @@ final class PartitionMessages {
         Map.entry("cold_restore_unconfigured",
             "a base referencia %s objeto(s) na camada fria, que não está configurada: defina AXON_COLD_DIR ou "
                 + "AXON_COLD_S3 e repita a restauração (nada foi alterado)"),
-        Map.entry("cold_hold_failed", "não foi possível bloquear os objetos frios do backup: %s")
+        Map.entry("cold_hold_failed", "não foi possível bloquear os objetos frios do backup: %s"),
+        Map.entry("cold_partition_too_large", "a partição %s é grande demais para a camada fria em cluster: a volta "
+            + "é uma única entrada do log Raft, com teto estimado de %s MiB. Ela não é movida; use um INTERVAL menor")
     );
 
     static final Map<String, String> EN = Map.ofEntries(
@@ -68,7 +70,9 @@ final class PartitionMessages {
         Map.entry("cold_restore_unconfigured",
             "the database references %s object(s) in the cold tier, which is not configured: set AXON_COLD_DIR or "
                 + "AXON_COLD_S3 and restore again (nothing was changed)"),
-        Map.entry("cold_hold_failed", "could not hold the backup's cold objects: %s")
+        Map.entry("cold_hold_failed", "could not hold the backup's cold objects: %s"),
+        Map.entry("cold_partition_too_large", "partition %s is too large for the cold tier in a cluster: bringing it "
+            + "back is a single Raft log entry, capped at an estimated %s MiB. It is not moved; use a smaller INTERVAL")
     );
 
     private PartitionMessages() {

@@ -85,15 +85,49 @@ final class ColdMover {
                 changes.apply(db, table, tx);
                 return true;
             });
+        } catch (TooLarge refused) {
+            keepLocal(db, table, start, key);
+            logTooLarge(db, table, start);
+            return false;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /** Em cluster, uma partição que não conseguiria voltar não vai: ela fica local, fixada, e volta a aceitar escrita. */
+    private void keepLocal(Database db, String table, long start, String key) {
+        change(db, table, start, tx -> {
+            PartitionDescriptor current = PartitionStore.track(db, tx, table, start).orElse(null);
+            if (current == null || current.state() != PartitionDescriptor.State.FREEZING
+                || !key.equals(current.object())) {
+                return false;
+            }
+            PartitionChanges changes = new PartitionChanges();
+            changes.save(db, table, current.requestHot());
+            changes.apply(db, table, tx);
+            return true;
+        });
+    }
+
+    private void logTooLarge(Database db, String table, long start) {
+        System.err.println("{\"event\":\"partition_too_large_for_cluster\",\"target\":\"" + db.ns() + "."
+            + db.db() + "." + table + "\",\"error\":\"" + ds.coldTier().tooLargeForCluster(table, start) + "\"}");
+    }
+
+    /** A partição passa do teto de uma entrada do log Raft. */
+    private static final class TooLarge extends IOException {
     }
 
     /** @return {@code true} quando a partição voltou para o armazenamento local */
     boolean thaw(Database db, String table, long start) {
         PartitionDescriptor thawing = PartitionStore.read(db, db.records(), table, start).orElse(null);
         if (thawing == null || thawing.state() != PartitionDescriptor.State.THAWING) {
+            return false;
+        }
+        if (ds.clustered()
+            && !ds.coldTier().fitsClusterEntry(db, table, thawing.rows(), thawing.bytes())) {
+            // uma volta pedida antes (ou antes de o nó entrar no cluster) fica lida do objeto; TO COLD a encerra
+            logTooLarge(db, table, start);
             return false;
         }
         ColdObject.Reader reader = ds.coldTier().cache().open(thawing.object());
@@ -198,6 +232,9 @@ final class ColdMover {
                 if (bytes > Integer.MAX_VALUE - (1L << 20)) {
                     throw new IOException("a partição passa de 2 GB e não cabe num objeto frio: "
                         + "use um INTERVAL menor");
+                }
+                if (ds.clustered() && !ds.coldTier().fitsClusterEntry(db, table, rows, bytes)) {
+                    throw new TooLarge();
                 }
                 writer.finish();
             }
