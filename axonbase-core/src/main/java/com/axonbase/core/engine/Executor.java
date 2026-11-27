@@ -194,11 +194,26 @@ public final class Executor {
     /**
      * Persiste uma aresta de grafo no KV com chave direcional dupla.
      * Formato da chave: {@code E|<ns>|<db>|out|<fromTbl>|<fromKey>|<kind>|<toTbl>|<toKey>}.
+     * O valor das duas chaves é o objeto de propriedades da aresta, ou vazio quando não há nenhuma. As novas se
+     * somam às já gravadas, então repetir o RELATE não apaga propriedade.
      */
     private void persistEdge(com.axonbase.core.catalog.Database db, AxonValue.RecordId from,
-                             String kind, AxonValue.RecordId to) {
-        records(db).put(edgeKey(db, "out", from, kind, to), new byte[0]);
-        records(db).put(edgeKey(db, "in", to, kind, from), new byte[0]);
+                             String kind, AxonValue.RecordId to, Map<String, AxonValue> properties) {
+        String outKey = edgeKey(db, "out", from, kind, to);
+        Map<String, AxonValue> merged = new LinkedHashMap<>(edgeProperties(db, outKey));
+        merged.putAll(properties);
+        byte[] value = merged.isEmpty() ? new byte[0] : encode(AxonValue.object(merged));
+        records(db).put(outKey, value);
+        records(db).put(edgeKey(db, "in", to, kind, from), value);
+    }
+
+    private Map<String, AxonValue> edgeProperties(com.axonbase.core.catalog.Database db, String key) {
+        Optional<byte[]> raw = records(db).get(key);
+        if (raw.isEmpty() || raw.get().length == 0) {
+            return Map.of();
+        }
+        AxonValue stored = decode(raw.get());
+        return stored.isObject() ? stored.asObject() : Map.of();
     }
 
     private String edgeKey(com.axonbase.core.catalog.Database db, String dir, AxonValue.RecordId from,
@@ -3715,6 +3730,12 @@ return score;
         AxonValue from = mapping(r.from());
         AxonValue to = mapping(r.to());
         String kind = tableOf(r.kind());
+        Map<String, AxonValue> assigned = new LinkedHashMap<>();
+        if (r.data() instanceof Data.SetClause sc) {
+            for (Assignment a : sc.assignments()) {
+                assigned.put(fieldOf(a.path()), evalExpr(a.value()));
+            }
+        }
         if (from.isRecordId() && to.isRecordId()) {
             AxonValue.RecordId fromR = from.asRecordId();
             AxonValue.RecordId toR = to.asRecordId();
@@ -3723,16 +3744,16 @@ return score;
             if (Datastore.PLAIN_NAME.matcher(kind).matches()) {
                 ensureTable(db, kind);
             }
-            persistEdge(db, fromR, kind, toR);
+            // in e out são as pontas da aresta, não propriedades
+            Map<String, AxonValue> properties = new LinkedHashMap<>(assigned);
+            properties.remove("in");
+            properties.remove("out");
+            persistEdge(db, fromR, kind, toR, properties);
         }
         Map<String, AxonValue> edge = new LinkedHashMap<>();
         edge.put("in", from);
         edge.put("out", to);
-        if (r.data() instanceof Data.SetClause sc) {
-            for (Assignment a : sc.assignments()) {
-                edge.put(fieldOf(a.path()), evalExpr(a.value()));
-            }
-        }
+        edge.putAll(assigned);
         return AxonValue.object(edge);
     }
 
@@ -5381,10 +5402,51 @@ return score;
 
     private AxonValue evalIdiom(Expr.Idiom i, Document doc) {
         AxonValue base = idiomBase(i.base(), doc);
-        for (Expr.Part p : i.parts()) {
-            base = applyPart(base, p);
+        List<Expr.Part> parts = i.parts();
+        for (int at = 0; at < parts.size(); at++) {
+            AxonValue from = base;
+            base = applyPart(base, parts.get(at));
+            if (at + 1 < parts.size() && parts.get(at) instanceof Expr.Part.Graph graph
+                && graph.lookup() instanceof Expr.Ident edge
+                && parts.get(at + 1) instanceof Expr.Part.Field field) {
+                // ->aresta.campo: vale o campo do registro alcançado; sem ele, a propriedade da aresta
+                AxonValue read = fieldAccess(base, field.name());
+                boolean missing = read.isNull() || read.isNone() || read.isArray() && read.asArray().isEmpty();
+                base = missing ? edgeProperty(from, graph.direction(), edge.name(), field.name(), read) : read;
+                at++;
+            }
         }
         return base;
+    }
+
+    /** A propriedade {@code name} das arestas {@code kind} que saem (ou chegam) nos registros de {@code from}. */
+    private AxonValue edgeProperty(AxonValue from, Expr.Direction direction, String kind, String name,
+                                   AxonValue absent) {
+        Database db = db();
+        List<String> dirs = direction == Expr.Direction.BOTH
+            ? List.of("out", "in")
+            : List.of(direction == Expr.Direction.IN ? "in" : "out");
+        List<AxonValue> sources = from.isArray() ? from.asArray() : List.of(from);
+        List<AxonValue> found = new ArrayList<>();
+        for (AxonValue source : sources) {
+            AxonValue id = source.isObject() ? source.asObject().get("id") : source;
+            if (id == null || !id.isRecordId()) {
+                continue;
+            }
+            for (String dir : dirs) {
+                String prefix = edgePrefix(db, dir, id.asRecordId()) + kind + "|";
+                for (String key : records(db).keysWithPrefix(prefix)) {
+                    AxonValue value = edgeProperties(db, key).get(name);
+                    if (value != null && !value.isNull() && !value.isNone()) {
+                        found.add(value);
+                    }
+                }
+            }
+        }
+        if (found.isEmpty()) {
+            return absent;
+        }
+        return found.size() == 1 ? found.get(0) : AxonValue.array(found);
     }
 
     /**
