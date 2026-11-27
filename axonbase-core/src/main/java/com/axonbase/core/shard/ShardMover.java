@@ -210,7 +210,7 @@ public final class ShardMover {
 
     /** Os registros da tabela nas faixas, cada um com a chave exata (modo parcial). */
     private List<AxonValue> read(ShardClient shard, ShardMap.TableKey table, SlotFilter filter) {
-        ShardRequest request = ShardRequest.of(table.namespace(), table.database(), "SELECT * FROM " + table.table())
+        ShardRequest request = ShardRequest.of(table.namespace(), table.database(), "SELECT * FROM " + com.axonbase.value.AxonQlText.identifier(table.table()))
             .partial(filter);
         return send(shard, request).asObject().get("items").asArray();
     }
@@ -231,7 +231,7 @@ public final class ShardMover {
 
     private void insert(ShardClient target, ShardMap.TableKey table, List<AxonValue> rows) {
         send(target, ShardRequest.of(table.namespace(), table.database(),
-                "INSERT INTO " + table.table() + " $" + ROWS + " RETURN NONE")
+                "INSERT INTO " + com.axonbase.value.AxonQlText.identifier(table.table()) + " $" + ROWS + " RETURN NONE")
             .withVars(Map.of(ROWS, AxonValue.array(rows))));
     }
 
@@ -256,7 +256,7 @@ public final class ShardMover {
 
     private void delete(ShardMap map, String shard, ShardMap.TableKey table, String field, List<SlotRange> ranges) {
         send(client(map, shard), ShardRequest.of(table.namespace(), table.database(),
-            "DELETE " + table.table() + " WHERE " + new SlotFilter(table.table(), field, ranges).condition()));
+            "DELETE " + com.axonbase.value.AxonQlText.identifier(table.table()) + " WHERE " + new SlotFilter(table.table(), field, ranges).condition()));
     }
 
     private ShardClient client(ShardMap map, String shardId) {

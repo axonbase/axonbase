@@ -1475,9 +1475,13 @@ public final class AxonServer {
             if (requireAuthenticated(s, resp) || refusedRead(req, resp)) {
                 return;
             }
+            String sql = "SELECT * FROM " + table;
+            if (refusedTableSql(resp, table, sql, com.axonbase.parser.ast.Statement.Select.class)) {
+                return;
+            }
             AxonValue rows;
             try {
-                rows = ds.execute("SELECT * FROM " + table, s, null);
+                rows = ds.execute(sql, s, null);
             } catch (com.axonbase.common.AxonError refused) {
                 if (RetryableRefusals.overloaded(resp, refused)) {
                     return;
@@ -1499,6 +1503,9 @@ public final class AxonServer {
             }
             AxonValue data = AxonJson.parseDocument(readBody(req));
             String sql = "CREATE " + table + " CONTENT " + AxonJson.write(data);
+            if (refusedTableSql(resp, table, sql, com.axonbase.parser.ast.Statement.Create.class)) {
+                return;
+            }
             try {
                 json(resp, 200, AxonJson.write(ds.execute(sql, s, null)));
             } catch (com.axonbase.core.cluster.CommitOutcomeUnknownException unknown) {
@@ -1685,6 +1692,22 @@ public final class AxonServer {
             ? AxonValue.num(n.longValue()) : value instanceof Boolean b
                 ? AxonValue.bool(b) : value == null ? AxonValue.nul() : AxonValue.str(String.valueOf(value))));
         return AxonValue.object(out);
+    }
+
+    /** A rota de tabela só executa uma sentença do tipo dela; o nome vem da URL. Responde 400 quando recusa. */
+    private boolean refusedTableSql(HttpServletResponse resp, String table, String sql,
+                                    Class<? extends com.axonbase.parser.ast.Statement> expected) throws IOException {
+        try {
+            // "--" abre comentário e cortaria o resto do comando
+            if (table.contains("--")) {
+                throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", table));
+            }
+            com.axonbase.parser.AxonQl.requireSingle(sql, expected);
+            return false;
+        } catch (IllegalArgumentException | com.axonbase.common.AxonError invalid) {
+            json(resp, 400, "{\"code\":-32700,\"message\":\"" + esc(invalid.getMessage()) + "\"}");
+            return true;
+        }
     }
 
     private String tablePath(HttpServletRequest req) {
