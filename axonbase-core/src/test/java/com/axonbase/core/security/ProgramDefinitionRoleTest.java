@@ -176,6 +176,19 @@ class ProgramDefinitionRoleTest {
     }
 
     @Test
+    void repetirUmDefinerContinuaExigindoPapelDeAdministradorDoBancoParaMudarODono() {
+        Datastore ds = ds();
+        String definer = "CREATE OR REPLACE FUNCTION fixa() SECURITY DEFINER AS $$ return 1 $$";
+        ds.execute(definer, databaseAdmin(), null);
+        String before = program(ds, "fixa").definition();
+
+        assertAdminRequired(ds, definer, editor());
+        ds.execute(definer, neighbourAdmin(), null);
+
+        assertEquals(before, program(ds, "fixa").definition());
+    }
+
+    @Test
     void importacaoSegueAMesmaRegra() {
         Datastore source = ds();
         String dump = source.exportDatabase("app", "main");
