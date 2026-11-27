@@ -4653,6 +4653,8 @@ return score;
                     throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
                 }
                 records(db).put(own, new byte[0]);
+                // a mesma chave que a escrita normal grava: o índice construído fica igual ao mantido desde o começo
+                records(db).put(uniqueClaimKey(db, table, index, prefix), new byte[0]);
             }
         }
         onlyIndex = index;
