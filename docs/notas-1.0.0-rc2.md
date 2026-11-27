@@ -9,8 +9,8 @@ Tire um backup antes de atualizar.
 ### `CREATE` e `INSERT` recusam um registro que já existe
 
 - `CREATE` e `INSERT` sobre um id existente devolvem erro. Antes sobrescreviam o registro.
-- `INSERT IGNORE` pula o id existente e devolve só o que gravou. Ele não ignora violação de `UNIQUE`, de `PRIMARY KEY` ou de outra restrição.
-- `UPSERT` continua sobrescrevendo. Um `UPSERT` cujo `WHERE` não casa com o registro existente ainda o regrava, agora sem deixar entradas antigas nos índices.
+- `INSERT IGNORE` pula o id existente e devolve só o que gravou. Ele não ignora violação de `UNIQUE`, de `PRIMARY KEY` ou de outra restrição. Antes de pular, confere se o usuário poderia criar a linha: sem essa permissão, responde `permission denied`, exista o id ou não. Com `PERMISSIONS` de criação ou Data Rule, a linha pulada também passa pelas validações de campo.
+- `UPSERT` continua alterando o registro que o `WHERE` e as permissões alcançam, e criando o que não existe. Sobre um registro existente ele já não o regrava quando o `WHERE` não casa (devolve lista vazia) nem quando as `PERMISSIONS` de alteração ou uma Data Rule o barram (responde `permission denied`). Antes o registro era substituído nos dois casos.
 - Para um usuário com Data Rule, `CREATE`, `INSERT`, `INSERT IGNORE` e `UPSERT` sobre um registro que a regra esconde respondem só `permission denied`. A resposta não diz que o registro existe, e `INSERT IGNORE` não o pula em silêncio.
 - Vale para os métodos `create` e `insert` dos SDKs (Software Development Kits), para a rota de tabela, para o driver JDBC (Java Database Connectivity) e para eventos. Um evento que cria sempre o mesmo id passa a fazer falhar a escrita que o disparou.
 - Importação (`POST /import`), movimentação de shards e compensação de saga continuam repondo registros existentes.
@@ -89,6 +89,12 @@ Atenção na atualização: certificado revogado passa a ser sempre recusado no 
 - Remover um usuário ou um acesso exige escopo que cubra o alvo. Definir um acesso segue a mesma regra.
 - Criar ou remover uma ligação entre bancos exige escopo de namespace ou maior. Criar ou remover uma definição de SAGA exige escopo root.
 - O root inicial do servidor não pode ser apagado. Uma sessão autenticada recebe erro, e o modo sem autenticação ignora o pedido.
+- `DEFINE EVENT`, `CREATE EVENT`, `ALTER EVENT` e `DROP EVENT` passam a exigir administrador, também numa importação. Tokens sem papel reconhecido, como os de escopo de banco sem `ROLES`, não definem mais eventos. Reinício e replicação não mudam.
+- Eventos que um editor criou antes continuam gravados e continuam disparando, com a identidade de quem faz a escrita, inclusive a do root. Revise cada tabela com `INFO FOR TABLE` antes de atualizar e remova o que não reconhecer.
+- Um usuário auditado, mesmo administrador, não aprova nem nega o próprio caso, não libera um caso `DANGER` de outro usuário (o que o desbloquearia) e só justifica os próprios casos. Também não executa `CREATE AI AUDIT`, `DROP AI AUDIT`, `CREATE USER`, `DEFINE USER` ou `DROP USER`, não usa `signup`, não desbloqueia usuários, não remove usuários nem emite tokens de serviço pela gestão. Ninguém decide um caso aberto em seu próprio nome.
+- Uma AI AUDIT atribuída ao usuário e inexistente no banco corrente passa a negar o comando. Antes liberava. Só o `USE` passa, para sair do banco. Antes de apagar uma auditoria, retire a atribuição dos usuários.
+- Uma condição de `PERMISSIONS` que cita um dado ausente em `$auth` ou `$token` passa a negar a condição inteira, inclusive os outros ramos de um `OR`. Antes, a falta casava com um campo ausente. Vale também para sessões sem token (modo embutido e servidor sem autenticação) e para testes como `$auth = NONE`. Condições que não citam `$auth` nem `$token` não mudam.
+- Um usuário com Data Rule não lê `AUDIT_LOG` nem `AUDIT_CASES`.
 - `$auth` e `$token` passam a vir do token da sessão. Numa sessão autenticada, o cliente não os define por `LET`, por variável da requisição nem pelo método `let`. Quem passava `auth` como variável para simular um usuário precisa mudar.
 - A auditoria por IA passa a interceptar pelo servidor os usuários definidos com `AUDITED BY`: eles passam a acionar o provedor de IA e podem ser bloqueados.
 - Um comando aprovado roda com a identidade do autor, nunca com o poder de quem aprovou. Autor removido não executa nada, e um caso aberto sem o autor registrado continua pendente.
@@ -123,7 +129,9 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 
 - `RELATE ... SET` grava as propriedades da aresta.
 - A exportação passa a levar arestas e suas propriedades, entradas de chave-valor com o prazo restante, embeddings, eventos, restrições de tabela e todas as opções de campo. Campos e eventos vão depois dos dados, para a importação não aplicar `DEFAULT`, `ASSERT` ou `REFERENCES` sobre o que já existia nem disparar eventos de novo. A exportação falha, com erro, diante de uma aresta cuja chave não possa ser escrita (por exemplo, com `|`).
-- Usuários, acessos, Data Rules, permissões de tabela, auditorias e ligações entre bancos continuam fora da exportação.
+- A exportação passa a levar as `PERMISSIONS` das tabelas e as Data Rules, depois dos dados, para o banco importado não ficar mais aberto que o de origem. Importar uma Data Rule continua exigindo administrador.
+- Usuários, senhas, tokens, acessos, auditorias e ligações entre bancos, com as credenciais delas, continuam fora da exportação. Atribua de novo as Data Rules aos usuários do banco de destino.
+- Reimportar sobre um banco cujas `PERMISSIONS` negam a identidade de quem importa é recusado.
 
 ### SAGA e arestas
 
@@ -152,6 +160,10 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 - `CANCEL SAGA` ainda não desfaz `UNRELATE` nem repõe as arestas que um `DELETE` removeu junto com o registro. Desfazer a criação de um registro remove também as arestas ligadas a ele.
 - Um `ROLLBACK TO` de ponto de salvamento não retira os passos de SAGA das escritas que ele desfez.
 - Num armazenamento em memória, um comando que falha no meio de várias linhas mantém as linhas anteriores.
-- `DEFINE EVENT` não exige administrador, e o corpo do evento roda na sessão de quem dispara a escrita. Um editor pode, assim, fazer o root executar comandos que ele mesmo não poderia.
+- O corpo de um evento roda na sessão de quem dispara a escrita. Um administrador de banco ou de namespace pode, assim, fazer o root executar comandos acima do escopo dele.
+- `DEFINE TABLE` não exige administrador. Um editor pode trocar ou retirar as `PERMISSIONS` de uma tabela.
+- `PERMISSIONS` de leitura não valem no acesso direto por id (`RETURN t:1.campo`), no `FETCH` e na leitura de um registro ligado.
+- Um record id guardado num campo volta como texto. Uma Data Rule como `dono.equipe = 'a'` não segue esse link e nega a linha. A travessia de grafo (`->pertence->u.equipe`) é seguida.
+- A auditoria de um usuário vem do token. Quem recebeu `AUDITED BY` depois de entrar só é alcançado no próximo login. Dois usuários auditados com papel de operador ainda podem aprovar os casos `WARNING` um do outro.
 - A estimativa do `EXPLAIN` conta também as linhas que uma Data Rule oculta.
 - Uma importação retida pela auditoria por IA e depois aprovada roda como um comando comum: não substitui registros existentes e, num nó único, não é tudo ou nada.

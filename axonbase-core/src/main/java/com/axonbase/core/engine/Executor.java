@@ -389,6 +389,10 @@ public final class Executor {
         if (cond == null) {
             return true;
         }
+        // como na Data Rule: sem o dado do token, NONE = NONE casaria e liberaria o acesso
+        if (lacksParameterValue(cond, TOKEN_PARAMETERS)) {
+            return false;
+        }
         Document target = doc;
         if (target == null) {
             target = emptyDoc();
@@ -448,7 +452,10 @@ public final class Executor {
             || s instanceof Statement.DropAiAudit || s instanceof DefineDatabaseLink
             || s instanceof DropDatabaseLink || s instanceof Statement.CreateDatabaseLink
             || s instanceof Statement.AlterDatabaseLink || s instanceof CreateSaga
-            || s instanceof Statement.DropSaga;
+            || s instanceof Statement.DropSaga
+            // o corpo do evento roda na sessão de quem dispara a escrita, inclusive a do root
+            || s instanceof DefineEvent || s instanceof Statement.CreateEvent
+            || s instanceof Statement.DropEvent;
         if (s instanceof Statement.SetAuditCase) {
             min = com.axonbase.core.security.Authz.Role.OPERATOR;
             needs = true;
@@ -464,6 +471,17 @@ public final class Executor {
             throw new com.axonbase.common.AxonError(-32002,
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
         }
+        // definir ou remover usuário muda a atribuição de auditoria, mesmo quando o texto não a cita
+        if (com.axonbase.core.security.Authz.audited(auth)
+            && (s instanceof Statement.DefineAiAudit || s instanceof Statement.DropAiAudit
+                || s instanceof Statement.DefineUser || s instanceof Statement.CreateUser
+                || s instanceof Statement.DropUser)) {
+            throw refusedToAudited();
+        }
+    }
+
+    private static com.axonbase.common.AxonError refusedToAudited() {
+        return new com.axonbase.common.AxonError(-32002, Messages.get("audit_user_restricted"));
     }
 
     /** Um usuário nunca cria identidade de escopo maior que o seu, nem fora do seu ns/db. */
@@ -1116,6 +1134,43 @@ public final class Executor {
         return output(i.ret(), AxonValue.array(records));
     }
 
+    /**
+     * A parte de criação do UPSERT. Um registro que já está sob o id e não foi alterado (WHERE falso, PERMISSIONS ou
+     * Data Rule) fica como está.
+     */
+    private void upsertCreate(Database db, Statement.Update u, String table, AxonValue explicitKey,
+                              List<AxonValue> results) {
+        AxonValue data = evalData(u.data(), table);
+        AxonValue given = data.isObject() ? data.asObject().get("id") : null;
+        AxonValue key = explicitKey != null || given == null ? explicitKey : resolveKey(unwrapId(given));
+        if (key != null) {
+            RecordId rid = new RecordId(table, key);
+            Document existing = loadDoc(db, rid);
+            if (existing != null) {
+                refuseHiddenRecord(db, rid);
+                if (!allowed(existing, table, "update")) {
+                    throw errorStmt("permission denied");
+                }
+                return;
+            }
+        }
+        // com algo a conferir, um registro criado por outro neste intervalo também não é substituído
+        boolean guarded = u.cond() != null || restrictsWrite(db, table, "update");
+        results.add(createRecord(db, table, data, explicitKey, guarded ? Existing.REFUSE : Existing.REPLACE));
+    }
+
+    /** O usuário tem Data Rule ou a tabela tem PERMISSIONS para a ação. */
+    private boolean restrictsWrite(Database db, String table, String action) {
+        if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            return true;
+        }
+        Catalog.TableDef def = db.catalog().table(table);
+        if (def == null || def.permissions() == null) {
+            return false;
+        }
+        return ("create".equals(action) ? def.permissions().create() : def.permissions().update()) != null;
+    }
+
     /** O que uma criação faz quando o id já existe. */
     private enum Existing { REFUSE, SKIP, REPLACE }
 
@@ -1218,7 +1273,9 @@ public final class Executor {
             // antes de pular ou de dizer que existe: sobre um registro oculto pela regra a recusa é sempre a mesma
             refuseHiddenRecord(db, rid);
         }
-        if (previous != null && existing == Existing.SKIP) {
+        boolean skip = previous != null && existing == Existing.SKIP;
+        // sem nada a conferir, pula antes de validar a linha (e de chamar o provedor de embedding)
+        if (skip && !restrictsWrite(db, table, "create")) {
             return null;
         }
         obj.put("id", ridAsValue(rid));
@@ -1226,9 +1283,15 @@ public final class Executor {
         injectDataRuleFields(obj);
         AxonValue record = AxonValue.object(obj);
         Document document = new Document(rid, record);
-        ds.auditLog(session, "CREATE", table, rid, null, record);
+        if (!skip) {
+            ds.auditLog(session, "CREATE", table, rid, null, record);
+        }
         if (!dataRuleFilter(document) || !allowed(document, table, "create")) {
             throw errorStmt("permission denied");
+        }
+        // pular também diz que o id existe: só quem poderia criar a linha fica sabendo
+        if (skip) {
+            return null;
         }
         // depois da permissão: quem não pode criar não fica sabendo se o id existe
         if (previous != null && existing == Existing.REFUSE) {
@@ -1506,12 +1569,12 @@ public final class Executor {
             if (u.target() instanceof Expr.Ident idTarget) {
                 String table = idTarget.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data(), table), null, Existing.REPLACE));
+                upsertCreate(db, u, table, null, results);
             } else if (u.target() instanceof Expr.RecordId rid
                 && rid.table() instanceof Expr.Ident ridTable) {
                 String table = ridTable.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data(), table), recordKey(rid.key()), Existing.REPLACE));
+                upsertCreate(db, u, table, recordKey(rid.key()), results);
             }
         }
         results.replaceAll(this::visible);
@@ -1855,6 +1918,11 @@ public final class Executor {
         // Check if FROM is AUDIT_CASES virtual table
         if (sel.from() instanceof Expr.Ident id) {
             String tableName = id.name();
+            // as duas guardam o conteúdo original: filtro e máscara não as alcançam
+            if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName))
+                && com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+                throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_audit_refused"));
+            }
             if (isAuditCasesTable(tableName)) return runSelectAuditCases(sel);
             if (isAuditLogTable(tableName)) return runSelectAuditLog(sel);
         }
@@ -5609,7 +5677,7 @@ return score;
             Catalog.DataRuleDef def = db.catalog().dataRule(name);
             // regra que não existe neste banco nega: liberar tornaria um nome errado em acesso total
             if (def == null) return DENY_ALL;
-            if (lacksParameterValue(def.predicate())) return DENY_ALL;
+            if (lacksParameterValue(def.predicate(), name2 -> true)) return DENY_ALL;
             predicates.add(def.predicate());
         }
         return predicates;
@@ -5635,27 +5703,32 @@ return score;
     /** Predicado que não deixa passar linha alguma. */
     private static final List<Expr> DENY_ALL = List.of(new Expr.Literal(AxonValue.bool(false)));
 
+    /** Os parâmetros que trazem dados do token da sessão. */
+    private static final java.util.function.Predicate<String> TOKEN_PARAMETERS =
+        name -> "auth".equals(name) || "token".equals(name);
+
     /**
-     * Algum {@code $parametro} da regra (ou o campo pedido a ele, como {@code $auth.tenant}) está sem valor. Comparar
-     * a falta com um campo ausente daria verdadeiro, então a regra inteira passa a negar.
+     * Algum {@code $parametro} conferido da regra (ou o campo pedido a ele, como {@code $auth.tenant}) está sem valor.
+     * Comparar a falta com um campo ausente daria verdadeiro, então a condição inteira passa a negar.
      */
-    private boolean lacksParameterValue(Expr e) {
+    private boolean lacksParameterValue(Expr e, java.util.function.Predicate<String> checked) {
+        java.util.function.Predicate<Expr> lacks = part -> lacksParameterValue(part, checked);
         return switch (e) {
             case null -> false;
-            case Expr.Param p -> !"parent".equals(p.name()) && isMissing(eval(p));
-            case Expr.Idiom i -> idiomLacksValue(i);
-            case Expr.Binary b -> lacksParameterValue(b.left()) || lacksParameterValue(b.right());
-            case Expr.Unary u -> lacksParameterValue(u.operand());
-            case Expr.Cast c -> lacksParameterValue(c.operand());
-            case Expr.Alias a -> lacksParameterValue(a.expr());
-            case Expr.Call c -> c.args().stream().anyMatch(this::lacksParameterValue);
-            case Expr.ArrayLit a -> a.items().stream().anyMatch(this::lacksParameterValue);
-            case Expr.SetLit s -> s.items().stream().anyMatch(this::lacksParameterValue);
-            case Expr.ObjectLit o -> o.entries().stream().anyMatch(en -> lacksParameterValue(en.value()));
-            case Expr.RecordId r -> lacksParameterValue(r.key());
-            case Expr.Range r -> lacksParameterValue(r.start()) || lacksParameterValue(r.end());
+            case Expr.Param p -> !"parent".equals(p.name()) && checked.test(p.name()) && isMissing(eval(p));
+            case Expr.Idiom i -> idiomLacksValue(i, checked);
+            case Expr.Binary b -> lacks.test(b.left()) || lacks.test(b.right());
+            case Expr.Unary u -> lacks.test(u.operand());
+            case Expr.Cast c -> lacks.test(c.operand());
+            case Expr.Alias a -> lacks.test(a.expr());
+            case Expr.Call c -> c.args().stream().anyMatch(lacks);
+            case Expr.ArrayLit a -> a.items().stream().anyMatch(lacks);
+            case Expr.SetLit s -> s.items().stream().anyMatch(lacks);
+            case Expr.ObjectLit o -> o.entries().stream().anyMatch(en -> lacks.test(en.value()));
+            case Expr.RecordId r -> lacks.test(r.key());
+            case Expr.Range r -> lacks.test(r.start()) || lacks.test(r.end());
             case Expr.SubQuery sq -> sq.query().statements().stream()
-                .anyMatch(st -> st instanceof Statement.Select sel && lacksParameterValue(sel.cond()));
+                .anyMatch(st -> st instanceof Statement.Select sel && lacks.test(sel.cond()));
             case Expr.Literal l -> false;
             case Expr.Ident id -> false;
             case Expr.Qualified q -> false;
@@ -5665,11 +5738,11 @@ return score;
     }
 
     /** Confere o trecho {@code $parametro.campo.campo} de um idiom; o que vier depois é percorrido como expressão. */
-    private boolean idiomLacksValue(Expr.Idiom i) {
+    private boolean idiomLacksValue(Expr.Idiom i, java.util.function.Predicate<String> checked) {
         if (!(i.base() instanceof Expr.Param p)) {
-            return lacksParameterValue(i.base());
+            return lacksParameterValue(i.base(), checked);
         }
-        if ("parent".equals(p.name())) {
+        if ("parent".equals(p.name()) || !checked.test(p.name())) {
             return false;
         }
         List<Expr.Part> fields = i.parts().stream().takeWhile(part -> part instanceof Expr.Part.Field).toList();
@@ -8115,6 +8188,10 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (!"PENDING".equals(auditCase.status())) {
             throw errorStmt(Messages.get("audit_case_resolved", auditCase.status()));
         }
+        if (com.axonbase.core.security.Authz.audited(session.auth())
+            && !sessionUserId().equals(auditCase.userId())) {
+            throw refusedToAudited();
+        }
         auditCase.setReason(sra.reason(), sessionUserId());
         return AxonValue.object(java.util.Map.of(
             "hash", AxonValue.str(sra.hash()),
@@ -8134,6 +8211,12 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         // Quem está bloqueado por este caso não pode decidi-lo (nem outro caso sobre si).
         if (userId.equals(auditCase.userId()) && cat.isBlocked(userId)) {
             throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_self_decision"));
+        }
+        // quem pediu não decide, bloqueado ou não, e um auditado não desbloqueia ninguém
+        boolean unblocks = "AUTHORIZED".equals(sac.status()) && "DANGER".equals(auditCase.classification());
+        if (userId.equals(auditCase.userId())
+            || unblocks && com.axonbase.core.security.Authz.audited(session.auth())) {
+            throw refusedToAudited();
         }
         // montada antes de decidir: sem a identidade do autor o caso continua pendente
         Session author = "AUTHORIZED".equals(sac.status()) ? authorSession(auditCase) : null;
@@ -8335,6 +8418,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
      */
     private AxonValue interceptWithAiAudit(String sql, Statement s) {
         if (isAuditCommand(s)) return null; // audit commands pass through
+        // sem isto, quem está num banco onde a auditoria não existe não conseguiria sair dele
+        if (s instanceof Statement.Use) return null;
         Database db = db();
         String userId = sessionUserId();
         if (userId == null || userId.isBlank()) return null; // no authenticated user
@@ -8360,7 +8445,10 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (auditName == null || auditName.isBlank()) return null;
 
         var def = db.catalog().audit(auditName);
-        if (def == null) return null;
+        // como a Data Rule: auditoria que não existe neste banco nega, senão um nome errado liberaria tudo
+        if (def == null) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_missing", auditName));
+        }
 
         String classification = def.classify(sql);
         if ("SAFE".equals(classification)) return null;

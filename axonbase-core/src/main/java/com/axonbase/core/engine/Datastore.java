@@ -1231,12 +1231,12 @@ public final class Datastore {
 
 /**
      * Gera um dump AxonQL do banco: o que {@link #importDatabase} recebe recria analyzers, embeddings, tabelas,
-     * índices, partições, programas, registros, arestas, chave-valor, campos e eventos.
+     * índices, partições, programas, registros, arestas, chave-valor, campos, eventos, PERMISSIONS e Data Rules.
      *
      * <p>Campos e eventos vêm depois dos dados: a importação repõe as linhas como estavam, sem DEFAULT, ASSERT nem
-     * REFERENCES sobre o que já existia, e nenhum evento dispara de novo. As definições de SAGA cujas ligações existem
-     * vão no fim. Usuários, acessos, Data Rules, permissões de tabela, auditorias e database links ficam fora do
-     * dump.</p>
+     * REFERENCES sobre o que já existia, e nenhum evento dispara de novo. PERMISSIONS e Data Rules também vêm depois
+     * dos dados, para não barrarem a própria importação. As definições de SAGA cujas ligações existem vão no fim.
+     * Usuários, senhas, tokens, acessos, auditorias e database links ficam fora do dump.</p>
      */
     public String exportDatabase(String ns, String db) {
         ConcurrentMap<String, Database> databases = namespaces.get(ns);
@@ -1288,6 +1288,8 @@ public final class Datastore {
         appendKeyValues(sb, ns, db);
         appendFields(sb, database);
         appendEvents(sb, database);
+        appendPermissions(sb, database);
+        appendDataRules(sb, database);
         appendSagas(sb, ns);
         return sb.toString();
     }
@@ -1375,7 +1377,37 @@ public final class Datastore {
         }
     }
 
-    /** A tabela com as opções dela; as permissões não vão no dump. */
+    /**
+     * Um DEFINE TABLE com as PERMISSIONS, para cada tabela que as tem. Redefinir a tabela mantém campos, índices,
+     * restrições e eventos.
+     */
+    private static void appendPermissions(StringBuilder sb, Database database) {
+        for (Catalog.TableDef def : database.catalog().tables()) {
+            Statement.Permissions perms = def.permissions();
+            if (perms == null || perms.select() == null && perms.create() == null && perms.update() == null
+                && perms.delete() == null) {
+                continue;
+            }
+            String text = com.axonbase.parser.Render.stmt(new Statement.DefineTable(def.name(), def.schemafull(),
+                false, perms, def.shardBy()));
+            if (def.drop()) {
+                // o parser lê DROP antes do tipo de esquema
+                String head = "DEFINE TABLE " + def.name();
+                text = head + " DROP" + text.substring(head.length());
+            }
+            sb.append(text).append(";\n");
+        }
+    }
+
+    /** As Data Rules do banco. Importá-las exige administrador, como criá-las. */
+    private static void appendDataRules(StringBuilder sb, Database database) {
+        for (Catalog.DataRuleDef rule : database.catalog().dataRules()) {
+            sb.append(com.axonbase.parser.Render.stmt(new Statement.CreateDataRule(rule.name(), rule.predicate(),
+                rule.maskPatterns()))).append(";\n");
+        }
+    }
+
+    /** A tabela com as opções dela; as PERMISSIONS vão depois dos dados. */
     private static void appendTable(StringBuilder sb, Catalog.TableDef def) {
         sb.append("DEFINE TABLE ").append(def.name()).append(def.schemafull() ? " SCHEMAFULL" : " SCHEMALESS");
         if (def.drop()) {

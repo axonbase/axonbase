@@ -199,6 +199,8 @@ final class AdminV1Servlet extends HttpServlet {
             }
             if (post && n == 1) {
                 needRoot(c, Authz.Role.ADMIN);
+                // o token de serviço nasce sem auditoria
+                needUnaudited(c);
                 return created(createServiceToken(body(req)));
             }
             if (delete && n == 2) {
@@ -312,6 +314,13 @@ final class AdminV1Servlet extends HttpServlet {
         if (c.role().compareTo(min) < 0) {
             throw new ApiError(403, "FORBIDDEN",
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
+        }
+    }
+
+    /** Ações que mudam a auditoria sem passar pelo motor: um usuário auditado não as faz. */
+    private static void needUnaudited(Caller c) {
+        if (Authz.audited(c.auth())) {
+            throw new ApiError(403, "FORBIDDEN", Messages.get("audit_user_restricted"));
         }
     }
 
@@ -598,6 +607,7 @@ final class AdminV1Servlet extends HttpServlet {
     }
 
     private void deleteUser(Caller c, String scopeRaw, String name, HttpServletRequest req) {
+        needUnaudited(c);
         needLeader();
         AuthCatalog.Scope scope;
         try {
@@ -810,6 +820,7 @@ final class AdminV1Servlet extends HttpServlet {
             }
             if (post && n == 4 && seg.get(3).equals("unblock")) {
                 needRoot(c, Authz.Role.OPERATOR);
+                needUnaudited(c);
                 unblock(seg.get(2));
                 return noContent();
             }

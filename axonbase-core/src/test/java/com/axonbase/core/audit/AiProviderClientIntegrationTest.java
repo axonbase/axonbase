@@ -79,6 +79,8 @@ class AiProviderClientIntegrationTest {
 
         var auditCase = datastore.requireDatabase(session).auditCatalog().listCases().getFirst();
         datastore.execute("SET REASON AUDIT CASE '" + auditCase.hash() + "' 'limpeza aprovada'", session, null);
+        // quem pediu não aprova o próprio caso
+        session.auth(AxonValue.object(java.util.Map.of("user", AxonValue.str("chefe"))));
         datastore.execute("SET AUDIT CASE '" + auditCase.hash()
             + "' AUTHORIZED REASON 'manutencao autorizada'", session, null);
 

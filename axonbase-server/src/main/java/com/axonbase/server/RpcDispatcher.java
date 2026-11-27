@@ -869,6 +869,10 @@ public final class RpcDispatcher {
         if (!Authz.atLeast(session.auth(), Authz.Role.ADMIN)) {
             return Messages.get("auth_role_required", "admin");
         }
+        // o usuário criado nasce sem auditoria
+        if (Authz.audited(session.auth())) {
+            return Messages.get("audit_user_restricted");
+        }
         boolean complete = ns != null && !ns.isBlank() && db != null && !db.isBlank();
         return complete && !Authz.allows(session.auth(), ns, db) ? Messages.get("rpc_scope_forbidden") : null;
     }
