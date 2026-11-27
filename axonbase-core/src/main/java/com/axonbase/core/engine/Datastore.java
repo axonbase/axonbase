@@ -705,6 +705,13 @@ public final class Datastore {
         this.clusterNodeId = nodeId;
     }
 
+    private static volatile java.util.function.Consumer<ControlCommand> replayHook;
+
+    /** Gancho chamado depois de cada comando reexecutado do plano de controle. Só para testes. */
+    public static void replayHook(java.util.function.Consumer<ControlCommand> hook) {
+        replayHook = hook;
+    }
+
     /**
      * Reconstrói catálogo e identidades reexecutando o plano de controle.
      *
@@ -721,6 +728,10 @@ public final class Datastore {
             authCatalog.clear();
             for (ControlCommand command : snapshot.commands()) {
                 replay(command);
+                java.util.function.Consumer<ControlCommand> hook = replayHook;
+                if (hook != null) {
+                    hook.accept(command);
+                }
             }
             authCatalog.restoreBootstrap();
         } finally {
