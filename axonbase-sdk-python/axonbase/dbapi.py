@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .client import Axon
+from .literals import quote_literal
 
 apilevel = "2.0"
 threadsafety = 2
@@ -91,12 +92,6 @@ class _SyncBridge:
 # ─── Connection ────────────────────────────────────────────────────────────
 
 
-def _quote(text: str) -> str:
-    """Literal de texto do AxonQL, em que a barra invertida é o escape (dobrar a aspa não vale)."""
-    escaped = text.replace("\\", "\\\\").replace("'", "\\'")
-    return f"'{escaped}'"
-
-
 class Connection:
     """AxonBase DBAPI connection."""
 
@@ -151,7 +146,7 @@ class Connection:
     def set_saga_correlation(self, correlation_id: str | None) -> None:
         """Sets the SAGA correlation for subsequent statements on this connection."""
         if correlation_id:
-            self._bridge.call(self._axon.query(f"LET $saga_corr = {_quote(correlation_id)}"))
+            self._bridge.call(self._axon.query(f"LET $saga_corr = {quote_literal(correlation_id)}"))
         else:
             self._bridge.call(self._axon.query("LET $saga_corr = NULL"))
 
@@ -531,10 +526,12 @@ class Cursor:
         if isinstance(v, bool):
             return "true" if v else "false"
         if isinstance(v, (int, float)):
-            return str(v)
+            text = str(v)
+            # um negativo ganha um espaço antes: "-%(n)s" viraria o comentário "--"
+            return f" {text}" if text.startswith("-") else text
         if isinstance(v, (bytes, bytearray, memoryview)):
             raise ProgrammingError("binary parameters are not supported")
-        return _quote(str(v))
+        return quote_literal(str(v))
 
 
 # ─── Module-level helpers ──────────────────────────────────────────────────

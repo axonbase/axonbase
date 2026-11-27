@@ -3,6 +3,7 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .literals import quote_literal, saga_name
 from .sqlalchemy_dialect import with_saga_correlation
 
 
@@ -37,7 +38,7 @@ class SagaExecuteTransaction:
         self.correlation_id = correlation_id
         if not self._participant:
             self._execute_orchestrator(
-                f"BEGIN SAGA {self.saga_name} WITH CORRELATION '{correlation_id}'"
+                f"BEGIN SAGA {self._target()}"
             )
         self.session = Session(self.local_engine)
         with_saga_correlation(self.session.connection(), correlation_id)
@@ -71,7 +72,7 @@ class SagaExecuteTransaction:
             self.session.commit()
             if not self._participant:
                 self._execute_orchestrator(
-                    f"COMMIT SAGA {self.saga_name} WITH CORRELATION '{self.correlation_id}'"
+                    f"COMMIT SAGA {self._target()}"
                 )
             self._finished = True
         except Exception:
@@ -88,7 +89,7 @@ class SagaExecuteTransaction:
             self.session.rollback()
             if not self._participant:
                 self._execute_orchestrator(
-                    f"CANCEL SAGA {self.saga_name} WITH CORRELATION '{self.correlation_id}'"
+                    f"CANCEL SAGA {self._target()}"
                 )
         finally:
             self._finished = True
@@ -101,6 +102,9 @@ class SagaExecuteTransaction:
         if not self._finished:
             self.rollback()
         return False
+
+    def _target(self) -> str:
+        return f"{saga_name(self.saga_name)} WITH CORRELATION {quote_literal(self.correlation_id)}"
 
     def _execute_orchestrator(self, statement: str):
         with self.orchestrator_engine.begin() as connection:

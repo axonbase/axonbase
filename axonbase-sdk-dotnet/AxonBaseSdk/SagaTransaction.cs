@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace AxonBaseSdk;
 
 /// <summary>Client-side helper for an AxonBase SAGA transaction.</summary>
@@ -23,7 +25,7 @@ public sealed class SagaTransaction
             throw new InvalidOperationException($"Saga already begun: {CorrelationId}");
 
         var result = await _axon.QueryAsync(
-            $"BEGIN SAGA {Escape(SagaName)} WITH CORRELATION '{Escape(CorrelationId)}'");
+            $"BEGIN SAGA {Name(SagaName)} WITH CORRELATION '{Escape(CorrelationId)}'");
         if (Status(result) == "RUNNING")
         {
             IsBegun = true;
@@ -44,7 +46,7 @@ public sealed class SagaTransaction
     {
         EnsureActive();
         var result = await _axon.QueryAsync(
-            $"COMMIT SAGA {Escape(SagaName)} WITH CORRELATION '{Escape(CorrelationId)}'");
+            $"COMMIT SAGA {Name(SagaName)} WITH CORRELATION '{Escape(CorrelationId)}'");
         IsFinished = true;
         if (Status(result) != "COMMITTED")
             throw new AxonSdkException($"Saga commit failed: {result}");
@@ -56,14 +58,20 @@ public sealed class SagaTransaction
             return;
 
         await _axon.QueryAsync(
-            $"CANCEL SAGA {Escape(SagaName)} WITH CORRELATION '{Escape(CorrelationId)}'");
+            $"CANCEL SAGA {Name(SagaName)} WITH CORRELATION '{Escape(CorrelationId)}'");
         IsFinished = true;
     }
 
     public Task<object?> DescribeAsync() => _axon.QueryAsync(
-        $"SHOW SAGA TRANSACTION {Escape(SagaName)} '{Escape(CorrelationId)}'");
+        $"SHOW SAGA TRANSACTION {Name(SagaName)} '{Escape(CorrelationId)}'");
 
-    internal static string Escape(string value) => value.Replace("\\", "\\\\").Replace("'", "''");
+    /// <summary>Body of an AxonQL string literal: the backslash is the escape character.</summary>
+    internal static string Escape(string value) => value.Replace("\\", "\\\\").Replace("'", "\\'")
+        .Replace("\n", "\\n").Replace("\r", "\\r");
+
+    /// <summary>A simple identifier goes as is; any other saga name goes as a string literal.</summary>
+    internal static string Name(string value) =>
+        Regex.IsMatch(value, @"\A[A-Za-z_][A-Za-z0-9_]*\z") ? value : $"'{Escape(value)}'";
 
     private void EnsureActive()
     {

@@ -46,7 +46,9 @@ public class AxonDatabaseMetaData implements DatabaseMetaData {
                 int ordinal = 0;
                 rows.add(columnRow("id", tableName, db(), ns(), Types.VARCHAR, "VARCHAR", columnNoNulls, ++ordinal));
                 try {
-                    ResultSet sample = stmt.executeQuery("SELECT * FROM " + tableName + " LIMIT 1");
+                    String source = quotedTable(tableName);
+                    if (source == null) continue;
+                    ResultSet sample = stmt.executeQuery("SELECT * FROM " + source + " LIMIT 1");
                     ResultSetMetaData md = sample.getMetaData();
                     Set<String> seen = new LinkedHashSet<>();
                     seen.add("id");
@@ -62,6 +64,16 @@ public class AxonDatabaseMetaData implements DatabaseMetaData {
             }
         }
         return JdbcProxy.create(ResultSet.class, new AxonResultSetBackend(AxonValue.array(rows)));
+    }
+
+    /**
+     * O nome da tabela como entra num comando: o que não é identificador simples vai entre delimitadores, para ser
+     * lido como nome. {@code null} quando nenhum delimitador serve.
+     */
+    private static String quotedTable(String name) {
+        if (name.matches("[A-Za-z_][A-Za-z0-9_]*")) return name;
+        if (name.indexOf('`') < 0) return "`" + name + "`";
+        return name.indexOf('\u27e9') < 0 ? "\u27e8" + name + "\u27e9" : null;
     }
 
     private List<String> resolveTables(Statement stmt, String tableNamePattern) throws SQLException {

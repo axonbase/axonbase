@@ -3,7 +3,7 @@ from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, Header, HTTPException
 
-from common import sql
+from common import identifier, sql
 
 app = FastAPI(title="invoice-service")
 ORCHESTRATOR = os.getenv("ORCHESTRATOR_URL", "http://127.0.0.1:8000")
@@ -13,6 +13,8 @@ STOCK_SERVICE = os.getenv("STOCK_SERVICE_URL", "http://127.0.0.1:9003")
 
 @app.post("/invoices")
 def create_invoice(order_id: str, x_correlation_id: str = Header()):
+    order_id = identifier(order_id)
+    x_correlation_id = identifier(x_correlation_id)
     try:
         sql(INVOICE_DB, f"CREATE invoice:{order_id} CONTENT {{order_id: '{order_id}', status: 'ISSUED'}}", "invoices", x_correlation_id)
         request = Request(f"{STOCK_SERVICE}/reservations?order_id={order_id}", headers={"X-Correlation-Id": x_correlation_id}, method="POST")

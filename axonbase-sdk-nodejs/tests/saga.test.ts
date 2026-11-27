@@ -31,10 +31,10 @@ test("SagaTransaction manages the saga lifecycle and session correlation", async
 
   assert.deepEqual(variables, [["saga_corr", "corr\\id'"]]);
   assert.deepEqual(queries, [
-    "BEGIN SAGA order''s WITH CORRELATION 'corr\\\\id'''",
+    "BEGIN SAGA 'order\\'s' WITH CORRELATION 'corr\\\\id\\''",
     "UPDATE orders:o1 SET total = 200",
-    "SHOW SAGA TRANSACTION order''s 'corr\\\\id'''",
-    "COMMIT SAGA order''s WITH CORRELATION 'corr\\\\id'''",
+    "SHOW SAGA TRANSACTION 'order\\'s' 'corr\\\\id\\''",
+    "COMMIT SAGA 'order\\'s' WITH CORRELATION 'corr\\\\id\\''",
   ]);
 });
 
@@ -58,5 +58,22 @@ test("SagaTransaction rollback is idempotent", async () => {
   assert.deepEqual(queries, [
     "BEGIN SAGA pedido WITH CORRELATION 'corr-123'",
     "CANCEL SAGA pedido WITH CORRELATION 'corr-123'",
+  ]);
+});
+
+test("SagaTransaction never turns a name or correlation into a command", async () => {
+  const queries: string[] = [];
+  const client = {
+    async query(sql: string): Promise<unknown> {
+      queries.push(sql);
+      return { status: "RUNNING" };
+    },
+  } as unknown as Axon;
+  const saga = new SagaTransaction(client, "z; DELETE alvo; --", "x\\'; DELETE alvo; --\n");
+
+  await saga.begin();
+
+  assert.deepEqual(queries, [
+    "BEGIN SAGA 'z; DELETE alvo; --' WITH CORRELATION 'x\\\\\\'; DELETE alvo; --\\n'",
   ]);
 });

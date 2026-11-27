@@ -279,7 +279,10 @@ expect($desc['status'] === 'RUNNING', 'saga describe result is invalid');
 expect(str_contains($transport->sent[1]['params'][0], "SHOW SAGA TRANSACTION test_saga 'corr-789'"), 'saga describe SQL is invalid');
 
 // saga escape
-expect(SagaTransaction::escape("a\\b'c") === "a\\\\b''c", 'saga escape is invalid');
+expect(SagaTransaction::escape("a\\b'c\r\n") === "a\\\\b\\'c\\r\\n", 'saga escape is invalid');
+expect(SagaTransaction::name('pedido_1') === 'pedido_1', 'saga simple name must stay bare');
+expect(SagaTransaction::name('z; DELETE alvo; --') === "'z; DELETE alvo; --'", 'saga name must be quoted');
+expect(SagaTransaction::name("pedido\n") === "'pedido\\n'", 'saga name with line break must be quoted');
 expect(SagaTransaction::escape("normal") === "normal", 'saga escape of normal string is invalid');
 
 // --- SagaParticipantTransaction ---
@@ -298,6 +301,7 @@ expect($pt->isFinished() === false, 'participant should not be finished');
 
 $pt->begin();
 expect($pt->isBegun() === true, 'participant should be begun after begin');
+expect($transport->sent[1]['params'] === ["LET \$saga_corr = 'corr-999'"], 'participant must bind its correlation id');
 expect($transport->sent[0]['method'] === 'begin', 'participant begin RPC method is invalid');
 expect($transport->sent[1]['method'] === 'query', 'participant let var query method is invalid');
 expect(str_contains($transport->sent[1]['params'][0], "LET \$saga_corr"), 'participant LET var is invalid');

@@ -56,7 +56,7 @@ impl SagaTransaction {
             .query(
                 &format!(
                     "BEGIN SAGA {} WITH CORRELATION '{}'",
-                    escape(&self.saga_name),
+                    saga_name(&self.saga_name),
                     escape(&self.correlation_id)
                 ),
                 None,
@@ -85,7 +85,7 @@ impl SagaTransaction {
             .query(
                 &format!(
                     "COMMIT SAGA {} WITH CORRELATION '{}'",
-                    escape(&self.saga_name),
+                    saga_name(&self.saga_name),
                     escape(&self.correlation_id)
                 ),
                 None,
@@ -107,7 +107,7 @@ impl SagaTransaction {
             .query(
                 &format!(
                     "CANCEL SAGA {} WITH CORRELATION '{}'",
-                    escape(&self.saga_name),
+                    saga_name(&self.saga_name),
                     escape(&self.correlation_id)
                 ),
                 None,
@@ -122,7 +122,7 @@ impl SagaTransaction {
             .query(
                 &format!(
                     "SHOW SAGA TRANSACTION {} '{}'",
-                    escape(&self.saga_name),
+                    saga_name(&self.saga_name),
                     escape(&self.correlation_id)
                 ),
                 None,
@@ -141,17 +141,44 @@ fn ensure_active(begun: bool, finished: bool) -> Result<(), AxonError> {
     Ok(())
 }
 
+/// Body of an AxonQL string literal: the backslash is the escape character.
 fn escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('\'', "''")
+    value
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// A simple identifier goes as is; any other saga name goes as a string literal.
+fn saga_name(value: &str) -> String {
+    let mut chars = value.chars();
+    let simple = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if simple {
+        value.to_string()
+    } else {
+        format!("'{}'", escape(value))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_active, escape};
+    use super::{ensure_active, escape, saga_name};
 
     #[test]
     fn escapes_saga_literals() {
-        assert_eq!(escape("a\\b'c"), "a\\\\b''c");
+        assert_eq!(escape("a\\b'c\r\n"), "a\\\\b\\'c\\r\\n");
+    }
+
+    #[test]
+    fn quotes_saga_names_outside_the_identifier_format() {
+        assert_eq!(saga_name("pedido_1"), "pedido_1");
+        assert_eq!(saga_name("z; DELETE alvo; --"), "'z; DELETE alvo; --'");
+        assert_eq!(saga_name("pedido\n"), "'pedido\\n'");
+        assert_eq!(saga_name(""), "''");
     }
 
     #[test]

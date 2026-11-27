@@ -72,4 +72,19 @@ class SqlTranslatorTest {
     @Test void alterAddColumn() {
         assertEquals("DEFINE FIELD email ON TABLE person TYPE string", SqlTranslator.translate("ALTER TABLE person ADD COLUMN email VARCHAR(255)"));
     }
+
+    @Test void dadoDentroDeLiteralNaoViraDdl() {
+        String sql = "CREATE person SET bio = 'CREATE TABLE users (x int)'";
+        assertEquals(sql, SqlTranslator.translate(sql));
+    }
+
+    @Test void countDentroDeLiteralNaoMexeNasAspas() {
+        String sql = "SELECT 'count(' AS a, upper(b) AS u FROM t";
+        assertEquals(sql, SqlTranslator.translate(sql));
+    }
+
+    @Test void countDeUmLiteralComParenteseContinuaTraduzido() {
+        assertEquals("SELECT count() AS total FROM t",
+            SqlTranslator.translate("SELECT COUNT(')') AS total FROM t"));
+    }
 }
