@@ -151,6 +151,24 @@ public final class Session {
         this.eventScope = scope;
     }
 
+    private java.util.Set<String> importedTables;
+
+    /** Começa a anotar as tabelas que uma importação cria. */
+    public void trackImportedTables() {
+        this.importedTables = new java.util.HashSet<>();
+    }
+
+    public void tableCreated(String ns, String db, String table) {
+        if (importedTables != null) {
+            importedTables.add(ns + "\u0000" + db + "\u0000" + table);
+        }
+    }
+
+    /** A tabela foi criada pela importação em curso, que ainda está completando a definição dela. */
+    public boolean importedTable(String ns, String db, String table) {
+        return importedTables != null && importedTables.contains(ns + "\u0000" + db + "\u0000" + table);
+    }
+
     // ------------------------------------------------------------------
     // transação activa
     // ------------------------------------------------------------------

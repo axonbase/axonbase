@@ -429,6 +429,7 @@ public final class Executor {
         if (def == null) {
             def = new Catalog.TableDef(name, false, false);
             db.catalog().defineTable(def);
+            session.tableCreated(db.ns(), db.db(), name);
             control(db, ControlCommand.Kind.TABLE, name, "DEFINE TABLE " + name + " SCHEMALESS");
         }
         return def;
@@ -471,6 +472,9 @@ public final class Executor {
             throw new com.axonbase.common.AxonError(-32002,
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
         }
+        if (changesSchema(s) && !administersDatabase(auth)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_role_required", "admin"));
+        }
         // definir ou remover usuário muda a atribuição de auditoria, mesmo quando o texto não a cita
         if (com.axonbase.core.security.Authz.audited(auth)
             && (s instanceof Statement.DefineAiAudit || s instanceof Statement.DropAiAudit
@@ -478,6 +482,98 @@ public final class Executor {
                 || s instanceof Statement.DropUser)) {
             throw refusedToAudited();
         }
+    }
+
+    private boolean administersDatabase(AxonValue auth) {
+        return com.axonbase.core.security.Authz.atLeast(auth, com.axonbase.core.security.Authz.Role.ADMIN)
+            && com.axonbase.core.security.Authz.allows(auth, session.namespace(), session.database());
+    }
+
+    /**
+     * Apagar tabela, mudar a definição de uma que existe e declarar PERMISSIONS são tarefas do administrador do banco.
+     * Criar tabela, campo ou índice que ainda não existe continua livre, salvo numa tabela com PERMISSIONS. Repetir a
+     * definição em vigor não muda nada.
+     */
+    private boolean changesSchema(Statement s) {
+        return switch (s) {
+            case Statement.DropTable ignored -> true;
+            case Statement.RemoveTable ignored -> true;
+            case Statement.DropIndex ignored -> true;
+            case DefineTable dt -> restricts(dt.permissions()) || redefines(dt);
+            case Statement.CreateTable ct -> !ct.ifNotExists() && settledTable(ct.name()) != null;
+            case Statement.AlterTable at -> settledTable(at.name()) != null;
+            case DefineField df -> changesField(df);
+            case DefineIndex di -> changesIndex(di.table(), new Catalog.IndexDef(di.name(), di.columns(),
+                di.unique(), di.count(), di.searchAnalyzer(), di.geo(), di.columnar(), di.vectorDimension(),
+                di.vectorDistance(), di.m(), di.efConstruction(), di.efSearch()));
+            case Statement.CreateIndex ci -> changesIndex(ci.table(), new Catalog.IndexDef(ci.name(), ci.columns(),
+                ci.unique(), ci.count(), ci.searchAnalyzer(), ci.geo(), ci.columnar(), ci.vectorDimension(),
+                ci.vectorDistance(), ci.m(), ci.efConstruction(), ci.efSearch()));
+            // partição e TTL mudam a tabela, e DROP PARTITION apaga linhas sem passar pelas PERMISSIONS
+            case Statement.Partition p -> !p.command().readOnly() && settledTable(p.command().table()) != null;
+            default -> false;
+        };
+    }
+
+    /** A tabela que já existe no banco da sessão; {@code null} se é nova ou criada pela importação em curso. */
+    private Catalog.TableDef settledTable(String name) {
+        if (session.namespace() == null || session.database() == null) {
+            return null;
+        }
+        Database db = ds.findDatabase(session.namespace(), session.database());
+        if (db == null || session.importedTable(db.ns(), db.db(), name)) {
+            return null;
+        }
+        return db.catalog().table(name);
+    }
+
+    private static boolean restricts(Statement.Permissions perms) {
+        return perms != null && (perms.select() != null || perms.create() != null || perms.update() != null
+            || perms.delete() != null);
+    }
+
+    private boolean redefines(DefineTable dt) {
+        Catalog.TableDef current = settledTable(dt.name());
+        return current != null && (restricts(current.permissions()) || current.schemafull() != dt.schemafull()
+            || current.drop() != dt.drop() || !java.util.Objects.equals(current.shardBy(), dt.shardBy()));
+    }
+
+    private boolean changesField(DefineField df) {
+        Catalog.TableDef table = settledTable(df.table());
+        if (table == null) {
+            return false;
+        }
+        Catalog.FieldDef current = table.fields().get(df.name());
+        if (current == null) {
+            return restricts(table.permissions());
+        }
+        // o DEFINE FIELD tira o NOT NULL e a PRIMARY KEY de uma coluna
+        return current.notNull() || current.primaryKey() || current.readonly() != df.readonly()
+            || !java.util.Objects.equals(current.type(), df.type())
+            || !java.util.Objects.equals(current.assertExpr(), df.assertExpr())
+            || !java.util.Objects.equals(current.defaultExpr(), df.defaultExpr())
+            || !java.util.Objects.equals(current.references(), df.references())
+            || !java.util.Objects.equals(current.embeddingName(), df.embeddingName())
+            || !java.util.Objects.equals(current.embeddingFrom(), df.embeddingFrom());
+    }
+
+    private boolean changesIndex(String tableName, Catalog.IndexDef wanted) {
+        Catalog.TableDef table = settledTable(tableName);
+        if (table == null) {
+            return false;
+        }
+        Catalog.IndexDef current = table.indexes().get(wanted.name());
+        if (current == null) {
+            return restricts(table.permissions());
+        }
+        return !current.columns().equals(wanted.columns()) || current.unique() != wanted.unique()
+            || current.count() != wanted.count() || current.geo() != wanted.geo()
+            || current.columnar() != wanted.columnar()
+            || !java.util.Objects.equals(current.searchAnalyzer(), wanted.searchAnalyzer())
+            || !java.util.Objects.equals(current.vectorDimension(), wanted.vectorDimension())
+            || !java.util.Objects.equals(current.vectorDistance(), wanted.vectorDistance())
+            || current.hnswM() != wanted.hnswM() || current.hnswEfc() != wanted.hnswEfc()
+            || current.hnswEfs() != wanted.hnswEfs();
     }
 
     private static com.axonbase.common.AxonError refusedToAudited() {
@@ -4401,6 +4497,9 @@ return score;
         def.permissions(dt.permissions());
         def.shardBy(dt.shardBy());
         db.catalog().defineTable(def);
+        if (previous == null) {
+            session.tableCreated(db.ns(), db.db(), dt.name());
+        }
         persistTable(db, dt.name());
         return AxonValue.nul();
     }
@@ -4466,6 +4565,9 @@ return score;
         ct.checks().stream().filter(check -> !checks.contains(check)).forEach(checks::add);
         def.checks(checks);
         db.catalog().defineTable(def);
+        if (previous == null) {
+            session.tableCreated(db.ns(), db.db(), ct.name());
+        }
 
         for (Statement.ColumnDef col : ct.columns()) {
             if ("id".equalsIgnoreCase(col.name())) {
