@@ -2183,8 +2183,26 @@ public final class Parser {
             case PARAM -> new Expr.Param((String) t.literal());
             case LBRACKET -> parseArrayLiteral();
             case LBRACE -> parseObjectOrSet();
+            case MINUS -> parseNegativeRecordKey();
             default -> throw error(Messages.get("parser_invalid_record_key", t.start(), t.text()));
         };
+    }
+
+    /** Chave numérica negativa ({@code conta:-7}); depois do sinal só vale um número. */
+    private Expr parseNegativeRecordKey() {
+        pos++;
+        Token t = peek();
+        if (!(t.is(INT) || t.is(FLOAT) || t.is(DECIMAL))) {
+            throw error(Messages.get("parser_invalid_record_key", t.start(), t.text()));
+        }
+        Object number = take().literal();
+        if (number instanceof BigDecimal decimal) {
+            return new Expr.Literal(AxonValue.num(decimal.negate()));
+        }
+        if (number instanceof Double real) {
+            return new Expr.Literal(AxonValue.num(-real.doubleValue()));
+        }
+        return new Expr.Literal(AxonValue.num(-((Long) number).longValue()));
     }
 
     private String parseTypeText() {

@@ -1237,7 +1237,7 @@ public final class Executor {
                     Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
                     if (linkDef != null) {
                         String selectSql = "SELECT * FROM " + q.table() + ":"
-                            + com.axonbase.parser.Render.expr(qRid.key());
+                            + com.axonbase.parser.Render.key(qRid.key());
                         List<AxonValue> rows = linkClient.query(linkDef, selectSql);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
                         sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
@@ -1331,7 +1331,7 @@ public final class Executor {
                     Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
                     if (linkDef != null) {
                         String selectSql = "SELECT * FROM " + q.table() + ":"
-                            + com.axonbase.parser.Render.expr(dqRid.key());
+                            + com.axonbase.parser.Render.key(dqRid.key());
                         List<AxonValue> rows = linkClient.query(linkDef, selectSql);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
                         sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
@@ -3179,7 +3179,7 @@ return score;
         }
         Datastore.DatabaseLinkDef linkDef = ds.databaseLink(ns, q.link());
         if (linkDef != null) {
-            String keyStr = com.axonbase.parser.Render.expr(rid.key());
+            String keyStr = com.axonbase.parser.Render.key(rid.key());
             String axonql = "SELECT * FROM " + q.table() + ":" + keyStr;
             List<AxonValue> rows = linkClient.query(linkDef, axonql);
             return rowsToDocs(rows, q.table());

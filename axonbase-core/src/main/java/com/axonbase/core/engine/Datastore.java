@@ -38,6 +38,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 /**
  * Núcleo de dados: namespaces, bancos, catálogos e registros.
@@ -936,24 +937,31 @@ public final class Datastore {
     private volatile com.axonbase.core.qos.WorkloadGovernor workloadGovernor;
 
     public AxonValue execute(String sql, Session session, Map<String, AxonValue> vars) {
+        return execute(sql, session, vars, UnaryOperator.identity());
+    }
+
+    /** @param rewrite ajuste da árvore antes da execução; o texto continua sendo o que se classifica e audita */
+    private AxonValue execute(String sql, Session session, Map<String, AxonValue> vars,
+                              UnaryOperator<Query> rewrite) {
         var governor = workloadGovernor;
         if (governor == null) {
-            return executeAdmitted(sql, session, vars);
+            return executeAdmitted(sql, session, vars, rewrite);
         }
         try (var admitted = governor.admit(sql, session)) {
-            return executeAdmitted(sql, session, vars);
+            return executeAdmitted(sql, session, vars, rewrite);
         }
     }
 
-    private AxonValue executeAdmitted(String sql, Session session, Map<String, AxonValue> vars) {
+    private AxonValue executeAdmitted(String sql, Session session, Map<String, AxonValue> vars,
+                                      UnaryOperator<Query> rewrite) {
         if (commitCoordinator != null && !session.inTransaction() && isMutation(sql)) {
             return autocommit(session, () -> {
                 var exec = new Executor(this);
                 exec.rawSql = sql;
-                return exec.execute(AxonQl.parse(sql), session, vars);
+                return exec.execute(rewrite.apply(AxonQl.parse(sql)), session, vars);
             });
         }
-        Query query = AxonQl.parse(sql);
+        Query query = rewrite.apply(AxonQl.parse(sql));
         var exec = new Executor(this);
         exec.rawSql = sql;
         AxonValue result = exec.execute(query, session, vars);
@@ -1102,6 +1110,11 @@ public final class Datastore {
             throw AxonError.internal(Messages.get("stmt_database_export_missing", ns, db));
         }
         StringBuilder sb = new StringBuilder();
+        // antes das tabelas: um índice SEARCH só é aceito com o analyzer já definido
+        for (Catalog.AnalyzerDef analyzer : database.catalog().analyzers()) {
+            sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineAnalyzer(analyzer.name(),
+                analyzer.lowercase(), analyzer.stopwords(), analyzer.stemming()))).append(";\n");
+        }
         for (Catalog.TableDef def : database.catalog().tables()) {
             sb.append("DEFINE TABLE ").append(def.name());
             if (def.schemafull()) {
@@ -1133,15 +1146,10 @@ public final class Datastore {
                 sb.append(";\n");
             }
             for (Catalog.IndexDef ix : def.indexes().values()) {
-                sb.append("DEFINE INDEX ").append(ix.name()).append(" ON TABLE ").append(def.name())
-                    .append(" COLUMNS ").append(String.join(", ", ix.columns()));
-                if (ix.unique()) {
-                    sb.append(" UNIQUE");
-                }
-                if (ix.geo()) {
-                    sb.append(" GEO");
-                }
-                sb.append(";\n");
+                sb.append(com.axonbase.parser.Render.stmt(new Statement.DefineIndex(ix.name(), def.name(),
+                    ix.columns(), ix.unique(), ix.count(), ix.searchAnalyzer(), ix.geo(), ix.columnar(),
+                    ix.vectorDimension(), ix.vectorDistance(), ix.hnswM(), ix.hnswEfc(), ix.hnswEfs())))
+                    .append(";\n");
             }
             appendTimeData(sb, database, def);
         }
@@ -1158,10 +1166,8 @@ public final class Datastore {
             com.axonbase.core.partition.PartitionKeys.StoredRecord stored =
                 com.axonbase.core.partition.PartitionKeys.record(key.substring(prefix.length()));
             if (stored != null) {
-                boolean timeData = database.catalog().partitioning(stored.table()) != null
-                    || database.catalog().ttl(stored.table()) != null;
                 database.records().get(key)
-                    .ifPresent(raw -> appendCreate(sb, stored.table(), stored.recordKey(), raw, timeData));
+                    .ifPresent(raw -> appendCreate(sb, stored.table(), stored.recordKey(), raw));
             }
         }
         exportColdRecords(sb, database);
@@ -1174,7 +1180,7 @@ public final class Datastore {
             for (var partition : com.axonbase.core.partition.PartitionStore.list(database, database.records(), table)) {
                 if (partition.coldData()) {
                     coldTier.records().scan(database, table, partition, "", (recordKey, raw) -> {
-                        appendCreate(sb, table, recordKey, raw, true);
+                        appendCreate(sb, table, recordKey, raw);
                         return true;
                     });
                 }
@@ -1182,51 +1188,16 @@ public final class Datastore {
         }
     }
 
-    private void appendCreate(StringBuilder sb, String table, String keyStr, byte[] raw, boolean timeData) {
+    private void appendCreate(StringBuilder sb, String table, String keyStr, byte[] raw) {
         AxonValue record = AxonJson.decode(raw);
         if (!record.isObject() || !record.asObject().containsKey("id")) {
             return;
         }
         // remove o campo id serializado (string) e emite CREATE <tabela>:<literal>
         Map<String, AxonValue> m = new java.util.LinkedHashMap<>(record.asObject());
-        m.remove("id");
-        sb.append("CREATE ").append(table).append(":").append(literalKey(keyStr)).append(" CONTENT ");
-        if (timeData) {
-            appendLiteral(sb, AxonValue.object(m));
-        } else {
-            sb.append(AxonJson.write(AxonValue.object(m)));
-        }
-        sb.append(";\n");
-    }
-
-    /**
-     * Literal AxonQL do valor. Nas tabelas particionadas ou com TTL as datas precisam voltar como datas: o JSON as
-     * escreveria como um objeto marcado, que a importação leria como objeto.
-     */
-    private static void appendLiteral(StringBuilder sb, AxonValue value) {
-        if (value.isDatetime()) {
-            sb.append("d\"").append(value.asInstant()).append('"');
-        } else if (value.isArray()) {
-            sb.append('[');
-            String separator = "";
-            for (AxonValue item : value.asArray()) {
-                sb.append(separator);
-                appendLiteral(sb, item);
-                separator = ", ";
-            }
-            sb.append(']');
-        } else if (value.isObject()) {
-            sb.append('{');
-            String separator = "";
-            for (Map.Entry<String, AxonValue> entry : value.asObject().entrySet()) {
-                sb.append(separator).append(AxonJson.write(AxonValue.str(entry.getKey()))).append(": ");
-                appendLiteral(sb, entry.getValue());
-                separator = ", ";
-            }
-            sb.append('}');
-        } else {
-            sb.append(AxonJson.write(value));
-        }
+        AxonValue id = m.remove("id");
+        sb.append("CREATE ").append(table).append(":").append(literalKey(table, keyStr, id))
+            .append(" CONTENT ").append(com.axonbase.parser.Render.value(AxonValue.object(m))).append(";\n");
     }
 
     /** A definição de partição e de TTL da tabela, depois dos campos e índices dela e antes dos dados. */
@@ -1247,15 +1218,49 @@ public final class Datastore {
     }
 
     /** Converte a keyString de storage ('n1', 'sAna') em literal AxonQL. */
-    private static String literalKey(String keyStr) {
-        if (keyStr.startsWith("n")) {
-            return keyStr.substring(1);
-        }
+    private static String literalKey(String table, String keyStr, AxonValue id) {
         if (keyStr.startsWith("s")) {
-            String s = keyStr.substring(1);
-            return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+            return AxonJson.write(AxonValue.str(keyStr.substring(1)));
+        }
+        if (keyStr.startsWith("n")) {
+            String prefix = table + ":";
+            String written = id != null && id.isString() && id.asString().startsWith(prefix)
+                ? id.asString().substring(prefix.length()) : "";
+            return com.axonbase.parser.Render.numberKey(
+                numberKeyValue(new java.math.BigDecimal(keyStr.substring(1)), written));
         }
         return keyStr;
+    }
+
+    /**
+     * A chave física só guarda o valor do número. O tipo (inteiro, real ou decimal) sai do texto do id, que a
+     * importação precisa reproduzir: {@code t:3} e {@code t:3.0} são o mesmo registro com ids escritos de modo
+     * diferente.
+     */
+    private static AxonValue numberKeyValue(java.math.BigDecimal number, String written) {
+        try {
+            long whole = Long.parseLong(written);
+            if (java.math.BigDecimal.valueOf(whole).compareTo(number) == 0) {
+                return AxonValue.num(whole);
+            }
+        } catch (NumberFormatException notWhole) {
+            // segue para as outras formas
+        }
+        try {
+            double real = Double.parseDouble(written);
+            if (Double.toString(real).equals(written)) {
+                // o id escreve como real também o decimal: se o real não guarda o valor exato, era um decimal
+                return java.math.BigDecimal.valueOf(real).compareTo(number) == 0
+                    ? AxonValue.num(real) : AxonValue.num(number);
+            }
+        } catch (NumberFormatException notReal) {
+            // segue para as outras formas
+        }
+        try {
+            return AxonValue.num(number.longValueExact());
+        } catch (ArithmeticException notLong) {
+            return AxonValue.num(number);
+        }
     }
 
     /** Restaura um dump AxonQL executando-o. */
@@ -1263,7 +1268,7 @@ public final class Datastore {
         Session s = Session.create();
         s.namespace(ns);
         s.database(db);
-        execute(dump, s, null);
+        execute(dump, s, null, LegacyDump::restoreTypes);
     }
 
     // ------------------------------------------------------------------

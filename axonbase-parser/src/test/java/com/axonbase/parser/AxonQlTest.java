@@ -512,7 +512,8 @@ class AxonQlTest {
     void roundTripAlterTableAddColumn() {
         assertEquals("ALTER TABLE person ADD COLUMN email STRING NOT NULL",
             AxonQl.render(AxonQl.parse("ALTER TABLE person ADD COLUMN email VARCHAR(255) NOT NULL")));
-        assertEquals("ALTER TABLE product ADD COLUMN price DECIMAL DEFAULT 0",
+        // 0.0 é real: renderizar "0" o releria como inteiro
+        assertEquals("ALTER TABLE product ADD COLUMN price DECIMAL DEFAULT 0.0",
             AxonQl.render(AxonQl.parse("ALTER TABLE product ADD COLUMN price DECIMAL(10,2) DEFAULT 0.0")));
         assertEquals("ALTER TABLE user ADD COLUMN age INT DEFAULT 18 CHECK ($value >= 0)",
             AxonQl.render(AxonQl.parse("ALTER TABLE user ADD COLUMN age INT DEFAULT 18 CHECK (age >= 0)")));
