@@ -15,6 +15,12 @@ import java.util.stream.Collectors;
 /** Renderizador canônico da AxonQL, usado nos testes de round-trip. */
 public final class Render {
 
+    private static final int RANGE_PRECEDENCE = 5;
+
+    private static final int PREFIX_PRECEDENCE = 9;
+
+    private static final int ATOM_PRECEDENCE = 10;
+
     private static final Set<String> NOT_CALLABLE = Set.of("true", "false", "null", "none", "not", "select");
 
     private static final Set<String> STATEMENT_WORDS = Set.of("select", "create", "update", "delete", "insert",
@@ -812,21 +818,30 @@ public final class Render {
                     case NEG -> sb.append('-');
                     case POS -> sb.append('+');
                 }
-                expr(sb, u.operand());
+                String operand = grouped(u.operand(), precedence(u.operand()) < PREFIX_PRECEDENCE);
+                // "--" abre comentário
+                boolean comment = u.op() == Expr.UnaryOp.NEG && operand.startsWith("-");
+                sb.append(comment ? "(" + operand + ")" : operand);
             }
             case Expr.Binary b -> {
-                expr(sb, b.left());
+                // os parênteses não ficam na árvore: voltam pela precedência, senão (a OR b) AND c muda de sentido
+                int own = precedence(b.op());
+                boolean rightAssociative = b.op() == Expr.BinaryOp.POW;
+                int left = precedence(b.left());
+                int right = precedence(b.right());
+                sb.append(grouped(b.left(), rightAssociative ? left <= own : left < own));
                 sb.append(' ').append(binOp(b.op())).append(' ');
-                expr(sb, b.right());
+                sb.append(grouped(b.right(), rightAssociative ? right < own : right <= own));
             }
-            case Expr.Cast c2 -> sb.append('<').append(id(c2.type())).append("> ").append(expr(c2.operand()));
+            case Expr.Cast c2 -> sb.append('<').append(id(c2.type())).append("> ")
+                .append(grouped(c2.operand(), precedence(c2.operand()) < PREFIX_PRECEDENCE));
             case Expr.Idiom i -> {
                 // travessia que começa na seta ({@code ->segue->pessoa}) tem uma base sintética "*" que não se
                 // escreve: "*->segue" releria como "todos os campos" seguido de uma seta solta
                 boolean syntheticBase = i.base() instanceof Expr.Ident id && id.name().equals("*")
                     && !i.parts().isEmpty() && i.parts().get(0) instanceof Expr.Part.Graph;
                 if (!syntheticBase) {
-                    expr(sb, i.base());
+                    sb.append(grouped(i.base(), precedence(i.base()) < ATOM_PRECEDENCE));
                 }
                 for (var part : i.parts()) {
                     idiomPart(sb, part);
@@ -834,11 +849,11 @@ public final class Render {
             }
             case Expr.Range r -> {
                 if (r.start() != null) {
-                    expr(sb, r.start());
+                    sb.append(grouped(r.start(), precedence(r.start()) < RANGE_PRECEDENCE));
                 }
                 sb.append(r.skipStart() ? ">.." : r.inclusive() ? ".." : "..");
                 if (r.end() != null) {
-                    expr(sb, r.end());
+                    sb.append(grouped(r.end(), precedence(r.end()) <= RANGE_PRECEDENCE));
                 }
             }
             case Expr.SubQuery q -> {
@@ -956,7 +971,7 @@ public final class Render {
             case MUL -> "*";
             case DIV -> "/";
             case MOD -> "%";
-            case POW -> "^";
+            case POW -> "**";
             case ALL_EQ -> "*=";
             case ANY_EQ -> "?=";
             case COALESCE -> "??";
@@ -967,7 +982,7 @@ public final class Render {
             case CONTAIN_ANY -> "CONTAINSANY";
             case CONTAIN_NONE -> "CONTAINSNONE";
             case INSIDE -> "INSIDE";
-            case NOT_INSIDE -> "NOT INSIDE";
+            case NOT_INSIDE -> "NOT IN";
             case ALL_INSIDE -> "ALLINSIDE";
             case ANY_INSIDE -> "ANYINSIDE";
             case NONE_INSIDE -> "NONEINSIDE";
@@ -982,7 +997,7 @@ public final class Render {
             case STRING -> sb.append('"').append(escape(v.asString())).append('"');
             case TABLE -> sb.append(id(v.asTable()));
             case RECORD_ID -> sb.append(AxonQlText.recordId(v.asRecordId().table(), v.asRecordId().key()));
-            default -> value(sb, v);
+            default -> sb.append(value(v));
         }
     }
 
@@ -1062,5 +1077,35 @@ public final class Render {
         boolean bare = key.matches("[\\p{L}_][\\p{L}\\p{Nd}_]*")
             && !STATEMENT_WORDS.contains(key.toLowerCase(java.util.Locale.ROOT));
         return bare ? key : AxonQlText.string(key);
+    }
+
+    private static String grouped(Expr e, boolean parentheses) {
+        return parentheses ? "(" + expr(e) + ")" : expr(e);
+    }
+
+    /** A mesma tabela de precedência do {@link Parser}. */
+    private static int precedence(Expr.BinaryOp op) {
+        return switch (op) {
+            case COALESCE, TERNARY -> 1;
+            case OR -> 2;
+            case AND -> 3;
+            case EQ, EQ_EXACT, NE, ALL_EQ, ANY_EQ -> 4;
+            case LT, GT, LE, GE, MATCH, CONTAIN, NOT_CONTAIN, CONTAIN_ALL, CONTAIN_ANY, CONTAIN_NONE, INSIDE,
+                 NOT_INSIDE, ALL_INSIDE, ANY_INSIDE, NONE_INSIDE, OUTSIDE, INTERSECTS -> RANGE_PRECEDENCE;
+            case ADD, SUB -> 6;
+            case MUL, DIV, MOD -> 7;
+            case POW -> 8;
+        };
+    }
+
+    private static int precedence(Expr e) {
+        return switch (e) {
+            case Expr.Binary b -> precedence(b.op());
+            case Expr.Range ignored -> RANGE_PRECEDENCE;
+            case Expr.Alias ignored -> 0;
+            case Expr.Unary ignored -> PREFIX_PRECEDENCE;
+            case Expr.Cast ignored -> PREFIX_PRECEDENCE;
+            default -> ATOM_PRECEDENCE;
+        };
     }
 }
