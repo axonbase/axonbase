@@ -1413,7 +1413,8 @@ public final class Executor {
         if (sagaCorr != null && recordId == null) {
             throw errorStmt(Messages.get("stmt_saga_record_required"));
         }
-        AxonValue result = runWriteViaLink(target, com.axonbase.parser.Render.stmt(create));
+        AxonValue result = runWriteViaLink(target, com.axonbase.parser.Render.stmt(create),
+            Statement.Create.class);
         if (sagaCorr != null) {
             Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), target.link());
             if (linkDef == null) {
@@ -1808,7 +1809,7 @@ public final class Executor {
                     if (linkDef != null) {
                         String selectSql = "SELECT * FROM " + q.table() + ":"
                             + com.axonbase.parser.Render.key(qRid.key());
-                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                        List<AxonValue> rows = queryLink(linkDef, q, selectSql, Statement.Select.class);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
                         // um UPSERT sobre o que não existe cria: desfazer é apagar
                         String operation = rows.isEmpty() && u.mode() == UpdateMode.UPSERT ? "CREATE" : "UPDATE";
@@ -1816,7 +1817,7 @@ public final class Executor {
                             q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, operation);
                     }
                 }
-                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
+                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u), Statement.Update.class);
             }
         }
         boolean retNone = u.ret() != null && u.ret().kind() == ReturnKind.NONE;
@@ -1912,13 +1913,13 @@ public final class Executor {
                     if (linkDef != null) {
                         String selectSql = "SELECT * FROM " + q.table() + ":"
                             + com.axonbase.parser.Render.key(dqRid.key());
-                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                        List<AxonValue> rows = queryLink(linkDef, q, selectSql, Statement.Select.class);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
                         sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
                             q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
                     }
                 }
-                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d));
+                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d), Statement.Delete.class);
             }
         }
         List<RecordId> targets;
@@ -3857,14 +3858,14 @@ return score;
         requireInReach(q.link());
         // Render the SELECT, then replace qualified FROM with unqualified one
         String rendered = com.axonbase.parser.Render.stmt(sel);
-        String qualifiedFrom = q.link() + "." + q.table();
+        String qualifiedFrom = renderedQualified(q);
         String unqualifiedFrom = q.table();
         String axonql = rendered.replace(qualifiedFrom, unqualifiedFrom);
         // Fix internal AST rendering: *->expr should be just ->expr
         axonql = axonql.replace("SELECT *->", "SELECT ->");
         axonql = axonql.replace("VALUE *->", "VALUE ->");
         try {
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, Statement.Select.class);
             if (rows.isEmpty()) return AxonValue.array(List.of());
             if (rows.size() == 1 && !rows.get(0).isObject() && !rows.get(0).isArray()) {
                 return rows.get(0);
@@ -3884,7 +3885,7 @@ return score;
         Datastore.DatabaseLinkDef linkDef = ds.databaseLink(ns, q.link());
         if (linkDef != null) {
             String axonql = "SELECT * FROM " + q.table();
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, Statement.Select.class);
             return rowsToDocs(rows, q.table());
         }
         // Local database (other db in same ns)
@@ -3922,7 +3923,8 @@ return score;
      * para o servidor remoto via DATABASE LINK. A sentença renderizada tem o prefixo
      * do link removido e é enviada ao endpoint {@code /sql} do link.
      */
-    private AxonValue runWriteViaLink(Expr.Qualified q, String renderedSql) {
+    private AxonValue runWriteViaLink(Expr.Qualified q, String renderedSql,
+                                      Class<? extends Statement> expected) {
         refuseLinkInEvent();
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
@@ -3932,10 +3934,9 @@ return score;
         if (linkDef == null) {
             throw errorStmt(Messages.get("stmt_database_link_missing", q.link()));
         }
-        String labeled = q.link() + "." + q.table();
-        String axonql = renderedSql.replace(labeled, q.table());
+        String axonql = renderedSql.replace(renderedQualified(q), q.table());
         try {
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, expected);
             if (rows.isEmpty()) return AxonValue.array(List.of());
             if (rows.size() == 1 && !rows.get(0).isObject() && !rows.get(0).isArray()) {
                 return rows.get(0);
@@ -3944,6 +3945,29 @@ return score;
         } catch (Exception e) {
             throw errorStmt(Messages.get("stmt_database_link_error", e.getMessage()));
         }
+    }
+
+    /** Como o Render escreve {@code link.tabela}. */
+    private static String renderedQualified(Expr.Qualified q) {
+        return com.axonbase.value.AxonQlText.identifier(q.link()) + "."
+            + com.axonbase.value.AxonQlText.identifier(q.table());
+    }
+
+    /**
+     * Envia ao servidor do DATABASE LINK, com a credencial dele, uma única sentença do tipo pedido. O nome da tabela
+     * precisa ser simples: o outro servidor pode ser de uma versão que não cita nomes ao gravar o catálogo.
+     */
+    private List<AxonValue> queryLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q, String axonql,
+                                      Class<? extends Statement> expected) {
+        if (!q.table().matches("[\\p{L}_][\\p{L}\\p{Nd}_]*")) {
+            throw errorStmt("nome de tabela não aceito num DATABASE LINK: " + q.table());
+        }
+        try {
+            com.axonbase.parser.AxonQl.requireSingle(axonql, expected);
+        } catch (IllegalArgumentException e) {
+            throw errorStmt(e.getMessage());
+        }
+        return linkClient.query(linkDef, axonql);
     }
 
     /** Resolve a qualified record ID {@code "link"."table":key}. */
@@ -3957,7 +3981,7 @@ return score;
         if (linkDef != null) {
             String keyStr = com.axonbase.parser.Render.key(rid.key());
             String axonql = "SELECT * FROM " + q.table() + ":" + keyStr;
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, Statement.Select.class);
             return rowsToDocs(rows, q.table());
         }
         // Local database
@@ -4563,7 +4587,7 @@ return score;
                 throw errorStmt(Messages.get("stmt_saga_relate_link_unsupported"));
             }
             return runWriteViaLink(rq != null ? rq : (Expr.Qualified) qualifiedOf(rFrom, rTo),
-                com.axonbase.parser.Render.stmt(r));
+                com.axonbase.parser.Render.stmt(r), Statement.Relate.class);
         }
         AxonValue from = mapping(r.from());
         AxonValue to = mapping(r.to());
