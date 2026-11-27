@@ -7,6 +7,8 @@ import com.axonbase.core.partition.cold.FileSystemColdStore;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.core.storage.VersionConflictException;
+import com.axonbase.value.AxonJson;
+import com.axonbase.value.AxonValue;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -19,7 +21,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -176,6 +180,34 @@ class PartitionRaceTest {
 
                 assertEquals(List.of("depois"), db.values("SELECT * FROM events:a", "who"));
             }
+        }
+
+        @Test
+        @DisplayName("linha que aparece na partição depois do envio não é apagada pela troca para COLD")
+        void rowAppearingAfterUpload_isNotErased() {
+            HookedStore store = new HookedStore(tmp.resolve("cold"));
+            try (TimeData db = TimeData.memory(tier(store)).threeDays()) {
+                toCold(db, DAY1);
+                String physical = PartitionKeys.partitionPrefix("test", "dev", "events",
+                    Instant.parse("2026-11-01T00:00:00Z").toEpochMilli()) + "sintruso";
+                // grava direto na base, como faria uma escrita que escapasse das condições de commit
+                store.afterDownload.set(() -> db.backend.put(physical, lateRow()));
+
+                assertEquals(0, maintenance(db).runOnce().movedCold());
+                assertEquals(List.of("ana", "bia", "caio", "intruso"), db.values("SELECT * FROM events", "who"));
+
+                // a rodada seguinte envia de novo, agora com a linha
+                assertEquals(1, maintenance(db).runOnce().movedCold());
+                assertEquals(List.of("ana", "bia", "caio", "intruso"), db.values("SELECT * FROM events", "who"));
+            }
+        }
+
+        private byte[] lateRow() {
+            Map<String, AxonValue> row = new LinkedHashMap<>();
+            row.put("id", AxonValue.record("events", AxonValue.str("intruso")));
+            row.put("at", AxonValue.datetime(Instant.parse(DAY1)));
+            row.put("who", AxonValue.str("intruso"));
+            return AxonJson.encode(AxonValue.object(row));
         }
 
         @Test
