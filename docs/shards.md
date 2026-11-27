@@ -187,7 +187,7 @@ O backup é recusado durante uma movimentação.
 
 ### Journal em cluster
 
-A E2 deixou o journal desligado em cluster. Nos shards ele passa a arquivar cada entrada aplicada do Raft, com o índice do log e o carimbo do líder. Um nó que receba o estado inteiro pela rede fica com um buraco no journal, e a restauração se recusa a atravessá-lo.
+A E2 deixou o journal desligado em cluster. Nos shards ele passa a arquivar cada entrada aplicada do Raft, com o índice do log e o carimbo do líder. É o mesmo journal da [recuperação de desastre](operacao-e-resiliencia.md#journal-em-cluster): ao voltar de uma queda, o nó reentrega a ele o que aplicou depois do último lote arquivado e que o log ainda guarda. Um nó que receba o estado inteiro pela rede, ou que já tenha descartado do log esse trecho, fica com um buraco no journal, e a restauração se recusa a atravessá-lo.
 
 ### Restauração
 
@@ -250,7 +250,7 @@ Todas são `POST`, com `Authorization: Bearer <AXON_GATEWAY_ADMIN_TOKEN>`.
 
 `GET /shard/v1/map` devolve o mapa.
 
-Para a restauração a um instante alcançar o presente, agende a barreira (por exemplo a cada minuto). Os segmentos fecham sozinhos em até 30 segundos. Copie os diretórios de backup e de journal para fora das máquinas: o manifesto só anota os caminhos em cada nó. Um nó que caiu ou recebeu o estado inteiro pela rede deixa um buraco no journal, então tire um backup novo depois desses eventos. A retenção dos backups de shard é manual.
+Para a restauração a um instante alcançar o presente, agende a barreira (por exemplo a cada minuto). Os segmentos fecham sozinhos em até 30 segundos. Copie os diretórios de backup e de journal para fora das máquinas: o manifesto só anota os caminhos em cada nó. Um nó que caiu ou recebeu o estado inteiro pela rede pode deixar um buraco no journal, então tire um backup novo depois desses eventos. A retenção dos backups de shard é manual. Se o shard base tiver tabelas na [camada fria](particoes-e-camada-fria.md), cada backup bloqueia sem prazo os objetos que referencia, e o `restore-shards` não confere se eles existem: eles precisam continuar no armazenamento.
 
 ### Restaurar
 
