@@ -111,10 +111,11 @@ O custo é constante no número de linhas: o lote tem poucas chaves. O espaço e
 - Em nó único, uma transação confirmada de dentro de outra escrita (uma procedure chamada por um `DEFINE EVENT`) não pode **criar** partição: o comando é recusado com erro e nada é gravado. Crie a partição antes, com uma escrita comum nessa faixa de tempo, o que em partições por tempo se repete a cada faixa nova. Para eventos que gravam em tabela particionada, prefira o `CREATE` direto no `THEN`, sem procedure.
 - `DEFINE PARTITION` dentro de transação (em cluster, sempre) só vale no `COMMIT`: até lá as outras sessões recebem conflito ao escrever na tabela, e o commit confere que ela continua vazia.
 
-Dois limites conhecidos:
+Três limites conhecidos:
 
 - Uma leitura por id feita no exato instante em que a linha muda de partição pode não encontrá-la.
 - Dois comandos avulsos simultâneos que gravam o mesmo valor único com ids diferentes podem passar os dois, como já acontece numa tabela comum. Dentro de transação isso é recusado.
+- Em cluster, logo depois de uma troca de líder, um `DEFINE PARTITION` proposto pelo líder anterior e ainda pendente pode não estar no catálogo do líder novo quando ele executa uma escrita. A linha é confirmada como numa tabela comum e deixa de aparecer nas leituras quando a definição passa a valer. O mesmo pode acontecer com um `DEFINE INDEX` pendente: a linha fica fora do índice, e um `UNIQUE` pode não valer para ela. Defina partições e índices com o cluster estável. Se a liderança mudar durante uma definição, espere o cluster se estabilizar e confira a definição antes de gravar na tabela.
 
 ## Segundo plano
 
