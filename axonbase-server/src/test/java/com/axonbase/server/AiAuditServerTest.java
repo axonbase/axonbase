@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Auditoria por IA pelo servidor, com um provedor de IA simulado em loopback. */
 class AiAuditServerTest {
@@ -147,6 +148,29 @@ class AiAuditServerTest {
         assertEquals(1, rows());
         assertNotNull(ds.execute("SELECT * FROM c:2", local(), null));
         assertEquals("outro", ds.execute("RETURN c:2.dono", local(), null).asString());
+    }
+
+    @Test
+    void administradorAuditadoNaoAlteraAuditoriaPelaGestaoNemPorSignup() throws Exception {
+        ok(root, "CREATE USER chefe ON ROOT PASSWORD 'Test-pw-1' ROLES admin AUDITED BY prot");
+        String chefe = AxonJson.parseDocument(
+            post("/signin", null, "{\"user\":\"chefe\",\"pass\":\"Test-pw-1\"}").body())
+            .asObject().get("token").asString();
+        var cases = ds.requireDatabase(local()).auditCatalog();
+        cases.blockUser("bia", "prot", "DELETE c", "perigo", "sys");
+
+        assertEquals(403, post("/admin/v1/audit/blocked-users/bia/unblock", chefe, "{}").statusCode());
+        assertEquals(403, post("/admin/v1/service-tokens", chefe, "{}").statusCode());
+        HttpResponse<String> dropped = HTTP.send(HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + server.port() + "/admin/v1/users/ROOT/chefe"))
+            .header("Authorization", "Bearer " + chefe).DELETE().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(403, dropped.statusCode(), dropped.body());
+        post("/rpc", chefe, "{\"id\":2,\"method\":\"signup\",\"params\":[{\"user\":\"livre\","
+            + "\"pass\":\"Test-pw-1\",\"ns\":\"app\",\"db\":\"aud\"}]}");
+
+        assertTrue(cases.isBlocked("bia"));
+        assertNotNull(ds.authCatalog().user("chefe", null, null));
+        assertNull(ds.authCatalog().user("livre", "app", "aud"));
     }
 
     @Test
