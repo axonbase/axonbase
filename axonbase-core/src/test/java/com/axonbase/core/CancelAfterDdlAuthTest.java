@@ -60,7 +60,9 @@ class CancelAfterDdlAuthTest {
         ControlStore store = new ControlStore(backend);
         ControlStateMachine state = new ControlStateMachine();
         state.restore(store.load());
-        state.apply(ControlCommand.of(ControlCommand.Kind.INDEX, "n", "d", "t:quebrado", "ISTO NAO E AXONQL"));
+        // texto do tipo certo que falha ao executar; texto inválido é pulado (ver ControlCatalogInjectionTest)
+        state.apply(ControlCommand.of(ControlCommand.Kind.USER, "n", "d", "quebrado",
+            "DEFINE USER quebrado ON ROOT PASSHASH \"sem-separador\""));
         store.save(state, backend);
         Session s = session();
         ds.execute("BEGIN", s, null);
