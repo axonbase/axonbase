@@ -14,7 +14,7 @@ Release candidate notes (in Portuguese): [1.0.0-rc2](docs/notas-1.0.0-rc2.md), i
 - **Search engines**: BM25 full-text with configurable analyzers, HNSW vector search (cosine/Euclidean/Manhattan), geo spatial with an H3 hierarchical hexagonal index, graph traversal, and columnar indexes for direct aggregation (count/sum/avg/min/max)
 - **Multi-model indexes**: unique, count, full-text (SEARCH ANALYZER), HNSW vector, GEO spatial, and COLUMNAR analytical
 - **MVCC transactions**: snapshot isolation, savepoints, optimistic retry, phantom protection via read ranges, and `VersionConflictException`
-- **Raft consensus**: TCP Raft with leader election, quorum, dynamic membership (join/leave via joint consensus), catch-up, snapshots, and consistent hash sharding
+- **Raft consensus**: TCP Raft with leader election, quorum, dynamic membership (join/leave as one log entry per change, without joint consensus; run one change at a time), catch-up, snapshots, and consistent hash sharding
 - **Authentication**: JWT (HS256) with root/namespace/database scope, certificate-based (ICP-Brasil compatible), mTLS, and Data Rules from JWT claims
 - **Protocols**: JSON-RPC over WebSocket and HTTP, REST (`/sql`, `/table`), GraphQL, MCP (Model Context Protocol), and JDBC
 - **Observability**: Prometheus metrics (`/metrics`), health/ready/status endpoints, structured JSON logging, S3 backup with AES-256-GCM encryption
@@ -109,8 +109,9 @@ The server refuses to start with the default root password or the default JWT se
 export AXON_ROOT_PASSWORD='choose-a-strong-password'
 export AXON_SECRET="$(openssl rand -hex 32)"
 docker run -d --name axonbase -p 8000:8000 \
+  -v axonbase-data:/data \
   -e AXON_ROOT_PASSWORD -e AXON_SECRET \
-  axonbase/axonbase:latest
+  axonbase/axonbase:1.0.0-rc2
 
 # Sign in (returns a JWT valid for 30 minutes)
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/signin \

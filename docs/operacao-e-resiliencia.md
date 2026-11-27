@@ -65,7 +65,7 @@ Se algo falhar no prazo, o líder solta as escritas e continua no cargo. O alvo 
 
 ### Drenar um nó
 
-`POST /admin/v1/cluster/drain` leva o nó a `DRAINING`: o `/ready` passa a responder `503`, o líder transfere o cargo, o nó deixa de disputar eleições (continua votando), espera `AXON_DRAIN_GRACE_MS` para o balanceador perceber e depois as requisições de dados terminarem. Se o nó receber o cargo durante a espera, transfere de novo. Aí o estado é `DRAINED` e o processo pode ser parado. `GET` consulta o estado e `DELETE` desfaz. Com `AXON_DRAIN_ON_SHUTDOWN=true`, o desligamento normal do processo drena antes de parar.
+`POST /admin/v1/cluster/drain` leva o nó a `DRAINING`: o `/ready` passa a responder `503`, o líder transfere o cargo, o nó deixa de disputar eleições (continua votando), espera `AXON_DRAIN_GRACE_MS` para o balanceador perceber e depois as requisições de dados terminarem. Se o nó receber o cargo durante a espera, transfere de novo. Aí o estado é `DRAINED` e o processo pode ser parado. `GET` consulta o estado e `DELETE` desfaz. Se o nó não conseguir sair sem erro no prazo, o estado é `FAILED`: o `/ready` continua em `503` até o `DELETE` ou uma nova drenagem. Com `AXON_DRAIN_ON_SHUTDOWN=true`, o desligamento normal do processo drena antes de parar.
 
 `GET /admin/v1/cluster/health` devolve versão, protocolo, papel, prontidão, estado de drenagem, índice aplicado e, no líder, o atraso e o protocolo de cada membro.
 
@@ -78,6 +78,8 @@ Antes de atualizar um nó, confira que:
 - o cluster não passa a ter três versões diferentes.
 
 `GET /admin/v1/cluster/upgrade-check?target=<versão>&members=<versões>` aplica essas regras.
+
+O sufixo de pré-lançamento conta na ordem: `1.0.0-rc1` vem antes de `1.0.0-rc2`, e as duas vêm antes de `1.0.0`. Voltar da final para uma candidata é recusado, e cada uma conta como uma versão diferente. O metadado depois de `+` é ignorado.
 
 **A partir da 0.10.x, use a [parada total](#falha-de-versões-mistas).** Com um membro 0.10.x, a verificação recusa a troca e manda parar os três nós. Ela decide só pelo número da versão: uma compilação desta linha de desenvolvimento que ainda se declare 0.10.x também é recusada, até a versão do projeto mudar.
 
@@ -232,7 +234,7 @@ java -cp "lib/*" com.axonbase.core.dr.DrTool restore --store s3 --epoch e1 --tar
 
 Se a base tiver partições na [camada fria](particoes-e-camada-fria.md), o ambiente do comando precisa de `AXON_COLD_DIR` ou `AXON_COLD_S3` apontando para os objetos dela, que o arquivamento não copia. Sem isso, ou faltando objeto, a restauração falha e não entrega a base.
 
-Suba cada nó com os dados em `/data/novo` (ou uma cópia dele) e sem diretório do Raft, e arquive o cluster novo numa época nova.
+Suba cada nó com os dados em `/data/novo` (ou uma cópia dele) sem o diretório do Raft (apague `.raft` da cópia, se houver), e arquive o cluster novo numa época nova.
 
 **Extensão para a E3:** o layout já separa os grupos. A restauração de vários shards repete o passo por grupo com o mesmo instante, e o manifesto de cluster da E3 entra ao lado de `groups/`.
 

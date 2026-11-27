@@ -74,6 +74,53 @@ O tamanho de uma entrada é a soma das chaves e dos valores gravados (o registro
 
 Com um membro votante parado, o líder pode guardar até dez vezes `AXON_RAFT_RETAIN_ENTRIES` para ele, mesmo além dos 30 minutos. Um membro atrasado além disso recebe o estado inteiro pela rede (snapshot), que é adequado só para bases pequenas.
 
+## Onde fica o estado do Raft, e como atualizar
+
+O diretório do Raft é `.raft` dentro do diretório de dados, e os truststores enviados pela API ficam em `.truststores`. Com o comando padrão da imagem (`--path /data` e um volume em `/data`), os dois ficam no volume.
+
+Ao apagar a base de um nó para repô-lo, apague também o `.raft`: um `rm -rf /data/*` não alcança nomes que começam com ponto, e um nó com o estado do Raft de uma base que sumiu fica diferente dos outros.
+
+Até a 1.0.0-rc1 eles ficavam ao lado do diretório de dados (`<caminho>.raft` e `<caminho>.truststores`). A atualização trata o local antigo assim:
+
+| Situação ao subir | O que o servidor faz |
+|---|---|
+| Há estado do Raft só no local antigo | usa o local antigo, sem mover; avisa no log quando ele está fora do diretório de dados |
+| Há estado do Raft nos dois locais | não sobe, para não escolher o errado; deixe só o atual e mova o outro para fora |
+| Há truststores no local antigo | copia para `.truststores` os que ainda não estão lá, sem apagar os originais |
+| A base tem dados e não há estado do Raft | sobe como antes e avisa no log (`raft_state_missing`) |
+
+Instalações fora de contêiner e as que usam `--path /data/db` com volume em `/data` não precisam de passo algum.
+
+### Contêiner com o comando padrão: copiar antes de recriar
+
+Na 1.0.0-rc1 e anteriores, com `--path /data`, o estado está em `/data.raft`, na camada do contêiner. Recriar o contêiner (trocar a imagem, `docker compose up` com outra tag, `down` e `up`) **apaga** esse estado. A versão nova não tem como recuperá-lo, então copie antes, com o contêiner parado e ainda existente:
+
+```bash
+scripts/migrar-estado-docker.sh <contêiner>
+```
+
+O script para o contêiner e copia `/data.raft` para `/data/.raft` e `/data.truststores` para `/data/.truststores`, dentro do volume. Depois troque a imagem e recrie. Da 0.10.x ou anterior, pare os três nós, rode o script em cada um e só então suba os três com a imagem nova. Entre versões novas, faça um nó por vez.
+
+Se a atualização falhar e for preciso voltar à imagem antiga no mesmo contêiner, faça isso antes de recriá-lo. Depois de recriado, a imagem antiga volta a procurar o estado em `/data.raft` e não o encontra.
+
+Numa máquina Linux descartável, `scripts/verificar-instalacao.sh` ensaia a instalação nova e a atualização.
+
+Se o contêiner antigo já foi removido (`docker compose down`, `docker rm`), o estado do Raft daquele nó se perdeu, como já acontecia nas versões anteriores. A base continua no volume. Não recrie os outros nós: copie o estado deles primeiro e confira se o nó recriado alcança o líder.
+
+## Compose de cluster: autenticação e portas
+
+O `docker-compose.cluster.yml` sobe sem autenticação, para desenvolvimento e teste, e publica as portas 18001 a 18003 só em `127.0.0.1`. Até a 1.0.0-rc1 elas eram publicadas em todas as interfaces: quem acessava o cluster de outra máquina precisa agora definir `AXON_PUBLISH_ADDRESS=0.0.0.0`, de preferência junto com a autenticação:
+
+```bash
+export AXON_REQUIRE_AUTH=true
+export AXON_ROOT_PASSWORD='senha-forte'
+export AXON_SECRET="$(openssl rand -hex 32)"
+export AXON_PUBLISH_ADDRESS=0.0.0.0
+docker compose -f docker-compose.cluster.yml up -d
+```
+
+Com a autenticação ligada, o servidor recusa a senha e o segredo padrão. Guarde os valores: os três nós precisam dos mesmos a cada subida.
+
 ## Leitura em seguidores
 
 Qualquer nó atende leituras. A consistência é pedida por requisição:
@@ -127,7 +174,7 @@ O roteiro de atualização, a drenagem, a transferência de liderança e os risc
 
 ## Limites conhecidos
 
-- A troca de membros continua sendo a das versões anteriores (uma mudança por vez, sem consenso conjunto), e a lista de membros gravada pelos seguidores não é recarregada em execução.
+- A troca de membros continua sendo a das versões anteriores (uma mudança por vez, sem consenso conjunto), e a lista de membros não é recarregada em execução: um seguidor passa a usar a lista nova só depois de reiniciado. Não faça uma segunda mudança antes de reiniciar os seguidores. A lista gravada a partir de uma mudança feita nesta versão inclui o líder, e cada nó tira a si mesmo dela; uma lista gravada por versão anterior continua como estava até a próxima mudança de membros.
 - Não há pré-voto: um nó que fica de 350 a 850 ms sem notícia do líder abre eleição, e o líder antigo deixa o cargo. As escritas pendentes nesse instante ficam sem desfecho. Disco lento no líder não basta para isso por até 10 segundos (os batimentos saem por uma conexão própria quando o envio das entradas para; depois desse prazo eles cessam e o cluster elege outro líder), nem um seguidor ainda recebendo requisições. Uma pausa longa da máquina virtual ou falta de CPU ainda bastam; o log do nó registra o atraso (`relógio interno atrasado`, `sem envio há`, `abre eleição`).
 - O snapshot enviado pela rede monta o estado inteiro em memória.
 - A porta do Raft não tem autenticação nem cifra, como nas versões anteriores: exponha-a só numa rede privada.

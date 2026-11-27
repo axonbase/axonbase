@@ -131,7 +131,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
         this.options = options;
         this.role = config.learner() ? ClusterRole.LEARNER : ClusterRole.FOLLOWER;
         this.electionTimeoutMillis = nextElectionTimeout();
-        this.node = new RaftNode(config.nodeId(), dataDir, backend, options);
+        this.node = new RaftNode(config.nodeId(), dataDir, backend, options, config.advertiseAddress());
         node.learner(config.learner());
         node.retentionFloor(this::retentionFloor);
         this.addressByNode.put(config.nodeId(), config.advertiseAddress());
@@ -1179,7 +1179,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     }
 
     /**
-     * Anexa um peer via log Raft (joint consensus). O batch com __raft/config é
+     * Anexa um peer via log Raft, numa entrada só (não há consenso conjunto). O batch com __raft/config é
      * replicado pelo quórum ATUAL; após confirm, todos os nós aplicam a mudança.
      */
     public boolean addPeer(String nodeId, InetSocketAddress addr) {
@@ -1212,7 +1212,7 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
 
     /**
      * Retira um peer via log Raft. O peer é removido do quórum ANTES de confirmar
-     * (joint consensus: quórum exclui o peer removido). O batch com __raft/config
+     * (o quórum já exclui o peer removido; não há consenso conjunto). O batch com __raft/config
      * é replicado pelo quórum reduzido.
      */
     public boolean removePeer(String addrPort) {
@@ -1254,11 +1254,24 @@ public final class ClusterRuntime implements AutoCloseable, ClusterStatusProvide
     }
 
     private boolean confirmConfig(String prefix, List<InetSocketAddress> members) {
-        byte[] bytes = RaftNodeState.formatPeers(members).getBytes(StandardCharsets.UTF_8);
+        // members são os outros, vistos por este líder: o formato antigo, que os nós anteriores continuam lendo
+        String others = RaftNodeState.formatPeers(members);
+        Map<String, byte[]> puts = new java.util.LinkedHashMap<>();
+        puts.put("__raft/config", others.getBytes(StandardCharsets.UTF_8));
+        InetSocketAddress me = config.advertiseAddress();
+        // um líder que escuta em 0.0.0.0 não sabe o endereço pelo qual os outros o alcançam
+        if (me.getAddress() == null || !me.getAddress().isAnyLocalAddress()) {
+            // uma lista herdada de versão anterior pode já trazer este nó: ele entra uma vez só
+            List<InetSocketAddress> voters = new ArrayList<>(members);
+            if (!voters.contains(me)) {
+                voters.add(me);
+            }
+            puts.put(RaftNode.VOTERS_KEY,
+                (others + "\n" + RaftNodeState.formatPeers(voters)).getBytes(StandardCharsets.UTF_8));
+        }
         try {
             confirm(config.nodeId(), new CommittedBatch(
-                prefix + java.time.Instant.now().toString().replace(":", "-"),
-                Map.of("__raft/config", bytes), Set.of()));
+                prefix + java.time.Instant.now().toString().replace(":", "-"), puts, Set.of()));
             return true;
         } catch (RuntimeException e) {
             return false;

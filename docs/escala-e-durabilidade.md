@@ -218,7 +218,7 @@ A imagem sai do `Dockerfile` da raiz (`docker build -t axonbase .`). Cada nó pr
 | `AXON_SECRET` e `AXON_ROOT_PASSWORD` | segredos próprios, obrigatórios fora do endereço local |
 | `AXON_STORAGE_SYNC` | opcional, `batch` por padrão |
 
-Portas: 8000 (HTTP) e 9000 (Raft). A imagem só declara a 8000, então publique a 9000 também (ou use a rede do host). Use `--path /data/db` com um volume em `/data`: o diretório do Raft é o caminho da base mais `.raft`, e com o padrão `--path /data` ele fica fora do volume. Informe os endereços dos membros por IP (Internet Protocol): um nome que não resolve na subida do processo não é resolvido de novo.
+Portas: 8000 (HTTP) e 9000 (Raft). A imagem só declara a 8000, então publique a 9000 também (ou use a rede do host). Monte um volume em `/data`: o estado do Raft fica em `.raft` dentro do diretório de dados. Quem vem da 1.0.0-rc1 ou anterior deve ler [onde fica o estado do Raft](cluster-raft.md#onde-fica-o-estado-do-raft-e-como-atualizar) antes de recriar contêineres. Informe os endereços dos membros por IP (Internet Protocol): um nome que não resolve na subida do processo não é resolvido de novo.
 
 ### Medidas locais (apenas informativas)
 

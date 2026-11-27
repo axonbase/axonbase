@@ -114,10 +114,16 @@ public final class AxonServer {
         this.config = config;
         this.certificateChallenges = new CertificateChallengeService(config.certAllowUnknownRevocation());
         this.trustStores = new TrustStoreRegistry();
+        try {
+            StatePaths.adoptTruststores(config.path());
+        } catch (java.io.UncheckedIOException e) {
+            AxonLog.log("error", "truststore_adopt_failed",
+                Messages.get("server_truststore_adopt_failed", String.valueOf(e.getMessage())));
+        }
         // registra o carregador de JKS e recarrega os truststores persistidos no plano de controle
         ds.jksRegistrar((name, path, password, collector, oids) -> {
             if (password == null) {
-                this.trustStores.registerWithoutPassword(name, path);
+                this.trustStores.registerWithoutPassword(name, StatePaths.locateTruststore(config.path(), path));
             } else {
                 this.trustStores.register(name, path, password, collector, oids);
             }
@@ -636,11 +642,7 @@ public final class AxonServer {
 
     /** Diretório onde os JKS enviados pela API ficam gravados. */
     java.nio.file.Path truststoreDir() {
-        String path = config.path();
-        java.nio.file.Path base = path == null || path.equals("memory") || path.isBlank()
-            ? java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "axonbase-truststores")
-            : java.nio.file.Path.of(path.startsWith("rocksdb:") ? path.substring(8) : path + ".truststores");
-        return path != null && path.startsWith("rocksdb:") ? base.resolveSibling(base.getFileName() + ".truststores") : base;
+        return StatePaths.truststoreDir(config.path());
     }
 
     /** Liga {@code axe_db_keys{ns,db}} (AXON_METRICS_PER_DATABASE), que tem custo linear por banco. */

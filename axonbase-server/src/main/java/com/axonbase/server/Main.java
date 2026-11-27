@@ -101,6 +101,29 @@ public final class Main {
         // um valor mal escrito derruba o processo aqui, antes de abrir a base, uma porta ou um nó no cluster
         AxonServer.validateSettings(System::getenv);
 
+        if (StatePaths.envPathIgnored(System.getenv("AXON_PATH"), path)) {
+            AxonLog.log("warn", "env_path_ignored",
+                Messages.get("server_env_path_ignored", System.getenv("AXON_PATH"), path));
+        }
+        // o local do estado do consenso é decidido antes de abrir a base: com estado em dois lugares o nó não sobe
+        Path raftDir = null;
+        if (!config.clusterId().isBlank()) {
+            try {
+                raftDir = StatePaths.raftDir(path);
+            } catch (IllegalStateException refused) {
+                System.err.println(refused.getMessage());
+                System.exit(2);
+                return;
+            }
+            if (StatePaths.outsideDataDir(path, raftDir)) {
+                AxonLog.log("warn", "raft_state_outside_data",
+                    Messages.get("server_raft_state_outside", raftDir));
+            }
+            if (StatePaths.dataWithoutRaftState(path)) {
+                AxonLog.log("warn", "raft_state_missing", Messages.get("server_raft_state_missing", raftDir));
+            }
+        }
+
         // Réplica de leitura: recebe o log, não vota. A base pode vir de um backup físico de um membro.
         boolean learner = "true".equalsIgnoreCase(System.getenv("AXON_RAFT_LEARNER"));
         String bootstrapBackup = System.getenv("AXON_RAFT_BOOTSTRAP_BACKUP");
@@ -180,8 +203,7 @@ public final class Main {
                 journal = archived.journal();
             }
             ReplicationHooks hooks = archived != null ? archived : new ClockHooks(clockFor(backend));
-            cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
-                (VersionedKvBackend) backend);
+            cluster = new ClusterRuntime(clusterConfig, raftDir, (VersionedKvBackend) backend);
             // logo depois de construir: o relógio precisa ver a cauda do log antes de carimbar qualquer lote
             cluster.hooks(hooks);
             if (archived != null) {

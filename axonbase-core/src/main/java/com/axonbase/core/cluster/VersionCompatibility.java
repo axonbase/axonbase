@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -21,13 +22,17 @@ public final class VersionCompatibility {
     /** A versão mais antiga que ainda conversa com este build. */
     public static final String MINIMUM_PEER = "0.10.1";
 
-    private static final Pattern VERSION = Pattern.compile("(\\d+)\\.(\\d+)\\.(\\d+)([-+].*)?");
+    /** Grupos: maior, menor, correção e pré-lançamento. O metadado de build, depois do {@code +}, é ignorado. */
+    private static final Pattern VERSION =
+        Pattern.compile("(\\d+)\\.(\\d+)\\.(\\d+)(?:-([^+]*))?(?:\\+.*)?");
+
+    private static final Pattern RUN = Pattern.compile("\\d+|\\D+");
 
     /** @param problems vazio quando a atualização é permitida */
     public record Check(boolean allowed, List<String> problems) {
     }
 
-    private record Version(int major, int minor, int patch) implements Comparable<Version> {
+    private record Version(int major, int minor, int patch, String pre) implements Comparable<Version> {
         boolean needsFullStop() {
             return major == 0 && minor == 10;
         }
@@ -37,16 +42,42 @@ public final class VersionCompatibility {
             if (major != other.major) {
                 return Integer.compare(major, other.major);
             }
-            return minor != other.minor ? Integer.compare(minor, other.minor) : Integer.compare(patch, other.patch);
+            if (minor != other.minor) {
+                return Integer.compare(minor, other.minor);
+            }
+            return patch != other.patch ? Integer.compare(patch, other.patch) : comparePre(pre, other.pre);
         }
 
         @Override
         public String toString() {
-            return major + "." + minor + "." + patch;
+            return major + "." + minor + "." + patch + (pre.isEmpty() ? "" : "-" + pre);
         }
     }
 
     private VersionCompatibility() {
+    }
+
+    /** A versão final vem depois dos pré-lançamentos dela; entre eles, os números contam como números (rc2 antes de rc10). */
+    private static int comparePre(String a, String b) {
+        if (a.isEmpty() || b.isEmpty()) {
+            return Boolean.compare(a.isEmpty(), b.isEmpty());
+        }
+        Matcher left = RUN.matcher(a);
+        Matcher right = RUN.matcher(b);
+        while (true) {
+            boolean hasLeft = left.find();
+            boolean hasRight = right.find();
+            if (!hasLeft || !hasRight) {
+                return Boolean.compare(hasLeft, hasRight);
+            }
+            String x = left.group();
+            String y = right.group();
+            boolean numbers = Character.isDigit(x.charAt(0)) && Character.isDigit(y.charAt(0));
+            int order = numbers ? new BigInteger(x).compareTo(new BigInteger(y)) : x.compareToIgnoreCase(y);
+            if (order != 0) {
+                return order;
+            }
+        }
     }
 
     /**
@@ -109,7 +140,7 @@ public final class VersionCompatibility {
         }
         try {
             return new Version(Integer.parseInt(matcher.group(1)), Integer.parseInt(matcher.group(2)),
-                Integer.parseInt(matcher.group(3)));
+                Integer.parseInt(matcher.group(3)), matcher.group(4) == null ? "" : matcher.group(4));
         } catch (NumberFormatException tooLarge) {
             return null;
         }

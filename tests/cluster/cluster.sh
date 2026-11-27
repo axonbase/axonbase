@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-compose="docker compose -f docker-compose.cluster.yml"
+# o teste chama as rotas sem token: não herda a autenticação do ambiente
+export AXON_REQUIRE_AUTH=false
+compose="docker compose -p axonbase-cluster-test -f docker-compose.cluster.yml -f tests/cluster/docker-compose.build.yml"
 ports=(18001 18002 18003)
 headers=(-H 'Axon-Ns: app' -H 'Axon-Db: main')
 
