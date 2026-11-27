@@ -97,6 +97,11 @@ final class CreatePlanner {
                 GatewayRules.requireStorableKey(value);
                 slot = SlotHash.ofValue(value);
                 if (id != null) {
+                    // como no nó único, o IGNORE pula o id que já existe, aqui em qualquer shard
+                    if (insert.ignore() && context.options.checkExplicitIds()
+                        && holder(map, session, table, engineKey(id), map.ownerOf(slot)) != null) {
+                        continue;
+                    }
                     requireUnusedId(map, session, table, id, map.ownerOf(slot));
                 } else {
                     row.put("id", AxonValue.str(newKey()));
@@ -207,6 +212,14 @@ final class CreatePlanner {
             throw ShardException.refused("explicit_id", table);
         }
         AxonValue key = engineKey(id);
+        String shard = holder(map, session, table, key, owner);
+        if (shard != null) {
+            throw ShardException.refused("id_exists", table + ":" + GatewayRules.keyLiteral(key), shard);
+        }
+    }
+
+    /** Outro shard, que não {@code owner}, que já guarda o id; {@code null} quando nenhum guarda. */
+    private String holder(ShardMap map, GatewaySession session, String table, AxonValue key, String owner) {
         String query = "SELECT * FROM " + table + ":" + GatewayRules.keyLiteral(key);
         for (String shard : map.shardIds()) {
             if (shard.equals(owner)) {
@@ -214,9 +227,10 @@ final class CreatePlanner {
             }
             AxonValue found = context.send(map, Plan.Part.of(shard, query), session, false);
             if (found.isObject() || found.isArray() && !found.asArray().isEmpty()) {
-                throw ShardException.refused("id_exists", table + ":" + GatewayRules.keyLiteral(key), shard);
+                return shard;
             }
         }
+        return null;
     }
 
     /**

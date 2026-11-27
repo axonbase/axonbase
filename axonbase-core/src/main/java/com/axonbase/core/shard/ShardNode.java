@@ -51,6 +51,10 @@ public final class ShardNode implements ShardMember {
     public ShardReply execute(ShardRequest request, Session caller) {
         // manutenção roda sem usuário: o transporte já conferiu que a credencial é root
         Session session = request.system() ? Session.create() : caller;
+        if (request.system()) {
+            // o movimentador copia registros que já existem: um resto de tentativa anterior é substituído
+            session.restoring(true);
+        }
         clock.receive(request.stamp());
         if (ShardRequest.AUTHENTICATE.equals(request.sql())) {
             // qualquer nó responde: não lê nem grava dados

@@ -14,7 +14,7 @@ experimentar consultas de grafo no Workspace.
 | `produto` | notebook, mouse, monitor | |
 | `cidade` | sp, rj | |
 
-Rode o arquivo inteiro com "Run all" no Workspace. Pode ser repetido (`CREATE` e `RELATE` regravam o mesmo registro e a
+Rode o arquivo inteiro com "Run all" no Workspace. Pode ser repetido (`UPSERT` e `RELATE` regravam o mesmo registro e a
 mesma aresta).
 
 ## Ver na página Relations graph

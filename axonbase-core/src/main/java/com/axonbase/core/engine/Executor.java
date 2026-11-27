@@ -693,6 +693,9 @@ public final class Executor {
         session.vars().set("before", before == null ? AxonValue.nul() : before);
         session.vars().set("after", after == null ? AxonValue.nul() : after);
         session.vars().set("value", value == null ? AxonValue.nul() : value);
+        // o que um evento escreve é escrita nova, mesmo quando quem o disparou está repondo dados
+        boolean restoring = session.restoring();
+        session.restoring(false);
         try {
             for (Catalog.EventDef ev : def.events().values()) {
                 if (ev.then().isEmpty()) {
@@ -707,6 +710,7 @@ public final class Executor {
                 }
             }
         } finally {
+            session.restoring(restoring);
             restoreVar("event", prevEvent);
             restoreVar("before", prevBefore);
             restoreVar("after", prevAfter);
@@ -982,7 +986,7 @@ public final class Executor {
         ensureTable(db, table);
         AxonValue explicitKey = c.target() instanceof Expr.RecordId rid
             ? recordKey(rid.key()) : null;
-        AxonValue record = createRecord(db, table, evalData(c.data()), explicitKey);
+        AxonValue record = createRecord(db, table, evalData(c.data()), explicitKey, onExisting(false));
         // Saga: record step (before=null)
         String sagaCorr = sagaCorrelation();
         if (sagaCorr != null && record.isObject()) {
@@ -1018,16 +1022,35 @@ public final class Executor {
         ensureTable(db, i.table());
         AxonValue data = eval(i.data());
         List<AxonValue> records = new ArrayList<>();
-        if (data.isArray()) {
-            for (AxonValue item : data.asArray()) {
-                if (item.isObject()) {
-                    records.add(createRecord(db, i.table(), item));
+        List<AxonValue> rows = data.isArray() ? data.asArray() : List.of(data);
+        for (AxonValue row : rows) {
+            if (row.isObject()) {
+                AxonValue record = createRecord(db, i.table(), row, null, onExisting(i.ignore()));
+                if (record != null) {
+                    records.add(record);
                 }
             }
-        } else if (data.isObject()) {
-            records.add(createRecord(db, i.table(), data));
         }
         return output(i.ret(), AxonValue.array(records));
+    }
+
+    /** O que uma criação faz quando o id já existe. */
+    private enum Existing { REFUSE, SKIP, REPLACE }
+
+    private Existing onExisting(boolean ignore) {
+        if (ignore) {
+            return Existing.SKIP;
+        }
+        return session.restoring() ? Existing.REPLACE : Existing.REFUSE;
+    }
+
+    /** O registro que já está sob este id, ou {@code null}. Num lote, o commit confere que ninguém o criou no meio. */
+    private AxonValue existingRecord(Database db, RecordId rid) {
+        if (rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
+            pending.expect(rid.storageKey(db.ns(), db.db()));
+        }
+        Document found = loadDoc(db, rid);
+        return found == null ? null : found.current();
     }
 
     private AxonValue evalData(Data data) {
@@ -1047,11 +1070,12 @@ public final class Executor {
         };
     }
 
-    private AxonValue createRecord(Database db, String table, AxonValue input) {
-        return createRecord(db, table, input, null);
-    }
-
-    private AxonValue createRecord(Database db, String table, AxonValue input, AxonValue explicitKey) {
+    /**
+     * Grava um registro novo, ou substitui o existente quando {@code existing} é {@code REPLACE}. Devolve
+     * {@code null} quando o id já existe e a criação o pula.
+     */
+    private AxonValue createRecord(Database db, String table, AxonValue input, AxonValue explicitKey,
+                                   Existing existing) {
         Map<String, AxonValue> obj = new LinkedHashMap<>();
         if (input.isObject()) {
             obj.putAll(input.asObject());
@@ -1059,6 +1083,12 @@ public final class Executor {
         Object idKey = obj.containsKey("id") ? unwrapId(obj.remove("id")) : null;
         AxonValue key = explicitKey != null ? explicitKey : resolveKey(idKey);
         RecordId rid = new RecordId(table, key);
+        // um id recém-gerado não existe em lugar algum: não precisa ser procurado
+        boolean generated = explicitKey == null && idKey == null;
+        AxonValue previous = generated ? null : existingRecord(db, rid);
+        if (previous != null && existing == Existing.SKIP) {
+            return null;
+        }
         obj.put("id", ridAsValue(rid));
         applyFieldSchema(db, table, obj, false);
         injectDataRuleFields(obj);
@@ -1068,12 +1098,16 @@ public final class Executor {
         if (!dataRuleFilter(document) || !allowed(document, table, "create")) {
             throw errorStmt("permission denied");
         }
-        bindPartition(db, rid, record, explicitKey == null && idKey == null);
-        enforceUnique(db, rid, null, record);
+        // depois da permissão: quem não pode criar não fica sabendo se o id existe
+        if (previous != null && existing == Existing.REFUSE) {
+            throw errorStmt(Messages.get("stmt_record_exists", ridAsValue(rid).asRecordId()));
+        }
+        bindPartition(db, rid, record, generated);
+        enforceUnique(db, rid, previous, record);
         records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));
-        indexSearch(db, rid, null, record);
-        indexAdvanced(db, rid, null, record);
-        indexColumnar(db, rid, null, record);
+        indexSearch(db, rid, previous, record);
+        indexAdvanced(db, rid, previous, record);
+        indexColumnar(db, rid, previous, record);
         notifyLive(db, rid, LiveBus.CREATE, null, record);
         fireEvents(db, rid, LiveBus.CREATE, null, record);
         return record;
@@ -1306,12 +1340,12 @@ public final class Executor {
             if (u.target() instanceof Expr.Ident idTarget) {
                 String table = idTarget.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data())));
+                results.add(createRecord(db, table, evalData(u.data()), null, Existing.REPLACE));
             } else if (u.target() instanceof Expr.RecordId rid
                 && rid.table() instanceof Expr.Ident ridTable) {
                 String table = ridTable.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data()), recordKey(rid.key())));
+                results.add(createRecord(db, table, evalData(u.data()), recordKey(rid.key()), Existing.REPLACE));
             }
         }
         return retNone ? AxonValue.none() : AxonValue.array(results);

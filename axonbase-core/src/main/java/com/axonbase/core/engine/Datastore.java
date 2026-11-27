@@ -1387,6 +1387,7 @@ public final class Datastore {
         Session s = Session.create();
         s.namespace(ns);
         s.database(db);
+        s.restoring(true);
         execute(dump, s, null, LegacyDump::restoreTypes);
     }
 
