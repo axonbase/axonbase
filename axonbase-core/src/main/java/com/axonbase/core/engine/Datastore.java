@@ -220,6 +220,30 @@ public final class Datastore {
         }
     }
 
+    /**
+     * Tira do plano de controle uma Data Rule, gravada sob {@code datarule:nome} ou, por versões anteriores, sob o
+     * próprio nome (o mesmo lugar da definição de uma tabela: por isso o texto também é conferido).
+     */
+    void removeDataRuleControl(Session session, String ns, String db, String name) {
+        if (replaying.get()) {
+            return;
+        }
+        synchronized (controlLock) {
+            int removed = controlState.removeWhere(c -> c.kind() == ControlCommand.Kind.TABLE
+                && c.namespace().equals(ns) && c.database().equals(db)
+                && (c.name().equals(name) || c.name().equals("datarule:" + name))
+                && c.definition().startsWith("CREATE DATA RULE "));
+            if (removed == 0) {
+                return;
+            }
+            KvBackend target = session != null && session.inTransaction() ? session.tx() : backend;
+            controlStore.save(controlState, target);
+            if (target == backend) {
+                backend.flush();
+            }
+        }
+    }
+
     private boolean definesMissingUser(ControlCommand command, String name) {
         for (AuthCatalog.Scope scope : AuthCatalog.Scope.values()) {
             // mesma forma do nome que o Executor dá à definição: nome:ESCOPO:ns:db

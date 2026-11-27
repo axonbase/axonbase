@@ -4888,7 +4888,9 @@ return score;
         Database db = db();
         Map<String, Expr> injections = extractInjections(cd.predicate());
         db.catalog().defineDataRule(new Catalog.DataRuleDef(cd.name(), cd.predicate(), cd.maskPatterns(), injections));
-        control(db, ControlCommand.Kind.TABLE, cd.name(), com.axonbase.parser.Render.stmt(cd));
+        ds.removeDataRuleControl(session, db.ns(), db.db(), cd.name());
+        // nome próprio no plano de controle: o nome puro é o da definição da tabela
+        control(db, ControlCommand.Kind.TABLE, "datarule:" + cd.name(), com.axonbase.parser.Render.stmt(cd));
         return AxonValue.nul();
     }
 
@@ -4897,6 +4899,7 @@ return score;
         if (!db.catalog().removeDataRule(dr.name())) {
             throw errorStmt(Messages.get("stmt_data_rule_missing", dr.name()));
         }
+        ds.removeDataRuleControl(session, db.ns(), db.db(), dr.name());
         return AxonValue.nul();
     }
 
