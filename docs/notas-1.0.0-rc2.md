@@ -1,8 +1,17 @@
 # Notas da versão 1.0.0-rc2
 
-A 1.0.0-rc2 é a segunda RC (release candidate), ou versão candidata, da 1.0.0. Ela corrige falhas de segurança e falhas que perdiam ou corrompiam dados, e muda o comportamento de escritas e de acesso. Leia a primeira seção antes de atualizar. O restante da versão está nas [notas da 1.0.0-rc1](notas-1.0.0-rc1.md).
+A 1.0.0-rc2 é a segunda RC (release candidate), ou versão candidata, da 1.0.0. Ela corrige falhas de segurança e falhas que perdiam ou corrompiam dados, e muda o comportamento de escritas e de acesso. Leia o aviso sobre contêineres e as mudanças de comportamento antes de atualizar. O restante da versão está nas [notas da 1.0.0-rc1](notas-1.0.0-rc1.md).
 
 Tire um backup antes de atualizar.
+
+## Atenção: contêineres da rc1 ou da 0.10.x
+
+> **Antes de recriar um contêiner vindo da 1.0.0-rc1, da 0.10.x ou de versão anterior, rode `scripts/migrar-estado-docker.sh <contêiner>`.** Com o comando padrão da imagem (`--path /data`), o estado do Raft, o protocolo de consenso do cluster, e os truststores estão na camada do contêiner. Recriá-lo (trocar a imagem, `docker compose up` com outra tag, `down` e `up`) **apaga esse estado, e a versão nova não consegue recuperá-lo**.
+
+- O script para o contêiner e copia o estado para dentro do volume em `/data`. Só depois troque a imagem e recrie, sem voltar a iniciar o contêiner antigo.
+- Num cluster vindo da 0.10.x ou anterior, pare os três nós, rode o script em cada um e só então suba os três com a imagem nova.
+- Instalações fora de contêiner e as que usam `--path /data/db` com volume em `/data` não precisam desse passo.
+- O passo a passo, inclusive como voltar atrás, está em [cluster Raft](cluster-raft.md#contêiner-com-o-comando-padrão-copiar-antes-de-recriar).
 
 ## Mudanças de comportamento
 
@@ -126,9 +135,31 @@ Continuam como antes: criar tabela sem `PERMISSIONS` (também ao gravar um regis
 - No driver JDBC com tradução de SQL, `DROP TABLE` exige administrador, e `CREATE TABLE` sobre uma tabela que já existe com outra definição é recusado.
 - A importação embutida por quem não é administrador completa as tabelas que ela mesma cria. Um dump com `PERMISSIONS`, ou que mude uma tabela já existente, é recusado por inteiro. `POST /import` já exigia administrador.
 
+### `PERMISSIONS NONE` passa a negar
+
+- `DEFINE TABLE t ... PERMISSIONS NONE` equivale a `WHERE false` em leitura, criação, alteração e remoção. Antes o comando era aceito e não restringia nada.
+- Como qualquer `WHERE false`, vale para todas as sessões, inclusive o root e o modo embutido. Para reabrir a tabela, um administrador a redefine com `PERMISSIONS FULL`.
+- Valem os mesmos limites das demais `PERMISSIONS`, descritos nas [limitações conhecidas](#limitações-conhecidas).
+- A rc1 e as anteriores gravavam essas tabelas sem restrição alguma. Atualizar não as fecha: repita o `DEFINE TABLE` com `PERMISSIONS NONE`.
+- Um script que repete `PERMISSIONS NONE` passa a exigir administrador, como toda declaração de `PERMISSIONS`. Em tabela dividida por shards ele é recusado.
+
+### Agregação com `math::`
+
+- Numa consulta com `GROUP ALL`, `GROUP BY` ou outro agregado, `math::sum`, `math::min`, `math::max`, `math::mean`, `math::median` e `math::product` com um argumento calculam sobre o grupo inteiro. Antes devolviam o valor do primeiro registro. Um campo lista contribui com todos os itens, e só números contam.
+- Sem agrupamento, continuam calculando a lista de cada linha. A expressão usada no próprio `GROUP BY` também mantém o valor da linha.
+- `math::median` e `math::product` guardam em memória todos os valores do grupo.
+
+### Busca textual combinada
+
+- `campo @@ 'texto' AND outra_condição`, sobre um campo com índice `SEARCH`, passa a usar o índice, o analisador e a pontuação de `search::score()`. Antes virava comparação de trecho de texto, com pontuação zero, e podia devolver outras linhas.
+- Com várias buscas ligadas por `AND`, a pontuação é a soma delas. Junto de `OR`, de `NOT` ou de `JOIN`, o comportamento não mudou.
+
 ### Conversões
 
-As conversões passam a recusar entrada inválida em vez de gravar o instante atual, zero ou um texto com marcador. Um campo `int` recusa número com fração.
+As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool>` passam a recusar entrada inválida em vez de gravar o instante atual, zero ou um texto com marcador. Um campo `int` recusa número com fração.
+
+- As formas `<datetime>` e `<uuid>` **não** validam: devolvem o texto recebido como está. Para converter e validar uma data, use `type::datetime`.
+- As formas `<float>` e `<number>` dão erro com um texto, mesmo numérico.
 
 - Converter um valor nulo ou ausente devolve o próprio valor.
 - Um texto só vira booleano quando é `true` ou `false`.
@@ -158,6 +189,8 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 
 ### SAGA e arestas
 
+- `LEAVE SAGA` passa a ser aceito e desvincula a sessão sem encerrar a transação. Antes dava erro de sintaxe, a sessão continuava na SAGA e as escritas seguintes podiam ser desfeitas por um `CANCEL SAGA`. A palavra `leave` continua livre para nomes de tabela e campo.
+- A correlação aceita hífen, como num UUID (Universally Unique Identifier), nos comandos de SAGA e no cancelamento pela API de gestão. Antes era recusada.
 - `INSERT`, `UPSERT` que cria um registro e `RELATE` passam a registrar um passo, e `CANCEL SAGA` os desfaz. Antes o cancelamento informava sucesso e deixava os dados. Um `RELATE` sobre uma aresta existente volta às propriedades anteriores. Escritas já feitas sem passo por uma versão anterior não são desfeitas. Os passos que ela gravou continuam valendo.
 - O passo de uma escrita que não chegou a ser gravada (comando em lote recusado ou transação cancelada ou em conflito) sai do registro da SAGA.
 - Dentro de uma SAGA, `RELATE` por `DATABASE LINK` é recusado, porque não haveria como desfazer a aresta remota.
@@ -184,6 +217,13 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 - Um `ROLLBACK TO` de ponto de salvamento não retira os passos de SAGA das escritas que ele desfez.
 - Num armazenamento em memória, um comando que falha no meio de várias linhas mantém as linhas anteriores.
 - `PERMISSIONS` de leitura não valem no acesso direto por id (`RETURN t:1.campo`), no `FETCH` e na leitura de um registro ligado.
+- `FETCH` e o acesso por ponto não seguem uma ligação gravada num campo.
+- No `JOIN`, um filtro sobre a tabela ligada pode zerar o resultado, o `ORDER BY` é ignorado, `LEFT JOIN` se comporta como junção interna e o apelido devolve nulo.
+- Uma consulta com `AT` devolve o valor atual quando não há histórico para o instante pedido.
+- `BEGIN SAGA` com um nome sem definição ainda é aceito, sem participantes. Um erro de digitação no nome faz o `CANCEL SAGA` informar sucesso sem desfazer nada nos bancos remotos.
+- O GraphQL ignora os campos pedidos, os argumentos e as demais raízes da consulta, e devolve tudo.
+- O método `signin` pelo WebSocket (`/rpc/ws`) devolve o token sem autenticar a conexão. Em seguida, chame `authenticate` com esse token.
+- O artefato publicado para Spring Data não traz repositórios, template nem anotações.
 - Um record id guardado num campo volta como texto. Uma Data Rule como `dono.equipe = 'a'` não segue esse link e nega a linha. A travessia de grafo (`->pertence->u.equipe`) é seguida.
 - A auditoria de um usuário vem do token. Quem recebeu `AUDITED BY` depois de entrar só é alcançado no próximo login. Dois usuários auditados com papel de operador ainda podem aprovar os casos `WARNING` um do outro.
 - Pelo painel Enterprise, a pessoa auditada com papel de operador consegue decidir o próprio caso, porque o motor vê a conta do agente.
