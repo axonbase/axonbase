@@ -4,14 +4,19 @@ import com.axonbase.core.catalog.Catalog;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.engine.IndexBuilder;
 import com.axonbase.core.storage.MemoryBackend;
+import com.axonbase.parser.AxonQl;
 import com.axonbase.parser.Render;
 import com.axonbase.parser.ast.Expr;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -20,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -156,10 +162,12 @@ class ExportImportFidelityTest {
         source.run("CREATE chave:\"123\" CONTENT {v: 6}");
         source.run("CREATE chave CONTENT {id: -7, v: 7}");
         source.run("CREATE chave:12345678901234567.25dec CONTENT {v: 8}");
+        // decimal sem casas que não cabe num real: o id o escreve como real
+        source.run("CREATE chave:12345678901234567e0dec CONTENT {v: 9}");
 
         Engine target = source.copy();
 
-        assertEquals(8, source.rows().size());
+        assertEquals(9, source.rows().size());
         assertEquals(source.rows(), target.rows());
     }
 
@@ -175,7 +183,76 @@ class ExportImportFidelityTest {
 
         assertEquals(3, source.rows().size());
         assertEquals(source.rows(), target.rows());
-        assertEquals(1, target.run("SELECT * FROM conta:-3").asArray().size());
+        // o SELECT por id devolve o próprio objeto
+        assertEquals(1, target.run("SELECT * FROM conta:-3").asObject().get("v").asLong());
+    }
+
+    @Test
+    @DisplayName("zero negativo real continua real")
+    void negativeZeroStaysFloat() throws InterruptedException {
+        Engine source = Engine.create();
+        source.run("CREATE zero:1 CONTENT $c", Map.of("c", AxonValue.object(Map.of("x", AxonValue.num(-0.0d)))));
+
+        Engine target = source.copy();
+
+        AxonValue x = target.run("SELECT * FROM zero:1").asObject().get("x");
+        assertTrue(x.raw() instanceof Double, AxonJson.write(x));
+    }
+
+    @Test
+    @DisplayName("registro cujo único campo tem o nome de um envelope volta inteiro")
+    void recordWithEnvelopeNamedFieldSurvives() throws InterruptedException {
+        Engine source = Engine.create();
+        source.run("CREATE solto:1 CONTENT {\"$decimal\": \"5\"}");
+        source.run("CREATE solto:2 CONTENT {\"$table\": \"x\"}");
+
+        Engine target = source.copy();
+
+        assertEquals(2, source.rows().size());
+        assertEquals(source.rows(), target.rows());
+    }
+
+    @Test
+    @DisplayName("referência a registro marcada no JSON volta como o texto que fica guardado")
+    void taggedRecordReferenceSurvives() throws InterruptedException {
+        Engine source = Engine.create();
+        source.run("CREATE ref:1 CONTENT {alvo: {\"$record\": \"pessoa:a-b\"}, "
+            + "outros: [{\"$record\": \"pessoa:joao silva\"}]}");
+
+        Engine target = source.copy();
+
+        assertEquals(source.rows(), target.rows());
+    }
+
+    @Test
+    @DisplayName("chave real negativa vai ao DATABASE LINK num texto que o outro servidor lê")
+    void negativeKeyOverDatabaseLinkStaysReadable() throws IOException {
+        List<String> received = new CopyOnWriteArrayList<>();
+        HttpServer remote = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        remote.createContext("/sql", exchange -> {
+            received.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] body = "[]".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        remote.start();
+        try {
+            Engine engine = Engine.create();
+            engine.run("DEFINE DATABASE LINK \"remoto\" CONNECT BY \"http://127.0.0.1:"
+                + remote.getAddress().getPort()
+                + "\" WITH ns = \"test\" db = \"dev\" user = \"\" password = \"\"");
+            engine.run("CREATE SAGA pedido WITH DATABASES 'remoto'");
+
+            // dentro da saga, a escrita remota lê antes a linha para poder compensar
+            engine.run("BEGIN SAGA pedido WITH CORRELATION 'c1'");
+            engine.run("UPDATE \"remoto\".\"conta\":-2.5 SET v = 1", Map.of("saga_corr", AxonValue.str("c1")));
+
+            assertTrue(received.contains("SELECT * FROM conta:-2.5"), received.toString());
+            received.forEach(AxonQl::parse);
+        } finally {
+            remote.stop(0);
+        }
     }
 
     // ------------------------------------------------------------------ índices
@@ -353,7 +430,7 @@ class ExportImportFidelityTest {
         target.ds.importDatabase("test", "dev", OLD_DUMP);
 
         assertEquals(2, target.rows().size());
-        AxonValue first = target.run("SELECT * FROM antiga:1").asArray().get(0);
+        AxonValue first = target.run("SELECT * FROM antiga:1");
         assertEquals("{\"$decimal\":\"-1.50\"}", AxonJson.write(first.asObject().get("saldo")));
         assertEquals("{\"$decimal\":5}", AxonJson.write(first.asObject().get("comum")));
         assertEquals("{\"$foo\":\"x\"}", AxonJson.write(first.asObject().get("outro")));
