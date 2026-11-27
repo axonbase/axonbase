@@ -93,11 +93,11 @@ func TestSagaTransactionLifecycle(t *testing.T) {
 		}
 	}
 	want := []string{
-		"query:BEGIN SAGA order''s WITH CORRELATION 'corr\\\\id'''",
+		"query:BEGIN SAGA 'order\\'s' WITH CORRELATION 'corr\\\\id\\''",
 		"let:saga_corr=corr\\id'",
 		"query:UPDATE orders:o1 SET total = 200",
-		"query:SHOW SAGA TRANSACTION order''s 'corr\\\\id'''",
-		"query:COMMIT SAGA order''s WITH CORRELATION 'corr\\\\id'''",
+		"query:SHOW SAGA TRANSACTION 'order\\'s' 'corr\\\\id\\''",
+		"query:COMMIT SAGA 'order\\'s' WITH CORRELATION 'corr\\\\id\\''",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("requests = %#v, want %#v", got, want)
@@ -108,5 +108,17 @@ func TestSagaTransactionRollbackIsIdempotent(t *testing.T) {
 	saga := &SagaTransaction{}
 	if err := saga.Rollback(); err != nil {
 		t.Errorf("Rollback before Begin: %v", err)
+	}
+}
+
+func TestSagaValuesNeverBecomeCommands(t *testing.T) {
+	if got, want := sagaName("pedido_1"), "pedido_1"; got != want {
+		t.Errorf("sagaName = %q, want %q", got, want)
+	}
+	if got, want := sagaName("z; DELETE alvo; --"), "'z; DELETE alvo; --'"; got != want {
+		t.Errorf("sagaName = %q, want %q", got, want)
+	}
+	if got, want := escapeSagaValue("x\\'; DELETE alvo; --\r\n"), `x\\\'; DELETE alvo; --\r\n`; got != want {
+		t.Errorf("escapeSagaValue = %q, want %q", got, want)
 	}
 }

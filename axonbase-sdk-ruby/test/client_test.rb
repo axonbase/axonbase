@@ -294,7 +294,7 @@ class SagaTransactionTest < Minitest::Test
     client = AxonBase::Client.new(transport)
     saga = AxonBase::SagaTransaction.new(client, "order's", "corr\\id'")
     saga.begin
-    assert_includes transport.sent[0]["params"][0], "WITH CORRELATION 'corr\\\\\\\\id'''"
+    assert_equal "BEGIN SAGA 'order\\'s' WITH CORRELATION 'corr\\\\id\\''", transport.sent[0]["params"][0]
     saga.commit
     assert saga.is_finished?
   end

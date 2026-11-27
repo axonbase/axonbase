@@ -150,8 +150,12 @@ Console.WriteLine("Custom server CA trust options OK");
 var saga = new SagaTransaction(new AxonClient("ws://localhost:8000/rpc/ws"), "order", "corr-1");
 if (saga.IsBegun || saga.IsFinished || saga.SagaName != "order" || saga.CorrelationId != "corr-1")
     throw new Exception("SagaTransaction initial state failed");
-if (SagaTransaction.Escape("a\\b'c") != "a\\\\b''c")
+if (SagaTransaction.Escape("a\\b'c\r\n") != "a\\\\b\\'c\\r\\n")
     throw new Exception("SagaTransaction literal escaping failed");
+if (SagaTransaction.Name("pedido_1") != "pedido_1"
+    || SagaTransaction.Name("z; DELETE alvo; --") != "'z; DELETE alvo; --'"
+    || SagaTransaction.Name("pedido\n") != "'pedido\\n'")
+    throw new Exception("SagaTransaction name quoting failed");
 try
 {
     await saga.StepAsync("UPDATE orders:o1 SET total = 200");

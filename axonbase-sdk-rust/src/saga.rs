@@ -147,11 +147,19 @@ fn escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_active, escape};
+    use super::{ensure_active, escape, saga_name};
 
     #[test]
     fn escapes_saga_literals() {
-        assert_eq!(escape("a\\b'c"), "a\\\\b''c");
+        assert_eq!(escape("a\\b'c\r\n"), "a\\\\b\\'c\\r\\n");
+    }
+
+    #[test]
+    fn quotes_saga_names_outside_the_identifier_format() {
+        assert_eq!(saga_name("pedido_1"), "pedido_1");
+        assert_eq!(saga_name("z; DELETE alvo; --"), "'z; DELETE alvo; --'");
+        assert_eq!(saga_name("pedido\n"), "'pedido\\n'");
+        assert_eq!(saga_name(""), "''");
     }
 
     #[test]
