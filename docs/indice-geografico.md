@@ -129,9 +129,10 @@ mvn -B -pl axonbase-core -am test -Dtest=GeoLatencyGateTest -Dsurefire.failIfNoS
 | `neighbours` | 20 |
 | `p99.knn` e `p99.radius` (ms) | 50 e 50 |
 | `moves` e `step` (metros) | um décimo dos pontos (0 desliga) e 30 |
+| `settle` (segundos) | 0; informado, pausa e mede mais uma vez antes dos movimentos |
 | `dir` | diretório temporário; informado, reaproveita a carga |
 
-As metas de p99 valem para as consultas feitas antes dos movimentos. Depois delas o teste move registros em passos curtos, mede as atualizações e repete as consultas, e imprime o tamanho da base nos dois momentos.
+As metas de p99 valem só para a primeira medida, feita logo depois da carga. Em seguida o teste repete as mesmas consultas (efeito do cache) e, com `settle`, repete de novo depois da pausa (efeito da compactação). Só então move registros em passos curtos, mede as atualizações e consulta mais uma vez. Em cada momento ele imprime o tamanho da base e a quantidade de tabelas SST (Sorted String Table), os arquivos de dados do RocksDB.
 
 Para comparar resoluções de armazenamento, o roteiro abaixo copia o repositório para cada resolução, troca a constante só na cópia e junta os números em `resumo.txt`. O diretório de saída precisa ser novo e ficar fora do repositório.
 
