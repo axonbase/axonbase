@@ -8247,6 +8247,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
      */
     private AxonValue interceptWithAiAudit(String sql, Statement s) {
         if (isAuditCommand(s)) return null; // audit commands pass through
+        // sem isto, quem está num banco onde a auditoria não existe não conseguiria sair dele
+        if (s instanceof Statement.Use) return null;
         Database db = db();
         String userId = sessionUserId();
         if (userId == null || userId.isBlank()) return null; // no authenticated user
@@ -8272,7 +8274,10 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (auditName == null || auditName.isBlank()) return null;
 
         var def = db.catalog().audit(auditName);
-        if (def == null) return null;
+        // como a Data Rule: auditoria que não existe neste banco nega, senão um nome errado liberaria tudo
+        if (def == null) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_missing", auditName));
+        }
 
         String classification = def.classify(sql);
         if ("SAFE".equals(classification)) return null;
