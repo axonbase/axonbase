@@ -22,9 +22,14 @@ mvn clean test -pl axonbase-server -am
 image="axonbase/axonbase"
 platforms=${DOCKER_PLATFORMS:-linux/amd64,linux/arm64}
 
+tags=(--tag "$image:$version")
+# latest só acompanha versão final: pré-lançamento (com hífen, como 1.0.0-rc2) publica apenas a própria tag
+if [[ $version != *-* ]]; then
+  tags+=(--tag "$image:latest")
+fi
+
 docker buildx build \
   --platform "$platforms" \
-  --tag "$image:$version" \
-  --tag "$image:latest" \
+  "${tags[@]}" \
   --push \
   .

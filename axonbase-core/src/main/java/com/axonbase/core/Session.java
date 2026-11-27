@@ -255,6 +255,32 @@ public final class Session {
     }
 
     // ------------------------------------------------------------------
+    // Ações presas ao destino das escritas da transação
+    // ------------------------------------------------------------------
+
+    private final java.util.List<Runnable> discardActions = new java.util.ArrayList<>();
+
+    /** Ação a executar se as escritas da transação em curso forem descartadas. */
+    public synchronized void onWritesDiscarded(Runnable action) {
+        discardActions.add(action);
+    }
+
+    /** A transação foi desfeita sem gravar: executa as ações registradas. */
+    public void writesDiscarded() {
+        java.util.List<Runnable> copy;
+        synchronized (this) {
+            copy = new java.util.ArrayList<>(discardActions);
+            discardActions.clear();
+        }
+        copy.forEach(Runnable::run);
+    }
+
+    /** As escritas foram gravadas, ou não se sabe: as ações são esquecidas. */
+    public synchronized void keepWrites() {
+        discardActions.clear();
+    }
+
+    // ------------------------------------------------------------------
     // Saga (transação distribuída)
     // ------------------------------------------------------------------
 

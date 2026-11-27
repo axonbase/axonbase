@@ -292,15 +292,24 @@ public final class Executor {
         for (int attempt = 1; ; attempt++) {
             com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
             batch = mine;
+            batchSagaUndo.clear();
             long outbound = ExternalCalls.count();
             try {
-                AxonValue result = runStatementUnbatched(s);
+                AxonValue result;
+                try {
+                    result = runStatementUnbatched(s);
+                } catch (RuntimeException notWritten) {
+                    discardBatchSagaSteps();
+                    throw notWritten;
+                }
                 batch = null;
                 mine.commit();
+                batchSagaUndo.clear();
                 return result;
             } catch (com.axonbase.core.storage.VersionConflictException conflict) {
-                // só um lote com condições (tabela particionada) conflita. Nada foi gravado, então refaz sobre o
-                // estado novo, a menos que o statement já tenha chamado para fora
+                discardBatchSagaSteps();
+                // só um lote com condições (partição, chave primária, UNIQUE) conflita. Nada foi gravado, então refaz
+                // sobre o estado novo, a menos que o statement já tenha chamado para fora
                 if (!mine.conditional() || attempt >= CONDITIONAL_ATTEMPTS || ExternalCalls.count() != outbound) {
                     throw conflict;
                 }
@@ -310,6 +319,46 @@ public final class Executor {
                 batch = null;
                 mine.discard();
             }
+        }
+    }
+
+    /** Retira os passos de SAGA das escritas do lote em curso, quando ele não é gravado. */
+    private final List<Runnable> batchSagaUndo = new ArrayList<>();
+
+    private void discardBatchSagaSteps() {
+        List<Runnable> undo = List.copyOf(batchSagaUndo);
+        batchSagaUndo.clear();
+        undo.forEach(Runnable::run);
+    }
+
+    /** Registra o passo de uma escrita local. Ele sai junto se o lote ou a transação da escrita for descartado. */
+    private void recordLocalStep(String correlationId, Database db, RecordId rid, AxonValue before,
+                                 String operation) {
+        long order = sagaLedger.recordStep(correlationId, db.ns(), db.db(), "", "local", rid.table(), rid, before,
+            operation);
+        undoStepWithWrite(db, correlationId, order);
+    }
+
+    private void recordEdgeStep(String correlationId, Database db, AxonValue.RecordId from, String kind,
+                                AxonValue.RecordId to) {
+        String outKey = edgeKey(db, "out", from, kind, to);
+        long order = sagaLedger.recordEdgeStep(correlationId, db.ns(), db.db(), kind,
+            new RecordId(from.table(), keyOf(from.key())), new RecordId(to.table(), keyOf(to.key())),
+            records(db).get(outKey).isPresent(), edgeProperties(db, outKey));
+        undoStepWithWrite(db, correlationId, order);
+    }
+
+    /**
+     * O passo é gravado antes da escrita, fora dela. Se a escrita não acontecer, um passo de criação que ficasse
+     * apagaria, no CANCEL, um registro que outro criou depois com a mesma chave.
+     */
+    private void undoStepWithWrite(Database db, String correlationId, long order) {
+        KvBackend target = rawRecords(db);
+        Runnable undo = () -> sagaLedger.discardStep(correlationId, order);
+        if (batch != null && target == batch) {
+            batchSagaUndo.add(undo);
+        } else if (target == session.tx()) {
+            session.onWritesDiscarded(undo);
         }
     }
 
@@ -1028,16 +1077,6 @@ public final class Executor {
         AxonValue explicitKey = c.target() instanceof Expr.RecordId rid
             ? recordKey(rid.key()) : null;
         AxonValue record = createRecord(db, table, evalData(c.data(), table), explicitKey, onExisting(false));
-        // Saga: record step (before=null)
-        String sagaCorr = sagaCorrelation();
-        if (sagaCorr != null && record.isObject()) {
-            AxonValue ridVal = record.asObject().get("id");
-            if (ridVal != null && ridVal.isRecordId()) {
-                var ar = ridVal.asRecordId();
-                RecordId rId = new RecordId(ar.table(), keyOf(ar.key()));
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rId.table(), rId, AxonValue.nul(), "CREATE");
-            }
-        }
         AxonValue shown = visible(record);
         return c.only() ? shown : AxonValue.array(List.of(shown));
     }
@@ -1212,6 +1251,12 @@ public final class Executor {
         }
         enforcePrimaryKey(db, rid, previous, record);
         enforceUnique(db, rid, previous, record);
+        // Saga: criar se desfaz apagando; regravar um existente (UPSERT), repondo o anterior
+        String sagaCorr = sagaCorrelation();
+        if (sagaCorr != null) {
+            recordLocalStep(sagaCorr, db, rid, previous == null ? AxonValue.nul() : previous,
+                previous == null ? "CREATE" : "UPDATE");
+        }
         records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));
         indexSearch(db, rid, previous, record);
         indexAdvanced(db, rid, previous, record);
@@ -1391,8 +1436,10 @@ public final class Executor {
                             + com.axonbase.parser.Render.key(qRid.key());
                         List<AxonValue> rows = linkClient.query(linkDef, selectSql);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                        // um UPSERT sobre o que não existe cria: desfazer é apagar
+                        String operation = rows.isEmpty() && u.mode() == UpdateMode.UPSERT ? "CREATE" : "UPDATE";
                         sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
+                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, operation);
                     }
                 }
                 return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
@@ -1427,7 +1474,7 @@ public final class Executor {
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
                 // Sem o passo registrado não há como compensar: a falha aborta a escrita.
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "UPDATE");
+                recordLocalStep(sagaCorr, db, rid, doc.current(), "UPDATE");
             }
             Map<String, AxonValue> current = new LinkedHashMap<>(doc.current().asObject());
             if (u.data() != null) {
@@ -1524,7 +1571,7 @@ public final class Executor {
             // Saga: capture BEFORE state
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "DELETE");
+                recordLocalStep(sagaCorr, db, rid, doc.current(), "DELETE");
             }
             records(db).delete(rid.storageKey(db.ns(), db.db()));
             enforcePrimaryKey(db, rid, doc.current(), null);
@@ -4039,6 +4086,10 @@ return score;
         Expr.Qualified rq = (rFrom instanceof Expr.RecordId rr && rr.table() instanceof Expr.Qualified q) ? q : null;
         if (rq != null || rFrom instanceof Expr.Qualified || rTo instanceof Expr.Qualified
             || (rTo instanceof Expr.RecordId tr && tr.table() instanceof Expr.Qualified)) {
+            if (sagaCorrelation() != null) {
+                // o estado anterior da aresta remota não é capturado, então o CANCEL não teria como desfazer
+                throw errorStmt(Messages.get("stmt_saga_relate_link_unsupported"));
+            }
             return runWriteViaLink(rq != null ? rq : (Expr.Qualified) qualifiedOf(rFrom, rTo),
                 com.axonbase.parser.Render.stmt(r));
         }
@@ -4063,6 +4114,10 @@ return score;
             Map<String, AxonValue> properties = new LinkedHashMap<>(assigned);
             properties.remove("in");
             properties.remove("out");
+            String sagaCorr = sagaCorrelation();
+            if (sagaCorr != null) {
+                recordEdgeStep(sagaCorr, db, fromR, kind, toR);
+            }
             persistEdge(db, fromR, kind, toR, properties);
         }
         Map<String, AxonValue> edge = new LinkedHashMap<>();
@@ -4265,8 +4320,10 @@ return score;
             return AxonValue.nul();
         }
         Catalog.TableDef previous = db.catalog().table(ct.name());
-        Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), false);
+        Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), previous != null && previous.drop());
         if (previous != null) {
+            def.permissions(previous.permissions());
+            def.indexFailures().putAll(previous.indexFailures());
             def.shardBy(previous.shardBy());
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());
@@ -4631,6 +4688,7 @@ return score;
             if (!sharedColumn) {
                 String head = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000!uidx\u0000";
                 deleteAll(db, head + (index.columns().size() == 1 ? index.columns().get(0) : name) + "\u0000");
+                deleteAll(db, uniqueClaimPrefix(db, table) + uniqueSegment(index) + "|");
             }
         }
         if (index.columnar()) {
@@ -5330,6 +5388,7 @@ return score;
         // se a tabela era um tipo de aresta (RELATE), as arestas dele saem junto
         removeEdgesOfKind(db, table);
         records(db).delete(primaryKeyMarker(db, table));
+        deleteAll(db, uniqueClaimPrefix(db, table));
         ds.removeTableControl(session, db.ns(), db.db(), table);
         return AxonValue.nul();
     }
@@ -5413,6 +5472,9 @@ return score;
     private AxonValue runDropIndex(Statement.DropIndex di) {
         Database db = db();
         for (Catalog.TableDef def : db.catalog().tables()) {
+            if (di.table() != null && !di.table().equals(def.name())) {
+                continue;
+            }
             java.util.concurrent.locks.Lock write = db.indexLock().writeLock();
             write.lock();
             Catalog.IndexDef removed;
@@ -5433,7 +5495,8 @@ return score;
                 return AxonValue.nul();
             }
         }
-        throw errorStmt(Messages.get("stmt_index_missing", di.name()));
+        throw errorStmt(di.table() == null ? Messages.get("stmt_index_missing", di.name())
+            : Messages.get("stmt_index_missing_on_table", di.name(), di.table()));
     }
 
     private AxonValue runDropEvent(Statement.DropEvent de) {
@@ -5449,6 +5512,15 @@ return score;
 
     private AxonValue runDropAnalyzer(Statement.DropAnalyzer da) {
         Database db = db();
+        for (Catalog.TableDef def : db.catalog().tables()) {
+            for (Catalog.IndexDef index : def.indexes().values()) {
+                // sem o analyzer o índice deixa de ser mantido, e a exportação dele não importa
+                if (da.name().equals(index.searchAnalyzer()) && db.catalog().analyzer(da.name()) != null) {
+                    throw errorStmt(Messages.get("stmt_analyzer_in_use", da.name(), index.name(), def.name(),
+                        index.name(), def.name()));
+                }
+            }
+        }
         if (!db.catalog().removeAnalyzer(da.name())) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", da.name()));
         }
@@ -5508,6 +5580,11 @@ return score;
             authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
                 "auth_scope_forbidden");
             this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+            // sem tirar a definição do plano de controle, o reinício devolveria o acesso
+            String targetNs = target.namespace() == null ? "" : target.namespace();
+            String targetDb = target.database() == null ? "" : target.database();
+            ds.removeControl(session, targetNs, targetDb, ControlCommand.Kind.ACCESS, identity(target.name(),
+                Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database()));
         }
         return AxonValue.nul();
     }
@@ -7187,6 +7264,10 @@ return score;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
             if (nextPrefix != null) {
+                // antes de ler: se outra escrita tomar ou soltar o valor no meio, o commit deste lote conflita
+                if (rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
+                    pending.expect(uniqueClaimKey(db, rid.table(), ix, nextPrefix));
+                }
                 String ownEntry = nextPrefix + rid.key().keyString();
                 var existing = records(db).keysWithPrefix(nextPrefix);
                 if (existing.stream().anyMatch(key -> !key.equals(ownEntry))) {
@@ -7197,11 +7278,42 @@ return score;
             String previousPrefix = uniqueIndexPrefix(db, rid.table(), ix, before);
             if (previousPrefix != null) {
                 records(db).delete(previousPrefix + rid.key().keyString());
+                if (!previousPrefix.equals(nextPrefix)) {
+                    records(db).delete(uniqueClaimKey(db, rid.table(), ix, previousPrefix));
+                }
             }
             if (nextPrefix != null) {
                 records(db).put(nextPrefix + rid.key().keyString(), new byte[0]);
+                if (!nextPrefix.equals(previousPrefix)) {
+                    records(db).put(uniqueClaimKey(db, rid.table(), ix, nextPrefix), new byte[0]);
+                }
             }
         }
+    }
+
+    /**
+     * A chave disputada por quem toma um valor UNIQUE: duas escritas simultâneas do mesmo valor a gravam, e a segunda
+     * conflita. Fica fora do prefixo da tabela, então nenhuma leitura de índice ou de registros a encontra, e vale
+     * também para tabela particionada. As entradas do índice continuam sendo a verdade sobre quem tem o valor.
+     */
+    private static String uniqueClaimKey(Database db, String table, Catalog.IndexDef index, String valuePrefix) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(valuePrefix.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return uniqueClaimPrefix(db, table) + uniqueSegment(index) + "|"
+                + java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private static String uniqueClaimPrefix(Database db, String table) {
+        return "UQL|" + db.ns() + "|" + db.db() + "|" + table + "|";
+    }
+
+    /** O trecho das chaves que identifica o índice: a coluna quando é uma só, senão o nome dele. */
+    private static String uniqueSegment(Catalog.IndexDef index) {
+        return index.columns().size() == 1 ? index.columns().get(0) : index.name();
     }
 
     private String uniqueIndexPrefix(Database db, String table, Catalog.IndexDef index, AxonValue record) {

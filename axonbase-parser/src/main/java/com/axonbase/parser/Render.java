@@ -544,7 +544,12 @@ public final class Render {
                     if (ci.efSearch() != null) sb.append(" EFS ").append(ci.efSearch());
                 }
             }
-            case Statement.DropIndex di -> sb.append("DROP INDEX ").append(di.name());
+            case Statement.DropIndex di -> {
+                sb.append("DROP INDEX ").append(di.name());
+                if (di.table() != null) {
+                    sb.append(" ON TABLE ").append(di.table());
+                }
+            }
             case Statement.CreateEvent ce -> {
                 sb.append("CREATE EVENT ").append(ce.name()).append(" ON TABLE ").append(ce.table())
                     .append(" WHEN ").append(expr(ce.when())).append(" THEN (");

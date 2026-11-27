@@ -1237,6 +1237,8 @@ public final class Parser {
             } else {
                 matchKeyword("schemaless");
             }
+            // o texto gravado no plano de controle e no dump traz o DROP depois do esquema
+            drop |= matchKeyword("drop");
             String shardBy = null;
             // "shard" não é palavra reservada: vale só aqui, depois do esquema
             if (atWord("shard")) {
@@ -1963,12 +1965,13 @@ public final class Parser {
         }
         if (matchKeyword("index")) {
             String name = expectIdent();
-            // forma com a tabela (DROP INDEX nome ON [TABLE] tabela), a mesma do CREATE INDEX; o nome já basta
+            // forma com a tabela (DROP INDEX nome ON [TABLE] tabela), a mesma do CREATE INDEX
+            String table = null;
             if (matchKeyword("on")) {
                 matchKeyword("table");
-                expectIdentOrString();
+                table = expectIdentOrString();
             }
-            return new Statement.DropIndex(name);
+            return new Statement.DropIndex(name, table);
         }
         if (matchKeyword("event")) {
             String name = expectIdent();

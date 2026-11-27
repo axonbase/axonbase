@@ -19,6 +19,7 @@ import java.util.Map;
  */
 public class SagaLedger {
 
+    private static final System.Logger LOG = System.getLogger(SagaLedger.class.getName());
     private static final String SAGA_NS = "system";
     private static final String SAGA_DB = "saga";
 
@@ -110,10 +111,10 @@ public class SagaLedger {
     /**
      * Registra um step com o snapshot anterior e aplica a compensação.
      */
-    public void recordStep(String correlationId, String stepNs, String stepDb,
+    public long recordStep(String correlationId, String stepNs, String stepDb,
                             String linkNamespace, String linkName, String table,
                             RecordId rid, AxonValue beforeValue, String operation) {
-        if (correlationId == null || correlationId.isBlank()) return;
+        if (correlationId == null || correlationId.isBlank()) return 0;
         String beforeLiteral = beforeLiteral(beforeValue);
         long order = nextStepOrder();
         ds.execute("CREATE saga_step CONTENT {"
@@ -129,6 +130,33 @@ public class SagaLedger {
             + "before: " + beforeLiteral + ","
             + "operation: \"" + esc(operation) + "\","
             + "status: \"PREPARED\"}", sagaSession(), null);
+        return order;
+    }
+
+    /** O passo de um RELATE local: as duas pontas e o que a aresta tinha antes dele. */
+    long recordEdgeStep(String correlationId, String stepNs, String stepDb, String kind, RecordId from, RecordId to,
+                        boolean existed, Map<String, AxonValue> properties) {
+        Map<String, AxonValue> before = new LinkedHashMap<>();
+        before.put("from_table", AxonValue.str(from.table()));
+        before.put("from_key", AxonValue.str(keyLiteral(from)));
+        before.put("to_table", AxonValue.str(to.table()));
+        before.put("to_key", AxonValue.str(keyLiteral(to)));
+        before.put("existed", AxonValue.bool(existed));
+        before.put("properties", AxonValue.object(properties));
+        return recordStep(correlationId, stepNs, stepDb, "", "local", kind, from, AxonValue.object(before),
+            "RELATE");
+    }
+
+    /** Retira o passo de uma escrita que não chegou a ser gravada. */
+    void discardStep(String correlationId, long stepOrder) {
+        try {
+            ds.execute("DELETE saga_step WHERE correlation_id = \"" + esc(correlationId)
+                + "\" AND step_order = " + stepOrder, sagaSession(), null);
+        } catch (RuntimeException e) {
+            // a falha que descartou a escrita é a que precisa chegar a quem chamou
+            LOG.log(System.Logger.Level.WARNING, "passo " + stepOrder + " da SAGA " + correlationId
+                + " ficou no ledger sem a escrita correspondente", e);
+        }
     }
 
     /**
@@ -228,6 +256,12 @@ public class SagaLedger {
             }
         }
 
+        if ("RELATE".equalsIgnoreCase(operation)) {
+            compensateEdge(linkDef, tableName, before.asObject(), targetSession);
+            markCompensated(corrId, stepOrder);
+            return;
+        }
+
         String key = storedKeyLiteral(step);
         if (before == null || !before.isObject() || before.asObject().isEmpty()) {
             if ("CREATE".equalsIgnoreCase(operation) && !key.isEmpty()) {
@@ -242,6 +276,30 @@ public class SagaLedger {
         executeCompensation(linkDef, restoreSql, targetSession);
 
         markCompensated(corrId, stepOrder);
+    }
+
+    /** Remove a aresta e, quando ela já existia, recria-a só com as propriedades anteriores. */
+    private void compensateEdge(Datastore.DatabaseLinkDef linkDef, String kind, Map<String, AxonValue> edge,
+                                Session targetSession) {
+        String path = Datastore.name(strField(edge, "from_table")) + ":" + strField(edge, "from_key")
+            + "->" + Datastore.name(kind) + "->"
+            + Datastore.name(strField(edge, "to_table")) + ":" + strField(edge, "to_key");
+        executeCompensation(linkDef, "UNRELATE " + path, targetSession);
+        AxonValue existed = edge.get("existed");
+        if (existed == null || !existed.isBool() || !existed.asBool()) {
+            return;
+        }
+        StringBuilder relate = new StringBuilder("RELATE ").append(path);
+        AxonValue properties = edge.get("properties");
+        if (properties != null && properties.isObject()) {
+            String separator = " SET ";
+            for (Map.Entry<String, AxonValue> property : properties.asObject().entrySet()) {
+                relate.append(separator).append(property.getKey()).append(" = ")
+                    .append(Render.value(property.getValue()));
+                separator = ", ";
+            }
+        }
+        executeCompensation(linkDef, relate.toString(), targetSession);
     }
 
     private void markCompensated(String corrId, long stepOrder) {

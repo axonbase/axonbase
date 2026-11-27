@@ -1339,7 +1339,7 @@ public final class Datastore {
         throw AxonError.internal(Messages.get("stmt_export_edge_unreadable", edge));
     }
 
-    private static String name(String name) {
+    static String name(String name) {
         return PLAIN_NAME.matcher(name).matches() ? name : AxonJson.write(AxonValue.str(name));
     }
 
@@ -2016,6 +2016,9 @@ public final class Datastore {
         }
         try (guards) {
             commitGuarded(session, tx, validated);
+        } catch (VersionConflictException conflict) {
+            session.writesDiscarded(); // um conflito não grava nada
+            throw conflict;
         }
     }
 
@@ -2024,6 +2027,7 @@ public final class Datastore {
         try {
             return coordinator.beginValidation();
         } catch (RuntimeException unavailable) {
+            session.keepWrites(); // sem consenso, o ledger também não aceitaria a retirada dos passos
             cancelSession(session);
             throw unavailable;
         }
@@ -2068,6 +2072,7 @@ public final class Datastore {
             commitReplicated(coordinator, session, tx, validated);
         }
         session.tx(null);
+        session.keepWrites();
         backend.flush();
         // As notificações retidas durante a transação só saem agora, depois do quórum.
         session.flushLive();
@@ -2098,7 +2103,11 @@ public final class Datastore {
                 consumeLocalOrigin(transactionId);
                 // Sem confirmação a transação morre aqui. Deixá-la aberta faria a própria
                 // sessão continuar lendo escritas que o cluster nunca aceitou.
-                cancelSession(session);
+                if (!(notConfirmed instanceof VersionConflictException)) {
+                    session.keepWrites(); // sem desfecho: a escrita ainda pode valer
+                }
+                // num conflito, commitSession executa o descarte depois de soltar as travas
+                rollback(session);
                 throw notConfirmed;
             }
             if (coordinator.appliesTo(backend)) {
@@ -2119,6 +2128,15 @@ public final class Datastore {
     }
 
     public void cancelSession(Session session) {
+        try {
+            rollback(session);
+        } finally {
+            session.writesDiscarded();
+        }
+    }
+
+    /** Desfaz a transação sem executar as ações presas às escritas dela. */
+    private void rollback(Session session) {
         Transaction tx = session.tx();
         long started = session.txControlVersion();
         if (tx != null) {
