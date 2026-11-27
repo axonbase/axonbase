@@ -97,7 +97,7 @@ Estes defeitos da 0.10.1 foram corrigidos no código desta candidata:
 - O reinício nó a nó foi verificado só com a mesma versão nova dos dois lados. A troca entre duas versões novas diferentes não foi verificada.
 - Partição nova só deve ser definida com o cluster todo atualizado. Um nó antigo não apaga a faixa.
 - O prazo de eleição é de 350 a 850 ms. Pausas da máquina virtual (coleta de lixo) ou falta de CPU não são cobertas. Pré-voto não foi implementado.
-- A porta do Raft (9000 por padrão) não tem autenticação. Exponha-a só em rede interna.
+- A porta do Raft (a de `AXON_RAFT_BIND`, 7000 no `docker-compose.cluster.yml`) não tem autenticação. Exponha-a só em rede interna.
 - Com o padrão `AXON_RAFT_MAX_READ_LAG_MS=0`, um seguidor isolado continua respondendo com dados antigos.
 - O redirecionamento 307 de escrita aponta para o endereço do Raft, a não ser que `AXON_CLUSTER_HTTP_PEERS` seja informado.
 - Com `--path /data`, o diretório do Raft fica fora do volume Docker.

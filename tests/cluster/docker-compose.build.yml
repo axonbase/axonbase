@@ -1,0 +1,13 @@
+# Usado só por tests/cluster/cluster.sh: compila a imagem do código local, com um nome próprio, para o teste não rodar a
+# imagem publicada nem sobrescrever a tag dela. Os caminhos são relativos à raiz do repositório.
+services:
+  n1:
+    image: axonbase/axonbase:cluster-test
+    build:
+      context: .
+  n2:
+    image: axonbase/axonbase:cluster-test
+    pull_policy: never
+  n3:
+    image: axonbase/axonbase:cluster-test
+    pull_policy: never

@@ -79,6 +79,8 @@ Antes de atualizar um nó, confira que:
 
 `GET /admin/v1/cluster/upgrade-check?target=<versão>&members=<versões>` aplica essas regras.
 
+O sufixo de pré-lançamento conta na ordem: `1.0.0-rc1` vem antes de `1.0.0-rc2`, e as duas vêm antes de `1.0.0`. Voltar da final para uma candidata é recusado, e cada uma conta como uma versão diferente. O metadado depois de `+` é ignorado.
+
 **A partir da 0.10.x, use a [parada total](#falha-de-versões-mistas).** Com um membro 0.10.x, a verificação recusa a troca e manda parar os três nós. Ela decide só pelo número da versão: uma compilação desta linha de desenvolvimento que ainda se declare 0.10.x também é recusada, até a versão do projeto mudar.
 
 ### Roteiro
