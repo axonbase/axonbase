@@ -660,6 +660,10 @@ public final class Executor {
     private AxonValue runStatementUnbatched(Statement s) {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
+        SagaCompensation compensation = session.compensation();
+        if (compensation != null && !compensation.permits(s)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("saga_compensation_only"));
+        }
         requireAllowedInEvent(s);
         requireReadingOnly(s);
         authorize(s);
@@ -1025,9 +1029,12 @@ public final class Executor {
         if (sub.owner() != null) {
             session.auth(sub.owner().auth());
         }
+        SagaCompensation compensation = session.compensation();
+        session.compensation(null);
         try {
             return asDefinition(work);
         } finally {
+            session.compensation(compensation);
             session.auth(writerAuth);
             session.namespace(writerNamespace);
             session.database(writerDatabase);
@@ -1096,6 +1103,9 @@ public final class Executor {
         // o que um evento escreve é escrita nova, mesmo quando quem o disparou está repondo dados
         boolean restoring = session.restoring();
         session.restoring(false);
+        // nem é compensação: a marca vale só para a escrita que desfaz o passo
+        SagaCompensation compensation = session.compensation();
+        session.compensation(null);
         // a condição e o corpo enxergam só o banco da tabela, mesmo quando a escrita veio de outro
         Session.EventScope outerScope = session.eventScope();
         String writerNamespace = session.namespace();
@@ -1121,6 +1131,7 @@ public final class Executor {
             session.namespace(writerNamespace);
             session.database(writerDatabase);
             session.restoring(restoring);
+            session.compensation(compensation);
             restoreVar("event", prevEvent);
             restoreVar("before", prevBefore);
             restoreVar("after", prevAfter);
@@ -5736,7 +5747,7 @@ return score;
             coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true,
                 linkNamespace(cs.correlationId()));
         }
-        sagaLedger.cancelSaga(cs.name(), cs.correlationId());
+        sagaLedger.cancelSaga(cs.name(), cs.correlationId(), session);
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
     }
 

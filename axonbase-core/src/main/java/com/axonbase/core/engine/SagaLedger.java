@@ -4,6 +4,7 @@ import com.axonbase.common.Messages;
 import com.axonbase.core.Session;
 import com.axonbase.core.catalog.RecordId;
 import com.axonbase.parser.Render;
+import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonValue;
 
 import java.util.ArrayList;
@@ -208,6 +209,11 @@ public class SagaLedger {
      * Idempotente: cada step é marcado como COMPENSATED e a busca é por status PREPARED.
      */
     public void cancelSaga(String sagaResource, String correlationId) {
+        cancelSaga(sagaResource, correlationId, Session.create());
+    }
+
+    /** @param caller sessão de quem cancela; a compensação local roda com a identidade dela */
+    void cancelSaga(String sagaResource, String correlationId, Session caller) {
         ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'COMPENSATING'",
             sagaSession(), null);
 
@@ -225,28 +231,19 @@ public class SagaLedger {
         }
 
         for (Map<String, AxonValue> step : stepsList) {
-            compensateStep(step, correlationId);
+            compensateStep(step, correlationId, caller);
         }
 
         ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'FAILED'",
             sagaSession(), null);
     }
 
-    private void compensateStep(Map<String, AxonValue> step, String corrId) {
-        String operation = strField(step, "operation");
-        AxonValue before = step.get("before");
-        String tableName = strField(step, "table_name");
+    private void compensateStep(Map<String, AxonValue> step, String corrId, Session caller) {
         String stepNs = strField(step, "step_ns");
         String stepDb = strField(step, "step_db");
         String linkNamespace = strField(step, "link_ns");
         String linkName = strField(step, "link_name");
         long stepOrder = longField(step, "step_order");
-
-        Session targetSession = Session.create();
-        targetSession.namespace(stepNs.isEmpty() ? SAGA_NS : stepNs);
-        targetSession.database(stepDb.isEmpty() ? SAGA_DB : stepDb);
-        // a compensação repõe o que já existia: não passa pelas restrições das escritas novas
-        targetSession.restoring(true);
 
         Datastore.DatabaseLinkDef linkDef = null;
         if (!"local".equals(linkName)) {
@@ -254,65 +251,36 @@ public class SagaLedger {
             if (linkDef == null) {
                 throw new IllegalStateException(Messages.get("saga_compensation_link_missing", linkName));
             }
+        } else if (stepNs.isEmpty() || stepDb.isEmpty()) {
+            throw new IllegalStateException(Messages.get("saga_compensation_refused", stepNs + "/" + stepDb));
         }
 
-        if ("RELATE".equalsIgnoreCase(operation)) {
-            compensateEdge(linkDef, tableName, before.asObject(), targetSession);
-            markCompensated(corrId, stepOrder);
-            return;
-        }
-
-        String key = storedKeyLiteral(step);
-        if (before == null || !before.isObject() || before.asObject().isEmpty()) {
-            if ("CREATE".equalsIgnoreCase(operation) && !key.isEmpty()) {
-                executeCompensation(linkDef, "DELETE " + tableName + ":" + key, targetSession);
+        for (Statement undo : SagaUndo.statements(step)) {
+            if (linkDef == null) {
+                executeLocally(undo, caller, stepNs, stepDb);
+            } else {
+                linkClient.query(linkDef, SagaUndo.remoteText(undo));
             }
-            markCompensated(corrId, stepOrder);
-            return;
         }
-
-        // o id vai junto: o CONTENT substitui o registro inteiro
-        String restoreSql = "UPSERT " + tableName + ":" + key + " CONTENT " + beforeLiteral(before);
-        executeCompensation(linkDef, restoreSql, targetSession);
-
         markCompensated(corrId, stepOrder);
     }
 
-    /** Remove a aresta e, quando ela já existia, recria-a só com as propriedades anteriores. */
-    private void compensateEdge(Datastore.DatabaseLinkDef linkDef, String kind, Map<String, AxonValue> edge,
-                                Session targetSession) {
-        String path = Datastore.name(strField(edge, "from_table")) + ":" + strField(edge, "from_key")
-            + "->" + Datastore.name(kind) + "->"
-            + Datastore.name(strField(edge, "to_table")) + ":" + strField(edge, "to_key");
-        executeCompensation(linkDef, "UNRELATE " + path, targetSession);
-        AxonValue existed = edge.get("existed");
-        if (existed == null || !existed.isBool() || !existed.asBool()) {
-            return;
-        }
-        StringBuilder relate = new StringBuilder("RELATE ").append(path);
-        AxonValue properties = edge.get("properties");
-        if (properties != null && properties.isObject()) {
-            String separator = " SET ";
-            for (Map.Entry<String, AxonValue> property : properties.asObject().entrySet()) {
-                relate.append(separator).append(property.getKey()).append(" = ")
-                    .append(Render.value(property.getValue()));
-                separator = ", ";
-            }
-        }
-        executeCompensation(linkDef, relate.toString(), targetSession);
+    /**
+     * Roda a sentença no banco do passo, com a identidade e o teto de papel de quem cancela, numa sessão que não
+     * executa nada além dela.
+     */
+    private void executeLocally(Statement undo, Session caller, String stepNs, String stepDb) {
+        // a compensação repõe o que já existia: não passa pelas restrições das escritas novas
+        Session target = caller.restoringCopy();
+        target.namespace(stepNs);
+        target.database(stepDb);
+        target.compensation(new SagaCompensation(undo));
+        ds.executeCompensation(undo, target);
     }
 
     private void markCompensated(String corrId, long stepOrder) {
         ds.execute("UPDATE saga_step SET status = 'COMPENSATED' WHERE correlation_id = \""
             + esc(corrId) + "\" AND step_order = " + stepOrder, sagaSession(), null);
-    }
-
-    private void executeCompensation(Datastore.DatabaseLinkDef linkDef, String sql, Session targetSession) {
-        if (linkDef == null) {
-            ds.execute(sql, targetSession, null);
-        } else {
-            linkClient.query(linkDef, sql);
-        }
     }
 
     private static String recordKey(RecordId recordId) {
@@ -324,18 +292,6 @@ public class SagaLedger {
     private static String keyLiteral(RecordId recordId) {
         AxonValue key = recordId.key();
         return key.isNumber() ? Render.numberKey(key) : Render.value(key);
-    }
-
-    /**
-     * A chave de um passo. Passos gravados por versões anteriores só têm o texto cru: o que parece número continua
-     * sendo lido como número, como antes, e o resto é texto.
-     */
-    private static String storedKeyLiteral(Map<String, AxonValue> step) {
-        String literal = strField(step, "record_literal");
-        if (!literal.isEmpty()) return literal;
-        String raw = strField(step, "record_key");
-        if (raw.isEmpty() || raw.matches("-?\\d+(\\.\\d+)?")) return raw;
-        return Render.value(AxonValue.str(raw));
     }
 
     /** O estado anterior como literal AxonQL: em JSON, data e decimal voltariam como objetos. */

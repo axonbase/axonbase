@@ -1109,6 +1109,21 @@ public final class Datastore {
     }
 
     /**
+     * Executa a sentença que desfaz um passo de SAGA, já montada em estruturas do analisador: nada é lido de texto. No
+     * cluster ela tem a própria transação implícita, como um comando avulso.
+     */
+    AxonValue executeCompensation(Statement statement, Session session) {
+        Supplier<AxonValue> work = () ->
+            new Executor(this).execute(new Query(java.util.List.of(statement)), session, null);
+        if (commitCoordinator != null) {
+            return autocommit(session, work);
+        }
+        AxonValue result = work.get();
+        backend.flush();
+        return result;
+    }
+
+    /**
      * A parte deste nó numa consulta espalhada entre shards (veja {@link ShardPartial}). Passa pela prioridade por tipo
      * de carga, porque disputa vaga e processador como a consulta inteira faria, e pela auditoria por IA.
      *

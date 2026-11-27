@@ -1,0 +1,217 @@
+package com.axonbase.core.engine;
+
+import com.axonbase.common.Messages;
+import com.axonbase.parser.AxonQl;
+import com.axonbase.parser.Render;
+import com.axonbase.parser.ast.Expr;
+import com.axonbase.parser.ast.Statement;
+import com.axonbase.value.AxonValue;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * As sentenças que desfazem um passo de SAGA, montadas em estruturas do analisador. Nome de tabela, chave,
+ * propriedade e valor entram como dados e nunca são lidos como texto de comando. Só um participante remoto recebe
+ * texto ({@link #remoteText}), citado e conferido para ser exatamente a sentença montada.
+ */
+final class SagaUndo {
+
+    private SagaUndo() {
+    }
+
+    /** As sentenças que repõem o estado anterior ao passo, na ordem; vazia quando não há o que desfazer. */
+    static List<Statement> statements(Map<String, AxonValue> step) {
+        String operation = text(step, "operation");
+        String table = text(step, "table_name");
+        AxonValue before = step.get("before");
+        if ("RELATE".equalsIgnoreCase(operation)) {
+            if (before == null || !before.isObject()) {
+                throw refused(table);
+            }
+            return edge(table, before.asObject());
+        }
+        Expr.Literal key = storedKey(step);
+        if (before == null || !before.isObject() || before.asObject().isEmpty()) {
+            if (!"CREATE".equalsIgnoreCase(operation) || key == null) {
+                return List.of();
+            }
+            return List.of(new Statement.Delete(record(table, key), null, Statement.ReturnSpec.AFTER));
+        }
+        if (key == null) {
+            throw refused(table);
+        }
+        // o id é a própria chave do alvo: a escrita o mantém, ou o repõe quando recria o registro
+        Map<String, AxonValue> content = new LinkedHashMap<>(before.asObject());
+        content.remove("id");
+        return List.of(new Statement.Update(Statement.UpdateMode.UPSERT, false, record(table, key),
+            new Statement.Data.Content(new Expr.Literal(AxonValue.object(content))), null,
+            Statement.ReturnSpec.AFTER));
+    }
+
+    /** Remove a aresta e, quando ela já existia, recria-a só com as propriedades anteriores. */
+    private static List<Statement> edge(String kind, Map<String, AxonValue> edge) {
+        Expr from = record(text(edge, "from_table"), literalKey(text(edge, "from_key")));
+        Expr to = record(text(edge, "to_table"), literalKey(text(edge, "to_key")));
+        Expr name = new Expr.Ident(kind);
+        List<Statement> statements = new ArrayList<>();
+        statements.add(new Statement.Unrelate(from, name, to));
+        AxonValue existed = edge.get("existed");
+        if (existed == null || !existed.isBool() || !existed.asBool()) {
+            return statements;
+        }
+        List<Statement.Assignment> assignments = new ArrayList<>();
+        AxonValue properties = edge.get("properties");
+        if (properties != null && properties.isObject()) {
+            for (Map.Entry<String, AxonValue> property : properties.asObject().entrySet()) {
+                assignments.add(new Statement.Assignment(new Expr.Ident(property.getKey()),
+                    new Expr.Literal(property.getValue())));
+            }
+        }
+        statements.add(new Statement.Relate(from, name, to,
+            assignments.isEmpty() ? null : new Statement.Data.SetClause(assignments), Statement.ReturnSpec.AFTER));
+        return statements;
+    }
+
+    private static Expr.RecordId record(String table, Expr.Literal key) {
+        return new Expr.RecordId(new Expr.Ident(table), key);
+    }
+
+    /**
+     * A chave de um passo, ou {@code null} quando ele não tem uma. Passos gravados por versões anteriores só têm o
+     * texto cru: o que parece número é número, como antes, e o resto é texto.
+     */
+    private static Expr.Literal storedKey(Map<String, AxonValue> step) {
+        String literal = text(step, "record_literal");
+        if (!literal.isEmpty()) {
+            return literalKey(literal);
+        }
+        String raw = text(step, "record_key");
+        if (raw.isEmpty()) {
+            return null;
+        }
+        if (!raw.matches("-?\\d+(\\.\\d+)?")) {
+            return new Expr.Literal(AxonValue.str(raw));
+        }
+        if (raw.indexOf('.') < 0 && raw.length() < 19) {
+            return new Expr.Literal(AxonValue.num(Long.parseLong(raw)));
+        }
+        return new Expr.Literal(AxonValue.num(new BigDecimal(raw)));
+    }
+
+    /** Lê o literal gravado no passo. Só vale um texto ou um número; qualquer coisa a mais é recusada. */
+    private static Expr.Literal literalKey(String literal) {
+        List<Statement> parsed = AxonQl.parse("DELETE x:" + literal).statements();
+        if (parsed.size() == 1 && parsed.get(0) instanceof Statement.Delete delete && delete.cond() == null
+            && delete.target() instanceof Expr.RecordId target && target.table().equals(new Expr.Ident("x"))
+            && target.key() instanceof Expr.Literal key && (key.value().isString() || key.value().isNumber())) {
+            return key;
+        }
+        throw refused(literal);
+    }
+
+    /**
+     * O texto de uma sentença para o participante remoto: nomes entre aspas, valores como literais. O texto é lido de
+     * volta e só segue se for uma única sentença do tipo montado, sobre o mesmo alvo.
+     */
+    static String remoteText(Statement statement) {
+        String text = switch (statement) {
+            case Statement.Delete d -> "DELETE " + target(d.target());
+            case Statement.Update u when u.data() instanceof Statement.Data.Content c
+                && c.content() instanceof Expr.Literal content ->
+                "UPSERT " + target(u.target()) + " CONTENT " + Render.value(content.value());
+            case Statement.Unrelate u -> "UNRELATE " + path(u.from(), u.kind(), u.to());
+            case Statement.Relate r -> "RELATE " + path(r.from(), r.kind(), r.to()) + set(r.data());
+            default -> throw refused(statement.getClass().getSimpleName());
+        };
+        List<Statement> parsed = AxonQl.parse(text).statements();
+        if (parsed.size() != 1 || !sameTarget(statement, parsed.get(0))) {
+            throw refused(text);
+        }
+        return text;
+    }
+
+    private static boolean sameTarget(Statement wanted, Statement parsed) {
+        return switch (wanted) {
+            case Statement.Delete d -> parsed instanceof Statement.Delete p && p.cond() == null
+                && p.target().equals(d.target());
+            case Statement.Update u -> parsed instanceof Statement.Update p && p.cond() == null
+                && p.mode() == u.mode() && p.target().equals(u.target());
+            case Statement.Unrelate u -> parsed.equals(u);
+            case Statement.Relate r -> parsed instanceof Statement.Relate p && p.from().equals(r.from())
+                && p.kind().equals(r.kind()) && p.to().equals(r.to()) && sameFields(r.data(), p.data());
+            default -> false;
+        };
+    }
+
+    private static boolean sameFields(Statement.Data wanted, Statement.Data parsed) {
+        return fields(wanted).equals(fields(parsed));
+    }
+
+    private static List<Expr> fields(Statement.Data data) {
+        return data instanceof Statement.Data.SetClause set
+            ? set.assignments().stream().map(Statement.Assignment::path).toList() : List.of();
+    }
+
+    private static String target(Expr expr) {
+        if (expr instanceof Expr.RecordId rid && rid.table() instanceof Expr.Ident table
+            && rid.key() instanceof Expr.Literal key) {
+            AxonValue value = key.value();
+            return quoted(table.name()) + ":"
+                + (value.isNumber() ? Render.numberKey(value) : Render.value(value));
+        }
+        throw refused(String.valueOf(expr));
+    }
+
+    private static String path(Expr from, Expr kind, Expr to) {
+        if (!(kind instanceof Expr.Ident name)) {
+            throw refused(String.valueOf(kind));
+        }
+        return target(from) + "->" + quoted(name.name()) + "->" + target(to);
+    }
+
+    private static String set(Statement.Data data) {
+        if (!(data instanceof Statement.Data.SetClause set)) {
+            return "";
+        }
+        StringBuilder text = new StringBuilder();
+        String separator = " SET ";
+        for (Statement.Assignment assignment : set.assignments()) {
+            if (!(assignment.path() instanceof Expr.Ident field)
+                || !(assignment.value() instanceof Expr.Literal value)) {
+                throw refused(String.valueOf(assignment.path()));
+            }
+            text.append(separator).append(identifier(field.name())).append(" = ")
+                .append(Render.value(value.value()));
+            separator = ", ";
+        }
+        return text.toString();
+    }
+
+    private static String quoted(String name) {
+        return Render.value(AxonValue.str(name));
+    }
+
+    /** Nome de propriedade entre crases, ou entre {@code ⟨ ⟩} quando ele tem crase. Com os dois não há como citar. */
+    private static String identifier(String name) {
+        if (name.indexOf('`') < 0) {
+            return "`" + name + "`";
+        }
+        if (name.indexOf('⟩') < 0) {
+            return "⟨" + name + "⟩";
+        }
+        throw refused(name);
+    }
+
+    private static String text(Map<String, AxonValue> map, String key) {
+        AxonValue value = map.get(key);
+        return value != null && value.isString() ? value.asString() : "";
+    }
+
+    private static IllegalStateException refused(String detail) {
+        return new IllegalStateException(Messages.get("saga_compensation_refused", detail));
+    }
+}

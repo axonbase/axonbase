@@ -119,6 +119,17 @@ public final class Session {
         this.restoring = value;
     }
 
+    private com.axonbase.core.engine.SagaCompensation compensation;
+
+    /** A compensação de SAGA em curso nesta sessão, ou {@code null}. Só o motor constrói a marca. */
+    public com.axonbase.core.engine.SagaCompensation compensation() {
+        return compensation;
+    }
+
+    public void compensation(com.axonbase.core.engine.SagaCompensation value) {
+        this.compensation = value;
+    }
+
     /**
      * Sessão nova para repor dados em nome desta: mesmo namespace e banco, mesma identidade e mesmo teto de papel, sem
      * a transação, as variáveis nem as live queries dela.
