@@ -108,10 +108,10 @@ class DataRuleBypassTest {
     @Test
     void regraQueAtravessaUmLinkContinuaValendo() {
         Datastore ds = ds();
-        ds.execute("CREATE u:1 CONTENT {time: 'a'}", admin(), null);
+        ds.execute("CREATE u:1 CONTENT {equipe: 'a'}", admin(), null);
         ds.execute("CREATE d:1 CONTENT {dono: u:1}", admin(), null);
-        ds.execute("CREATE DATA RULE time_a APPLY dono.time = 'a'", admin(), null);
-        assertEquals(1, ds.execute("SELECT * FROM d", restricted("time_a", "main"), null).asArray().size());
+        ds.execute("CREATE DATA RULE equipe_a APPLY dono.equipe = 'a'", admin(), null);
+        assertEquals(1, ds.execute("SELECT * FROM d", restricted("equipe_a", "main"), null).asArray().size());
     }
 
     @Test
