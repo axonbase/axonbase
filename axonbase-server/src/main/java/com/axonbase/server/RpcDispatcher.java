@@ -279,6 +279,19 @@ public final class RpcDispatcher {
             args.get(2).asString(), args.get(3), ttl);
     }
 
+    /**
+     * As chamadas kv_* trazem namespace e banco nos parâmetros: o escopo do token precisa cobrir esses, e não só os
+     * da sessão. Com menos de dois parâmetros a validação de cada método recusa adiante.
+     */
+    private boolean kvScopeAllowed(Map<String, AxonValue> obj, Session session) {
+        List<AxonValue> args = paramsOf(obj);
+        if (!authRequired() || args == null || args.size() < 2) {
+            return true;
+        }
+        return args.get(0).isString() && args.get(1).isString()
+            && auth.allows(claimsOf(session.auth()), args.get(0).asString(), args.get(1).asString());
+    }
+
     private static String[] kvParams(String method, Map<String, AxonValue> obj, int min) {
         AxonValue params = obj.get("params");
         if (params == null || !params.isArray() || params.asArray().size() < min) {
@@ -797,10 +810,15 @@ public final class RpcDispatcher {
                 ds.cancelSession(session);
                 result = AxonValue.nul();
             }
-            case "kv_get" -> result = kvRead("kv_get", obj, session);
-            case "kv_set" -> result = kvWrite("kv_set", obj, session);
-            case "kv_del" -> result = kvWrite("kv_del", obj, session);
-            case "kv_scan" -> result = kvRead("kv_scan", obj, session);
+            case "kv_get", "kv_set", "kv_del", "kv_scan" -> {
+                if (!kvScopeAllowed(obj, session)) {
+                    error = Messages.get("rpc_scope_forbidden");
+                    errorCode = -32002;
+                } else {
+                    result = READ_METHODS.contains(method)
+                        ? kvRead(method, obj, session) : kvWrite(method, obj, session);
+                }
+            }
             default -> {
                 error = Messages.get("rpc_method_unsupported", method);
                 errorCode = -32601;
