@@ -101,6 +101,8 @@ O script para o contêiner e copia `/data.raft` para `/data/.raft` e `/data.trus
 
 Se a atualização falhar e for preciso voltar à imagem antiga no mesmo contêiner, faça isso antes de recriá-lo. Depois de recriado, a imagem antiga volta a procurar o estado em `/data.raft` e não o encontra.
 
+Numa máquina Linux descartável, `scripts/verificar-instalacao.sh` ensaia a instalação nova e a atualização.
+
 Se o contêiner antigo já foi removido (`docker compose down`, `docker rm`), o estado do Raft daquele nó se perdeu, como já acontecia nas versões anteriores. A base continua no volume. Não recrie os outros nós: copie o estado deles primeiro e confira se o nó recriado alcança o líder.
 
 ## Compose de cluster: autenticação e portas
