@@ -428,6 +428,9 @@ public final class Datastore {
     // namespaces e databases
     // ------------------------------------------------------------------
 
+    /** Travas e épocas por banco, que sobrevivem à releitura do catálogo. */
+    private final ConcurrentMap<String, Database.Coordination> databaseCoordination = new ConcurrentHashMap<>();
+
     public Database ensureDatabase(String ns, String db) {
         return ensureDatabase(null, ns, db);
     }
@@ -447,7 +450,8 @@ public final class Datastore {
             k -> new ConcurrentHashMap<>());
         boolean created = !dbs.containsKey(db);
         Database database = dbs.computeIfAbsent(db, k -> {
-            Database fresh = new Database(ns, db, backend);
+            Database fresh = new Database(ns, db, backend,
+                databaseCoordination.computeIfAbsent(ns + '\u0000' + db, key -> new Database.Coordination()));
             fresh.auditCatalog().listener((type, data) -> {
                 Map<String, Object> enriched = new java.util.LinkedHashMap<>(data);
                 enriched.put("ns", ns);
