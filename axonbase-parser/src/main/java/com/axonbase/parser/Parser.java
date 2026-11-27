@@ -196,6 +196,10 @@ public final class Parser {
                 if (atWord("call") && (peek(1).is(IDENT) || peek(1).is(KEYWORD))) {
                     yield parseCall();
                 }
+                // LEAVE também é contextual: tabelas e campos chamados "leave" continuam valendo
+                if (atWord("leave") && peekIsWord(1, "saga")) {
+                    yield parseLeaveSaga();
+                }
                 throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
             }
             default -> throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
@@ -314,12 +318,6 @@ public final class Parser {
         if (t.isKeyword("join")) {
             if (peek(1) != null && peek(1).isKeyword("saga")) {
                 return parseJoinSaga();
-            }
-            throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
-        }
-        if (t.isKeyword("leave")) {
-            if (peek(1) != null && peek(1).isKeyword("saga")) {
-                return parseLeaveSaga();
             }
             throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
         }
@@ -1077,6 +1075,10 @@ public final class Parser {
     }
 
     private Statement.Permissions parsePermissions() {
+        // NONE vira WHERE false nas quatro ações, para valer, exportar e reiniciar como qualquer outra condição
+        if (matchKeyword("none")) {
+            return Statement.Permissions.denied();
+        }
         Expr sel = null;
         Expr crt = null;
         Expr upd = null;
