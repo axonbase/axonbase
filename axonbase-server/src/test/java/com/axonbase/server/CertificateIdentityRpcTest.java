@@ -4,6 +4,7 @@ import com.axonbase.core.Session;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.security.AuthCatalog;
 import com.axonbase.server.auth.AuthService;
+import com.axonbase.server.auth.CertificateChallengeService;
 import com.axonbase.server.auth.TrustStoreRegistry;
 import com.axonbase.server.auth.UserStore;
 import com.axonbase.value.AxonJson;
@@ -55,7 +56,8 @@ class CertificateIdentityRpcTest {
         stores.register("icp_brasil", truststore.toString(), TestCertificates.PASSWORD.toCharArray(),
             "ICPBRASIL", List.of());
         AuthService auth = new AuthService("segredo", new UserStore(ds.authCatalog()));
-        rpc = new RpcDispatcher(ds, auth, true, 0, stores);
+        // a autoridade de teste não publica revogação; este teste trata de identidade
+        rpc = new RpcDispatcher(ds, auth, true, 0, stores, new CertificateChallengeService(true));
     }
 
     private void usuario(String nome, String db, String fingerprint) {

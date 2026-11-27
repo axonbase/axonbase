@@ -94,11 +94,16 @@ public final class RpcDispatcher {
 
     public RpcDispatcher(Datastore ds, AuthService auth, boolean requireAuth, long queryTimeoutMs,
                          TrustStoreRegistry trustStores) {
+        this(ds, auth, requireAuth, queryTimeoutMs, trustStores, new CertificateChallengeService());
+    }
+
+    public RpcDispatcher(Datastore ds, AuthService auth, boolean requireAuth, long queryTimeoutMs,
+                         TrustStoreRegistry trustStores, CertificateChallengeService certificateChallenges) {
         this.ds = ds;
         this.auth = auth;
         this.requireAuth = requireAuth;
         this.queryTimeoutMs = queryTimeoutMs;
-        this.certificateChallenges = new CertificateChallengeService();
+        this.certificateChallenges = certificateChallenges;
         this.trustStores = trustStores == null ? new TrustStoreRegistry() : trustStores;
     }
 

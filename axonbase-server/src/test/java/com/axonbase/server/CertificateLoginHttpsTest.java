@@ -64,7 +64,9 @@ class CertificateLoginHttpsTest {
             "AXON_PORT", String.valueOf(port),
             "AXON_TLS_CERT", servidor.file().toString(),
             "AXON_TLS_KEY", TestCertificates.PASSWORD,
-            "AXON_TLS_CA", truststore.toString()));
+            "AXON_TLS_CA", truststore.toString(),
+            // a autoridade de teste não publica revogação; este teste trata de identidade
+            "AXON_CERT_ALLOW_UNKNOWN_REVOCATION", "true"));
         server = AxonServer.start(ds, "secret-testing", config);
     }
 

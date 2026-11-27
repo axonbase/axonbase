@@ -54,7 +54,7 @@ public final class AxonServer {
     private final boolean requireAuth;
     private final ServerConfig config;
     private final TrustStoreRegistry trustStores;
-    private final CertificateChallengeService certificateChallenges = new CertificateChallengeService();
+    private final CertificateChallengeService certificateChallenges;
     private volatile com.axonbase.core.cluster.ClusterStatusProvider clusterStatus;
     private static final String READ_CONSISTENCY_HEADER = "Axon-Read-Consistency";
     private volatile com.axonbase.core.cluster.ClusterRuntime clusterRuntime;
@@ -112,6 +112,7 @@ public final class AxonServer {
         this.auth = auth;
         this.requireAuth = requireAuth;
         this.config = config;
+        this.certificateChallenges = new CertificateChallengeService(config.certAllowUnknownRevocation());
         this.trustStores = new TrustStoreRegistry();
         // registra o carregador de JKS e recarrega os truststores persistidos no plano de controle
         ds.jksRegistrar((name, path, password, collector, oids) -> {
@@ -307,11 +308,13 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new SqlServlet()), "/sql/*");
         ctx.addServlet(new ServletHolder(new TableServlet()), "/table/*");
         ctx.addServlet(new ServletHolder(new SigninServlet()), "/signin");
-        RpcServlet rpc = new RpcServlet(ds, auth, requireAuth, trustStores);
+        RpcServlet rpc = new RpcServlet(ds, auth, requireAuth, trustStores,
+            new CertificateChallengeService(config.certAllowUnknownRevocation()));
         WsRpcServlet ws = new WsRpcServlet(ds, auth, requireAuth, trustStores, wsOpen,
             wsFramesReceived, wsFramesSent, wsResponseTimeNanos, wsResponseCount,
             wsQueryErrors, wsNotLeaderErrors,
-            config.queryTimeout(), config.txnTimeout());
+            config.queryTimeout(), config.txnTimeout(),
+            new CertificateChallengeService(config.certAllowUnknownRevocation()));
         rpc.dispatcher.metrics(metrics);
         ws.dispatcher().metrics(metrics);
         rpc.dispatcher.activity(activity);
@@ -1540,8 +1543,8 @@ public final class AxonServer {
         }
 
         RpcServlet(Datastore ds, com.axonbase.server.auth.AuthService auth, boolean requireAuth,
-                   TrustStoreRegistry trustStores) {
-            this.dispatcher = new RpcDispatcher(ds, auth, requireAuth, 0, trustStores);
+                   TrustStoreRegistry trustStores, CertificateChallengeService challenges) {
+            this.dispatcher = new RpcDispatcher(ds, auth, requireAuth, 0, trustStores, challenges);
         }
 
         @Override

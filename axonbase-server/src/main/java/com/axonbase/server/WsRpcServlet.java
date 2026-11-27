@@ -72,8 +72,9 @@ public final class WsRpcServlet extends JettyWebSocketServlet {
                  AtomicLong openConnections, AtomicLong framesReceived, AtomicLong framesSent,
                  AtomicLong responseTimeNanos, AtomicLong responseCount,
                  AtomicLong queryErrors, AtomicLong notLeaderErrors,
-                 long queryTimeoutMs, long txnTimeoutMs) {
-        this.dispatcher = new RpcDispatcher(ds, auth, requireAuth, 0, trustStores);
+                 long queryTimeoutMs, long txnTimeoutMs,
+                 com.axonbase.server.auth.CertificateChallengeService certificateChallenges) {
+        this.dispatcher = new RpcDispatcher(ds, auth, requireAuth, 0, trustStores, certificateChallenges);
         this.openConnections = openConnections;
         this.framesReceived = framesReceived;
         this.framesSent = framesSent;
