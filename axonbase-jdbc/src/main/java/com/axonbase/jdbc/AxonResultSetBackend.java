@@ -2,6 +2,7 @@ package com.axonbase.jdbc;
 
 import com.axonbase.value.AxonValue;
 
+import java.math.BigDecimal;
 import java.sql.*;
 import java.util.*;
 
@@ -14,6 +15,7 @@ public class AxonResultSetBackend {
     private final List<String> columns = new ArrayList<>();
     private int rowIndex = -1;
     private boolean closed;
+    private boolean lastWasNull;
 
     public AxonResultSetBackend(AxonValue value) {
         if (value == null) return;
@@ -45,6 +47,27 @@ public class AxonResultSetBackend {
         }
     }
 
+    private String idTable;
+    private Set<String> idLabels = Set.of();
+
+    /** Resultado de um SELECT traduzido: colunas na ordem do SQL e o {@code id} sem o nome da tabela. */
+    AxonResultSetBackend(AxonValue value, SqlRecordIds.Shape shape) {
+        this(value);
+        if (shape == null || !rows.stream().allMatch(row -> shape.labels().containsAll(row.keySet()))) return;
+        // o Hibernate lê por posição, e um campo ausente no registro não pode deslocar as demais colunas
+        columns.clear();
+        columns.addAll(shape.labels());
+        idTable = shape.table();
+        idLabels = shape.idLabels();
+    }
+
+    private AxonValue key(AxonValue v) {
+        if (!(v.isString() || v.isRecordId())) return v;
+        String text = v.isString() ? v.asString() : v.asRecordId().toString();
+        if (!text.startsWith(idTable + ":")) return v;
+        return AxonValue.str(text.substring(idTable.length() + 1));
+    }
+
     public ResultSetMetaData getMetaData() throws SQLException {
         return JdbcProxy.create(ResultSetMetaData.class, new AxonResultSetMetaData(columns));
     }
@@ -55,7 +78,12 @@ public class AxonResultSetBackend {
     }
     public void close() { closed = true; rows.clear(); columns.clear(); }
     public boolean isClosed() { return closed; }
-    public boolean wasNull() { return false; }
+    public boolean wasNull() { return lastWasNull; }
+
+    /** Aplica o {@code setMaxRows} do statement; zero é sem limite. */
+    void limit(int maxRows) {
+        if (maxRows > 0 && rows.size() > maxRows) rows.subList(maxRows, rows.size()).clear();
+    }
 
     private Map<String, AxonValue> currentRow() throws SQLException {
         if (closed) throw new SQLException("ResultSet is closed");
@@ -68,7 +96,8 @@ public class AxonResultSetBackend {
         Map<String, AxonValue> row = currentRow();
         AxonValue v = row.get(label);
         if (v == null && label.indexOf('.') > 0) v = row.get(label.substring(label.indexOf('.') + 1));
-        return v;
+        lastWasNull = v == null || v.isNull() || v.isNone();
+        return !lastWasNull && idLabels.contains(label) ? key(v) : v;
     }
     private String colLabel(int i) throws SQLException {
         if (i < 1 || i > columns.size()) {
@@ -80,7 +109,7 @@ public class AxonResultSetBackend {
     public String getString(int i) throws SQLException { return getString(colLabel(i)); }
     public String getString(String label) throws SQLException {
         AxonValue v = col(label);
-        if (v == null) return null;
+        if (lastWasNull) return null;
         if (v.isString()) return v.asString();
         if (v.isDatetime()) return v.asInstant().toString();
         return v.isRecordId() ? v.asRecordId().toString() : v.toString();
@@ -89,15 +118,40 @@ public class AxonResultSetBackend {
     public int getInt(String label) throws SQLException { return (int) getLong(label); }
     public long getLong(int i) throws SQLException { return getLong(colLabel(i)); }
     public long getLong(String label) throws SQLException {
-        AxonValue v = col(label); return v != null && v.isNumber() ? v.asLong() : 0;
+        AxonValue v = col(label);
+        if (lastWasNull) return 0;
+        if (v.isNumber()) return v.asLong();
+        return number(label, v).longValue();
     }
     public double getDouble(int i) throws SQLException { return getDouble(colLabel(i)); }
     public double getDouble(String label) throws SQLException {
-        AxonValue v = col(label); return v != null && v.isNumber() ? v.asDouble() : 0;
+        AxonValue v = col(label);
+        if (lastWasNull) return 0;
+        if (v.isNumber()) return v.asDouble();
+        return number(label, v).doubleValue();
     }
     public boolean getBoolean(int i) throws SQLException { return getBoolean(colLabel(i)); }
     public boolean getBoolean(String label) throws SQLException {
-        AxonValue v = col(label); return v != null && v.isBool() && v.asBool();
+        AxonValue v = col(label);
+        if (lastWasNull) return false;
+        if (v.isBool()) return v.asBool();
+        if (v.isString() && (v.asString().equalsIgnoreCase("true") || v.asString().equalsIgnoreCase("false"))) {
+            return Boolean.parseBoolean(v.asString());
+        }
+        return number(label, v).signum() != 0;
+    }
+    /** Converte texto ou booleano em número; o que não for conversível é erro, e não zero. */
+    private static BigDecimal number(String label, AxonValue v) throws SQLException {
+        if (v.isNumber()) return v.asDecimal();
+        if (v.isBool()) return v.asBool() ? BigDecimal.ONE : BigDecimal.ZERO;
+        if (v.isString()) {
+            try {
+                return new BigDecimal(v.asString().trim());
+            } catch (NumberFormatException e) {
+                throw new SQLException("column " + label + " is not a number", e);
+            }
+        }
+        throw new SQLException("column " + label + " is not a number");
     }
     public Object getObject(int i) throws SQLException { return getObject(colLabel(i)); }
     public Object getObject(String label) throws SQLException {

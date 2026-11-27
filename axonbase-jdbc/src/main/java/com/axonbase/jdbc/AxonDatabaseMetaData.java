@@ -241,7 +241,7 @@ public class AxonDatabaseMetaData implements DatabaseMetaData {
     @Override public boolean updatesAreDetected(int type) { return false; }
     @Override public boolean deletesAreDetected(int type) { return false; }
     @Override public boolean insertsAreDetected(int type) { return false; }
-    @Override public boolean supportsBatchUpdates() { return false; }
+    @Override public boolean supportsBatchUpdates() { return true; }
     @Override public boolean supportsSavepoints() { return true; }
     @Override public boolean supportsNamedParameters() { return false; }
     @Override public boolean supportsMultipleOpenResults() { return false; }

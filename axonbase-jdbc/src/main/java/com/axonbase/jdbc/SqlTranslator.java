@@ -13,13 +13,13 @@ public class SqlTranslator {
     private static final Pattern INSERT = Pattern.compile(
         "INSERT\\s+INTO\\s+(\\w+)\\s*\\(([^)]+)\\)\\s*VALUES\\s*\\((.+?)\\)(?:\\s*;\\s*)?$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern SELECT = Pattern.compile(
+    static final Pattern SELECT = Pattern.compile(
         "SELECT\\s+(.+?)\\s+FROM\\s+(\\w+(?:\\s+\\w+)?)(?:\\s+WHERE\\s+(.+?))?(?:\\s+ORDER\\s+BY\\s+(.+?))?(?:\\s+LIMIT\\s+(\\d+))?(?:\\s+OFFSET\\s+(\\d+))?\\s*;?\\s*$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern UPDATE = Pattern.compile(
+    static final Pattern UPDATE = Pattern.compile(
         "UPDATE\\s+(\\w+)\\s+SET\\s+(.+?)(?:\\s+WHERE\\s+(.+?))?\\s*;?\\s*$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern DELETE = Pattern.compile(
+    static final Pattern DELETE = Pattern.compile(
         "DELETE\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(.+?))?\\s*;?\\s*$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern DROP = Pattern.compile(
@@ -55,6 +55,11 @@ public class SqlTranslator {
         TYPE_MAP.put("bool", "bool");
         TYPE_MAP.put("blob", "bytes");
         TYPE_MAP.put("bytes", "bytes");
+    }
+
+    /** Tradução usada pelo driver: além do dialeto, o {@code id} do SQL passa a comparar com o record id. */
+    static String translateStatement(String sql) {
+        return translate(SqlRecordIds.rewrite(sql));
     }
 
     public static String translate(String sql) {
@@ -123,7 +128,8 @@ public class SqlTranslator {
             char c = colDefs.charAt(i);
             if (inStr) {
                 cur.append(c);
-                if (c == quote && (i + 1 >= colDefs.length() || colDefs.charAt(i + 1) != quote)) inStr = false;
+                if (c == '\\' && i + 1 < colDefs.length()) cur.append(colDefs.charAt(++i));
+                else if (c == quote && (i + 1 >= colDefs.length() || colDefs.charAt(i + 1) != quote)) inStr = false;
                 continue;
             }
             if (c == '\'' || c == '"') { inStr = true; quote = c; cur.append(c); continue; }
@@ -182,6 +188,8 @@ public class SqlTranslator {
         String table = m.group(1);
         String[] colNames = m.group(2).split("\\s*,\\s*");
         String[] values = splitValues(m.group(3));
+        // quantidades diferentes (ou várias linhas) perderiam valores em silêncio: o servidor recusa o original
+        if (colNames.length != values.length) return sql;
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE ").append(table).append(" CONTENT {");
         for (int i = 0; i < colNames.length && i < values.length; i++) {
@@ -202,7 +210,8 @@ public class SqlTranslator {
             char c = vals.charAt(i);
             if (inStr) {
                 cur.append(c);
-                if (c == quote && (i + 1 >= vals.length() || vals.charAt(i + 1) != quote)) inStr = false;
+                if (c == '\\' && i + 1 < vals.length()) cur.append(vals.charAt(++i));
+                else if (c == quote && (i + 1 >= vals.length() || vals.charAt(i + 1) != quote)) inStr = false;
                 continue;
             }
             if (c == '\'' || c == '"') { inStr = true; quote = c; cur.append(c); continue; }
@@ -325,7 +334,8 @@ public class SqlTranslator {
             char c = cols.charAt(i);
             if (inStr) {
                 sb.append(c);
-                if (c == quote) inStr = false;
+                if (c == '\\' && i + 1 < cols.length()) sb.append(cols.charAt(++i));
+                else if (c == quote) inStr = false;
                 continue;
             }
             if (c == '\'' || c == '"') {
