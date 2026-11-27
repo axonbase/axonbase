@@ -1740,6 +1740,14 @@ public final class AxonServer {
         return out.toString();
     }
 
+    /** Usuário que o próprio certificado declara, pela regra do truststore; {@code null} quando não declara. */
+    static String certificateIdentity(TrustStoreRegistry stores, String store,
+                                      java.security.cert.X509Certificate certificate) {
+        return stores.usesIcpBrasilCollector(store)
+            ? extractIcpBrasilUserId(certificate)
+            : stores.collectUser(store, certificate);
+    }
+
     /**
      * Extrai CPF ou CNPJ de um certificado ICP-Brasil.
      *
@@ -1750,14 +1758,6 @@ public final class AxonServer {
      *    2.16.76.1.3.7 (pessoa jurídica), onde o CPF/CNPJ fica numa
      *    UTF8String/PrintableString dentro do DER da extensão.</p>
      */
-    /** Usuário que o próprio certificado declara, pela regra do truststore; {@code null} quando não declara. */
-    static String certificateIdentity(TrustStoreRegistry stores, String store,
-                                      java.security.cert.X509Certificate certificate) {
-        return stores.usesIcpBrasilCollector(store)
-            ? extractIcpBrasilUserId(certificate)
-            : stores.collectUser(store, certificate);
-    }
-
     private static String extractIcpBrasilUserId(java.security.cert.X509Certificate certificate) {
         try {
             LdapName ldapName = new LdapName(certificate.getSubjectX500Principal().getName());
