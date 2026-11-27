@@ -8,6 +8,7 @@ import com.axonbase.core.cluster.RaftOptions;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HybridClock;
 import com.axonbase.core.journal.JournalOptions;
+import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.shard.backup.BackupMember;
 import com.axonbase.core.shard.backup.ShardBackupNode;
 import com.axonbase.core.shard.backup.ShardJournalHooks;
@@ -28,6 +29,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 /**
  * Vários grupos Raft reais, sobre TCP (Transmission Control Protocol), no mesmo processo: o "conjunto de shards" dos
@@ -52,11 +54,18 @@ public final class ShardTestCluster implements AutoCloseable {
     private final Map<String, InetSocketAddress> addresses = new LinkedHashMap<>();
     private final List<String> shardIds = new ArrayList<>();
     private final int members;
+    /** A camada fria de cada nó, pelo identificador dele. */
+    private final Function<String, ColdTier> cold;
 
     private ShardTestCluster(Path root, boolean rocks, int members) {
+        this(root, rocks, members, node -> ColdTier.NONE);
+    }
+
+    private ShardTestCluster(Path root, boolean rocks, int members, Function<String, ColdTier> cold) {
         this.root = root;
         this.rocks = rocks;
         this.members = members;
+        this.cold = cold;
     }
 
     /** {@code shards} grupos de {@code members} nós, em memória. */
@@ -67,6 +76,11 @@ public final class ShardTestCluster implements AutoCloseable {
     /** Como {@link #memory}, com RocksDB em disco (backup físico e journal). */
     public static ShardTestCluster rocks(Path root, int shards, int members) {
         return new ShardTestCluster(root, true, members).start(shards);
+    }
+
+    /** Como {@link #rocks(Path, int, int)}, com a camada fria de cada nó. */
+    public static ShardTestCluster rocks(Path root, int shards, int members, Function<String, ColdTier> cold) {
+        return new ShardTestCluster(root, true, members, cold).start(shards);
     }
 
     /**
@@ -103,7 +117,7 @@ public final class ShardTestCluster implements AutoCloseable {
     public List<BackupMember> backupMembers(String shard) {
         return nodes(shard).stream().map(node -> (BackupMember) new ShardBackupNode(node.runtime(),
             (RocksDbBackend) node.backend(), node.journal(), dir(shard, node.id()).resolve("backups"),
-            java.time.Duration.ofSeconds(30))).toList();
+            java.time.Duration.ofSeconds(30), node.datastore())).toList();
     }
 
     private ShardTestCluster start(int shards) {
@@ -161,7 +175,7 @@ public final class ShardTestCluster implements AutoCloseable {
             ShardJournalHooks journal = backend instanceof RocksDbBackend
                 ? ShardJournalHooks.open(clock, dir(shard, id).resolve("journal"), JournalOptions.defaults()) : null;
             runtime.hooks(journal != null ? journal : new ClockHooks(clock));
-            Datastore datastore = new Datastore(backend);
+            Datastore datastore = new Datastore(backend, cold.apply(id));
             runtime.appliedBatchListener(datastore.appliedBatchListener());
             datastore.commitCoordinator(runtime, id);
             Node node = new Node(shard, id, backend, clock, runtime, datastore,
@@ -235,6 +249,7 @@ public final class ShardTestCluster implements AutoCloseable {
             if (node.journal() != null) {
                 node.journal().close();
             }
+            node.datastore().coldTier().close();
             if (node.backend() instanceof RocksDbBackend disk) {
                 disk.close();
             }

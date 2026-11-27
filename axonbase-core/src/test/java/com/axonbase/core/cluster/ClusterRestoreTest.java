@@ -8,6 +8,7 @@ import com.axonbase.core.dr.DrRestore;
 import com.axonbase.core.hlc.HlcTimestamp;
 import com.axonbase.core.journal.JournalOptions;
 import com.axonbase.core.journal.PitrJournal;
+import com.axonbase.core.shard.backup.ShardBackupNode;
 import com.axonbase.core.shard.backup.ShardJournalHooks;
 import com.axonbase.core.storage.CommitWatermark;
 import com.axonbase.core.storage.PhysicalBackups;
@@ -221,6 +222,38 @@ class ClusterRestoreTest {
         assertEquals(BASE + 1, result.prepared().lastIndex());
         Set<String> keys = keys(dir.resolve("restaurada"));
         assertTrue(keys.contains("k6") && !keys.contains("k7"), keys.toString());
+    }
+
+    @Test
+    @DisplayName("a base restaurada de um shard não guarda a identificação da história antiga, nem a do journal")
+    void forgetsShardIdentity() {
+        Path backups = dir.resolve("backups-shard");
+        try (RocksDbBackend source = new RocksDbBackend(dir.resolve("origem-shard").toString());
+             PhysicalBackups engine = PhysicalBackups.open(backups)) {
+            source.applyReplicated(Map.of(RaftApplier.APPLIED_KEY, RaftApplier.marker(BASE, 3), "base", bytes("b"),
+                ShardBackupNode.INCARNATION_KEY, bytes("historia-antiga"),
+                ShardJournalHooks.BARRIER_KEY, bytes("historia-antiga")), Set.of());
+            engine.create(source);
+        }
+        // uma barreira também no journal: a reaplicação a regrava, e ela precisa sair mesmo assim
+        Path directory = dir.resolve("journal-shard");
+        AtomicReference<CommitWatermark> mark = new AtomicReference<>(CommitWatermark.NONE);
+        try (PitrJournal journal = PitrJournal.open(directory,
+                JournalOptions.defaults().withIdleHeartbeat(Duration.ZERO), mark::get)) {
+            journal.offer(BASE + 1, new CommittedBatch("barreira", Map.of("k6", bytes("v6"),
+                ShardJournalHooks.BARRIER_KEY, bytes("historia-antiga")), Set.of(), false, stamp(BASE + 1)));
+            mark.set(new CommitWatermark(stamp(BASE + 1), BASE + 1));
+            journal.seal();
+        }
+        Path target = dir.resolve("restaurada-shard");
+
+        ClusterRestore.Prepared prepared = ClusterRestore.prepare(backups, 1, List.of(directory), target, null);
+
+        assertEquals(BASE + 1, prepared.lastIndex());
+        Set<String> keys = keys(target);
+        assertTrue(keys.containsAll(List.of("base", "k6")), keys.toString());
+        assertFalse(keys.contains(ShardBackupNode.INCARNATION_KEY), keys.toString());
+        assertFalse(keys.contains(ShardJournalHooks.BARRIER_KEY), keys.toString());
     }
 
     @Test
