@@ -158,7 +158,7 @@ jobs:
         run: python -m twine upload --skip-existing axonbase-sdk-python/dist/*
 
   publish-dotnet:
-    needs: [validate]
+    needs: [version, validate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -168,7 +168,14 @@ jobs:
       - run: dotnet pack axonbase-sdk-dotnet/AxonBaseSdk/AxonBaseSdk.csproj -c Release -o ./artifacts/nuget
       - env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push './artifacts/nuget/*.nupkg' --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # pré-lançamento não vai para o NuGet; o job termina com sucesso para o release no GitHub sair
+          if [[ "$VERSION" == *-* ]]; then
+            echo "::notice::NuGet: pré-lançamento ${VERSION} não é publicado"
+            exit 0
+          fi
+          dotnet nuget push './artifacts/nuget/*.nupkg' --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   publish-ruby:
     needs: [version, validate]
