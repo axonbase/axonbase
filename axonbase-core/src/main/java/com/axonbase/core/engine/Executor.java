@@ -1826,6 +1826,11 @@ public final class Executor {
         // Check if FROM is AUDIT_CASES virtual table
         if (sel.from() instanceof Expr.Ident id) {
             String tableName = id.name();
+            // as duas guardam o conteúdo original: filtro e máscara não as alcançam
+            if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName))
+                && com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+                throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_audit_refused"));
+            }
             if (isAuditCasesTable(tableName)) return runSelectAuditCases(sel);
             if (isAuditLogTable(tableName)) return runSelectAuditLog(sel);
         }
