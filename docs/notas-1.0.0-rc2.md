@@ -90,7 +90,7 @@ Atenção na atualização: certificado revogado passa a ser sempre recusado no 
 - Criar ou remover uma ligação entre bancos exige escopo de namespace ou maior. Criar ou remover uma definição de SAGA exige escopo root.
 - O root inicial do servidor não pode ser apagado. Uma sessão autenticada recebe erro, e o modo sem autenticação ignora o pedido.
 - `DEFINE EVENT`, `CREATE EVENT`, `ALTER EVENT` e `DROP EVENT` passam a exigir administrador, também numa importação. Tokens sem papel reconhecido, como os de escopo de banco sem `ROLES`, não definem mais eventos. Reinício e replicação não mudam.
-- Eventos que um editor criou antes continuam gravados e continuam disparando, com a identidade de quem faz a escrita, inclusive a do root. Revise cada tabela com `INFO FOR TABLE` antes de atualizar e remova o que não reconhecer.
+- Eventos que um editor criou antes continuam gravados e continuam disparando, com a identidade de quem faz a escrita, agora [confinados ao banco da tabela](#corpo-de-evento-confinado-ao-banco-da-tabela). Revise cada tabela com `INFO FOR TABLE` antes de atualizar e remova o que não reconhecer.
 - Um usuário auditado, mesmo administrador, não aprova nem nega o próprio caso, não libera um caso `DANGER` de outro usuário (o que o desbloquearia) e só justifica os próprios casos. Também não executa `CREATE AI AUDIT`, `DROP AI AUDIT`, `CREATE USER`, `DEFINE USER` ou `DROP USER`, não usa `signup`, não desbloqueia usuários, não remove usuários nem emite tokens de serviço pela gestão. Ninguém decide um caso aberto em seu próprio nome.
 - Uma AI AUDIT atribuída ao usuário e inexistente no banco corrente passa a negar o comando. Antes liberava. Só o `USE` passa, para sair do banco. Antes de apagar uma auditoria, retire a atribuição dos usuários.
 - Uma condição de `PERMISSIONS` que cita um dado ausente em `$auth` ou `$token` passa a negar a condição inteira, inclusive os outros ramos de um `OR`. Antes, a falta casava com um campo ausente. Vale também para sessões sem token (modo embutido e servidor sem autenticação) e para testes como `$auth = NONE`. Condições que não citam `$auth` nem `$token` não mudam.
@@ -102,6 +102,29 @@ Atenção na atualização: certificado revogado passa a ser sempre recusado no 
 - As máscaras passam a valer no retorno das escritas, em `SELECT VALUE`, em apelidos, no acesso por id, no `FETCH` e no `JOIN`.
 - Um usuário com Data Rule não usa `LIVE SELECT` nem `/export`.
 - Data Rules não são uma fronteira completa de isolamento. A lista do que elas não cobrem está no [README](../README.md#data-rules-coverage-and-limits).
+
+### Corpo de evento confinado ao banco da tabela
+
+- A condição e o corpo de um evento continuam rodando com a identidade de quem grava, mas só leem e gravam dados do banco da tabela. Vale para qualquer escritor (root, administrador, editor, modo sem autenticação, expiração por TTL (Time To Live), importação e compensação de saga) e para os programas chamados pelo evento, inclusive `SECURITY DEFINER`.
+- Continuam aceitos: `SELECT`, `CREATE`, `INSERT`, `UPDATE`, `UPSERT`, `DELETE`, `RELATE`, `UNRELATE`, `LET`, `RETURN`, `IF`, `ERROR`, `EXPLAIN`, `DESCRIBE`, `SHOW DATA RULES`, `CALL`, pontos de salvamento e `INFO` do banco ou de seus objetos.
+- São recusados: definições e remoções (`DEFINE`, `CREATE TABLE`, `ALTER`, `DROP`), usuários, acessos, auditoria, comandos de SAGA, `USE`, `LIVE`, `KILL`, `BEGIN`, `COMMIT`, `CANCEL`, outro banco por `banco.tabela`, `DATABASE LINK` e `INFO` de root ou de namespace.
+- Um evento antigo, mesmo definido pelo root, que faça algo recusado continua gravado e passa a fazer falhar a escrita que o dispara, com a mensagem `an event body only reads and writes data of the table's database` (no idioma configurado). Em disco ou em cluster, fora de transação explícita, nada dessa escrita é gravado. Numa expiração por TTL, as linhas deixam de expirar até o evento ser corrigido. O que o evento fazia fora do banco precisa passar para a aplicação.
+- As `PERMISSIONS` e as Data Rules de quem grava valem como antes, inclusive as subconsultas delas que leem outro banco. Já um `DEFAULT` ou `ASSERT` de campo que leia outro banco é recusado quando a escrita parte de um evento.
+
+### Definição de tabela exige administrador do banco
+
+Numa sessão autenticada, as ações abaixo exigem papel de administrador com escopo que cubra o banco. O modo sem autenticação não muda.
+
+- `DROP TABLE` e `REMOVE TABLE`.
+- Declarar `PERMISSIONS`, mesmo numa tabela nova.
+- Sobre uma tabela existente: `DEFINE TABLE` que mude o tipo de esquema, a opção `DROP`, o `SHARD BY` ou as `PERMISSIONS`; `CREATE TABLE` sem `IF NOT EXISTS`; `ALTER TABLE`; `DROP INDEX`; definir ou remover partição e TTL, e mover partição.
+- `DEFINE FIELD`, `DEFINE INDEX` e `CREATE INDEX` que troquem uma definição por outra diferente, e qualquer campo ou índice novo numa tabela com `PERMISSIONS`.
+
+Continuam como antes: criar tabela sem `PERMISSIONS` (também ao gravar um registro), acrescentar campo ou índice novo a uma tabela sem `PERMISSIONS`, `CREATE TABLE IF NOT EXISTS` e repetir sem mudança um `DEFINE TABLE`, `DEFINE FIELD` ou `DEFINE INDEX`, como fazem os migradores dos SDKs. Repetir `DEFINE PARTITION` ou `DEFINE TTL` sobre uma tabela existente exige administrador mesmo sem mudança.
+
+- Perdem essas ações o papel `operator` (inclusive o teto `Axon-Role-Cap: operator`) e os tokens sem papel reconhecido, como os de escopo de banco sem `ROLES`.
+- No driver JDBC com tradução de SQL, `DROP TABLE` exige administrador, e `CREATE TABLE` sobre uma tabela que já existe com outra definição é recusado.
+- A importação embutida por quem não é administrador completa as tabelas que ela mesma cria. Um dump com `PERMISSIONS`, ou que mude uma tabela já existente, é recusado por inteiro. `POST /import` já exigia administrador.
 
 ### Conversões
 
@@ -154,16 +177,15 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 - **`EXPLAIN`.** Sem `ANALYZE`, as linhas de uma tabela são contadas em fluxo, sem carregar os registros. Dentro de uma transação, essa contagem não conta como leitura. Subconsulta e `DATABASE LINK` ainda materializam o resultado para contar.
 - **Índice geográfico.** As metas de latência com 10 milhões de pontos foram atendidas em uma rodada, em nó único, sem rede e sem sincronizar o disco a cada escrita. O p99 (percentil 99) foi de 33,88 ms nos 20 vizinhos mais próximos e de 12,45 ms no raio de 500 m com `LIMIT 100`, para uma meta de 50 ms. As condições estão em [índice geográfico](indice-geografico.md#portão-de-latência).
 
-## Limites conhecidos
+## Limitações conhecidas
 
 - Num armazenamento em memória, um índice `UNIQUE` ainda pode aceitar duplicatas em escritas simultâneas feitas fora de transação.
 - `CANCEL SAGA` ainda não desfaz `UNRELATE` nem repõe as arestas que um `DELETE` removeu junto com o registro. Desfazer a criação de um registro remove também as arestas ligadas a ele.
 - Um `ROLLBACK TO` de ponto de salvamento não retira os passos de SAGA das escritas que ele desfez.
 - Num armazenamento em memória, um comando que falha no meio de várias linhas mantém as linhas anteriores.
-- O corpo de um evento roda na sessão de quem dispara a escrita. Um administrador de banco ou de namespace pode, assim, fazer o root executar comandos acima do escopo dele.
-- `DEFINE TABLE` não exige administrador. Um editor pode trocar ou retirar as `PERMISSIONS` de uma tabela.
 - `PERMISSIONS` de leitura não valem no acesso direto por id (`RETURN t:1.campo`), no `FETCH` e na leitura de um registro ligado.
 - Um record id guardado num campo volta como texto. Uma Data Rule como `dono.equipe = 'a'` não segue esse link e nega a linha. A travessia de grafo (`->pertence->u.equipe`) é seguida.
 - A auditoria de um usuário vem do token. Quem recebeu `AUDITED BY` depois de entrar só é alcançado no próximo login. Dois usuários auditados com papel de operador ainda podem aprovar os casos `WARNING` um do outro.
+- Pelo painel Enterprise, a pessoa auditada com papel de operador consegue decidir o próprio caso, porque o motor vê a conta do agente.
 - A estimativa do `EXPLAIN` conta também as linhas que uma Data Rule oculta.
 - Uma importação retida pela auditoria por IA e depois aprovada roda como um comando comum: não substitui registros existentes e, num nó único, não é tudo ou nada.
