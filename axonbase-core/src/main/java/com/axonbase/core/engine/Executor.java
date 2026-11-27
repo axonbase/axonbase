@@ -5452,8 +5452,14 @@ return score;
     }
 
     private AxonValue evalIdiom(Expr.Idiom i, Document doc) {
-        AxonValue base = idiomBase(i.base(), doc);
-        List<Expr.Part> parts = i.parts();
+        // ->aresta.campo chega como idiom dentro de idiom: achatado, o passo de grafo fica ao lado do campo
+        List<Expr.Part> parts = new ArrayList<>(i.parts());
+        Expr root = i.base();
+        while (root instanceof Expr.Idiom nested) {
+            parts.addAll(0, nested.parts());
+            root = nested.base();
+        }
+        AxonValue base = idiomBase(root, doc);
         for (int at = 0; at < parts.size(); at++) {
             AxonValue from = base;
             base = applyPart(base, parts.get(at));
