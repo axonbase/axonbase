@@ -2,6 +2,7 @@ package com.axonbase.jdbc;
 
 import com.axonbase.common.Messages;
 import com.axonbase.sdk.Axon;
+import com.axonbase.sdk.AxonQlText;
 import java.sql.*;
 import java.io.InputStream;
 import java.io.Reader;
@@ -51,7 +52,7 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
                 }
                 Object val = params.get(p++);
                 if (val == null) sb.append("null");
-                else if (val instanceof Number || val instanceof Boolean) sb.append(val);
+                else if (val instanceof Number || val instanceof Boolean) appendBare(sb, val.toString());
                 else sb.append(literal(val.toString()));
             } else {
                 sb.append(c);
@@ -68,9 +69,15 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
     @Override
     public int executeUpdate() throws SQLException { return super.executeUpdate(buildSql()); }
 
+    /** Número ou booleano sem aspas. Um negativo ganha um espaço antes: {@code -?} viraria o comentário {@code --}. */
+    private static void appendBare(StringBuilder sb, String value) {
+        if (value.startsWith("-")) sb.append(' ');
+        sb.append(value);
+    }
+
     /** Literal de texto do AxonQL, em que a barra invertida é o caractere de escape (dobrar a aspa não vale). */
     static String literal(String text) {
-        return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'";
+        return AxonQlText.literal(text);
     }
 
     private void setParam(int index, Object value) throws SQLException {

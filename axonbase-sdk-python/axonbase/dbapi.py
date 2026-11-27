@@ -94,6 +94,8 @@ class _SyncBridge:
 def _quote(text: str) -> str:
     """Literal de texto do AxonQL, em que a barra invertida é o escape (dobrar a aspa não vale)."""
     escaped = text.replace("\\", "\\\\").replace("'", "\\'")
+    # a quebra de linha escrita como \n impede que o valor saia de um comentário de linha do comando
+    escaped = escaped.replace("\n", "\\n").replace("\r", "\\r")
     return f"'{escaped}'"
 
 
@@ -531,7 +533,9 @@ class Cursor:
         if isinstance(v, bool):
             return "true" if v else "false"
         if isinstance(v, (int, float)):
-            return str(v)
+            text = str(v)
+            # um negativo ganha um espaço antes: "-%(n)s" viraria o comentário "--"
+            return f" {text}" if text.startswith("-") else text
         if isinstance(v, (bytes, bytearray, memoryview)):
             raise ProgrammingError("binary parameters are not supported")
         return _quote(str(v))
