@@ -1,6 +1,7 @@
 package com.axonbase.core;
 
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.engine.IndexBuilder;
 import com.axonbase.core.storage.RocksDbBackend;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -8,18 +9,22 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DisplayName("UNIQUE sob escritas simultâneas fora de transação")
 class UniqueConcurrencyTest {
 
     private static final int ROUNDS = 50;
     private static final int WRITERS = 4;
+    private static final int BUILD_ROWS = 1200;
+    private static final String BUILD = "DEFINE INDEX email ON TABLE c COLUMNS email UNIQUE";
 
     private static Session session() {
         Session s = Session.create();
@@ -122,6 +127,88 @@ class UniqueConcurrencyTest {
             assertThrows(RuntimeException.class, () -> run(ds, "CREATE c:z SET email = 'z'"));
             assertDoesNotThrow(() -> run(ds, "UPDATE c:trocado SET outro = 1"));
         }
+    }
+
+    @Test
+    @DisplayName("construção em segundo plano: uma escrita aceita por valor durante e depois, e uma chave por valor")
+    void onlineBuildClaimsEveryValue(@TempDir Path dir) throws Exception {
+        try (RocksDbBackend backend = open(dir)) {
+            Datastore ds = new Datastore(backend);
+            loadForBackgroundBuild(ds);
+            CountDownLatch paused = new CountDownLatch(1);
+            CountDownLatch go = new CountDownLatch(1);
+            AtomicInteger chunks = new AtomicInteger();
+            IndexBuilder.chunkHook(() -> {
+                if (chunks.incrementAndGet() == 2) {
+                    paused.countDown();
+                    try {
+                        go.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            });
+            try {
+                run(ds, BUILD);
+                assertTrue(paused.await(30, TimeUnit.SECONDS));
+
+                assertEquals(1, race(ds, i -> "CREATE c:durante" + i + " SET email = 'durante'"));
+            } finally {
+                go.countDown();
+                assertTrue(IndexBuilder.awaitAll(60_000));
+                IndexBuilder.chunkHook(null);
+            }
+
+            assertEquals(BUILD_ROWS + 1, claims(backend));
+            assertEquals(1, race(ds, i -> "CREATE c:depois" + i + " SET email = 'depois'"));
+            assertThrows(RuntimeException.class, () -> run(ds, "CREATE c:z SET email = 'u10'"));
+
+            run(ds, "DROP INDEX email ON TABLE c");
+
+            assertEquals(0, claims(backend));
+        }
+    }
+
+    @Test
+    @DisplayName("construção retomada depois de uma queda termina com uma chave por valor")
+    void resumedBuildClaimsEveryValue(@TempDir Path dir) throws Exception {
+        try (RocksDbBackend backend = open(dir)) {
+            Datastore ds = new Datastore(backend);
+            loadForBackgroundBuild(ds);
+            AtomicInteger chunks = new AtomicInteger();
+            IndexBuilder.chunkHook(() -> {
+                if (chunks.incrementAndGet() == 3) {
+                    throw new IndexBuilder.Crash();
+                }
+            });
+            try {
+                run(ds, BUILD);
+                assertTrue(IndexBuilder.awaitAll(60_000));
+            } finally {
+                IndexBuilder.chunkHook(null);
+            }
+        }
+        try (RocksDbBackend backend = open(dir)) {
+            Datastore ds = new Datastore(backend);
+            assertTrue(IndexBuilder.awaitAll(60_000));
+
+            assertEquals(BUILD_ROWS, claims(backend));
+            assertThrows(RuntimeException.class, () -> run(ds, "CREATE c:z SET email = 'u10'"));
+            assertEquals(1, race(ds, i -> "CREATE c:novo" + i + " SET email = 'novo'"));
+        }
+    }
+
+    /** Linhas suficientes para a construção ter mais de dois blocos. */
+    private static void loadForBackgroundBuild(Datastore ds) {
+        run(ds, "DEFINE TABLE c SCHEMALESS");
+        ds.findDatabase("n", "d").indexInlineRows(0);
+        for (int i = 0; i < BUILD_ROWS; i++) {
+            run(ds, "CREATE c:" + i + " SET email = 'u" + i + "'");
+        }
+    }
+
+    private static int claims(RocksDbBackend backend) {
+        return backend.keysWithPrefix("UQL|n|d|c|").size();
     }
 
     @Test

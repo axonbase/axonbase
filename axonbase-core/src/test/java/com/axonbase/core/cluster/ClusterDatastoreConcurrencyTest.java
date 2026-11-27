@@ -136,6 +136,37 @@ class ClusterDatastoreConcurrencyTest {
     }
 
     @Test
+    @DisplayName("UNIQUE construído sobre dados: uma escrita aceita por valor e as mesmas chaves em todos os nós")
+    void uniqueIndexBuiltOverDataIsTheSameOnEveryNode() throws Exception {
+        try (ClusterHarness cluster = ClusterHarness.rocks(dir, RaftOptions.defaults(), "n1", "n2", "n3")
+                .startAll()) {
+            ClusterRuntime leaderNode = cluster.awaitLeader();
+            Datastore leader = datastores(cluster).get(leaderNode.config().nodeId());
+            leader.execute("DEFINE TABLE u SCHEMALESS", session(), null);
+            for (int i = 0; i < 20; i++) {
+                leader.execute("CREATE u:" + i + " CONTENT { email: 'u" + i + "' }", session(), null);
+            }
+            leader.execute("DEFINE INDEX email ON TABLE u COLUMNS email UNIQUE", session(), null);
+
+            concurrently(8, 5, (worker, i) -> {
+                try {
+                    leader.execute("CREATE u:w" + worker + "x" + i + " CONTENT { email: 'v" + i + "' }",
+                        session(), null);
+                } catch (RuntimeException refused) {
+                    // recusado: é o esperado para todos menos um de cada valor
+                }
+                return 0;
+            });
+
+            assertEquals(25, leader.execute("SELECT * FROM u", session(), null).asArray().size());
+            cluster.awaitConverged();
+            Map<String, String> expected = ClusterHarness.data(leaderNode);
+            assertEquals(25, expected.keySet().stream().filter(k -> k.startsWith("UQL|")).count());
+            cluster.nodes().forEach(n -> assertEquals(expected, ClusterHarness.data(n), n.config().nodeId()));
+        }
+    }
+
+    @Test
     @DisplayName("inserções concorrentes de registros diferentes não conflitam entre si")
     void concurrentInsertsDoNotConflict() throws Exception {
         try (ClusterHarness cluster = ClusterHarness.rocks(dir, RaftOptions.defaults(), "n1", "n2", "n3")
