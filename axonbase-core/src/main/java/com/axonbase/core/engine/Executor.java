@@ -3913,8 +3913,44 @@ return score;
         def.permissions(dt.permissions());
         def.shardBy(dt.shardBy());
         db.catalog().defineTable(def);
-        control(db, ControlCommand.Kind.TABLE, dt.name(), com.axonbase.parser.Render.stmt(dt));
+        persistTable(db, dt.name());
         return AxonValue.nul();
+    }
+
+    /**
+     * Grava a tabela como ela está agora. O plano de controle guarda uma definição por tabela, então gravar o comando
+     * recebido (um ALTER, um DEFINE TABLE, um segundo CREATE TABLE) faria o reinício esquecer o que veio antes. As
+     * colunas declaradas por CREATE ou ALTER TABLE vão num CREATE TABLE; as de DEFINE FIELD têm definição própria.
+     */
+    private void persistTable(Database db, String table) {
+        if (ds.isReplaying()) {
+            return;
+        }
+        Catalog.TableDef def = db.catalog().table(table);
+        java.util.Set<String> fieldDefinitions = ds.controlSnapshot().commands().stream()
+            .filter(c -> c.kind() == ControlCommand.Kind.FIELD && c.namespace().equals(db.ns())
+                && c.database().equals(db.db()))
+            .map(ControlCommand::name)
+            .collect(java.util.stream.Collectors.toSet());
+        List<Statement.ColumnDef> columns = def.fields().values().stream()
+            .filter(field -> !fieldDefinitions.contains(table + ":" + field.name()))
+            .sorted(java.util.Comparator.comparing(Catalog.FieldDef::name))
+            .map(field -> new Statement.ColumnDef(field.name(), field.type() == null ? "any" : field.type(), false,
+                false, field.defaultExpr(), field.assertExpr(), field.references()))
+            .toList();
+        String definition = com.axonbase.parser.Render.stmt(new DefineTable(table, def.schemafull(), def.drop(),
+            def.permissions(), def.shardBy()));
+        if (!columns.isEmpty()) {
+            // o CREATE TABLE vem primeiro: o DEFINE TABLE mantém as colunas e repõe as opções da tabela
+            definition = com.axonbase.parser.Render.stmt(new Statement.CreateTable(table, false, def.schemafull(),
+                columns)) + ";\n" + definition;
+        }
+        control(db, ControlCommand.Kind.TABLE, table, definition);
+    }
+
+    /** A coluna passou a ser declarada pela tabela (ou saiu dela): um DEFINE FIELD antigo não pode repô-la. */
+    private void forgetFieldDefinition(Database db, String table, String field) {
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.FIELD, table + ":" + field);
     }
 
     private AxonValue runCreateTable(Statement.CreateTable ct) {
@@ -3945,9 +3981,10 @@ return score;
                 col.references()
             );
             def.fields().put(col.name(), fd);
+            forgetFieldDefinition(db, ct.name(), col.name());
         }
 
-        control(db, ControlCommand.Kind.TABLE, ct.name(), com.axonbase.parser.Render.stmt(ct));
+        persistTable(db, ct.name());
         return AxonValue.nul();
     }
 
@@ -3973,7 +4010,8 @@ return score;
             com.axonbase.core.partition.PartitionRunner.checkIndex(db, di.table(), di.name(),
                 di.searchAnalyzer() != null || di.geo() || di.vectorDimension() != null || di.count());
         }
-        if (di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
+        // no replay o analyzer pode ter sido apagado depois do índice: o índice continua, como antes do reinício
+        if (!ds.isReplaying() && di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", di.searchAnalyzer()));
         }
         if (di.vectorDimension() != null) {
@@ -4939,32 +4977,52 @@ return score;
     private AxonValue runAlterTable(Statement.AlterTable at) {
         Database db = db();
         Catalog.TableDef def = ensureTable(db, at.name());
+        // no replay um ALTER gravado pela rc1 no lugar da tabela fala de colunas que já não estão no catálogo
+        if (!ds.isReplaying()) {
+            checkAlterColumns(def, at);
+        }
         for (Statement.AlterOp op : at.operations()) {
             switch (op) {
                 case Statement.AddColumn ac -> {
                     def.fields().put(ac.name(), new Catalog.FieldDef(ac.name(), ac.type(), false,
                         ac.checkExpr(), ac.defaultExpr(), ac.references()));
+                    forgetFieldDefinition(db, at.name(), ac.name());
                 }
                 case Statement.DropColumn dc -> {
-                    if (def.fields().remove(dc.name()) == null) {
-                        throw errorStmt(Messages.get("stmt_field_missing", dc.name(), at.name()));
-                    }
+                    def.fields().remove(dc.name());
+                    forgetFieldDefinition(db, at.name(), dc.name());
                 }
                 case Statement.ModifyColumn mc -> {
                     Catalog.FieldDef existing = def.fields().get(mc.name());
-                    if (existing == null) {
-                        throw errorStmt(Messages.get("stmt_field_missing", mc.name(), at.name()));
-                    }
                     def.fields().put(mc.name(), new Catalog.FieldDef(mc.name(), mc.type(),
-                        existing.readonly(),
-                        mc.checkExpr() != null ? mc.checkExpr() : existing.assertExpr(),
-                        mc.defaultExpr() != null ? mc.defaultExpr() : existing.defaultExpr(),
-                        existing.references()));
+                        existing != null && existing.readonly(),
+                        mc.checkExpr() != null || existing == null ? mc.checkExpr() : existing.assertExpr(),
+                        mc.defaultExpr() != null || existing == null ? mc.defaultExpr() : existing.defaultExpr(),
+                        existing == null ? null : existing.references()));
+                    forgetFieldDefinition(db, at.name(), mc.name());
                 }
             }
         }
-        control(db, ControlCommand.Kind.TABLE, at.name(), com.axonbase.parser.Render.stmt(at));
+        persistTable(db, at.name());
         return AxonValue.nul();
+    }
+
+    /** Confere o ALTER inteiro antes de mudar o catálogo: ou todas as operações valem, ou nenhuma. */
+    private void checkAlterColumns(Catalog.TableDef def, Statement.AlterTable at) {
+        java.util.Set<String> columns = new java.util.HashSet<>(def.fields().keySet());
+        for (Statement.AlterOp op : at.operations()) {
+            String missing = switch (op) {
+                case Statement.AddColumn ac -> {
+                    columns.add(ac.name());
+                    yield null;
+                }
+                case Statement.DropColumn dc -> columns.remove(dc.name()) ? null : dc.name();
+                case Statement.ModifyColumn mc -> columns.contains(mc.name()) ? null : mc.name();
+            };
+            if (missing != null) {
+                throw errorStmt(Messages.get("stmt_field_missing", missing, at.name()));
+            }
+        }
     }
 
     private AxonValue runDropIndex(Statement.DropIndex di) {
@@ -4997,6 +5055,7 @@ return score;
         Database db = db();
         for (Catalog.TableDef def : db.catalog().tables()) {
             if (def.events().remove(de.name()) != null) {
+                ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.EVENT, def.name() + ":" + de.name());
                 return AxonValue.nul();
             }
         }
@@ -5008,6 +5067,7 @@ return score;
         if (!db.catalog().removeAnalyzer(da.name())) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", da.name()));
         }
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.ANALYZER, da.name());
         return AxonValue.nul();
     }
 
