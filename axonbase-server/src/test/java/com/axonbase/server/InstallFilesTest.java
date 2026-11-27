@@ -83,6 +83,11 @@ class InstallFilesTest {
     }
 
     @Test
+    void exemploDoReadmeGuardaOsDadosNumVolume() throws IOException {
+        assertTrue(read("README.md").contains("-v axonbase-data:/data"));
+    }
+
+    @Test
     void conferenciaDeVersoesIncluiOComposeEOReadme() throws IOException {
         String script = read("scripts/check-versions.sh");
 
