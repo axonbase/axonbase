@@ -552,6 +552,10 @@ public final class RpcDispatcher {
                 ActivityRegistry.Running run = tracker == null ? null : tracker.begin(ActivityRegistry.userOf(session),
                     session.namespace(), session.database(), sql, "ws", tracker.remoteOf(session), tracker.sessionIdOf(session),
                     session);
+                AxonValue workload = obj.get("workload");
+                if (run != null && workload != null && workload.isString()) {
+                    run.handle().requestWorkload(workload.asString());
+                }
                 com.axonbase.core.engine.QueryContext.Handle previousHandle = run == null ? null
                     : com.axonbase.core.engine.QueryContext.attach(run.handle());
                 boolean failed = false;

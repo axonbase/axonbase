@@ -4,7 +4,9 @@ import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.CommittedBatch;
 import com.axonbase.core.cluster.RaftApplier;
+import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.hlc.HlcTimestamp;
+import com.axonbase.core.partition.ColdBackups;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.RocksDbBackend;
 
@@ -21,16 +23,27 @@ import java.util.UUID;
 public final class ShardBackupNode implements BackupMember {
 
     /** Identificador da história do shard, replicado junto com os dados. */
-    static final String INCARNATION_KEY = "__shard/incarnation";
+    public static final String INCARNATION_KEY = "__shard/incarnation";
 
     private final ClusterRuntime cluster;
     private final RocksDbBackend backend;
     private final ShardJournalHooks journal;
     private final Path backupDir;
     private final Duration timeout;
+    private final Datastore datastore;
 
     public ShardBackupNode(ClusterRuntime cluster, RocksDbBackend backend, ShardJournalHooks journal, Path backupDir,
                            Duration timeout) {
+        this(cluster, backend, journal, backupDir, timeout, null);
+    }
+
+    /**
+     * @param datastore o motor do nó, para o backup bloquear os objetos da camada fria que ele referencia;
+     *                  {@code null} só quando o nó não tem camada fria
+     */
+    public ShardBackupNode(ClusterRuntime cluster, RocksDbBackend backend, ShardJournalHooks journal, Path backupDir,
+                           Duration timeout, Datastore datastore) {
+        this.datastore = datastore;
         this.cluster = cluster;
         this.backend = backend;
         this.journal = journal;
@@ -88,7 +101,9 @@ public final class ShardBackupNode implements BackupMember {
             () -> ClusterBackup.unavailable("backup_lagging", node(), minIndex));
         try (PhysicalBackups backups = PhysicalBackups.open(backupDir)) {
             // lido antes de copiar: a base contém pelo menos até este índice
-            PhysicalBackups.Info info = backups.create(backend);
+            // sem o bloqueio, a retenção ou a coleta de lixo apagaria objetos frios que o backup só referencia
+            PhysicalBackups.Info info = datastore == null ? backups.create(backend)
+                : ColdBackups.createPhysical(datastore, backups, backend, backupDir);
             return new Copy(node(), backupDir.toAbsolutePath().toString(), info.id(), applied,
                 journal.directory().toAbsolutePath().toString(), incarnation);
         }

@@ -2,7 +2,7 @@
 
 A restauração a um instante, ou PITR (Point-In-Time Recovery), devolve a base ao estado que ela tinha numa hora escolhida. O motor combina duas peças: um [backup físico](backup-fisico.md) tirado antes do instante e o **journal**, um arquivo que registra cada lote confirmado com um carimbo de tempo. Restaurar a um instante é restaurar o backup e reaplicar os lotes do journal até lá.
 
-Vale para nó único com armazenamento RocksDB (a base de dados embutida do AxonBase). Em cluster esta API (Application Programming Interface) fica desligada: ela responde 409 a quem tenta restaurar, importar ou apagar segmentos. A restauração de um cluster é a do [backup de cluster com shards](shards.md#backup-do-cluster-e-restauração-a-um-instante).
+Vale para nó único com armazenamento RocksDB (a base de dados embutida do AxonBase). Em cluster, cada nó arquiva os lotes confirmados no próprio journal, mas esta API (Application Programming Interface) fica desligada para restaurar: ela responde 409 a quem tenta restaurar, importar ou apagar segmentos, e a lista de janelas vem vazia. A restauração de um cluster a um instante tem dois caminhos: o [backup de cluster com shards](shards.md#backup-do-cluster-e-restauração-a-um-instante) e o [exercício de recuperação de desastre](operacao-e-resiliencia.md#recuperação-de-desastre).
 
 ## Ligar
 
@@ -171,7 +171,7 @@ Depois de uma **queda** do motor ou de uma **restauração** (física ou a um in
 
 - O instante é o do relógio do servidor: a exatidão em relação à hora real é a do NTP dele. Pedir ao segundo é seguro.
 - Um salto grande de relógio não quebra a ordem dos carimbos, mas faz o instante pedido deixar de corresponder à hora real.
-- Num cluster, o PITR existe pelo backup de cluster com shards (inclusive com um shard só), descrito em [shards.md](shards.md#backup-do-cluster-e-restauração-a-um-instante). A API desta página continua só para o nó único.
+- Em cluster a restauração não se faz com o servidor no ar nem por esta API, que continua só para o nó único. Ela reconstrói um cluster novo a partir do backup de cluster com shards (inclusive com um shard só), descrito em [shards.md](shards.md#backup-do-cluster-e-restauração-a-um-instante), ou a partir do arquivamento de um grupo, descrito em [operacao-e-resiliencia.md](operacao-e-resiliencia.md#recuperação-de-desastre).
 - O `kill -9` não perde dado confirmado da base, mas encerra a linha do tempo: os instantes posteriores à queda pedem um backup novo. O desligamento normal do servidor não encerra.
 
 ## Medidas

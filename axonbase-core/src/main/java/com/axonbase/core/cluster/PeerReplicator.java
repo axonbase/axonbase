@@ -588,6 +588,16 @@ final class PeerReplicator {
                     return;
                 }
                 lastSend = sent;
+                if (response.accepted() && response.matchIndex() < index) {
+                    // O log da 0.10.1, depois de truncar, ainda acha em memória o que apagou e aceita sem gravar.
+                    // Não conta para o quórum. Só um mandato novo faz o membro trocar essas sobras, porque ele
+                    // compara os termos: o líder deixa o cargo e disputa de novo.
+                    System.getLogger(PeerReplicator.class.getName()).log(System.Logger.Level.WARNING,
+                        "o membro antigo " + address + " aceitou a entrada " + index + " sem gravar (último índice "
+                            + response.matchIndex() + "); abrindo um mandato novo");
+                    leader.higherTerm(leader.term() + 1);
+                    return;
+                }
                 if (response.accepted()) {
                     storedByLegacy.put(index, leader.term());
                     storedByLegacy.remove(index - 64);

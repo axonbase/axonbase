@@ -12,24 +12,30 @@ import com.axonbase.core.storage.CommitWatermark;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 /**
- * O journal de PITR (Point-In-Time Recovery) de um nó de shard: cada entrada do Raft aplicada é arquivada com o
- * índice do log e o carimbo do líder. Faz também o que o {@link ClockHooks} faz com o relógio híbrido.
+ * O journal de PITR (Point-In-Time Recovery) de um nó de cluster, com um shard só ou vários: cada entrada do Raft
+ * aplicada é arquivada com o índice do log e o carimbo do líder. Envolve os ganchos que já existiam (normalmente o
+ * {@link ClockHooks}, do relógio híbrido), porque o consenso aceita um só. É o único journal de cluster: serve ao
+ * backup de cluster com shards e à recuperação de desastre.
  *
- * <p>No cluster o índice do journal é o do log, e a ordem dos índices é a ordem dos carimbos. Um nó que recebe o
- * estado inteiro pela rede não vê as entradas puladas: fica um buraco, que a restauração se recusa a atravessar.</p>
+ * <p>No cluster o índice do journal é o do log, e a ordem dos índices é a ordem dos carimbos. A marca d'água é a
+ * última entrada entregue, retomada dos segmentos ao reabrir, e o que veio depois do arquivado é pedido de volta ao
+ * nó ({@link #replayFrom}). Um nó que recebe o estado inteiro pela rede não vê as entradas puladas: fica um buraco,
+ * que outro nó cobre ou que a restauração se recusa a atravessar.</p>
  */
 public final class ShardJournalHooks implements ReplicationHooks, AutoCloseable {
 
     /** Chave que marca uma entrada de barreira; o valor é a encarnação do shard. */
-    static final String BARRIER_KEY = "__shard/barrier";
+    public static final String BARRIER_KEY = "__shard/barrier";
     /** Quantas barreiras recentes ficam lembradas para quem as pediu perguntar o carimbo. */
     private static final int REMEMBERED = 64;
 
-    private final ClockHooks clockHooks;
+    private final ReplicationHooks next;
     private final Path directory;
     private final PitrJournal journal;
     /** Carimbo de cada barreira recente, por índice. */
@@ -39,42 +45,62 @@ public final class ShardJournalHooks implements ReplicationHooks, AutoCloseable 
             return size() > REMEMBERED;
         }
     };
-    private volatile CommitWatermark applied = CommitWatermark.NONE;
+    private final AtomicReference<CommitWatermark> applied = new AtomicReference<>(CommitWatermark.NONE);
 
-    private ShardJournalHooks(HybridClock clock, Path directory, JournalOptions options) {
-        this.clockHooks = new ClockHooks(clock);
+    private ShardJournalHooks(Path directory, JournalOptions options, ReplicationHooks next) {
+        this.next = Objects.requireNonNull(next, "next");
         this.directory = directory;
         // a marca d'água é a última entrada já entregue ao journal
-        this.journal = PitrJournal.open(directory, options, () -> applied);
+        this.journal = PitrJournal.open(directory, options, applied::get);
+        // ao reabrir ela continua de onde os segmentos pararam, em vez de recomeçar do zero
+        applied.accumulateAndGet(journal.archived(), ShardJournalHooks::latest);
     }
 
     /**
      * @param clock o relógio do armazenamento do nó
      */
     public static ShardJournalHooks open(HybridClock clock, Path directory, JournalOptions options) {
-        return new ShardJournalHooks(clock, directory, options);
+        return open(directory, options, new ClockHooks(clock));
+    }
+
+    /**
+     * @param directory onde ficam os segmentos deste nó
+     * @param next      os ganchos que continuam valendo, normalmente {@link ClockHooks}
+     */
+    public static ShardJournalHooks open(Path directory, JournalOptions options, ReplicationHooks next) {
+        return new ShardJournalHooks(directory, options, next);
+    }
+
+    /** O que veio depois do último lote arquivado pode ter ficado na fila quando o nó caiu. */
+    @Override
+    public long replayFrom() {
+        long archived = journal.archived().index();
+        // um journal novo não pede a história: quem liga o PITR começa a arquivar dali em diante
+        long own = archived == 0 ? Long.MAX_VALUE : archived + 1;
+        return Math.min(own, next.replayFrom());
     }
 
     @Override
     public void recovered(CommittedBatch batch) {
-        clockHooks.recovered(batch);
+        next.recovered(batch);
     }
 
     @Override
     public CommittedBatch stamp(CommittedBatch batch) {
-        return clockHooks.stamp(batch);
+        return next.stamp(batch);
     }
 
     @Override
     public boolean accept(CommittedBatch batch) {
-        return clockHooks.accept(batch);
+        return next.accept(batch);
     }
 
     @Override
     public void committed(long index, long term, CommittedBatch batch) {
+        next.committed(index, term, batch);
         // entra na fila antes de a marca d'água andar, para a marca nunca passar do que o journal recebeu
         journal.offer(index, batch);
-        applied = new CommitWatermark(batch.stamp(), index);
+        applied.accumulateAndGet(new CommitWatermark(batch.stamp(), index), ShardJournalHooks::latest);
         synchronized (barriers) {
             if (batch.puts().containsKey(BARRIER_KEY)) {
                 barriers.put(index, batch.stamp());
@@ -106,7 +132,7 @@ public final class ShardJournalHooks implements ReplicationHooks, AutoCloseable 
 
     /** Espera o journal ter recebido a entrada do índice. */
     void awaitIndex(long index, Duration timeout) {
-        await(() -> applied.index() >= index, timeout, index);
+        await(() -> applied.get().index() >= index, timeout, index);
     }
 
     private void await(BooleanSupplier reached, Duration timeout, long index) {
@@ -125,6 +151,10 @@ public final class ShardJournalHooks implements ReplicationHooks, AutoCloseable 
                 }
             }
         }
+    }
+
+    private static CommitWatermark latest(CommitWatermark a, CommitWatermark b) {
+        return new CommitWatermark(HlcTimestamp.max(a.stamp(), b.stamp()), Math.max(a.index(), b.index()));
     }
 
     @Override

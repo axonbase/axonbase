@@ -1844,6 +1844,8 @@ public final class Executor {
         boolean[] stopped = {false};
         for (String lead : RECORD_KEY_LEADS) {
             kv.scanPrefix(prefix + lead, key -> {
+                // por registro: cancelamento e orçamento do QoS valem também nas varreduras seriais
+                QueryContext.checkCancelled();
                 if (!visitor.test(key)) {
                     stopped[0] = true;
                     return false;
@@ -1865,6 +1867,7 @@ public final class Executor {
         boolean[] stopped = {false};
         for (String lead : RECORD_KEY_LEADS) {
             kv.scanEntries(prefix + lead, (key, value) -> {
+                QueryContext.checkCancelled();
                 if (!visitor.test(new RawRecord(key, value))) {
                     stopped[0] = true;
                     return false;

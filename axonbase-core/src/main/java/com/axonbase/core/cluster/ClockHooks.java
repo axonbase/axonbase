@@ -11,7 +11,8 @@ import java.util.Objects;
  * índices do log é a ordem dos carimbos, inclusive depois de uma troca de líder.
  *
  * <p>Use o relógio do armazenamento ({@code RocksDbBackend#clock}), que já garante em disco um teto acima de tudo que
- * emite. O journal de PITR não é ligado em cluster.</p>
+ * emite. Com o PITR ligado em cluster, o journal envolve estes ganchos
+ * ({@code com.axonbase.core.shard.backup.ShardJournalHooks}).</p>
  */
 public final class ClockHooks implements ReplicationHooks {
 
