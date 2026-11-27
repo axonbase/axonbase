@@ -30,7 +30,7 @@ In an authenticated session, a database administrator is required to drop a tabl
 
 Expressions that come from a schema or a policy (field `DEFAULT` and `ASSERT`, `CHECK`, `PERMISSIONS`, data rules, event conditions, program parameter defaults and `LIVE SELECT` filters and columns) only read, and only the database of the table. This holds for subqueries and for the programs they call: writes, schema, user, access, saga, `USE`, transaction, `KILL` and `LIVE` statements, `kv::set`, `kv::del`, other databases and database links are refused. Stored definitions still load on restart and fail when evaluated. An AxonPL function only reads, also through subqueries.
 
-Naming another database of the namespace (`database.table`) requires a namespace or root identity. In an authenticated session, `DEFINE`, `CREATE` and `DROP` of embeddings and analyzers require a database administrator, except repeating the current definition unchanged.
+Naming another database of the namespace (`database.table`) requires a namespace or root identity. In an authenticated session, `DEFINE`, `CREATE` and `DROP` of embeddings and analyzers require a database administrator, except repeating the current definition unchanged. The same applies to `CREATE`, `CREATE OR REPLACE` and `DROP` of AxonPL functions, procedures and packages (only an unchanged `CREATE OR REPLACE` stays open to writers). Calling them does not change. Programs stored earlier keep running as the caller, so review them with `INFO FOR DATABASE` and `INFO FOR FUNCTION`, `PROCEDURE` or `PACKAGE`.
 
 `$auth` and `$token` hold the claims of the session token (`$auth.id` is the user name). An authenticated session cannot set them.
 

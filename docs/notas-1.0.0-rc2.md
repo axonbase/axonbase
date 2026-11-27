@@ -171,6 +171,24 @@ Uma subconsulta de várias sentenças na consulta do próprio usuário continua 
 - Perdem essas ações o papel `operator` (inclusive o teto `Axon-Role-Cap: operator`, usado pelo painel Enterprise) e os tokens sem papel reconhecido.
 - A importação embutida por quem não é administrador é recusada quando o dump traz um embedding ou analisador que o banco ainda não tem. `POST /import` já exigia administrador. Reinício e replicação não mudam.
 
+### Funções, procedures e pacotes exigem administrador do banco
+
+Antes, um editor podia trocar uma procedure que o root chamava com `CALL`, e o corpo rodava com o poder do root. Também podia trocar uma função citada numa `PERMISSIONS` e abrir a tabela.
+
+- `CREATE FUNCTION`, `CREATE PROCEDURE` e `CREATE PACKAGE`, com ou sem `OR REPLACE`, e `DROP FUNCTION`, `DROP PROCEDURE` e `DROP PACKAGE` exigem administrador com escopo que cubra o banco, inclusive numa importação e dentro de um programa.
+- Repetir com `CREATE OR REPLACE` a definição em vigor, sem mudança, continua aberto a quem grava e não altera versão, datas nem dono. Um programa `SECURITY DEFINER` já exigia papel de administrador.
+- Perdem essas ações o papel `operator` (inclusive o teto `Axon-Role-Cap: operator`, usado pelo painel Enterprise) e os tokens sem papel reconhecido. No painel, o operador passa a receber recusa ao salvar ou apagar um programa.
+- Chamar (`CALL` e chamada em expressão) e depurar não mudam.
+- A importação embutida por quem não é administrador é recusada quando o dump traz um programa que o banco não tem ou que difere do atual. `POST /import` já exigia administrador.
+- Reinício, replicação, restauração de backup, movimentação de shards, modo embutido e servidor sem autenticação não mudam.
+
+Programas que editores criaram ou trocaram antes continuam gravados e continuam rodando, com a identidade de quem chama. Revise cada banco antes de liberar o uso:
+
+1. `INFO FOR DATABASE` lista funções, procedures e pacotes, com a versão de cada um.
+2. `INFO FOR FUNCTION nome`, `INFO FOR PROCEDURE nome` e `INFO FOR PACKAGE nome` mostram o código (`source`), a versão, as datas e o modo (`security`). O resultado não informa quem escreveu: compare o código com o que está no controle de versão da aplicação.
+3. `INFO FOR TABLE tabela` mostra as `PERMISSIONS` e os eventos que citam esses programas.
+4. Como administrador, substitua com `CREATE OR REPLACE` ou apague com `DROP` o que não reconhecer.
+
 ### `CREATE TABLE IF NOT EXISTS`
 
 A forma era recusada pelo analisador e passa a ser aceita. `exists` não virou palavra reservada.
@@ -238,7 +256,7 @@ As conversões passam a recusar entrada inválida em vez de gravar o instante at
 - Numa consulta `banco.tabela` feita por identidade de namespace ou root, as `PERMISSIONS` e as Data Rules aplicadas são as do banco da sessão, não as do banco citado.
 - Um `LIVE SELECT` não aplica as `PERMISSIONS` de leitura aos avisos, e um `$parâmetro` do filtro é lido das variáveis de quem grava.
 - Um `DATABASE LINK` vale para todo o namespace: um usuário de banco consegue consultá-lo, com a credencial gravada na ligação.
-- Criar, substituir e apagar função, procedure ou pacote não exige papel de administrador. Um editor pode trocar uma procedure que o root chama com `CALL`, ou uma função citada numa `PERMISSIONS`.
+- Um erro de `LIVE SELECT` que não seja uma recusa direta de acesso (por exemplo, uma falha ao avaliar o filtro ou uma coluna) ainda pode derrubar a escrita de quem grava.
 - `REEMBED` não exige administrador e regrava as linhas sem consultar as `PERMISSIONS`.
 - Uma Data Rule cuja subconsulta leia linhas sujeitas à própria regra entra em recursão e a consulta falha.
 - Pelo painel Enterprise, a pessoa auditada com papel de operador consegue decidir o próprio caso, porque o motor vê a conta do agente.
