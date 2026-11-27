@@ -373,7 +373,16 @@ public final class Executor {
     // Permisos de táboa (PERMISSIONS FOR ... WHERE ...)
     // ------------------------------------------------------------------
 
+    /** A escrita nesta tabela é a que desfaz um passo de SAGA: repõe o que já existia. */
+    private boolean compensates(String table) {
+        SagaCompensation compensation = session.compensation();
+        return compensation != null && compensation.restores(table);
+    }
+
     private boolean allowed(Document doc, String table, String action) {
+        if (!"select".equals(action) && compensates(table)) {
+            return true;
+        }
         Catalog.TableDef def = db().catalog().table(table);
         if (def == null || def.permissions() == null) {
             return true;
@@ -1478,6 +1487,9 @@ public final class Executor {
 
     /** O usuário tem Data Rule ou a tabela tem PERMISSIONS para a ação. */
     private boolean restrictsWrite(Database db, String table, String action) {
+        if (compensates(table)) {
+            return false;
+        }
         if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
             return true;
         }
@@ -1661,18 +1673,25 @@ public final class Executor {
         if (def == null) {
             return;
         }
-        autoEmbed(db, def, obj, before);
+        // quem desfaz um passo de SAGA repõe o valor que existia: nada é gerado nem conferido de novo
+        boolean compensating = compensates(table);
+        if (!compensating) {
+            autoEmbed(db, def, obj, before);
+        }
         for (Catalog.FieldDef fd : def.fields().values()) {
             String fieldName = fd.name();
             boolean present = obj.containsKey(fieldName);
             AxonValue value = present ? obj.get(fieldName) : null;
-            if (!present && fd.defaultExpr() != null) {
+            if (!present && fd.defaultExpr() != null && !compensating) {
                 obj.put(fieldName, asDefinition(() -> eval(fd.defaultExpr())));
                 present = true;
                 value = obj.get(fieldName);
             }
             if (present && value != null && fd.type() != null && !value.isNull() && !value.isNone()) {
                 AxonValue coerced = coerceType(fd.type(), value);
+                if (coerced == null && compensating) {
+                    coerced = value;
+                }
                 if (coerced == null) {
                     throw AxonError.internal(Messages.get("stmt_field_type_invalid",
                         fieldName, fd.type(), value));
@@ -1680,14 +1699,15 @@ public final class Executor {
                 obj.put(fieldName, coerced);
                 value = coerced;
             }
-            if (present && value != null && fd.assertExpr() != null) {
+            if (present && value != null && fd.assertExpr() != null && !compensating) {
                 AxonValue asserted = value;
                 AxonValue ok = asDefinition(() -> evalWithValue(fd.assertExpr(), asserted));
                 if (!truthy(ok)) {
                     throw AxonError.internal(Messages.get("stmt_assert_failed", fieldName, value));
                 }
             }
-            if (present && value != null && fd.references() != null && (value.isRecordId() || value.isString())) {
+            if (present && value != null && fd.references() != null && !compensating
+                && (value.isRecordId() || value.isString())) {
                 validateReference(db, fd.references(), value);
             }
         }
@@ -6224,6 +6244,9 @@ return score;
 
     /** Injeta nos campos do novo registro os valores mapeados pelas data rules do usuário. */
     private void injectDataRuleFields(Map<String, AxonValue> obj) {
+        if (session.compensation() != null) {
+            return;
+        }
         for (var entry : dataRuleInjections().entrySet()) {
             AxonValue value = asPolicy(() -> eval(entry.getValue()));
             if (value != null && !value.isNone()) {
@@ -6302,6 +6325,7 @@ return score;
 
     /** Retorna true se o documento passa pelo filtro das Data Rules. */
     private boolean dataRuleFilter(Document doc) {
+        if (session.compensation() != null && compensates(doc.id().table())) return true;
         List<Expr> predicates = dataRulePredicates();
         if (predicates.isEmpty()) return true;
         Expr combined = predicates.size() == 1 ? predicates.get(0)

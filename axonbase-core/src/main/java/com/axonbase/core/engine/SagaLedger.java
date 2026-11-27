@@ -257,9 +257,9 @@ public class SagaLedger {
 
         for (Statement undo : SagaUndo.statements(step)) {
             if (linkDef == null) {
-                executeLocally(undo, caller, stepNs, stepDb);
+                executeLocally(undo, strField(step, "table_name"), caller, stepNs, stepDb);
             } else {
-                linkClient.query(linkDef, SagaUndo.remoteText(undo));
+                executeRemotely(linkDef, undo);
             }
         }
         markCompensated(corrId, stepOrder);
@@ -269,13 +269,25 @@ public class SagaLedger {
      * Roda a sentença no banco do passo, com a identidade e o teto de papel de quem cancela, numa sessão que não
      * executa nada além dela.
      */
-    private void executeLocally(Statement undo, Session caller, String stepNs, String stepDb) {
+    private void executeLocally(Statement undo, String table, Session caller, String stepNs, String stepDb) {
         // a compensação repõe o que já existia: não passa pelas restrições das escritas novas
         Session target = caller.restoringCopy();
         target.namespace(stepNs);
         target.database(stepDb);
-        target.compensation(new SagaCompensation(undo));
+        target.compensation(new SagaCompensation(undo, table));
         ds.executeCompensation(undo, target);
+    }
+
+    /**
+     * No participante a sentença roda como um comando da credencial da ligação. Um DELETE que as PERMISSIONS de lá
+     * pulam não devolve erro, então o registro é procurado antes de o passo contar como compensado.
+     */
+    private void executeRemotely(Datastore.DatabaseLinkDef linkDef, Statement undo) {
+        linkClient.query(linkDef, SagaUndo.remoteText(undo));
+        if (undo instanceof Statement.Delete delete
+            && linkClient.query(linkDef, SagaUndo.remoteProbe(delete)).stream().anyMatch(AxonValue::isObject)) {
+            throw new IllegalStateException(Messages.get("saga_compensation_not_applied", linkDef.name()));
+        }
     }
 
     private void markCompensated(String corrId, long stepOrder) {

@@ -134,6 +134,17 @@ final class SagaUndo {
         return text;
     }
 
+    /** A leitura que confere, no participante remoto, se o registro do DELETE ainda existe. */
+    static String remoteProbe(Statement.Delete delete) {
+        String text = "SELECT * FROM " + target(delete.target());
+        List<Statement> parsed = AxonQl.parse(text).statements();
+        if (parsed.size() != 1 || !(parsed.get(0) instanceof Statement.Select select) || select.cond() != null
+            || !delete.target().equals(select.from())) {
+            throw refused(text);
+        }
+        return text;
+    }
+
     private static boolean sameTarget(Statement wanted, Statement parsed) {
         return switch (wanted) {
             case Statement.Delete d -> parsed instanceof Statement.Delete p && p.cond() == null
