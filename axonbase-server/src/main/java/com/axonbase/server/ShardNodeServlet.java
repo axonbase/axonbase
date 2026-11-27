@@ -47,9 +47,18 @@ final class ShardNodeServlet extends HttpServlet {
     private final transient HybridClock clock;
     private final transient Supplier<BackupMember> backup;
     private final transient Supplier<String> secret;
+    private final transient Tracker tracker;
+
+    /** Executa um pedido com o registro de atividade, o cancelamento e o prazo de consulta do {@code /sql}. */
+    @FunctionalInterface
+    interface Tracker {
+        ShardReply run(HttpServletRequest req, Session session, ShardRequest request, Supplier<ShardReply> work);
+    }
 
     ShardNodeServlet(Datastore datastore, Function<HttpServletRequest, Session> sessions, boolean requireAuth,
-                     Supplier<ClusterRuntime> cluster, Supplier<BackupMember> backup, Supplier<String> secret) {
+                     Supplier<ClusterRuntime> cluster, Supplier<BackupMember> backup, Supplier<String> secret,
+                     Tracker tracker) {
+        this.tracker = tracker;
         this.secret = secret;
         this.backup = backup;
         this.datastore = datastore;
@@ -118,13 +127,21 @@ final class ShardNodeServlet extends HttpServlet {
             return;
         }
         try {
-            ShardReply reply = new ShardNode(datastore, cluster.get(), clock).execute(request, session);
+            Supplier<ShardReply> work =
+                () -> new ShardNode(datastore, cluster.get(), clock).execute(request, session);
+            // as perguntas internas (credencial, definições, permissões) não são consultas de ninguém
+            ShardReply reply = internal(request) ? work.get() : tracker.run(req, session, request, work);
             resp.setStatus(200);
             resp.setContentType(ShardHttp.CONTENT_TYPE);
             resp.getOutputStream().write(ShardCodec.encode(reply));
         } catch (RuntimeException e) {
             send(resp, ShardHttp.failure(e));
         }
+    }
+
+    private static boolean internal(ShardRequest request) {
+        return ShardRequest.AUTHENTICATE.equals(request.sql()) || ShardRequest.DEFINITIONS.equals(request.sql())
+            || ShardRequest.PERMISSIONS.equals(request.sql());
     }
 
     /** As rotas do coordenador de backup (veja {@link BackupHttp}); só com o journal ligado neste nó. */
