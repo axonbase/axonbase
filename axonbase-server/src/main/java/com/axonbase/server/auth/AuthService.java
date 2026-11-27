@@ -384,12 +384,19 @@ public final class AuthService {
      * mínimo viável: sem access methods, sem dados de perfil, só a identidade.
      * Sem um namespace/banco o {@code null} devolvido sinaliza escopo ausente.
      */
-    public String signup(String user, String pass, String namespace, String database) {
+    public synchronized String signup(String user, String pass, String namespace, String database) {
         if (user == null || user.isBlank()) {
             throw new IllegalArgumentException(Messages.get("auth_signup_user_invalid"));
         }
         if (namespace == null || namespace.isBlank() || database == null || database.isBlank()) {
             return null;
+        }
+        // signup só cria: trocar senha ou papéis de quem já existe é outra operação
+        boolean taken = users.catalog().users().stream().anyMatch(u -> u.name().equals(user)
+            && u.scope() == AuthCatalog.Scope.DATABASE
+            && namespace.equals(u.namespace()) && database.equals(u.database()));
+        if (taken) {
+            throw new IllegalArgumentException(Messages.get("auth_signup_user_exists"));
         }
         users.catalog().defineUser(user, AuthCatalog.Scope.DATABASE, namespace, database,
             pass == null ? "" : pass, java.util.List.of(), java.util.List.of());

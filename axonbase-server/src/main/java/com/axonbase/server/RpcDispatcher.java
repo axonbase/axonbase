@@ -8,6 +8,7 @@ import com.axonbase.core.cluster.QuorumUnavailableException;
 import com.axonbase.core.cluster.ReadConsistency;
 import com.axonbase.core.cluster.StaleReadException;
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.security.Authz;
 import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.server.auth.AuthService;
@@ -762,6 +763,12 @@ public final class RpcDispatcher {
                     error = Messages.get("rpc_signup_user_invalid");
                     break;
                 }
+                String refusal = signupRefusal(session, ns, db);
+                if (refusal != null) {
+                    error = refusal;
+                    errorCode = -32002;
+                    break;
+                }
                 try {
                     String token = auth.signup(user, pass, ns, db);
                     if (token == null) {
@@ -828,6 +835,24 @@ public final class RpcDispatcher {
             return rpcError(id, errorCode, error);
         }
         return "{\"id\":" + idJson(id) + ",\"result\":" + AxonJson.write(result) + "}";
+    }
+
+    /**
+     * signup cria identidade: exige sessão que possa escrever, papel de administrador e escopo que cubra o destino.
+     * Sem namespace ou banco o próprio {@link AuthService#signup} devolve o erro de escopo ausente.
+     */
+    private String signupRefusal(Session session, String ns, String db) {
+        if (!authRequired()) {
+            return null;
+        }
+        if (session.readOnly()) {
+            return Messages.get("session_read_only");
+        }
+        if (!Authz.atLeast(session.auth(), Authz.Role.ADMIN)) {
+            return Messages.get("auth_role_required", "admin");
+        }
+        boolean complete = ns != null && !ns.isBlank() && db != null && !db.isBlank();
+        return complete && !Authz.allows(session.auth(), ns, db) ? Messages.get("rpc_scope_forbidden") : null;
     }
 
     private boolean authorizedForSession(Session session) {
