@@ -1,8 +1,17 @@
+# Cluster de três nós para desenvolvimento e teste.
+#
+# Por padrão a autenticação fica DESLIGADA, e por isso as portas 18001 a 18003 só são publicadas em 127.0.0.1.
+# Para ligar a autenticação (os três nós usam os mesmos valores):
+#   export AXON_REQUIRE_AUTH=true AXON_ROOT_PASSWORD='senha-forte' AXON_SECRET="$(openssl rand -hex 32)"
+# Para atender outras máquinas, ligue a autenticação e defina AXON_PUBLISH_ADDRESS=0.0.0.0.
+# Vindo da 1.0.0-rc1 ou anterior, leia docs/cluster-raft.md antes de recriar os contêineres.
 x-cluster-env: &cluster_env
   AXON_PATH: /data
   AXON_BIND: 0.0.0.0
   AXON_PORT: 8000
-  AXON_REQUIRE_AUTH: "false"
+  AXON_REQUIRE_AUTH: "${AXON_REQUIRE_AUTH:-false}"
+  AXON_ROOT_PASSWORD: "${AXON_ROOT_PASSWORD:-}"
+  AXON_SECRET: "${AXON_SECRET:-}"
   AXON_CLUSTER_ID: axonbase-cluster
 
 services:
@@ -15,7 +24,7 @@ services:
       AXON_RAFT_BIND: n1:7000
       AXON_RAFT_PEERS: n2:7000,n3:7000
     volumes: [n1-data:/data]
-    ports: ["18001:8000"]
+    ports: ["${AXON_PUBLISH_ADDRESS:-127.0.0.1}:18001:8000"]
   n2:
     image: axonbase/axonbase:${AXONBASE_IMAGE_TAG:-1.0.0-rc2}
     hostname: n2
@@ -25,7 +34,7 @@ services:
       AXON_RAFT_BIND: n2:7000
       AXON_RAFT_PEERS: n1:7000,n3:7000
     volumes: [n2-data:/data]
-    ports: ["18002:8000"]
+    ports: ["${AXON_PUBLISH_ADDRESS:-127.0.0.1}:18002:8000"]
   n3:
     image: axonbase/axonbase:${AXONBASE_IMAGE_TAG:-1.0.0-rc2}
     hostname: n3
@@ -35,7 +44,7 @@ services:
       AXON_RAFT_BIND: n3:7000
       AXON_RAFT_PEERS: n1:7000,n2:7000
     volumes: [n3-data:/data]
-    ports: ["18003:8000"]
+    ports: ["${AXON_PUBLISH_ADDRESS:-127.0.0.1}:18003:8000"]
 
 volumes:
   n1-data:

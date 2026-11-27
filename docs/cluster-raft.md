@@ -103,6 +103,20 @@ Se a atualização falhar e for preciso voltar à imagem antiga no mesmo contêi
 
 Se o contêiner antigo já foi removido (`docker compose down`, `docker rm`), o estado do Raft daquele nó se perdeu, como já acontecia nas versões anteriores. A base continua no volume. Não recrie os outros nós: copie o estado deles primeiro e confira se o nó recriado alcança o líder.
 
+## Compose de cluster: autenticação e portas
+
+O `docker-compose.cluster.yml` sobe sem autenticação, para desenvolvimento e teste, e publica as portas 18001 a 18003 só em `127.0.0.1`. Até a 1.0.0-rc1 elas eram publicadas em todas as interfaces: quem acessava o cluster de outra máquina precisa agora definir `AXON_PUBLISH_ADDRESS=0.0.0.0`, de preferência junto com a autenticação:
+
+```bash
+export AXON_REQUIRE_AUTH=true
+export AXON_ROOT_PASSWORD='senha-forte'
+export AXON_SECRET="$(openssl rand -hex 32)"
+export AXON_PUBLISH_ADDRESS=0.0.0.0
+docker compose -f docker-compose.cluster.yml up -d
+```
+
+Com a autenticação ligada, o servidor recusa a senha e o segredo padrão. Guarde os valores: os três nós precisam dos mesmos a cada subida.
+
 ## Leitura em seguidores
 
 Qualquer nó atende leituras. A consistência é pedida por requisição:
