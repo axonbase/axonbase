@@ -164,7 +164,8 @@ public final class ProgramService {
                     + " e nao pode ser substituido por " + what);
             }
         }
-        List<ProgramDef.Param> ps = bindParams(eval, what(kind), name, params, replaying);
+        List<String> refusedDefaults = new ArrayList<>();
+        List<ProgramDef.Param> ps = bindParams(eval, what(kind), name, params, replaying, refusedDefaults);
         if (returns != null && !ParamTypes.known(returns) && !replaying) {
             throw new AxonError(-32000, "tipo de retorno desconhecido em '" + name + "': " + returns);
         }
@@ -197,6 +198,9 @@ public final class ProgramService {
         }
         String text = Render.stmt(renderable(kind, name, ps, params, returns, definer, body));
         String definition = effective.header() + text;
+        if (error == null && !refusedDefaults.isEmpty()) {
+            error = refusedDefaults.get(0);
+        }
         ProgramDef def = new ProgramDef(kind, name, ps, returns, definer, owner, body, definition, version, created,
             updated, error, program);
         ds.applyControl(session, ControlCommand.of(controlKind(kind), db.ns(), db.db(), name, definition));
@@ -275,7 +279,8 @@ public final class ProgramService {
     }
 
     private List<ProgramDef.Param> bindParams(Function<Expr, AxonValue> eval, String what, String name,
-                                              List<Statement.ProgramParam> params, boolean replaying) {
+                                              List<Statement.ProgramParam> params, boolean replaying,
+                                              List<String> refused) {
         List<ProgramDef.Param> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         boolean sawDefault = false;
@@ -303,8 +308,14 @@ public final class ProgramService {
                 try {
                     dv = eval.apply(p.defaultExpr());
                 } catch (RuntimeException e) {
-                    throw new AxonError(-32000, "o padrao do parametro '" + p.name() + "' de '" + name
-                        + "' nao e uma expressao constante valida: " + e.getMessage());
+                    String message = "o padrao do parametro '" + p.name() + "' de '" + name
+                        + "' nao e uma expressao constante valida: " + e.getMessage();
+                    // no reinício a definição abre assim mesmo, e a chamada responde com este erro
+                    if (!replaying) {
+                        throw new AxonError(-32000, message);
+                    }
+                    refused.add(message);
+                    dv = AxonValue.nul();
                 }
             }
             out.add(new ProgramDef.Param(p.name(), p.type(), p.defaultExpr() != null, dv, text));
@@ -545,6 +556,9 @@ public final class ProgramService {
         String savedDb = session.database();
         long started = System.nanoTime();
         level[0]++;
+        boolean savedReadOnly = session.readOnlyCall();
+        // a classificação do SQL em db.* olha só a primeira camada: subconsultas são barradas na execução
+        session.readOnlyCall(savedReadOnly || !writable);
         try {
             if (def.definer()) {
                 session.auth(def.owner());
@@ -565,6 +579,7 @@ public final class ProgramService {
             throw e;
         } finally {
             level[0]--;
+            session.readOnlyCall(savedReadOnly);
             session.auth(savedAuth);
             session.namespace(savedNs);
             session.database(savedDb);

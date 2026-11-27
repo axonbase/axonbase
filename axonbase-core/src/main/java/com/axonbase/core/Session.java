@@ -151,6 +151,32 @@ public final class Session {
         this.eventScope = scope;
     }
 
+    private EventScope definitionScope;
+
+    /**
+     * O banco da expressão de esquema ou de política em avaliação (DEFAULT, ASSERT, CHECK, PERMISSIONS, Data Rule,
+     * condição de evento, filtro de LIVE), ou {@code null} fora de uma. Enquanto vale, a sessão só lê esse banco.
+     * Só o motor liga isto.
+     */
+    public EventScope definitionScope() {
+        return definitionScope;
+    }
+
+    public void definitionScope(EventScope scope) {
+        this.definitionScope = scope;
+    }
+
+    private boolean readOnlyCall;
+
+    /** Uma função somente leitura está em execução: nada do que ela dispara escreve. Só o motor liga isto. */
+    public boolean readOnlyCall() {
+        return readOnlyCall;
+    }
+
+    public void readOnlyCall(boolean value) {
+        this.readOnlyCall = value;
+    }
+
     private java.util.Set<String> importedTables;
 
     /** Começa a anotar as tabelas que uma importação cria. */

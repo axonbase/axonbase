@@ -428,6 +428,9 @@ public final class Executor {
         Catalog.TableDef def = db.catalog().table(name);
         if (def == null) {
             def = new Catalog.TableDef(name, false, false);
+            if (session.definitionScope() != null) {
+                return def;
+            }
             db.catalog().defineTable(def);
             session.tableCreated(db.ns(), db.db(), name);
             control(db, ControlCommand.Kind.TABLE, name, "DEFINE TABLE " + name + " SCHEMALESS");
@@ -627,6 +630,7 @@ public final class Executor {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
         requireAllowedInEvent(s);
+        requireReadingOnly(s);
         authorize(s);
         requireWritableIfNeeded(s);
         return switch (s) {
@@ -733,7 +737,11 @@ public final class Executor {
 
     /** AxonPL: CREATE/DROP FUNCTION|PROCEDURE|PACKAGE e CALL (a lógica fica em {@code core.pl}). */
     private AxonValue runProgram(Statement s) {
-        return ds.programs().run(s, session, this::eval);
+        if (s instanceof Statement.CallProgram) {
+            return ds.programs().run(s, session, this::eval);
+        }
+        // o padrão de um parâmetro faz parte da definição, e é avaliado de novo a cada reinício
+        return ds.programs().run(s, session, e -> asDefinition(() -> eval(e)));
     }
 
     /**
@@ -759,8 +767,60 @@ public final class Executor {
             || s instanceof Statement.Release || s instanceof Statement.RollbackTo;
     }
 
-    /** Esta é a subconsulta de uma PERMISSIONS ou Data Rule: quem a escreveu não foi o corpo de um evento. */
-    private boolean withinPolicy;
+    /**
+     * Quem escreve uma expressão de esquema ou de política não é quem a avalia: ela roda na sessão de quem grava ou
+     * consulta, que pode ser o root. Por isso ali só passa leitura, também nas subconsultas e nas funções que ela chama.
+     * O corpo de uma função somente leitura segue a mesma regra, sem o limite de banco.
+     */
+    private void requireReadingOnly(Statement s) {
+        Session.EventScope scope = session.definitionScope();
+        if (scope != null && !readsDatabaseOnly(s)) {
+            throw outsideDefinitionScope();
+        }
+        if (session.readOnlyCall() && !readsOnly(s)) {
+            throw refusedInFunction();
+        }
+    }
+
+    private static boolean readsDatabaseOnly(Statement s) {
+        if (s instanceof Info info) {
+            return !"root".equals(info.kind()) && !"namespace".equals(info.kind());
+        }
+        return s instanceof Statement.Select || s instanceof Statement.Return || s instanceof Statement.IfElse
+            || s instanceof Statement.ErrorStmt || s instanceof Statement.DescribeTable;
+    }
+
+    private static boolean readsOnly(Statement s) {
+        if (s instanceof Statement.Use || s instanceof Statement.Begin || s instanceof Statement.Commit
+            || s instanceof Statement.Cancel || s instanceof Statement.Live || s instanceof Kill) {
+            return false;
+        }
+        return Datastore.isReadOnly(s) || s instanceof Statement.IfElse || s instanceof Statement.ErrorStmt;
+    }
+
+    /** Avalia uma expressão que vem do esquema ou de uma política, confinada à leitura do banco corrente. */
+    private <T> T asDefinition(java.util.function.Supplier<T> work) {
+        Session scoped = session;
+        Session.EventScope outer = scoped.definitionScope();
+        if (outer == null) {
+            scoped.definitionScope(new Session.EventScope(scoped.namespace(), scoped.database()));
+        }
+        try {
+            return work.get();
+        } finally {
+            scoped.definitionScope(outer);
+        }
+    }
+
+    private com.axonbase.common.AxonError outsideDefinitionScope() {
+        Session.EventScope scope = session.definitionScope();
+        return new com.axonbase.common.AxonError(-32002,
+            Messages.get("definition_scope_refused", scope.namespace() + "/" + scope.database()));
+    }
+
+    private static com.axonbase.common.AxonError refusedInFunction() {
+        return new com.axonbase.common.AxonError(-32002, Messages.get("function_read_only"));
+    }
 
     /** Um DATABASE LINK leva a outro servidor: o corpo de um evento não o usa. */
     private void refuseLinkInEvent() {
@@ -770,15 +830,22 @@ public final class Executor {
     }
 
     /**
-     * Num corpo de evento, {@code banco.tabela} só vale para o próprio banco, e nunca para um DATABASE LINK. As leituras
-     * de uma PERMISSIONS ou Data Rule valem como numa escrita direta.
+     * Numa expressão de esquema ou de política, e num corpo de evento, {@code banco.tabela} só vale para o próprio
+     * banco, e nunca para um DATABASE LINK.
      */
     private void requireInEventScope(String qualifier) {
+        Session.EventScope definition = session.definitionScope();
+        if (definition != null && leaves(definition, qualifier)) {
+            throw outsideDefinitionScope();
+        }
         Session.EventScope scope = session.eventScope();
-        if (scope != null && !withinPolicy && evaluatingPolicy.get() == null
-            && (!qualifier.equals(scope.database()) || ds.databaseLink(scope.namespace(), qualifier) != null)) {
+        if (scope != null && leaves(scope, qualifier)) {
             throw outsideEventScope();
         }
+    }
+
+    private boolean leaves(Session.EventScope scope, String qualifier) {
+        return !qualifier.equals(scope.database()) || ds.databaseLink(scope.namespace(), qualifier) != null;
     }
 
     private com.axonbase.common.AxonError outsideEventScope() {
@@ -867,16 +934,25 @@ public final class Executor {
             Session previousIdentity = identitySession;
             identitySession = sub.owner();
             try {
-                if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
-                    continue;
+                payload = asSubscriber(db, sub, () -> {
+                    if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
+                        return null;
+                    }
+                    return sub.diff() && !LiveBus.DELETE.equals(action)
+                        ? diffOf(before, after) : project(sub.select(), doc);
+                });
+            } catch (com.axonbase.common.AxonError refused) {
+                if (refused.code() != -32002) {
+                    throw refused;
                 }
-                if (sub.diff() && !LiveBus.DELETE.equals(action)) {
-                    payload = diffOf(before, after);
-                } else {
-                    payload = project(sub.select(), doc);
-                }
+                // a consulta do assinante pediu o que não pode: ele fica sem o aviso, e a escrita vale
+                System.err.println("{\"event\":\"live_query_refused\",\"id\":\"" + sub.id() + "\"}");
+                continue;
             } finally {
                 identitySession = previousIdentity;
+            }
+            if (payload == null) {
+                continue;
             }
             LiveBus.Notification note = new LiveBus.Notification(sub.id(), action, payload);
             if (session.inTransaction()) {
@@ -886,6 +962,29 @@ public final class Executor {
             } else {
                 bus.deliver(sub, note);
             }
+        }
+    }
+
+    /**
+     * O filtro e as colunas de um LIVE são de quem assinou, mas são calculados durante a escrita de outra sessão: valem
+     * com a identidade do assinante e só leem o banco da tabela.
+     */
+    private AxonValue asSubscriber(Database db, LiveBus.Subscription sub,
+                                   java.util.function.Supplier<AxonValue> work) {
+        AxonValue writerAuth = session.auth();
+        String writerNamespace = session.namespace();
+        String writerDatabase = session.database();
+        session.namespace(db.ns());
+        session.database(db.db());
+        if (sub.owner() != null) {
+            session.auth(sub.owner().auth());
+        }
+        try {
+            return asDefinition(work);
+        } finally {
+            session.auth(writerAuth);
+            session.namespace(writerNamespace);
+            session.database(writerDatabase);
         }
     }
 
@@ -964,7 +1063,7 @@ public final class Executor {
                     continue;
                 }
                 Document doc = new Document(rid, value != null ? value : AxonValue.object(Map.of()));
-                if (ev.whenExpr() != null && !truthy(evalExprInDoc(ev.whenExpr(), doc))) {
+                if (ev.whenExpr() != null && !truthy(asDefinition(() -> evalExprInDoc(ev.whenExpr(), doc)))) {
                     continue;
                 }
                 for (Statement st : ev.then()) {
@@ -1508,7 +1607,7 @@ public final class Executor {
             boolean present = obj.containsKey(fieldName);
             AxonValue value = present ? obj.get(fieldName) : null;
             if (!present && fd.defaultExpr() != null) {
-                obj.put(fieldName, eval(fd.defaultExpr()));
+                obj.put(fieldName, asDefinition(() -> eval(fd.defaultExpr())));
                 present = true;
                 value = obj.get(fieldName);
             }
@@ -1522,7 +1621,8 @@ public final class Executor {
                 value = coerced;
             }
             if (present && value != null && fd.assertExpr() != null) {
-                AxonValue ok = evalWithValue(fd.assertExpr(), value);
+                AxonValue asserted = value;
+                AxonValue ok = asDefinition(() -> evalWithValue(fd.assertExpr(), asserted));
                 if (!truthy(ok)) {
                     throw AxonError.internal(Messages.get("stmt_assert_failed", fieldName, value));
                 }
@@ -2082,6 +2182,9 @@ public final class Executor {
             if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName))
                 && com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
                 throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_audit_refused"));
+            }
+            if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName)) && session.definitionScope() != null) {
+                throw outsideDefinitionScope();
             }
             if (isAuditCasesTable(tableName)) return runSelectAuditCases(sel);
             if (isAuditLogTable(tableName)) return runSelectAuditLog(sel);
@@ -5861,7 +5964,7 @@ return score;
         Boolean previous = evaluatingPolicy.get();
         evaluatingPolicy.set(Boolean.TRUE);
         try {
-            return work.get();
+            return asDefinition(work);
         } finally {
             if (previous == null) {
                 evaluatingPolicy.remove();
@@ -6870,6 +6973,14 @@ return score;
         if (ns == null || ns.isBlank() || db == null || db.isBlank()) {
             throw AxonError.internal(Messages.get("stmt_kv_scope_required"));
         }
+        if (name.equals("kv::set") || name.equals("kv::del")) {
+            if (session.definitionScope() != null) {
+                throw outsideDefinitionScope();
+            }
+            if (session.readOnlyCall()) {
+                throw refusedInFunction();
+            }
+        }
         return switch (name.substring(4)) {
             case "get" -> ds.kvGet(session, ns, db, kvStr(args, 0));
             case "set" -> ds.kvSet(session, ns, db, kvStr(args, 0), kvArg(args, 1), kvTtl(args));
@@ -7177,7 +7288,6 @@ return score;
         try {
             Executor sub = new Executor(ds);
             sub.identitySession = identitySession;
-            sub.withinPolicy = withinPolicy || evaluatingPolicy.get() != null;
             // as variáveis já estão na sessão: nada a repassar
             return sub.execute(sq.query(), session, null);
         } finally {
