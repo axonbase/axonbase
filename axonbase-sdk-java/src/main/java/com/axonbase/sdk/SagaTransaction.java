@@ -94,7 +94,21 @@ public class SagaTransaction implements AutoCloseable {
         axon.use("system", "saga");
         AxonValue snapshot = beforeRecord != null && beforeRecord.isObject()
             ? beforeRecord : AxonValue.object(Map.of());
-        // todos os dados vão como parâmetros: nenhum entra no texto do comando
+        // sem a correlação na sessão, senão o servidor registraria um passo para a gravação do próprio passo
+        axon.query("LET $saga_corr = NULL");
+        try {
+            recordStep(table, recordId, ns, db, operation, snapshot);
+        } finally {
+            axon.query("LET $saga_corr = " + AxonQlText.literal(correlationId));
+        }
+
+        // 3. Switch back to business database
+        axon.use(ns, db);
+    }
+
+    /** Grava o passo no ledger. Todos os dados vão como parâmetros: nenhum entra no texto do comando. */
+    private void recordStep(String table, String recordId, String ns, String db, String operation,
+                            AxonValue snapshot) {
         axon.query("CREATE saga_step CONTENT {"
             + "correlation_id: $step_correlation,"
             + "step_order: $step_order,"
@@ -114,9 +128,6 @@ public class SagaTransaction implements AutoCloseable {
                 "step_key", AxonValue.str(recordId),
                 "step_before", snapshot,
                 "step_operation", AxonValue.str(operation)));
-
-        // 3. Switch back to business database
-        axon.use(ns, db);
     }
 
     /**
