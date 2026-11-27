@@ -114,6 +114,16 @@ public final class ColdBackups {
 
     /** Confere que os objetos frios citados por uma base preparada para restore existem. */
     public static void requireRestorable(Datastore ds, Path preparedBase) {
+        requireRestorable(ds.coldTier(), preparedBase);
+    }
+
+    /**
+     * O mesmo sem motor aberto, para as restaurações fora de linha. Só os descritores de partição são lidos: abrir um
+     * motor sobre a base gravaria nela e retomaria construções de índice.
+     *
+     * @throws AxonError quando a base referencia objetos frios e a camada fria não está configurada, ou falta objeto
+     */
+    public static void requireRestorable(ColdTier cold, Path preparedBase) {
         Set<String> objects = new TreeSet<>();
         try (RocksDbBackend base = new RocksDbBackend(preparedBase.toString(), RocksDbBackend.SyncMode.OFF)) {
             base.scanEntries(PartitionKeys.DESCRIPTORS, (key, value) -> {
@@ -124,18 +134,25 @@ public final class ColdBackups {
                 return true;
             });
         }
-        requireObjects(ds, objects);
+        requireObjects(cold, objects);
     }
 
     /** @throws AxonError quando algum objeto falta ou a camada fria não está configurada */
     public static void requireObjects(Datastore ds, Collection<String> objects) {
+        requireObjects(ds.coldTier(), objects);
+    }
+
+    private static void requireObjects(ColdTier cold, Collection<String> objects) {
         if (objects.isEmpty()) {
             return;
+        }
+        if (!cold.configured()) {
+            throw AxonError.internal(Messages.get("cold_restore_unconfigured", objects.size()));
         }
         List<String> missing = new ArrayList<>();
         try {
             for (String object : objects) {
-                if (!ds.coldTier().store().exists(object)) {
+                if (!cold.store().exists(object)) {
                     missing.add(object);
                 }
             }

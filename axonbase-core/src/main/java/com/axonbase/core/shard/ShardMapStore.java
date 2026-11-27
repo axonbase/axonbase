@@ -2,6 +2,7 @@ package com.axonbase.core.shard;
 
 import com.axonbase.core.hlc.ClockDriftException;
 import com.axonbase.core.hlc.HybridClock;
+import com.axonbase.core.storage.KvBackend;
 import com.axonbase.core.storage.VersionConflictException;
 import com.axonbase.value.AxonJson;
 import com.axonbase.value.AxonValue;
@@ -28,6 +29,25 @@ public final class ShardMapStore {
 
     public ShardMapStore(ShardClient meta) {
         this.meta = meta;
+    }
+
+    /**
+     * O mapa gravado numa base parada, lido direto das chaves, sem abrir um motor nem escrever nada. Serve para
+     * conferir uma base restaurada.
+     */
+    public static Optional<ShardMap> stored(KvBackend base) {
+        String prefix = NAMESPACE + "\u0000" + DATABASE + "\u0000" + TABLE + "\u0000";
+        ShardMap[] found = {null};
+        base.scanEntries(prefix, (key, value) -> {
+            // chaves de índice começam com "!"; o que sobra é o registro único do mapa
+            if (key.startsWith("!", prefix.length())) {
+                return true;
+            }
+            AxonValue body = AxonJson.decode(value).asObject().get("body");
+            found[0] = ShardMap.fromValue(AxonJson.parseDocument(body.asString()));
+            return false;
+        });
+        return Optional.ofNullable(found[0]);
     }
 
     public Optional<ShardMap> load() {

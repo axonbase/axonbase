@@ -250,7 +250,7 @@ Todas são `POST`, com `Authorization: Bearer <AXON_GATEWAY_ADMIN_TOKEN>`.
 
 `GET /shard/v1/map` devolve o mapa.
 
-Para a restauração a um instante alcançar o presente, agende a barreira (por exemplo a cada minuto). Os segmentos fecham sozinhos em até 30 segundos. Copie os diretórios de backup e de journal para fora das máquinas: o manifesto só anota os caminhos em cada nó. Um nó que caiu ou recebeu o estado inteiro pela rede pode deixar um buraco no journal, então tire um backup novo depois desses eventos. A retenção dos backups de shard é manual. Se o shard base tiver tabelas na [camada fria](particoes-e-camada-fria.md), cada backup bloqueia sem prazo os objetos que referencia, e o `restore-shards` não confere se eles existem: eles precisam continuar no armazenamento.
+Para a restauração a um instante alcançar o presente, agende a barreira (por exemplo a cada minuto). Os segmentos fecham sozinhos em até 30 segundos. Copie os diretórios de backup e de journal para fora das máquinas: o manifesto só anota os caminhos em cada nó. Um nó que caiu ou recebeu o estado inteiro pela rede pode deixar um buraco no journal, então tire um backup novo depois desses eventos. A retenção dos backups de shard é manual. Se o shard base tiver tabelas na [camada fria](particoes-e-camada-fria.md), cada backup bloqueia sem prazo os objetos que referencia, e eles precisam continuar no armazenamento para a restauração.
 
 ### Restaurar
 
@@ -259,6 +259,8 @@ Junte numa máquina os diretórios de backup e de journal anotados no manifesto 
 ```bash
 axonbase restore-shards manifesto.json /dados/restaurados --at 2026-11-26T14:32:10Z --source s0=/copias/s0/backup,/copias/s0/journal --source s1=/copias/s1/backup,/copias/s1/journal
 ```
+
+Se alguma base tiver partições na camada fria, defina `AXON_COLD_DIR` ou `AXON_COLD_S3` no ambiente do comando, como nos nós. Sem isso, ou faltando objeto, nada é restaurado. O comando não abre um motor sobre as bases: uma construção de índice interrompida continua interrompida, e o servidor a retoma ao subir, o que pede a mesma configuração fria nele.
 
 `--at` usa o formato ISO (International Organization for Standardization) 8601 e, sem ele, vale o corte do manifesto. Sem `--source`, valem os caminhos do manifesto. O comando cria um diretório por shard. Suba cada membro do shard com uma cópia dele e o diretório do Raft vazio, e depois o gateway: o mapa volta junto com o grupo de metadados, desde que os endereços sejam os mesmos.
 

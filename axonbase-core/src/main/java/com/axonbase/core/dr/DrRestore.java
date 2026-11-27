@@ -2,6 +2,7 @@ package com.axonbase.core.dr;
 
 import com.axonbase.core.cluster.ClusterRestore;
 import com.axonbase.core.hlc.HlcTimestamp;
+import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.storage.PhysicalFiles;
 
 import java.io.IOException;
@@ -56,6 +57,14 @@ public final class DrRestore {
      */
     public static Result restore(ArchiveStore store, ArchiveLayout layout, Path work, Path target,
                                  HlcTimestamp until, int transfers) {
+        return restore(store, layout, work, target, until, transfers, ColdTier.NONE);
+    }
+
+    /**
+     * @param cold a camada fria que a base referencia; o arquivamento não copia os objetos dela
+     */
+    public static Result restore(ArchiveStore store, ArchiveLayout layout, Path work, Path target,
+                                 HlcTimestamp until, int transfers, ColdTier cold) {
         requireEmpty(work);
         List<BackupDescriptor> candidates = candidates(store, layout, until);
         long started = System.nanoTime();
@@ -64,7 +73,7 @@ public final class DrRestore {
             Path directory = attempt == 0 ? work : work.resolve("tentativa-" + (attempt + 1));
             try {
                 return restoreFrom(store, layout, candidates.get(attempt), directory, target, until, transfers,
-                    started);
+                    started, cold);
             } catch (ClusterRestore.BaseTooNew newer) {
                 tooNew = newer;
             }
@@ -73,7 +82,7 @@ public final class DrRestore {
     }
 
     private static Result restoreFrom(ArchiveStore store, ArchiveLayout layout, BackupDescriptor backup, Path work,
-                                      Path target, HlcTimestamp until, int transfers, long started) {
+                                      Path target, HlcTimestamp until, int transfers, long started, ColdTier cold) {
         Path backupDir = work.resolve("backup");
         Map<String, Path> downloads = new LinkedHashMap<>();
         Path listing = work.resolve("descriptor.txt");
@@ -89,7 +98,8 @@ public final class DrRestore {
         long bytes = downloads.values().stream().mapToLong(DrRestore::size).sum();
         long millis = (System.nanoTime() - started) / 1_000_000L;
         List<Path> journals = segments.values().stream().map(Path::getParent).distinct().toList();
-        ClusterRestore.Prepared prepared = ClusterRestore.prepare(backupDir, backup.id(), journals, target, until);
+        ClusterRestore.Prepared prepared =
+            ClusterRestore.prepare(backupDir, backup.id(), journals, target, until, cold);
         return new Result(prepared, backup.node(), backup.id(), backup.stamp(), segments.size(), bytes, millis);
     }
 

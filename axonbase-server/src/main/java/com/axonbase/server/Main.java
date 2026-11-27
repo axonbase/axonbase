@@ -108,10 +108,13 @@ public final class Main {
         }
         if (learner && bootstrapBackup != null && !bootstrapBackup.isBlank()) {
             String directory = path.startsWith("rocksdb:") ? path.substring(8) : path;
-            com.axonbase.core.cluster.LearnerBootstrap
-                .restore(java.nio.file.Path.of(bootstrapBackup.trim()), java.nio.file.Path.of(directory))
-                .ifPresent(applied -> System.out.println(
-                    Messages.get("server_learner_restored", applied.index(), bootstrapBackup.trim())));
+            // um backup com partições frias só é restaurado com a camada fria configurada e completa
+            try (var cold = com.axonbase.core.partition.ColdTier.fromEnvironment(System.getenv())) {
+                com.axonbase.core.cluster.LearnerBootstrap
+                    .restore(java.nio.file.Path.of(bootstrapBackup.trim()), java.nio.file.Path.of(directory), cold)
+                    .ifPresent(applied -> System.out.println(
+                        Messages.get("server_learner_restored", applied.index(), bootstrapBackup.trim())));
+            }
         }
 
         KvBackend backend = switch (path) {

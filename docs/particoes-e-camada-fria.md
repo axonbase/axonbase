@@ -166,7 +166,7 @@ O que precisa ser garantido é que o objeto referenciado continue existindo. Sã
   - motor em uso: cada motor publica as referências da sua base viva, o que protege uma cópia restaurada que compartilhe o armazenamento.
 - **Carência:** um objeto sem nenhuma referência só é apagado depois de `AXON_COLD_GC_GRACE_DAYS` (35, o máximo da retenção do PITR; com o journal ligado, nunca menos que `AXON_PITR_RETENTION_DAYS`). A coleta de lixo (GC, Garbage Collection) marca o objeto como órfão na primeira vez em que o vê assim e apaga depois da carência, se ele continuar sem referência. Isso cobre o PITR para instantes anteriores à remoção da partição.
 
-Se não for possível gravar o bloqueio, o backup **falha**. Um restore confere se os objetos referenciados existem e recusa a troca de base se faltar algum.
+Se não for possível gravar o bloqueio, o backup **falha**. Um restore confere se os objetos referenciados existem e recusa a troca de base se faltar algum. O mesmo vale para as restaurações fora de linha (`restore-shards`, `DrTool restore` e a entrada de um learner por backup): se a base referenciar a camada fria, elas exigem `AXON_COLD_DIR` ou `AXON_COLD_S3` e, sem isso ou faltando objeto, não publicam nada. Elas não abrem um motor sobre a base, então não constroem nem removem índices. A conferência é de presença do objeto, não do conteúdo.
 
 ## Journal do PITR
 

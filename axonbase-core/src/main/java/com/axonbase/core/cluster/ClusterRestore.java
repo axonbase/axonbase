@@ -4,6 +4,7 @@ import com.axonbase.core.hlc.HlcTimestamp;
 import com.axonbase.core.journal.JournalRecord;
 import com.axonbase.core.journal.JournalSegments;
 import com.axonbase.core.journal.SegmentInfo;
+import com.axonbase.core.partition.ColdBackups;
 import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.shard.backup.ShardBackupNode;
 import com.axonbase.core.shard.backup.ShardJournalHooks;
@@ -28,6 +29,9 @@ import java.util.stream.Stream;
  *
  * <p>O diretório pronto serve a qualquer nó de um cluster novo, que sobe com o diretório do Raft vazio: a base diz em
  * que índice parou e não traz a lista de membros antiga.</p>
+ *
+ * <p>Uma base que referencia a camada fria só é entregue com ela configurada e com todos os objetos presentes. Nenhum
+ * motor é aberto sobre a base, então índices não são construídos nem removidos aqui.</p>
  */
 public final class ClusterRestore {
 
@@ -82,6 +86,14 @@ public final class ClusterRestore {
      */
     public static Prepared prepare(Path backupDir, int backupId, List<Path> journalDirs, Path target,
                                    HlcTimestamp until) {
+        return prepare(backupDir, backupId, journalDirs, target, until, ColdTier.NONE);
+    }
+
+    /**
+     * @param cold a camada fria que a base referencia; sem ela, uma base com partições frias é recusada
+     */
+    public static Prepared prepare(Path backupDir, int backupId, List<Path> journalDirs, Path target,
+                                   HlcTimestamp until, ColdTier cold) {
         requireEmpty(target);
         Path prepared = PhysicalBackups.prepareRestore(backupDir, backupId, target);
         boolean done = false;
@@ -91,6 +103,8 @@ public final class ClusterRestore {
                 result = replay(db, journalDirs, target, until);
                 db.syncWal();
             }
+            // depois do journal: ele pode ter levado partições para a camada fria
+            ColdBackups.requireRestorable(cold, prepared);
             PhysicalBackups.commitPrepared(target);
             done = true;
             return result;
@@ -99,12 +113,6 @@ public final class ClusterRestore {
                 PhysicalBackups.discardPrepared(target);
             }
         }
-    }
-
-    /** O mesmo, com a camada fria que a base restaurada pode referenciar (ainda não conferida). */
-    public static Prepared prepare(Path backupDir, int backupId, List<Path> journalDirs, Path target,
-                                   HlcTimestamp until, ColdTier cold) {
-        return prepare(backupDir, backupId, journalDirs, target, until);
     }
 
     private static Prepared replay(RocksDbBackend db, List<Path> journalDirs, Path target, HlcTimestamp until) {

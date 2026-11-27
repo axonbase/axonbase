@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 
+import com.axonbase.core.partition.ColdBackups;
 import com.axonbase.core.partition.ColdTier;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.RocksDbBackend;
@@ -32,6 +33,14 @@ public final class LearnerBootstrap {
      * @throws IllegalStateException se não há backup ou se ele não veio de um nó de cluster
      */
     public static Optional<RaftApplier.Applied> restore(Path backupDir, Path dataDir) {
+        return restore(backupDir, dataDir, ColdTier.NONE);
+    }
+
+    /**
+     * @param cold a camada fria que o backup referencia; sem ela, ou faltando objeto, um backup com partições frias é
+     *             recusado e {@code dataDir} continua sem base
+     */
+    public static Optional<RaftApplier.Applied> restore(Path backupDir, Path dataDir, ColdTier cold) {
         boolean existed = Files.isDirectory(dataDir);
         if (existed) {
             PhysicalBackups.recoverInterruptedSwap(dataDir);
@@ -56,20 +65,28 @@ public final class LearnerBootstrap {
             applied = RaftApplier.applied(restored);
         }
         if (applied.isEmpty()) {
-            PhysicalBackups.discardPrepared(dataDir);
-            if (!existed) {
-                delete(dataDir);
-            }
+            discard(dataDir, existed);
             throw new IllegalStateException("o backup " + latest + " de " + backupDir
                 + " não veio de um nó de cluster: não diz em que ponto do log foi tirado");
+        }
+        boolean restorable = false;
+        try {
+            ColdBackups.requireRestorable(cold, prepared);
+            restorable = true;
+        } finally {
+            if (!restorable) {
+                discard(dataDir, existed);
+            }
         }
         PhysicalBackups.commitPrepared(dataDir);
         return applied;
     }
 
-    /** O mesmo, com a camada fria que o backup pode referenciar (ainda não conferida). */
-    public static Optional<RaftApplier.Applied> restore(Path backupDir, Path dataDir, ColdTier cold) {
-        return restore(backupDir, dataDir);
+    private static void discard(Path dataDir, boolean existed) {
+        PhysicalBackups.discardPrepared(dataDir);
+        if (!existed) {
+            delete(dataDir);
+        }
     }
 
     /** Há uma base: algum arquivo que não seja do mecanismo de troca, cujos nomes começam com ponto. */
