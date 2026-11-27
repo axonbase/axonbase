@@ -46,7 +46,7 @@ public final class ShardNode implements ShardMember {
     }
 
     /**
-     * @param session sessão já autenticada pelo transporte; o namespace e o banco vêm da requisição
+     * @param caller sessão já autenticada pelo transporte; o namespace e o banco vêm da requisição
      */
     public ShardReply execute(ShardRequest request, Session caller) {
         // manutenção roda sem usuário: o transporte já conferiu que a credencial é root
