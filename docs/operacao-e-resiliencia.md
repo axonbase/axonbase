@@ -50,6 +50,8 @@ Para cargas analíticas pesadas, a recomendação continua sendo um learner (vej
 
 ## Atualização um nó de cada vez
 
+**Da 0.10.x, atualize só com os três nós parados.** Atualizar um nó de cada vez a partir da 0.10.x não é suportado, porque a 0.10.x pode [confirmar escritas sem gravar](#defeito-na-0101-e-anteriores-escrita-confirmada-sem-gravar). Faça a [parada total](#falha-de-versões-mistas). Esta seção descreve a troca um nó de cada vez entre versões novas (desta em diante). O reinício um nó de cada vez de um cluster só com versão nova foi medido: 60 de 60 rodadas boas, com a mesma versão dos dois lados (veja o [roteiro](#roteiro)).
+
 ### Transferência de liderança
 
 O líder passa o cargo sem esperar o prazo de eleição:
@@ -142,7 +144,7 @@ O roteiro `scripts/raft-gates/mixed_versions.py` falhou uma vez: com dois nós n
 
 Essas três últimas defesas passam na suíte e não bastam no cluster misto (veja a tabela abaixo). Elas só valem quando o nó novo participa: com um nó novo e dois antigos, os antigos formam maioria sozinhos.
 
-O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível: se acontecer durante a atualização, reinicie o líder antigo travado.
+O mesmo laço existe entre dois nós 0.10.1, e ali não há correção possível: numa troca um nó de cada vez, que não é suportada, a saída é reiniciar o líder antigo travado.
 
 **O que o ambiente de testes mostrou.** Cada rodada é uma execução do roteiro de versões mistas, da 0.10.1 para a versão indicada.
 
@@ -159,7 +161,7 @@ As perdas grandes vêm do [defeito da versão antiga](#defeito-na-0101-e-anterio
 
 **Um caso em que a líder era nova.** Em `238e9a1`, uma escrita confirmada pela líder nova ficou fora de um seguidor antigo; os outros dois nós a guardam. Pelos registros, o outro seguidor antigo não a gravou (a líder não contou a resposta dele), então o voto que fechou o quórum veio de um nó antigo que já se dizia aplicado naquele índice, com o log vazio, e por isso nunca a aplicou. Se a líder caísse naquele instante, a escrita se perderia. Como esse nó chegou a esse estado não foi determinado, e o nó novo não tem como perceber: o protocolo antigo não informa o índice aplicado.
 
-**Conclusão.** A atualização um nó de cada vez a partir da 0.10.x não pode ser garantida: enquanto um nó antigo participar do quórum, os defeitos dele atingem o cluster. As defesas do nó novo reduzem a exposição, mas não a eliminam.
+**Conclusão.** A atualização um nó de cada vez a partir da 0.10.x não é suportada, porque não pode ser garantida: enquanto um nó antigo participar do quórum, os defeitos dele atingem o cluster, inclusive o de confirmar escritas sem gravar. As defesas do nó novo reduzem a exposição, mas não a eliminam. Da 0.10.x, atualize só com os três nós parados.
 
 **Atualização com parada total.** `mixed_versions.py <dir> <classpath antigo> <classpath novo> parada` derruba os três nós antigos (pedindo para sair e com kill), sobe os três na versão nova, confere as perdas e segue escrevendo. A linha `MIXED PARADA <como> RESULT` separa o que a versão antiga já tinha perdido do que a troca perdeu. Em `17bea4d`, 30 rodadas com as duas paradas (60 trocas) passaram todas, sem perda causada pela troca e sem divergência. Em duas trocas limpas a versão antiga já tinha perdido 407 e 413 escritas antes da parada.
 
@@ -237,7 +239,7 @@ Os portões são opt-in e rodam em máquinas separadas, com `scripts/resilience-
 | Portão | Meta |
 |---|---|
 | `failover` | líder morto sob carga: nenhuma escrita confirmada perdida e eleição em menos de 10 segundos |
-| `upgrade` | atualização nó a nó sem erro visível ao cliente |
+| `upgrade` | atualização nó a nó entre versões que transferem a liderança, sem erro visível ao cliente |
 | `qos` | carga analítica sem piorar o p99 transacional em mais de 20% |
 | `dr` | restaurar 10 GB do MinIO em menos de 10 minutos, mais restauração a um instante |
 
