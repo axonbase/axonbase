@@ -57,8 +57,8 @@ public class AxonPreparedStatement extends AxonStatement implements PreparedStat
                 sb.append(c);
             }
         }
-        String built = sb.toString();
-        return translate ? SqlTranslator.translate(built) : built;
+        // a tradução acontece uma vez só, na execução
+        return sb.toString();
     }
 
     @Override

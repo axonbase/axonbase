@@ -23,6 +23,7 @@ public class AxonStatement implements Statement {
     protected int maxRows;
     protected int queryTimeout;
     private final List<String> batch = new ArrayList<>();
+    private SqlRecordIds.Shape shape;
 
     public AxonStatement(Axon axon, String ns, String db, AxonConnection connection) {
         this(axon, ns, db, connection, false);
@@ -62,7 +63,8 @@ public class AxonStatement implements Statement {
             throw new SQLException(Messages.get("jdbc_execute_failed", "null"));
         }
         try {
-            String command = translate ? SqlTranslator.translate(sql) : sql;
+            String command = translate ? SqlTranslator.translateStatement(sql) : sql;
+            shape = translate ? SqlRecordIds.shape(sql) : null;
             if (countRows) {
                 command = returningDeletedRows(command);
             }
@@ -112,7 +114,7 @@ public class AxonStatement implements Statement {
     @Override
     public ResultSet getResultSet() throws SQLException {
         if (currentResult == null) return null;
-        AxonResultSetBackend backend = new AxonResultSetBackend(currentResult);
+        AxonResultSetBackend backend = new AxonResultSetBackend(currentResult, shape);
         backend.limit(maxRows);
         return JdbcProxy.create(ResultSet.class, backend);
     }

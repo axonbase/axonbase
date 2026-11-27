@@ -13,13 +13,13 @@ public class SqlTranslator {
     private static final Pattern INSERT = Pattern.compile(
         "INSERT\\s+INTO\\s+(\\w+)\\s*\\(([^)]+)\\)\\s*VALUES\\s*\\((.+?)\\)(?:\\s*;\\s*)?$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern SELECT = Pattern.compile(
+    static final Pattern SELECT = Pattern.compile(
         "SELECT\\s+(.+?)\\s+FROM\\s+(\\w+(?:\\s+\\w+)?)(?:\\s+WHERE\\s+(.+?))?(?:\\s+ORDER\\s+BY\\s+(.+?))?(?:\\s+LIMIT\\s+(\\d+))?(?:\\s+OFFSET\\s+(\\d+))?\\s*;?\\s*$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern UPDATE = Pattern.compile(
+    static final Pattern UPDATE = Pattern.compile(
         "UPDATE\\s+(\\w+)\\s+SET\\s+(.+?)(?:\\s+WHERE\\s+(.+?))?\\s*;?\\s*$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern DELETE = Pattern.compile(
+    static final Pattern DELETE = Pattern.compile(
         "DELETE\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(.+?))?\\s*;?\\s*$",
         Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern DROP = Pattern.compile(
@@ -55,6 +55,11 @@ public class SqlTranslator {
         TYPE_MAP.put("bool", "bool");
         TYPE_MAP.put("blob", "bytes");
         TYPE_MAP.put("bytes", "bytes");
+    }
+
+    /** Tradução usada pelo driver: além do dialeto, o {@code id} do SQL passa a comparar com o record id. */
+    static String translateStatement(String sql) {
+        return translate(SqlRecordIds.rewrite(sql));
     }
 
     public static String translate(String sql) {
