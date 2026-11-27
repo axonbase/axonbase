@@ -766,6 +766,19 @@ public final class AxonServer {
         return false;
     }
 
+    /** Operações que valem para o nó inteiro: administrador de escopo ROOT (401 sem sessão, 403 sem papel ou escopo). */
+    private boolean requireRootAdmin(Session session, HttpServletResponse resp) throws IOException {
+        if (requireAdmin(session, resp)) {
+            return true;
+        }
+        if (requireAuth && com.axonbase.core.security.Authz.scope(session.auth())
+            != com.axonbase.core.security.AuthCatalog.Scope.ROOT) {
+            json(resp, 403, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_forbidden")) + "\"}");
+            return true;
+        }
+        return false;
+    }
+
     private boolean requireRoot(Session session, HttpServletResponse resp) throws IOException {
         if (!requireAuth || session.auth() == null || !session.auth().isObject()
             || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))) {
@@ -1012,7 +1025,7 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             Session s = withNames(req);
-            if (requireAdmin(s, resp)) {
+            if (requireRootAdmin(s, resp)) {
                 return;
             }
             var rt = clusterRuntime;
