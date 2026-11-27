@@ -1,6 +1,6 @@
 # Notas da versão 1.0.0-rc2
 
-A 1.0.0-rc2 é a segunda RC (release candidate), ou versão candidata, da 1.0.0. Ela corrige falhas de segurança e falhas que perdiam ou corrompiam dados, e muda o comportamento de escritas e de acesso. Leia o aviso sobre contêineres e as mudanças de comportamento antes de atualizar. O restante da versão está nas [notas da 1.0.0-rc1](notas-1.0.0-rc1.md).
+A 1.0.0-rc2 é a segunda RC (release candidate), ou versão candidata, da 1.0.0. Ela corrige falhas de segurança e falhas que perdiam ou corrompiam dados, e muda o comportamento de escritas e de acesso. Leia os avisos sobre contêineres e sobre SAGAs, e as mudanças de comportamento, antes de atualizar. O restante da versão está nas [notas da 1.0.0-rc1](notas-1.0.0-rc1.md).
 
 Tire um backup antes de atualizar.
 
@@ -12,6 +12,13 @@ Tire um backup antes de atualizar.
 - Num cluster vindo da 0.10.x ou anterior, pare os três nós, rode o script em cada um e só então suba os três com a imagem nova.
 - Instalações fora de contêiner e as que usam `--path /data/db` com volume em `/data` não precisam desse passo.
 - O passo a passo, inclusive como voltar atrás, está em [cluster Raft](cluster-raft.md#contêiner-com-o-comando-padrão-copiar-antes-de-recriar).
+
+## Atenção: SAGAs abertas e definições de SAGA
+
+> **Conclua todas as SAGAs abertas, com `COMMIT SAGA` ou `CANCEL SAGA`, antes de atualizar. Depois de atualizar, repita todos os `CREATE SAGA`.** A rc1 não gravava as definições, então elas não voltam depois do reinício.
+
+- Para achar as transações abertas na rc1, use a API (Application Programming Interface) de gestão (`GET /admin/v1/sagas?status=RUNNING` e `GET /admin/v1/sagas?status=COMPENSATING`, como root) ou consulte a tabela `saga` no namespace `system`, banco `saga`, como root.
+- Sem a definição repetida, `BEGIN SAGA` abre a transação sem participantes.
 
 ## Mudanças de comportamento
 
@@ -83,7 +90,7 @@ Tire um backup antes de atualizar.
 - Essa conferência vale para as chamadas por RPC (Remote Procedure Call), o protocolo de chamadas do servidor.
 - O método `signup` exige um administrador cujo escopo cubra o destino, é recusado em sessão somente leitura e não altera um usuário existente.
 - A entrada e a saída de membros do cluster exigem administrador root.
-- A API (Application Programming Interface) de gestão aplica o teto de papel pedido em `Axon-Role-Cap`. Registrar um truststore passa a exigir papel de administrador.
+- A API de gestão aplica o teto de papel pedido em `Axon-Role-Cap`. Registrar um truststore passa a exigir papel de administrador.
 - No login por certificado, o usuário vem do próprio certificado, e um usuário informado diferente dele é recusado. Quando o certificado não identifica ninguém, só entra o usuário definido com o `FINGERPRINT` desse certificado.
 - A credencial temporária vale por 60 segundos e fica presa ao usuário e ao escopo do primeiro uso.
 - Uma senha de root configurada em branco impede a subida. Antes virava a senha padrão.
@@ -288,6 +295,11 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 - Um `UPSERT` por `DATABASE LINK` que cria o registro é desfeito apagando esse registro.
 - A compensação preserva a chave, com o tipo dela, e o `id` do registro, e segue a ordem dos passos também depois de um reinício ou de uma troca de líder.
 - `CANCEL SAGA` retoma uma compensação que parou no meio.
+- A compensação deixa de montar comandos por texto. Nome de tabela, chave, propriedade e valor, inclusive os de passos gravados por versões anteriores, são tratados só como dados. Um passo que não possa ser escrito com segurança num participante remoto (uma propriedade de aresta com crase e `⟩` no mesmo nome) é recusado, e a SAGA fica em `COMPENSATING`.
+- A compensação local repõe o estado anterior sem passar pelas `PERMISSIONS` de escrita, pelas Data Rules, por `DEFAULT`, `ASSERT`, `REFERENCES` ou embedding da tabela do passo. Antes uma tabela com `PERMISSIONS` de alteração por condição deixava a SAGA presa em `COMPENSATING`, e uma criação sem permissão de apagar era dada como desfeita sem ter sido. Índices `UNIQUE` continuam valendo.
+- A compensação roda no banco do passo com a identidade e o teto de papel de quem cancela. Os eventos que ela dispara continuam confinados ao banco da tabela, rodam com essa identidade e não herdam a dispensa: um evento barrado por `PERMISSIONS` interrompe o cancelamento.
+- Uma escrita feita por `DATABASE LINK` é desfeita por um comando comum no participante, com a credencial da ligação, então as `PERMISSIONS` e as Data Rules de lá valem. Quando barram, a SAGA fica em `COMPENSATING`: libere a credencial no participante e repita o `CANCEL SAGA`. Depois de um `DELETE` remoto o motor procura o registro, e essa conferência não enxerga uma linha que a credencial não pode ler.
+- `SHOW SAGA TRANSACTION`, `BEGIN SAGA` sobre uma correlação existente, `JOIN SAGA`, `COMMIT SAGA` e `CANCEL SAGA` exigem identidade que alcance o namespace e o banco de quem abriu a SAGA e o banco de cada passo local. Fora disso a resposta é recusa de escopo. Root e o modo sem autenticação não mudam. Num participante, a credencial da ligação precisa alcançar todos os bancos em que os serviços dele gravaram na SAGA.
 - Confirmar ou cancelar uma SAGA sem transação ativa, sem definição ou com o nome de outra devolve erro. Antes informava sucesso.
 - O cancelamento pela API de gestão alcança os participantes pelas ligações do namespace de quem abriu a SAGA.
 - A leitura `->aresta.campo` alcança a propriedade da aresta quando o registro de destino não tem o campo.
@@ -312,6 +324,10 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 - `FETCH` e o acesso por ponto não seguem uma ligação gravada num campo.
 - No `JOIN`, um filtro sobre a tabela ligada pode zerar o resultado, o `ORDER BY` é ignorado, `LEFT JOIN` se comporta como junção interna e o apelido devolve nulo.
 - Uma consulta com `AT` devolve o valor atual quando não há histórico para o instante pedido.
+- `SHOW SAGA TRANSACTION` mostra o estado anterior dos registros a quem alcança a SAGA, sem aplicar `PERMISSIONS` de leitura, Data Rules ou máscaras.
+- Quem alcança uma SAGA e pode gravar consegue cancelá-la, e o cancelamento repõe o estado anterior mesmo que as `PERMISSIONS` negassem essa escrita.
+- Informar `$saga_corr` ou o cabeçalho `X-Correlation-Id` não confere escopo. Um passo gravado em outro banco por quem conhece a correlação impede que o dono com escopo de banco a leia ou conclua: use uma identidade de namespace ou root.
+- Uma SAGA aberta sem namespace e ainda sem passos pode ser concluída por qualquer identidade que grave.
 - `BEGIN SAGA` com um nome sem definição ainda é aceito, sem participantes. Um erro de digitação no nome faz o `CANCEL SAGA` informar sucesso sem desfazer nada nos bancos remotos.
 - O GraphQL ignora os campos pedidos, os argumentos e as demais raízes da consulta, e devolve tudo.
 - O método `signin` pelo WebSocket (`/rpc/ws`) devolve o token sem autenticar a conexão. Em seguida, chame `authenticate` com esse token.
