@@ -378,7 +378,9 @@ public final class AxonServer {
         ctx.addFilter(asyncFilter(roleCapFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(metricsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(new LoggingFilter(auth)), "/*", EnumSet.of(DispatcherType.REQUEST));
-        ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
+        ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit(),
+            RateLimitFilter.trustedProxies(System.getenv("AXON_TRUSTED_PROXIES")))),
+            "/*", EnumSet.of(DispatcherType.REQUEST));
         // Mantém threads livres para /health, /ready e /admin mesmo com consultas lentas em andamento.
         admission = new AdmissionControl(AdmissionControl.limitFor(config.httpThreads()));
         ctx.addFilter(asyncFilter(new AdmissionFilter(admission)),
