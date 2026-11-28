@@ -196,6 +196,10 @@ public final class Parser {
                 if (atWord("call") && (peek(1).is(IDENT) || peek(1).is(KEYWORD))) {
                     yield parseCall();
                 }
+                // LEAVE também é contextual: tabelas e campos chamados "leave" continuam valendo
+                if (atWord("leave") && peekIsWord(1, "saga")) {
+                    yield parseLeaveSaga();
+                }
                 throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
             }
             default -> throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
@@ -317,12 +321,6 @@ public final class Parser {
             }
             throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
         }
-        if (t.isKeyword("leave")) {
-            if (peek(1) != null && peek(1).isKeyword("saga")) {
-                return parseLeaveSaga();
-            }
-            throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
-        }
         throw error(Messages.get("parser_unexpected_statement", t.start(), t.text()));
     }
 
@@ -377,6 +375,9 @@ public final class Parser {
 
     private Statement parseShow() {
         pos++; // show
+        if (matchTarget("partitions")) {
+            return PartitionParser.show(partitionTokens());
+        }
         if (matchKeyword("saga")) {
             expectText("transaction");
             String name = expectIdentOrString();
@@ -590,7 +591,8 @@ public final class Parser {
         boolean ifNotExists = false;
         if (matchKeyword("if")) {
             expectKeyword("not");
-            expectKeyword("exists");
+            // exists não é reservada: continua valendo como nome de tabela e de campo
+            expectText("exists");
             ifNotExists = true;
         }
         String table = expectIdentOrString();
@@ -598,6 +600,7 @@ public final class Parser {
 
         List<Statement.ColumnDef> columns = new ArrayList<>();
         List<String> primaryKeyCols = new ArrayList<>();
+        List<Expr> checks = new ArrayList<>();
 
         while (!at(TokenType.RPAREN) && !at(TokenType.EOF)) {
             // Check for table-level constraints
@@ -605,7 +608,9 @@ public final class Parser {
                 expectIdentOrString(); // skip constraint name
             }
 
-            if (matchKeyword("primary")) {
+            // "primary" e "check" também são nomes de coluna: versões anteriores os gravavam sem crases
+            if (atKeyword("primary") && peek(1).isKeyword("key")) {
+                pos++;
                 expectKeyword("key");
                 expect(TokenType.LPAREN);
                 primaryKeyCols.add(expectIdentOrString());
@@ -613,9 +618,10 @@ public final class Parser {
                     primaryKeyCols.add(expectIdentOrString());
                 }
                 expect(TokenType.RPAREN);
-            } else if (matchKeyword("check")) {
+            } else if (atKeyword("check") && peek(1).is(TokenType.LPAREN)) {
+                pos++;
                 expect(TokenType.LPAREN);
-                parseExpr(); // table check
+                checks.add(parseExpr());
                 expect(TokenType.RPAREN);
             } else if (matchKeyword("foreign")) {
                 expectKeyword("key");
@@ -708,7 +714,7 @@ public final class Parser {
             columns = updated;
         }
 
-        return new Statement.CreateTable(table, ifNotExists, schemafull, columns);
+        return new Statement.CreateTable(table, ifNotExists, schemafull, columns, checks);
     }
 
     private String parseSqlColumnType() {
@@ -813,12 +819,12 @@ public final class Parser {
         pos++;
         boolean only = matchKeyword("only");
         Expr target = parseTarget();
-        consumeAlias();
+        String alias = consumeAlias();
         Data data = null;
         if (matchKeyword("content")) {
             data = new Data.Content(parseExpr());
         } else if (matchKeyword("set")) {
-            data = new Data.SetClause(parseAssignments());
+            data = new Data.SetClause(withoutQualifier(parseAssignments(), alias));
         } else if (matchKeyword("merge")) {
             data = new Data.Merge(parseExpr());
         } else if (matchKeyword("patch")) {
@@ -836,6 +842,16 @@ public final class Parser {
 
     private Statement parseDelete() {
         pos++;
+        // TABLE e FROM só valem como palavra quando um alvo vem depois: "DELETE table:1" e "DELETE from" continuam
+        // falando das tabelas com esses nomes
+        if (atKeyword("table") && targetFollows()) {
+            Token start = peek(1);
+            String name = start.isKeyword("if") ? "<tabela>" : start.text();
+            throw error(Messages.get("parser_delete_table", name, name));
+        }
+        if (atKeyword("from") && targetFollows()) {
+            pos++;
+        }
         Expr target = parseTarget();
         consumeAlias();
         Expr cond = null;
@@ -844,6 +860,13 @@ public final class Parser {
         }
         ReturnSpec ret = parseReturnSpec();
         return new Statement.Delete(target, cond, ret);
+    }
+
+    /** O token seguinte ao atual começa um alvo (nome, texto ou parâmetro), e não uma cláusula nem o fim. */
+    private boolean targetFollows() {
+        Token next = peek(1);
+        return next.is(IDENT) || next.is(PARAM) || next.is(TokenType.STRING)
+            || (next.is(KEYWORD) && !next.isKeyword("where") && !next.isKeyword("return"));
     }
 
     private Statement parseSelect() {
@@ -1055,6 +1078,10 @@ public final class Parser {
     }
 
     private Statement.Permissions parsePermissions() {
+        // NONE vira WHERE false nas quatro ações, para valer, exportar e reiniciar como qualquer outra condição
+        if (matchKeyword("none")) {
+            return Statement.Permissions.denied();
+        }
         Expr sel = null;
         Expr crt = null;
         Expr upd = null;
@@ -1088,20 +1115,50 @@ public final class Parser {
         return expect(IDENT).text();
     }
 
-    /** Consome um alias opcional após um target de FROM/JOIN (ex.: {@code FROM users u}). */
-    private void consumeAlias() {
+    /**
+     * Consome um alias opcional após um target de FROM/JOIN (ex.: {@code FROM users u}) e o devolve, ou {@code null}.
+     */
+    private String consumeAlias() {
         Token t = peek();
-        if (t == null || !t.is(IDENT)) return;
+        if (t == null || !t.is(IDENT)) return null;
         String text = t.text();
         if (!"join".equals(text) && !"where".equals(text) && !"order".equals(text)
             && !"limit".equals(text) && !"start".equals(text) && !"group".equals(text)
             && !"fetch".equals(text) && !"on".equals(text)) {
             pos++;
+            return text;
         }
+        return null;
+    }
+
+    /** Em {@code UPDATE t apelido SET apelido.campo = ...} o apelido só qualifica a coluna: sai do caminho. */
+    private static List<Assignment> withoutQualifier(List<Assignment> assignments, String alias) {
+        if (alias == null) {
+            return assignments;
+        }
+        List<Assignment> out = new ArrayList<>(assignments.size());
+        for (Assignment assignment : assignments) {
+            if (assignment.path() instanceof Expr.Idiom idiom && idiom.base() instanceof Expr.Ident base
+                && base.name().equals(alias) && idiom.parts().get(0) instanceof Part.Field first) {
+                List<Part> rest = idiom.parts().subList(1, idiom.parts().size());
+                Expr column = new Expr.Ident(first.name());
+                out.add(new Assignment(rest.isEmpty() ? column : new Expr.Idiom(column, List.copyOf(rest)),
+                    assignment.value()));
+            } else {
+                out.add(assignment);
+            }
+        }
+        return out;
     }
 
     private Statement parseDefine() {
         pos++;
+        if (matchTarget("partition")) {
+            return PartitionParser.define(partitionTokens());
+        }
+        if (matchTarget("ttl")) {
+            return PartitionParser.defineTtl(partitionTokens());
+        }
         if (matchKeyword("analyzer")) {
             String name = expectIdent();
             boolean lowercase = false;
@@ -1186,11 +1243,20 @@ public final class Parser {
             } else {
                 matchKeyword("schemaless");
             }
+            // o texto gravado no plano de controle e no dump traz o DROP depois do esquema
+            drop |= matchKeyword("drop");
+            String shardBy = null;
+            // "shard" não é palavra reservada: vale só aqui, depois do esquema
+            if (atWord("shard")) {
+                pos++;
+                expectKeyword("by");
+                shardBy = expectIdent();
+            }
             Statement.Permissions perms = Statement.Permissions.none();
             if (matchKeyword("permissions")) {
                 perms = parsePermissions();
             }
-            return new Statement.DefineTable(name, schemafull, drop, perms);
+            return new Statement.DefineTable(name, schemafull, drop, perms, shardBy);
         }
         if (matchKeyword("field")) {
             String name = parseFieldPath();
@@ -1691,6 +1757,9 @@ public final class Parser {
 
     private Statement parseAlter() {
         pos++;
+        if (matchTarget("partition")) {
+            return PartitionParser.alter(partitionTokens());
+        }
         if (matchKeyword("table")) {
             String name = expectIdentOrString();
             List<Statement.AlterOp> ops = new ArrayList<>();
@@ -1738,7 +1807,11 @@ public final class Parser {
                 } else {
                     break;
                 }
-                if (!match(COMMA)) break;
+                // a vírgula é opcional antes de outra operação com COLUMN: o texto gravado vinha sem ela
+                if (!match(COMMA) && !((atKeyword("add") || atKeyword("drop") || atKeyword("modify"))
+                    && peek(1).isKeyword("column"))) {
+                    break;
+                }
             }
             if (ops.isEmpty()) {
                 throw error(Messages.get("parser_alter_table_no_ops", peek().start()));
@@ -1864,6 +1937,12 @@ public final class Parser {
 
     private Statement parseDrop() {
         pos++;
+        if (matchTarget("partition")) {
+            return PartitionParser.drop(partitionTokens());
+        }
+        if (matchTarget("ttl")) {
+            return PartitionParser.dropTtl(partitionTokens());
+        }
         if (matchKeyword("ai")) {
             expectKeyword("audit");
             String name = expectIdent();
@@ -1896,12 +1975,13 @@ public final class Parser {
         }
         if (matchKeyword("index")) {
             String name = expectIdent();
-            // forma com a tabela (DROP INDEX nome ON [TABLE] tabela), a mesma do CREATE INDEX; o nome já basta
+            // forma com a tabela (DROP INDEX nome ON [TABLE] tabela), a mesma do CREATE INDEX
+            String table = null;
             if (matchKeyword("on")) {
                 matchKeyword("table");
-                expectIdentOrString();
+                table = expectIdentOrString();
             }
-            return new Statement.DropIndex(name);
+            return new Statement.DropIndex(name, table);
         }
         if (matchKeyword("event")) {
             String name = expectIdent();
@@ -2158,8 +2238,26 @@ public final class Parser {
             case PARAM -> new Expr.Param((String) t.literal());
             case LBRACKET -> parseArrayLiteral();
             case LBRACE -> parseObjectOrSet();
+            case MINUS -> parseNegativeRecordKey();
             default -> throw error(Messages.get("parser_invalid_record_key", t.start(), t.text()));
         };
+    }
+
+    /** Chave numérica negativa ({@code conta:-7}); depois do sinal só vale um número. */
+    private Expr parseNegativeRecordKey() {
+        pos++;
+        Token t = peek();
+        if (!(t.is(INT) || t.is(FLOAT) || t.is(DECIMAL))) {
+            throw error(Messages.get("parser_invalid_record_key", t.start(), t.text()));
+        }
+        Object number = take().literal();
+        if (number instanceof BigDecimal decimal) {
+            return new Expr.Literal(AxonValue.num(decimal.negate()));
+        }
+        if (number instanceof Double real) {
+            return new Expr.Literal(AxonValue.num(-real.doubleValue()));
+        }
+        return new Expr.Literal(AxonValue.num(-((Long) number).longValue()));
     }
 
     private String parseTypeText() {
@@ -2212,13 +2310,16 @@ public final class Parser {
     private Expr parseAssignmentPath() {
         String name = expectIdent();
         List<Part> parts = new ArrayList<>();
-        while (match(DOT)) {
-            parts.add(new Part.Field(expectIdent()));
-        }
-        while (match(TokenType.LBRACKET)) {
-            Expr idx = parseExpr();
-            expect(TokenType.RBRACKET);
-            parts.add(new Part.Index(idx));
+        while (true) {
+            if (match(DOT)) {
+                parts.add(new Part.Field(expectIdent()));
+            } else if (match(TokenType.LBRACKET)) {
+                Expr idx = parseExpr();
+                expect(TokenType.RBRACKET);
+                parts.add(new Part.Index(idx));
+            } else {
+                break;
+            }
         }
         if (parts.isEmpty()) {
             return new Expr.Ident(name);
@@ -2691,6 +2792,53 @@ public final class Parser {
         }
         expect(RPAREN);
         return new Query(stmts);
+    }
+
+    /** Consome {@code word} quando vem seguida de {@code ON}: o começo de um comando de partição ou TTL. */
+    private boolean matchTarget(String word) {
+        if (atWord(word) && peekIsWord(1, "on")) {
+            pos++;
+            return true;
+        }
+        return false;
+    }
+
+    private PartitionParser.Tokens partitionTokens() {
+        return new PartitionParser.Tokens() {
+            @Override
+            public boolean word(String word) {
+                return matchWord(word);
+            }
+
+            @Override
+            public void require(String word) {
+                expectWord(word);
+            }
+
+            @Override
+            public String name() {
+                return expectIdentOrString();
+            }
+
+            @Override
+            public long duration() {
+                long millis = (Long) expect(DURATION).literal();
+                while (at(DURATION)) {
+                    millis += (Long) take().literal();
+                }
+                return millis;
+            }
+
+            @Override
+            public Expr expression() {
+                return parseExpr();
+            }
+
+            @Override
+            public RuntimeException unexpected(String expected) {
+                return error(Messages.get("parser_expected_keyword", expected, peek().start()));
+            }
+        };
     }
 
     private Expr parseDuration() {

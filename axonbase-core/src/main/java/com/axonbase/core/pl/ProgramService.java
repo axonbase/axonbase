@@ -154,6 +154,13 @@ public final class ProgramService {
             }
         }
         ProgramDef existing = db.programs().get(name);
+        if (!replaying && !administers(session)) {
+            // repetir a definição em vigor não muda nada: nem a versão, nem as datas, nem o dono
+            if (orReplace && repeats(existing, renderable(kind, name, List.of(), params, returns, definer, body))) {
+                return AxonValue.nul();
+            }
+            throw adminRequired();
+        }
         if (existing != null && !replaying) {
             if (!orReplace) {
                 throw new AxonError(-32000, "ja existe " + what(existing.kind()) + " '" + name
@@ -164,7 +171,8 @@ public final class ProgramService {
                     + " e nao pode ser substituido por " + what);
             }
         }
-        List<ProgramDef.Param> ps = bindParams(eval, what(kind), name, params, replaying);
+        List<String> refusedDefaults = new ArrayList<>();
+        List<ProgramDef.Param> ps = bindParams(eval, what(kind), name, params, replaying, refusedDefaults);
         if (returns != null && !ParamTypes.known(returns) && !replaying) {
             throw new AxonError(-32000, "tipo de retorno desconhecido em '" + name + "': " + returns);
         }
@@ -197,6 +205,9 @@ public final class ProgramService {
         }
         String text = Render.stmt(renderable(kind, name, ps, params, returns, definer, body));
         String definition = effective.header() + text;
+        if (error == null && !refusedDefaults.isEmpty()) {
+            error = refusedDefaults.get(0);
+        }
         ProgramDef def = new ProgramDef(kind, name, ps, returns, definer, owner, body, definition, version, created,
             updated, error, program);
         ds.applyControl(session, ControlCommand.of(controlKind(kind), db.ns(), db.db(), name, definition));
@@ -275,7 +286,8 @@ public final class ProgramService {
     }
 
     private List<ProgramDef.Param> bindParams(Function<Expr, AxonValue> eval, String what, String name,
-                                              List<Statement.ProgramParam> params, boolean replaying) {
+                                              List<Statement.ProgramParam> params, boolean replaying,
+                                              List<String> refused) {
         List<ProgramDef.Param> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         boolean sawDefault = false;
@@ -303,8 +315,14 @@ public final class ProgramService {
                 try {
                     dv = eval.apply(p.defaultExpr());
                 } catch (RuntimeException e) {
-                    throw new AxonError(-32000, "o padrao do parametro '" + p.name() + "' de '" + name
-                        + "' nao e uma expressao constante valida: " + e.getMessage());
+                    String message = "o padrao do parametro '" + p.name() + "' de '" + name
+                        + "' nao e uma expressao constante valida: " + e.getMessage();
+                    // no reinício a definição abre assim mesmo, e a chamada responde com este erro
+                    if (!replaying) {
+                        throw new AxonError(-32000, message);
+                    }
+                    refused.add(message);
+                    dv = AxonValue.nul();
                 }
             }
             out.add(new ProgramDef.Param(p.name(), p.type(), p.defaultExpr() != null, dv, text));
@@ -346,7 +364,34 @@ public final class ProgramService {
         return AxonValue.object(keep);
     }
 
+    /**
+     * O corpo de um programa roda com a identidade de quem o chama, inclusive a do root, e uma função pode decidir uma
+     * PERMISSIONS. Por isso criar, substituir e apagar é do administrador cujo escopo cobre o banco. Sessão sem auth é
+     * o modo embutido, o replay ou o servidor sem autenticação.
+     */
+    private static boolean administers(Session session) {
+        AxonValue auth = session.auth();
+        return !Authz.authenticated(auth)
+            || Authz.atLeast(auth, Authz.Role.ADMIN) && Authz.allows(auth, session.namespace(), session.database());
+    }
+
+    private static AxonError adminRequired() {
+        return new AxonError(-32002, Messages.get("auth_role_required", "admin"));
+    }
+
+    /** O texto pedido é o da definição em vigor, sem contar a linha de metadados que a precede. */
+    private static boolean repeats(ProgramDef current, Statement wanted) {
+        if (current == null) {
+            return false;
+        }
+        String definition = current.definition();
+        return definition.substring(definition.indexOf('\n') + 1).equals(Render.stmt(wanted));
+    }
+
     private AxonValue drop(Session session, Statement.DropProgram d) {
+        if (!administers(session)) {
+            throw adminRequired();
+        }
         Database db = ds.requireDatabase(session);
         ProgramDef.Kind kind = ProgramDef.Kind.valueOf(d.kind());
         ProgramDef existing = db.programs().get(d.name());
@@ -545,6 +590,9 @@ public final class ProgramService {
         String savedDb = session.database();
         long started = System.nanoTime();
         level[0]++;
+        boolean savedReadOnly = session.readOnlyCall();
+        // a classificação do SQL em db.* olha só a primeira camada: subconsultas são barradas na execução
+        session.readOnlyCall(savedReadOnly || !writable);
         try {
             if (def.definer()) {
                 session.auth(def.owner());
@@ -565,6 +613,7 @@ public final class ProgramService {
             throw e;
         } finally {
             level[0]--;
+            session.readOnlyCall(savedReadOnly);
             session.auth(savedAuth);
             session.namespace(savedNs);
             session.database(savedDb);

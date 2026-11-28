@@ -94,18 +94,30 @@ public sealed interface Statement {
     record Unrelate(Expr from, Expr kind, Expr to) implements Statement {
     }
 
-    record DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions)
+    /** Comandos de partição por tempo e de TTL (E4); os detalhes ficam em {@link PartitionCommand}. */
+    record Partition(PartitionCommand command) implements Statement {
+    }
+
+    /** {@code shardBy} é o campo da cláusula {@code SHARD BY} ({@code id} ou um campo), ou {@code null}. */
+    record DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions, String shardBy)
             implements Statement {
+
+        /** DEFINE TABLE sem a cláusula SHARD BY. */
+        public DefineTable(String name, boolean schemafull, boolean drop, Permissions permissions) {
+            this(name, schemafull, drop, permissions, null);
+        }
     }
 
     record ColumnDef(String name, String type, boolean primaryKey, boolean notNull,
                      Expr defaultExpr, Expr checkExpr, String references) {
     }
 
+    /** {@code checks} são as cláusulas {@code CHECK (...)} da tabela; as de coluna ficam na própria coluna. */
     record CreateTable(String name, boolean ifNotExists, boolean schemafull,
-                       List<ColumnDef> columns) implements Statement {
+                       List<ColumnDef> columns, List<Expr> checks) implements Statement {
         public CreateTable {
             columns = columns == null ? List.of() : List.copyOf(columns);
+            checks = checks == null ? List.of() : List.copyOf(checks);
         }
     }
 
@@ -362,8 +374,8 @@ public sealed interface Statement {
         }
     }
 
-    /** DROP INDEX {@code <name>} */
-    record DropIndex(String name) implements Statement {
+    /** DROP INDEX {@code <name>} [ON [TABLE] {@code <table>}]; sem a tabela, {@code table} é {@code null}. */
+    record DropIndex(String name, String table) implements Statement {
     }
 
     /** CREATE EVENT SQL padrão */
@@ -505,8 +517,15 @@ public sealed interface Statement {
     /** Permisos dunha táboa, por acción (select/create/update/delete). */
     record Permissions(Expr select, Expr create, Expr update, Expr delete) {
 
+        /** Sem cláusula {@code PERMISSIONS}: nenhuma restrição. Não é o {@code PERMISSIONS NONE}. */
         public static Permissions none() {
             return new Permissions(null, null, null, null);
+        }
+
+        /** {@code PERMISSIONS NONE}: todas as ações negadas. */
+        public static Permissions denied() {
+            var f = new Expr.Literal(com.axonbase.value.AxonValue.bool(false));
+            return new Permissions(f, f, f, f);
         }
 
         public static Permissions full() {

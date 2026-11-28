@@ -23,7 +23,7 @@ public final class SagaParticipantTransaction implements AutoCloseable {
         if (begun) throw new IllegalStateException(Messages.get("sdk_transaction_already_begun", correlationId));
         axon.begin();
         try {
-            axon.query("LET $saga_corr = '" + escape(correlationId) + "'");
+            axon.query("LET $saga_corr = " + AxonQlText.literal(correlationId));
             begun = true;
         } catch (RuntimeException error) {
             try {
@@ -60,9 +60,5 @@ public final class SagaParticipantTransaction implements AutoCloseable {
     private void ensureActive() {
         if (!begun) throw new IllegalStateException(Messages.get("sdk_transaction_not_begun"));
         if (finished) throw new IllegalStateException(Messages.get("sdk_transaction_already_finished"));
-    }
-
-    private static String escape(String value) {
-        return value.replace("\\", "\\\\").replace("'", "''");
     }
 }

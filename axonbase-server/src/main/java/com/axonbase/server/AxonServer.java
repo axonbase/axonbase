@@ -54,9 +54,12 @@ public final class AxonServer {
     private final boolean requireAuth;
     private final ServerConfig config;
     private final TrustStoreRegistry trustStores;
-    private final CertificateChallengeService certificateChallenges = new CertificateChallengeService();
+    private final CertificateChallengeService certificateChallenges;
     private volatile com.axonbase.core.cluster.ClusterStatusProvider clusterStatus;
+    private static final String READ_CONSISTENCY_HEADER = "Axon-Read-Consistency";
     private volatile com.axonbase.core.cluster.ClusterRuntime clusterRuntime;
+    private volatile com.axonbase.core.shard.backup.BackupMember shardBackup;
+    private volatile String shardSecret;
     private final java.util.List<RpcDispatcher> dispatchers = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicLong inflight = new java.util.concurrent.atomic.AtomicLong();
     private final ServerMetrics metrics = new ServerMetrics();
@@ -67,6 +70,14 @@ public final class AxonServer {
     private volatile boolean metricsPerDatabase;
     private volatile boolean metricsRequireAuth;
     private volatile com.axonbase.core.backup.S3SyncManager backups;
+    private volatile com.axonbase.core.journal.PitrJournal pitr;
+    private volatile com.axonbase.core.qos.WorkloadGovernor workload;
+    private static final long DEFAULT_DRAIN_GRACE_MS = 5_000;
+    private static final long DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
+    private volatile NodeDrain drain = newDrain(DEFAULT_DRAIN_GRACE_MS, DEFAULT_DRAIN_TIMEOUT_MS);
+    private volatile boolean drainOnShutdown;
+    private volatile LeaderRedirect leaderRedirect = LeaderRedirect.NONE;
+    private volatile AdmissionControl admission;
     private final EventBus events = new EventBus();
     private final java.util.concurrent.ScheduledExecutorService ticker =
         Executors.newSingleThreadScheduledExecutor(r -> {
@@ -101,11 +112,18 @@ public final class AxonServer {
         this.auth = auth;
         this.requireAuth = requireAuth;
         this.config = config;
+        this.certificateChallenges = new CertificateChallengeService(config.certAllowUnknownRevocation());
         this.trustStores = new TrustStoreRegistry();
+        try {
+            StatePaths.adoptTruststores(config.path());
+        } catch (java.io.UncheckedIOException e) {
+            AxonLog.log("error", "truststore_adopt_failed",
+                Messages.get("server_truststore_adopt_failed", String.valueOf(e.getMessage())));
+        }
         // registra o carregador de JKS e recarrega os truststores persistidos no plano de controle
         ds.jksRegistrar((name, path, password, collector, oids) -> {
             if (password == null) {
-                this.trustStores.registerWithoutPassword(name, path);
+                this.trustStores.registerWithoutPassword(name, StatePaths.locateTruststore(config.path(), path));
             } else {
                 this.trustStores.register(name, path, password, collector, oids);
             }
@@ -197,7 +215,29 @@ public final class AxonServer {
         return srv;
     }
 
+    /**
+     * Modo do certificado do cliente ({@code AXON_TLS_CLIENT_AUTH}, ou a propriedade {@code axon.tls.clientAuth}):
+     * {@code optional}, o padrão, pede e aceita a conexão sem ele; {@code require} o exige. Exigir sem TLS completo, ou
+     * com a porta sem TLS aberta, não protegeria nada: a subida é recusada.
+     */
+    private static boolean clientCertificateRequired(ServerConfig config) {
+        String raw = System.getProperty("axon.tls.clientAuth", System.getenv("AXON_TLS_CLIENT_AUTH"));
+        String mode = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (mode.isEmpty() || mode.equals("optional")) {
+            return false;
+        }
+        if (!mode.equals("require")) {
+            throw new IllegalArgumentException(Messages.get("config_tls_client_auth_invalid", raw));
+        }
+        if (config.tlsCert().isBlank() || config.tlsKey().isBlank() || config.tlsCa().isBlank()
+            || config.plainPort() > 0) {
+            throw new IllegalArgumentException(Messages.get("config_tls_client_auth_incomplete"));
+        }
+        return true;
+    }
+
     private void listen() throws Exception {
+        boolean requireClientCertificate = clientCertificateRequired(config);
         QueuedThreadPool pool = new QueuedThreadPool(config.httpThreads(), 1, config.httpQueue());
         Server jetty = new Server(pool);
 
@@ -210,7 +250,11 @@ public final class AxonServer {
             if (!config.tlsCa().isBlank()) {
                 ssl.setTrustStorePath(config.tlsCa());
                 ssl.setTrustStorePassword(config.tlsKey());
-                ssl.setWantClientAuth(true);
+                if (requireClientCertificate) {
+                    ssl.setNeedClientAuth(true);
+                } else {
+                    ssl.setWantClientAuth(true);
+                }
             }
             ServerConnector connector = new ServerConnector(jetty, ssl);
             connector.setHost(bind);
@@ -259,6 +303,9 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new AdminTrustStoreServlet()), "/admin/truststores");
         ctx.addServlet(new ServletHolder(new CertificateLoginServlet()), "/certificate/login/*");
         ctx.addServlet(new ServletHolder(new ShardMoveServlet()), "/admin/shard/move");
+        // rota interna do gateway de shards (docs/shards.md)
+        ctx.addServlet(new ServletHolder(new ShardNodeServlet(ds, this::withNames, requireAuth, () -> clusterRuntime,
+            () -> shardBackup, () -> shardSecret, this::trackShard)), "/shard/v1/*");
         ServletHolder adminV1 = new ServletHolder(new AdminV1Servlet(this));
         adminV1.setAsyncSupported(true);
         adminV1.getRegistration().setMultipartConfig(new jakarta.servlet.MultipartConfigElement(
@@ -267,11 +314,13 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new SqlServlet()), "/sql/*");
         ctx.addServlet(new ServletHolder(new TableServlet()), "/table/*");
         ctx.addServlet(new ServletHolder(new SigninServlet()), "/signin");
-        RpcServlet rpc = new RpcServlet(ds, auth, requireAuth, trustStores);
+        RpcServlet rpc = new RpcServlet(ds, auth, requireAuth, trustStores,
+            new CertificateChallengeService(config.certAllowUnknownRevocation()));
         WsRpcServlet ws = new WsRpcServlet(ds, auth, requireAuth, trustStores, wsOpen,
             wsFramesReceived, wsFramesSent, wsResponseTimeNanos, wsResponseCount,
             wsQueryErrors, wsNotLeaderErrors,
-            config.queryTimeout(), config.txnTimeout());
+            config.queryTimeout(), config.txnTimeout(),
+            new CertificateChallengeService(config.certAllowUnknownRevocation()));
         rpc.dispatcher.metrics(metrics);
         ws.dispatcher().metrics(metrics);
         rpc.dispatcher.activity(activity);
@@ -284,6 +333,16 @@ public final class AxonServer {
         ctx.addServlet(new ServletHolder(new ImportServlet()), "/import");
         ctx.addServlet(new ServletHolder(new GraphQLServlet(ds, this::withNames, requireAuth)), "/graphql");
         ctx.addServlet(new ServletHolder(new McpServlet(ds, this::withNames, requireAuth)), "/mcp/*");
+        // GraphQL e MCP também leem: num nó que não é o líder valem o limite de defasagem e o cabeçalho.
+        jakarta.servlet.Filter readBarrier = (request, response, chain) -> {
+            if (!refusedRead((HttpServletRequest) request, (HttpServletResponse) response)) {
+                chain.doFilter(request, response);
+            }
+        };
+        for (String path : new String[] {"/graphql", "/mcp/*"}) {
+            ctx.addFilter(asyncFilter(readBarrier), path,
+                java.util.EnumSet.of(jakarta.servlet.DispatcherType.REQUEST));
+        }
         JettyWebSocketServletContainerInitializer.configure(ctx, (sc, wsContainer) -> {});
         ctx.addServlet(new ServletHolder(ws), "/rpc/ws/*");
 
@@ -298,7 +357,7 @@ public final class AxonServer {
                         (jakarta.servlet.http.HttpServletResponse) response;
                     resp.setHeader("Access-Control-Allow-Origin", config.corsOrigins());
                     resp.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-                    resp.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Axon-Ns, Axon-Db, Axon-Role-Cap, X-Request-Id, X-Correlation-Id");
+                    resp.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Axon-Ns, Axon-Db, Axon-Role-Cap, Axon-Workload, X-Request-Id, X-Correlation-Id");
                     resp.setHeader("Access-Control-Allow-Credentials", "true");
                     if ("OPTIONS".equalsIgnoreCase(((jakarta.servlet.http.HttpServletRequest) request).getMethod())) {
                         resp.setStatus(204);
@@ -354,10 +413,12 @@ public final class AxonServer {
         ctx.addFilter(asyncFilter(roleCapFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(metricsFilter), "/*", EnumSet.of(DispatcherType.REQUEST));
         ctx.addFilter(asyncFilter(new LoggingFilter(auth)), "/*", EnumSet.of(DispatcherType.REQUEST));
-        ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit())), "/*", EnumSet.of(DispatcherType.REQUEST));
+        ctx.addFilter(asyncFilter(new RateLimitFilter(config.rateLimit(),
+            RateLimitFilter.trustedProxies(System.getenv("AXON_TRUSTED_PROXIES")))),
+            "/*", EnumSet.of(DispatcherType.REQUEST));
         // Mantém threads livres para /health, /ready e /admin mesmo com consultas lentas em andamento.
-        ctx.addFilter(asyncFilter(new AdmissionFilter(
-            new AdmissionControl(AdmissionControl.limitFor(config.httpThreads())))),
+        admission = new AdmissionControl(AdmissionControl.limitFor(config.httpThreads()));
+        ctx.addFilter(asyncFilter(new AdmissionFilter(admission)),
             "/*", EnumSet.of(DispatcherType.REQUEST));
 
         return ctx;
@@ -474,17 +535,114 @@ public final class AxonServer {
         return clusterRuntime;
     }
 
+    /**
+     * Torna este nó um shard: liga a rota interna {@code /shard/v1/*}, que passa a exigir este segredo do gateway.
+     * Vazio ou {@code null} mantém a rota desligada.
+     */
+    public void shardSecret(String secret) {
+        this.shardSecret = secret == null || secret.isBlank() ? null : secret.trim();
+    }
+
+    /** Liga as rotas de backup de shard a este nó ({@code null} quando o journal de cluster está desligado). */
+    public void shardBackup(com.axonbase.core.shard.backup.BackupMember node) {
+        this.shardBackup = node;
+    }
+
+    /**
+     * Liga a prioridade por tipo de carga (QoS) quando as variáveis {@code AXON_QOS*} pedem. As vagas analíticas são
+     * dimensionadas pelo número de requisições de dados que este servidor atende ao mesmo tempo.
+     */
+    public void qos(java.util.function.Function<String, String> env) {
+        var settings = com.axonbase.core.qos.QosSettings.from(env, Runtime.getRuntime().availableProcessors(),
+            AdmissionControl.limitFor(config.httpThreads()));
+        this.workload = settings.enabled() ? new com.axonbase.core.qos.WorkloadGovernor(settings) : null;
+        ds.workloadGovernor(workload);
+    }
+
+    com.axonbase.core.qos.WorkloadGovernor workload() {
+        return workload;
+    }
+
+    /**
+     * Configura a operação do nó em cluster: {@code AXON_CLUSTER_HTTP_PEERS} (redirecionamento para o líder),
+     * {@code AXON_DRAIN_GRACE_MS}, {@code AXON_DRAIN_TIMEOUT_MS} e {@code AXON_DRAIN_ON_SHUTDOWN}.
+     */
+    public void operations(java.util.function.Function<String, String> env) {
+        this.leaderRedirect = LeaderRedirect.parse(env.apply("AXON_CLUSTER_HTTP_PEERS"));
+        this.drain = newDrain(millis(env, "AXON_DRAIN_GRACE_MS", DEFAULT_DRAIN_GRACE_MS),
+            millis(env, "AXON_DRAIN_TIMEOUT_MS", DEFAULT_DRAIN_TIMEOUT_MS));
+        this.drainOnShutdown = "true".equalsIgnoreCase(env.apply("AXON_DRAIN_ON_SHUTDOWN"));
+    }
+
+    /** Confere as variáveis que {@link #qos} e {@link #operations} vão ler, sem mudar nada. */
+    static void validateSettings(java.util.function.Function<String, String> env) {
+        com.axonbase.core.qos.QosSettings.from(env, 1, 2);
+        LeaderRedirect.parse(env.apply("AXON_CLUSTER_HTTP_PEERS"));
+        millis(env, "AXON_DRAIN_GRACE_MS", DEFAULT_DRAIN_GRACE_MS);
+        millis(env, "AXON_DRAIN_TIMEOUT_MS", DEFAULT_DRAIN_TIMEOUT_MS);
+    }
+
+    NodeDrain drain() {
+        return drain;
+    }
+
+    private static long millis(java.util.function.Function<String, String> env, String name, long fallback) {
+        String raw = env.apply(name);
+        if (raw == null || raw.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(Messages.get("config_invalid_long", raw), e);
+        }
+    }
+
+    private NodeDrain newDrain(long graceMillis, long timeoutMillis) {
+        return new NodeDrain(new NodeDrain.Node() {
+            @Override
+            public boolean leading() {
+                var cluster = clusterRuntime;
+                return cluster != null && cluster.leading();
+            }
+
+            @Override
+            public com.axonbase.core.cluster.TransferResult transfer(java.time.Duration timeout) {
+                return clusterRuntime.transferLeadership(null, timeout);
+            }
+
+            @Override
+            public void abstain(boolean value) {
+                var cluster = clusterRuntime;
+                if (cluster != null) {
+                    cluster.abstain(value);
+                }
+            }
+
+            @Override
+            public long dataRequestsInFlight() {
+                var control = admission;
+                return control == null ? 0 : control.inFlight();
+            }
+        }, graceMillis, timeoutMillis);
+    }
+
+    /** Liga o journal de PITR a este servidor (API, métricas e restauração a um instante). */
+    public void pitr(com.axonbase.core.journal.PitrJournal journal) {
+        this.pitr = journal;
+    }
+
+    com.axonbase.core.journal.PitrJournal pitr() {
+        return pitr;
+    }
+
     long uptimeSeconds() {
         return Math.max(0, System.nanoTime() - startedAtNanos) / 1_000_000_000L;
     }
 
     /** Diretório onde os JKS enviados pela API ficam gravados. */
     java.nio.file.Path truststoreDir() {
-        String path = config.path();
-        java.nio.file.Path base = path == null || path.equals("memory") || path.isBlank()
-            ? java.nio.file.Path.of(System.getProperty("java.io.tmpdir"), "axonbase-truststores")
-            : java.nio.file.Path.of(path.startsWith("rocksdb:") ? path.substring(8) : path + ".truststores");
-        return path != null && path.startsWith("rocksdb:") ? base.resolveSibling(base.getFileName() + ".truststores") : base;
+        return StatePaths.truststoreDir(config.path());
     }
 
     /** Liga {@code axe_db_keys{ns,db}} (AXON_METRICS_PER_DATABASE), que tem custo linear por banco. */
@@ -527,7 +685,10 @@ public final class AxonServer {
         this.clusterStatus = provider == null
             ? com.axonbase.core.cluster.ClusterStatusProvider.Status::local : provider;
         this.clusterRuntime = provider instanceof com.axonbase.core.cluster.ClusterRuntime rt ? rt : null;
-        dispatchers.forEach(dispatcher -> dispatcher.clusterStatus(() -> clusterStatus.status()));
+        dispatchers.forEach(dispatcher -> {
+            dispatcher.clusterStatus(() -> clusterStatus.status());
+            dispatcher.readBarrier(consistency -> clusterStatus.awaitRead(consistency));
+        });
         lastLeader = clusterStatus.status().leader();
         var previous = leaderWatch;
         if (previous != null) {
@@ -548,9 +709,10 @@ public final class AxonServer {
         if (status.isLeader()) {
             return false;
         }
-        if (!status.leaderAddress().isEmpty()) {
+        String leaderUrl = leaderRedirect.base(status.leader(), status.leaderAddress());
+        if (!leaderUrl.isEmpty()) {
             String query = req.getQueryString();
-            resp.setHeader("Location", "http://" + status.leaderAddress() + req.getRequestURI()
+            resp.setHeader("Location", leaderUrl + req.getRequestURI()
                 + (query == null ? "" : "?" + query));
             resp.setHeader("Axon-Leader", status.leader());
             resp.setStatus(307);
@@ -561,6 +723,54 @@ public final class AxonServer {
             + esc(status.leader()) + "\",\"leader_address\":\"\",\"detail\":\""
             + esc(Messages.get("server_no_leader")) + "\"}");
         return true;
+    }
+
+    /**
+     * Aplica a consistência pedida no cabeçalho {@code Axon-Read-Consistency} ou, num nó que não é o líder, o
+     * limite de defasagem configurado.
+     *
+     * @return {@code true} quando a resposta de erro já foi escrita
+     */
+    private boolean refusedRead(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        com.axonbase.core.cluster.ReadConsistency wanted;
+        try {
+            wanted = com.axonbase.core.cluster.ReadConsistency.parse(req.getHeader(READ_CONSISTENCY_HEADER));
+        } catch (IllegalArgumentException invalid) {
+            json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(invalid.getMessage()) + "\"}");
+            return true;
+        }
+        if (wanted == null && clusterStatus.leading()) {
+            return false;
+        }
+        try {
+            clusterStatus.awaitRead(wanted);
+            return false;
+        } catch (com.axonbase.core.cluster.StaleReadException stale) {
+            var status = clusterStatus.status();
+            json(resp, 503, "{\"status\":\"ERR\",\"kind\":\"STALE_READ\",\"leader\":\"" + esc(status.leader())
+                + "\",\"leader_address\":\"" + esc(status.leaderAddress()) + "\",\"detail\":\""
+                + esc(stale.getMessage()) + "\"}");
+            return true;
+        }
+    }
+
+    /**
+     * A liderança mudou antes de a escrita ser proposta (uma transferência, por exemplo): nada foi gravado, e o
+     * cliente é mandado ao líder novo. Um script que confirma no meio fica de fora, porque o começo dele pode ter
+     * sido gravado.
+     */
+    private boolean lostLeadership(HttpServletRequest req, HttpServletResponse resp, Throwable failure, String sql)
+            throws IOException {
+        if (!(failure instanceof com.axonbase.core.cluster.NotLeaderException)
+            || sql.toLowerCase(java.util.Locale.ROOT).contains("commit")) {
+            return false;
+        }
+        return redirectWrites(req, resp);
+    }
+
+    /** A escrita pode ter acontecido: nem 2xx nem a resposta de erro comum, para o cliente não repetir às cegas. */
+    private void outcomeUnknown(HttpServletResponse resp, String detail) throws IOException {
+        json(resp, 504, "{\"status\":\"UNKNOWN\",\"kind\":\"OUTCOME_UNKNOWN\",\"detail\":\"" + esc(detail) + "\"}");
     }
 
     private boolean requireAuthenticated(Session session, HttpServletResponse resp) throws IOException {
@@ -589,13 +799,35 @@ public final class AxonServer {
         return false;
     }
 
+    /** Operações que valem para o nó inteiro: administrador de escopo ROOT (401 sem sessão, 403 sem papel ou escopo). */
+    private boolean requireRootAdmin(Session session, HttpServletResponse resp) throws IOException {
+        if (requireAdmin(session, resp)) {
+            return true;
+        }
+        if (requireAuth && com.axonbase.core.security.Authz.scope(session.auth())
+            != com.axonbase.core.security.AuthCatalog.Scope.ROOT) {
+            json(resp, 403, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_forbidden")) + "\"}");
+            return true;
+        }
+        return false;
+    }
+
     private boolean requireRoot(Session session, HttpServletResponse resp) throws IOException {
         if (!requireAuth || session.auth() == null || !session.auth().isObject()
-            || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))) {
+            || !"ROOT".equals(valueOf(session.auth().asObject().get("scope")))
+            || !com.axonbase.core.security.Authz.atLeast(session.auth(),
+                com.axonbase.core.security.Authz.Role.ADMIN)) {
         json(resp, 403, "{\"code\":-32002,\"message\":\"" + esc(Messages.get("auth_forbidden")) + "\"}");
             return true;
         }
         return false;
+    }
+
+    private volatile com.axonbase.core.partition.PartitionMaintenance maintenance;
+
+    /** A manutenção de partições e TTL, para o desligamento pará-la. */
+    public void maintenance(com.axonbase.core.partition.PartitionMaintenance background) {
+        this.maintenance = background;
     }
 
     public void stop() throws Exception {
@@ -603,6 +835,9 @@ public final class AxonServer {
             return;
         }
         stopping = true;
+        if (drainOnShutdown) {
+            drain.drainAndWait();
+        }
         long deadline = System.currentTimeMillis() + config.shutdownTimeout();
         while (System.currentTimeMillis() < deadline && inflight.get() > 0) {
             Thread.sleep(100);
@@ -610,6 +845,17 @@ public final class AxonServer {
         ticker.shutdownNow();
         jetty.stop();
         jetty = null;
+        var background = maintenance;
+        if (background != null) {
+            background.close(); // antes de o armazenamento fechar
+        }
+        ds.coldTier().close();
+        var journal = pitr;
+        if (journal != null) {
+            journal.close(); // depois das requisições: tudo o que foi confirmado fica num segmento fechado
+        }
+        // marca o desligamento limpo: sem ela a próxima subida abre outra linha do tempo e o PITR pede backup novo
+        ds.rocksBackend().ifPresent(com.axonbase.core.storage.RocksDbBackend::markClean);
     }
 
     // ------------------------------------------------------------------
@@ -627,7 +873,8 @@ public final class AxonServer {
         @Override
         protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             var s = clusterStatus.status();
-            json(resp, s.ready() ? 200 : 503, "{\"ready\":" + s.ready()
+            boolean ready = s.ready() && !drain.draining();
+            json(resp, ready ? 200 : 503, "{\"ready\":" + ready
                 + ",\"role\":\"" + s.role() + "\""
                 + ",\"leader\":\"" + esc(s.leader()) + "\""
                 + ",\"active\":" + s.active() + ",\"quorum\":" + s.quorum() + "}");
@@ -795,6 +1042,8 @@ public final class AxonServer {
               .append("# TYPE axe_backup_runs_total counter\n")
               .append("axe_backup_runs_total{result=\"success\"} ").append(bk == null ? 0 : bk.runsOk()).append("\n")
               .append("axe_backup_runs_total{result=\"failure\"} ").append(bk == null ? 0 : bk.runsFailed()).append("\n");
+            PitrMetrics.append(sb, pitr, ds);
+            QosMetrics.append(sb, workload);
             if (metricsPerDatabase) {
                 sb.append("# TYPE axe_db_keys gauge\n");
                 for (var db : ds.allDatabases()) {
@@ -811,7 +1060,7 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             Session s = withNames(req);
-            if (requireAdmin(s, resp)) {
+            if (requireRootAdmin(s, resp)) {
                 return;
             }
             var rt = clusterRuntime;
@@ -956,12 +1205,16 @@ public final class AxonServer {
                     var fingerprint = certificateChallenges.verifyChain(
                         java.util.List.of(certChain), trustStore);
 
-                    String user = req.getParameter("user");
-                    if (user == null || user.isBlank()) {
-                        user = trustStores.usesIcpBrasilCollector(store)
-                            ? extractIcpBrasilUserId(certChain[0])
-                            : trustStores.collectUser(store, certChain[0]);
+                    // quem o certificado identifica manda; o parâmetro só vale quando ele não identifica ninguém
+                    String requested = req.getParameter("user");
+                    String declared = certificateIdentity(trustStores, store, certChain[0]);
+                    if (declared != null && requested != null && !requested.isBlank() && !declared.equals(requested)) {
+                        html.append("<div class=\"info\">").append(Messages.get("cert_user_mismatch")).append("</div>");
+                        html.append("</body></html>");
+                        html(resp, 200, html.toString());
+                        return;
                     }
+                    String user = declared != null ? declared : requested;
                     System.err.println("{\"event\":\"certificate_login\",\"subject\":\""
                         + esc(certChain[0].getSubjectX500Principal().getName())
                         + "\",\"issuer\":\"" + esc(certChain[0].getIssuerX500Principal().getName())
@@ -997,7 +1250,9 @@ public final class AxonServer {
                         return;
                     }
 
-                    String credential = auth.issueTemporaryCredential(user, store, fingerprint.fingerprint());
+                    String credential = declared != null
+                        ? auth.issueCredentialForCertificate(user, store, fingerprint.fingerprint())
+                        : auth.issueTemporaryCredential(user, store, fingerprint.fingerprint());
 
                     String copyUserLabel = Messages.get("cert_copy_user");
                     String copyPassLabel = Messages.get("cert_copy_password");
@@ -1062,21 +1317,29 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             String body = readBody(req);
-            // Só um nó que não é o líder precisa saber se a instrução escreve (para redirecionar); no líder ou sem
-            // cluster isso custaria um parse a mais em toda requisição.
-            if (!clusterStatus.status().isLeader() && com.axonbase.core.engine.Datastore.isMutation(body)
-                && redirectWrites(req, resp)) {
+            // Só um nó que não é o líder (para redirecionar) ou um pedido de consistência precisam saber se a
+            // instrução escreve; fora disso custaria um parse a mais em toda requisição.
+            boolean follower = !clusterStatus.leading();
+            boolean classify = follower || req.getHeader(READ_CONSISTENCY_HEADER) != null;
+            boolean mutation = classify && com.axonbase.core.engine.Datastore.isMutation(body);
+            if (follower && mutation && redirectWrites(req, resp)) {
                 return;
             }
             Session s = withNames(req);
             if (requireAuthenticated(s, resp)) {
                 return;
             }
+            if (classify && !mutation && refusedRead(req, resp)) {
+                return;
+            }
             AxonValue result = null;
             String error = null;
+            boolean outcomeUnknown = false;
+            Throwable failure = null;
             long startedNanos = System.nanoTime();
             ActivityRegistry.Running run = activity.begin(ActivityRegistry.userOf(s), s.namespace(), s.database(), body,
                 "http", req.getRemoteAddr(), null, s);
+            run.handle().requestWorkload(req.getHeader("Axon-Workload"));
             if (config.queryTimeout() > 0) {
                 Future<AxonValue> future = queryExecutor.submit(() -> executeTracked(run, body, s));
                 try {
@@ -1087,18 +1350,28 @@ public final class AxonServer {
                     future.cancel(true);
                     error = Messages.get("query_timeout");
                 } catch (Exception e) {
+                    failure = e.getCause();
                     error = e.getCause() instanceof RuntimeException re ? re.getMessage() : e.getMessage();
+                    outcomeUnknown = e.getCause() instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
             } else {
                 try {
                     result = executeTracked(run, body, s);
                 } catch (RuntimeException e) {
+                    failure = e;
                     error = e.getMessage();
+                    outcomeUnknown = e instanceof com.axonbase.core.cluster.CommitOutcomeUnknownException;
                 }
             }
             activity.end(run, error != null, run.handle().cancelled());
             metrics.query(System.nanoTime() - startedNanos, error != null);
-            if (error != null) {
+            if (outcomeUnknown) {
+                outcomeUnknown(resp, error);
+            } else if (RetryableRefusals.overloaded(resp, failure)) {
+                return;
+            } else if (lostLeadership(req, resp, failure, body)) {
+                return;
+            } else if (error != null) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(error) + "\"}");
             } else {
                 json(resp, 200, AxonJson.write(result));
@@ -1106,14 +1379,92 @@ public final class AxonServer {
         }
     }
 
-    /** Executa ligando a consulta à thread, para o motor poder checar o cancelamento. */
-    private AxonValue executeTracked(ActivityRegistry.Running run, String sql, Session s) {
-        com.axonbase.core.engine.QueryContext.Handle previous = com.axonbase.core.engine.QueryContext.attach(run.handle());
+    /**
+     * O que a rota dos shards tem em comum com o {@code /sql}: a consulta aparece na atividade, pode ser cancelada,
+     * conta nas métricas e respeita o prazo de consulta. A manutenção dos shards (só root) não tem prazo, porque a
+     * cópia de uma movimentação de slots lê tabelas inteiras.
+     */
+    private com.axonbase.core.shard.ShardReply trackShard(HttpServletRequest req, Session s,
+            com.axonbase.core.shard.ShardRequest request,
+            java.util.function.Supplier<com.axonbase.core.shard.ShardReply> work) {
+        ActivityRegistry.Running run = activity.begin(ActivityRegistry.userOf(s), request.namespace(),
+            request.database(), request.sql(), "shard", req.getRemoteAddr(), null, s);
+        run.handle().requestWorkload(req.getHeader("Axon-Workload"));
+        long startedNanos = System.nanoTime();
+        long timeout = request.system() ? 0 : config.queryTimeout();
+        boolean failed = true;
         try {
-            return ds.execute(sql, s, null);
+            com.axonbase.core.shard.ShardReply reply = timeout > 0
+                ? within(timeout, run, writes(request), work) : attached(run, work);
+            failed = false;
+            return reply;
+        } finally {
+            activity.end(run, failed, run.handle().cancelled());
+            metrics.query(System.nanoTime() - startedNanos, failed);
+        }
+    }
+
+    /** O pedido do gateway pode gravar: um bloco atômico, ou um comando não parcial que não é só leitura. */
+    private static boolean writes(com.axonbase.core.shard.ShardRequest request) {
+        return request.atomic() || !request.partial() && !request.sql().startsWith("__axon_")
+            && Datastore.isMutation(request.sql());
+    }
+
+    /**
+     * Executa em outra thread e desiste no prazo, cancelando a consulta de verdade.
+     *
+     * @param write o trabalho pode gravar: a interrupção não garante que o commit pare, então desistir dele tem
+     *              desfecho desconhecido
+     */
+    private <T> T within(long timeoutMillis, ActivityRegistry.Running run, boolean write,
+                         java.util.function.Supplier<T> work) {
+        Future<T> future = queryExecutor.submit(() -> attached(run, work));
+        try {
+            return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            run.handle().cancel("timeout");
+            future.cancel(true);
+            if (write) {
+                throw new com.axonbase.core.cluster.CommitOutcomeUnknownException(outcomeGroup(), e);
+            }
+            throw new com.axonbase.common.AxonError(-32028, Messages.get("query_timeout"));
+        } catch (InterruptedException e) {
+            run.handle().cancel("shutdown");
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            if (write) {
+                throw new com.axonbase.core.cluster.CommitOutcomeUnknownException(outcomeGroup(), e);
+            }
+            throw new com.axonbase.common.AxonError(-32000, Messages.get("query_cancelled"));
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException failure) {
+                throw failure;
+            }
+            if (e.getCause() instanceof Error fatal) {
+                throw fatal;
+            }
+            throw new IllegalStateException(e.getCause());
+        }
+    }
+
+    /** O nome que a mensagem de desfecho desconhecido leva: o grupo do cluster, quando há um. */
+    private String outcomeGroup() {
+        return config.clusterId().isBlank() ? "shard" : config.clusterId();
+    }
+
+    private static <T> T attached(ActivityRegistry.Running run, java.util.function.Supplier<T> work) {
+        com.axonbase.core.engine.QueryContext.Handle previous =
+            com.axonbase.core.engine.QueryContext.attach(run.handle());
+        try {
+            return work.get();
         } finally {
             com.axonbase.core.engine.QueryContext.detach(previous);
         }
+    }
+
+    /** Executa ligando a consulta à thread, para o motor poder checar o cancelamento. */
+    private AxonValue executeTracked(ActivityRegistry.Running run, String sql, Session s) {
+        return attached(run, () -> ds.execute(sql, s, null));
     }
 
     private final class TableServlet extends HttpServlet {
@@ -1121,10 +1472,22 @@ public final class AxonServer {
         protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             String table = tablePath(req);
             Session s = withNames(req);
-            if (requireAuthenticated(s, resp)) {
+            if (requireAuthenticated(s, resp) || refusedRead(req, resp)) {
                 return;
             }
-            AxonValue rows = ds.execute("SELECT * FROM " + table, s, null);
+            String sql = "SELECT * FROM " + table;
+            if (refusedTableSql(resp, table, sql, com.axonbase.parser.ast.Statement.Select.class)) {
+                return;
+            }
+            AxonValue rows;
+            try {
+                rows = ds.execute(sql, s, null);
+            } catch (com.axonbase.common.AxonError refused) {
+                if (RetryableRefusals.overloaded(resp, refused)) {
+                    return;
+                }
+                throw refused;
+            }
             json(resp, 200, AxonJson.write(rows));
         }
 
@@ -1140,8 +1503,18 @@ public final class AxonServer {
             }
             AxonValue data = AxonJson.parseDocument(readBody(req));
             String sql = "CREATE " + table + " CONTENT " + AxonJson.write(data);
-            AxonValue out = ds.execute(sql, s, null);
-            json(resp, 200, AxonJson.write(out));
+            if (refusedTableSql(resp, table, sql, com.axonbase.parser.ast.Statement.Create.class)) {
+                return;
+            }
+            try {
+                json(resp, 200, AxonJson.write(ds.execute(sql, s, null)));
+            } catch (com.axonbase.core.cluster.CommitOutcomeUnknownException unknown) {
+                outcomeUnknown(resp, unknown.getMessage());
+            } catch (com.axonbase.core.cluster.NotLeaderException moved) {
+                if (!redirectWrites(req, resp)) {
+                    throw moved;
+                }
+            }
         }
     }
 
@@ -1179,8 +1552,8 @@ public final class AxonServer {
         }
 
         RpcServlet(Datastore ds, com.axonbase.server.auth.AuthService auth, boolean requireAuth,
-                   TrustStoreRegistry trustStores) {
-            this.dispatcher = new RpcDispatcher(ds, auth, requireAuth, 0, trustStores);
+                   TrustStoreRegistry trustStores, CertificateChallengeService challenges) {
+            this.dispatcher = new RpcDispatcher(ds, auth, requireAuth, 0, trustStores, challenges);
         }
 
         @Override
@@ -1221,6 +1594,12 @@ public final class AxonServer {
             }
             String ns = s.namespace() != null ? s.namespace() : "";
             String db = s.database() != null ? s.database() : "";
+            if (com.axonbase.core.security.Authz.hasDataRules(s.auth())) {
+                // a exportação não aplica o filtro nem a máscara da regra
+                json(resp, 403, "{\"code\":-32002,\"message\":\""
+                    + esc(Messages.get("data_rule_export_refused")) + "\"}");
+                return;
+            }
             String dump = ds.exportDatabase(ns, db);
             resp.setStatus(200);
             resp.setContentType("text/plain");
@@ -1233,7 +1612,7 @@ public final class AxonServer {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
             Session s = withNames(req);
-            if (requireAuthenticated(s, resp)) {
+            if (requireAdmin(s, resp)) {
                 return;
             }
             if (s.readOnly()) {
@@ -1243,11 +1622,16 @@ public final class AxonServer {
             if (redirectWrites(req, resp)) {
                 return;
             }
-            String ns = s.namespace() != null ? s.namespace() : "";
-            String db = s.database() != null ? s.database() : "";
+            if (s.namespace() == null) {
+                s.namespace("");
+            }
+            if (s.database() == null) {
+                s.database("");
+            }
             String dump = readBody(req);
             try {
-                ds.importDatabase(ns, db, dump);
+                // a sessão da requisição leva identidade e teto de papel: cada comando do dump é autorizado
+                ds.importDatabase(s, dump);
                 json(resp, 200, "{\"status\":\"ok\"}");
             } catch (RuntimeException e) {
                 json(resp, 400, "{\"status\":\"ERR\",\"detail\":\"" + esc(e.getMessage()) + "\"}");
@@ -1308,6 +1692,22 @@ public final class AxonServer {
             ? AxonValue.num(n.longValue()) : value instanceof Boolean b
                 ? AxonValue.bool(b) : value == null ? AxonValue.nul() : AxonValue.str(String.valueOf(value))));
         return AxonValue.object(out);
+    }
+
+    /** A rota de tabela só executa uma sentença do tipo dela; o nome vem da URL. Responde 400 quando recusa. */
+    private boolean refusedTableSql(HttpServletResponse resp, String table, String sql,
+                                    Class<? extends com.axonbase.parser.ast.Statement> expected) throws IOException {
+        try {
+            // "--" abre comentário e cortaria o resto do comando
+            if (table.contains("--")) {
+                throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", table));
+            }
+            com.axonbase.parser.AxonQl.requireSingle(sql, expected);
+            return false;
+        } catch (IllegalArgumentException | com.axonbase.common.AxonError invalid) {
+            json(resp, 400, "{\"code\":-32700,\"message\":\"" + esc(invalid.getMessage()) + "\"}");
+            return true;
+        }
     }
 
     private String tablePath(HttpServletRequest req) {
@@ -1372,6 +1772,14 @@ public final class AxonServer {
             }
         }
         return out.toString();
+    }
+
+    /** Usuário que o próprio certificado declara, pela regra do truststore; {@code null} quando não declara. */
+    static String certificateIdentity(TrustStoreRegistry stores, String store,
+                                      java.security.cert.X509Certificate certificate) {
+        return stores.usesIcpBrasilCollector(store)
+            ? extractIcpBrasilUserId(certificate)
+            : stores.collectUser(store, certificate);
     }
 
     /**

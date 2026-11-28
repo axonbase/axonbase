@@ -1,5 +1,5 @@
 -- Rede de exemplo para a página "Relations graph" e para consultas de grafo no Workspace.
--- Rode com "Run all" no Workspace (ou com POST /sql). Pode ser repetido: CREATE e RELATE regravam o mesmo registro e a
+-- Rode com "Run all" no Workspace (ou com POST /sql). Pode ser repetido: UPSERT e RELATE regravam o mesmo registro e a
 -- mesma aresta. A partir da versão 0.6.0, DELETE de um registro apaga também as arestas dele e UNRELATE remove uma aresta.
 
 -- A partir da versão 0.5.1 o RELATE registra o tipo de aresta sozinho. As linhas DEFINE TABLE abaixo só são
@@ -15,18 +15,18 @@ DEFINE TABLE fornece SCHEMALESS;
 DELETE pessoa; DELETE empresa; DELETE produto; DELETE cidade;
 
 -- Nós
-CREATE pessoa:ana CONTENT {nome: 'Ana', idade: 31};
-CREATE pessoa:bia CONTENT {nome: 'Bia', idade: 27};
-CREATE pessoa:caio CONTENT {nome: 'Caio', idade: 35};
-CREATE pessoa:dani CONTENT {nome: 'Dani', idade: 29};
-CREATE pessoa:edu CONTENT {nome: 'Edu', idade: 42};
-CREATE empresa:acme CONTENT {nome: 'Acme Logística'};
-CREATE empresa:byte CONTENT {nome: 'Byte Tecnologia'};
-CREATE produto:notebook CONTENT {nome: 'Notebook', preco: 4200};
-CREATE produto:mouse CONTENT {nome: 'Mouse', preco: 90};
-CREATE produto:monitor CONTENT {nome: 'Monitor', preco: 1300};
-CREATE cidade:sp CONTENT {nome: 'São Paulo'};
-CREATE cidade:rj CONTENT {nome: 'Rio de Janeiro'};
+UPSERT pessoa:ana CONTENT {nome: 'Ana', idade: 31};
+UPSERT pessoa:bia CONTENT {nome: 'Bia', idade: 27};
+UPSERT pessoa:caio CONTENT {nome: 'Caio', idade: 35};
+UPSERT pessoa:dani CONTENT {nome: 'Dani', idade: 29};
+UPSERT pessoa:edu CONTENT {nome: 'Edu', idade: 42};
+UPSERT empresa:acme CONTENT {nome: 'Acme Logística'};
+UPSERT empresa:byte CONTENT {nome: 'Byte Tecnologia'};
+UPSERT produto:notebook CONTENT {nome: 'Notebook', preco: 4200};
+UPSERT produto:mouse CONTENT {nome: 'Mouse', preco: 90};
+UPSERT produto:monitor CONTENT {nome: 'Monitor', preco: 1300};
+UPSERT cidade:sp CONTENT {nome: 'São Paulo'};
+UPSERT cidade:rj CONTENT {nome: 'Rio de Janeiro'};
 
 -- Arestas: quem segue quem (há um ciclo: ana -> caio -> dani -> ana)
 RELATE pessoa:ana->segue->pessoa:bia;

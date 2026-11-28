@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .client import Axon
+from .literals import quote_literal
 
 apilevel = "2.0"
 threadsafety = 2
@@ -145,8 +146,7 @@ class Connection:
     def set_saga_correlation(self, correlation_id: str | None) -> None:
         """Sets the SAGA correlation for subsequent statements on this connection."""
         if correlation_id:
-            escaped = correlation_id.replace("'", "''")
-            self._bridge.call(self._axon.query(f"LET $saga_corr = '{escaped}'"))
+            self._bridge.call(self._axon.query(f"LET $saga_corr = {quote_literal(correlation_id)}"))
         else:
             self._bridge.call(self._axon.query("LET $saga_corr = NULL"))
 
@@ -526,9 +526,12 @@ class Cursor:
         if isinstance(v, bool):
             return "true" if v else "false"
         if isinstance(v, (int, float)):
-            return str(v)
-        escaped = str(v).replace("'", "''")
-        return f"'{escaped}'"
+            text = str(v)
+            # um negativo ganha um espaço antes: "-%(n)s" viraria o comentário "--"
+            return f" {text}" if text.startswith("-") else text
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            raise ProgrammingError("binary parameters are not supported")
+        return quote_literal(str(v))
 
 
 # ─── Module-level helpers ──────────────────────────────────────────────────

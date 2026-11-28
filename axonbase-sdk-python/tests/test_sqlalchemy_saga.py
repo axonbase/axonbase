@@ -110,3 +110,15 @@ def test_participant_commits_only_its_local_session():
 
     assert local.committed
     assert local.connection_value.options["axonbase_saga_correlation_id"] == "corr_3"
+
+
+def test_name_and_correlation_never_become_commands():
+    orchestrator = Engine()
+    local = LocalSession(None)
+    with patch("axonbase.sqlalchemy.Session", return_value=local):
+        transaction = SagaExecuteTransaction(orchestrator, object(), "z; DELETE alvo; --")
+        transaction.begin("x'; DELETE alvo; --")
+        transaction.commit()
+
+    target = "'z; DELETE alvo; --' WITH CORRELATION 'x\\'; DELETE alvo; --'"
+    assert orchestrator.statements == ["BEGIN SAGA " + target, "COMMIT SAGA " + target]

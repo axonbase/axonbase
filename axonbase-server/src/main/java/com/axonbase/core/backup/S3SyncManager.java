@@ -1,5 +1,6 @@
 package com.axonbase.core.backup;
 
+import com.axonbase.common.Messages;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.server.ServerConfig;
 
@@ -197,6 +198,10 @@ public final class S3SyncManager implements AutoCloseable {
             long startedAt = System.currentTimeMillis();
             long t0 = System.nanoTime();
             try {
+                if (datastore.restoreInterrupted()) {
+                    // enviar a base pela metade faria a retenção apagar os backups bons
+                    throw new IllegalStateException(Messages.get("server_s3_restore_interrupted"));
+                }
                 // Marca d'água lida ANTES do dump. A versão do backend é a mesma grandeza que
                 // backupIncremental compara; o índice de commit do Raft é outra e não serve aqui.
                 long current = datastore.backupVersion();
@@ -394,42 +399,81 @@ public final class S3SyncManager implements AutoCloseable {
         return idx >= 0 && restoreKeys(all.subList(0, idx + 1));
     }
 
+    /** O que a restauração da subida encontrou. */
+    public enum StartupRestore { RESTORED, NO_BACKUP }
+
+    /**
+     * A restauração pedida pela configuração, sobre uma base vazia. Ao contrário de {@link #restoreFromS3}, nenhuma
+     * falha vira "não há o que restaurar": só um balde listado sem backup algum devolve {@code NO_BACKUP}.
+     *
+     * @throws IllegalStateException quando não dá para listar, baixar, decifrar ou aplicar os backups
+     */
+    public StartupRestore restoreAtStartup() {
+        synchronized (lock) {
+            try {
+                List<String> keys = backupNames(store.listObjects(bucket, listPrefix()));
+                if (keys.isEmpty()) {
+                    return StartupRestore.NO_BACKUP;
+                }
+                String dump = merge(keys, true);
+                if (dump == null) {
+                    throw new IllegalStateException("os backups do balde não têm conteúdo");
+                }
+                datastore.restoreCluster(dump);
+                return StartupRestore.RESTORED;
+            } catch (Exception e) {
+                String cause = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                throw new IllegalStateException(Messages.get("server_s3_restore_refused", cause), e);
+            }
+        }
+    }
+
     private boolean restoreKeys(List<String> keys) {
         synchronized (lock) {
             try {
-                if (keys.isEmpty()) {
+                String dump = keys.isEmpty() ? null : merge(keys, false);
+                if (dump == null) {
                     return false;
                 }
-
-                var merged = new StringBuilder(S3Encryption.PLAIN_HEADER).append('\n');
-                boolean any = false;
-
-                for (String file : keys) {
-                    byte[] raw = store.download(bucket, file);
-                    if (raw == null || raw.length == 0) continue;
-
-                    String text;
-                    byte[] decrypted = S3Encryption.decryptBytes(raw, encryptKey);
-                    text = new String(decrypted, StandardCharsets.UTF_8);
-
-                    int nl = text.indexOf('\n');
-                    if (nl < 0) continue;
-                    String body = text.substring(nl + 1);
-                    for (String line : body.split("\n", -1)) {
-                        if (line.isBlank()) continue;
-                        merged.append(line).append('\n');
-                        any = true;
-                    }
-                }
-
-                if (!any) return false;
-                datastore.restoreCluster(merged.toString());
+                datastore.restoreCluster(dump);
                 return true;
             } catch (Exception e) {
                 System.err.println("Erro ao restaurar do S3: " + e.getMessage());
                 return false;
             }
         }
+    }
+
+    /**
+     * Junta os backups num dump só.
+     *
+     * @param strict um backup listado que venha vazio ou sem cabeçalho é erro, em vez de ficar de fora
+     * @return o dump, ou {@code null} se nenhum backup tem linhas
+     */
+    private String merge(List<String> keys, boolean strict) {
+        var merged = new StringBuilder(S3Encryption.PLAIN_HEADER).append('\n');
+        boolean any = false;
+
+        for (String file : keys) {
+            byte[] raw = store.download(bucket, file);
+            String text = raw == null || raw.length == 0 ? ""
+                : new String(S3Encryption.decryptBytes(raw, encryptKey), StandardCharsets.UTF_8);
+
+            int nl = text.indexOf('\n');
+            if (nl < 0) {
+                if (strict) {
+                    throw new IllegalStateException("o backup " + file + " veio vazio ou incompleto");
+                }
+                continue;
+            }
+            String body = text.substring(nl + 1);
+            for (String line : body.split("\n", -1)) {
+                if (line.isBlank()) continue;
+                merged.append(line).append('\n');
+                any = true;
+            }
+        }
+        return any ? merged.toString() : null;
     }
 
     // ------------------------------------------------------------------
@@ -496,6 +540,10 @@ public final class S3SyncManager implements AutoCloseable {
         } catch (Exception e) {
             return List.of();
         }
+        return backupNames(all);
+    }
+
+    private static List<String> backupNames(List<String> all) {
         var backups = new ArrayList<String>();
         for (String k : all) {
             if (isBackupName(k)) {

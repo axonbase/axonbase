@@ -1,10 +1,17 @@
 package com.axonbase.server;
 
+import com.axonbase.parser.AxonQl;
+import com.axonbase.parser.ast.Statement;
+import com.axonbase.value.AxonQlText;
 import com.axonbase.core.Session;
 import com.axonbase.core.cluster.ClusterStatusProvider;
+import com.axonbase.core.cluster.CommitOutcomeUnknownException;
 import com.axonbase.core.cluster.NotLeaderException;
 import com.axonbase.core.cluster.QuorumUnavailableException;
+import com.axonbase.core.cluster.ReadConsistency;
+import com.axonbase.core.cluster.StaleReadException;
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.security.Authz;
 import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.server.auth.AuthService;
@@ -37,6 +44,12 @@ public final class RpcDispatcher {
     public static final int NOT_LEADER = -32010;
     /** Código JSON-RPC de "sem maioria para confirmar a escrita". */
     public static final int NO_QUORUM = -32011;
+    /** A escrita pode ou não ter sido confirmada: consultar antes de repetir. Diferente de uma falha. */
+    public static final int OUTCOME_UNKNOWN = -32013;
+    /** Este nó não atende a leitura com a consistência pedida. */
+    public static final int STALE_READ = -32012;
+    /** Métodos que leem dados e por isso passam pela barreira de leitura num cluster. */
+    private static final Set<String> READ_METHODS = Set.of("query", "select", "kv_get", "kv_scan");
     /** Código JSON-RPC de "protocolo incompatível" (comparte -32600 da invalid request). */
     public static final int PROTOCOL_MISMATCH = -32600;
 
@@ -68,6 +81,7 @@ public final class RpcDispatcher {
     private volatile ActivityRegistry activity;
     private volatile Supplier<ClusterStatusProvider.Status> clusterStatus =
         ClusterStatusProvider.Status::local;
+    private volatile java.util.function.Consumer<ReadConsistency> readBarrier = consistency -> { };
 
     public RpcDispatcher(Datastore ds) {
         this(ds, null, false, 0);
@@ -83,11 +97,16 @@ public final class RpcDispatcher {
 
     public RpcDispatcher(Datastore ds, AuthService auth, boolean requireAuth, long queryTimeoutMs,
                          TrustStoreRegistry trustStores) {
+        this(ds, auth, requireAuth, queryTimeoutMs, trustStores, new CertificateChallengeService());
+    }
+
+    public RpcDispatcher(Datastore ds, AuthService auth, boolean requireAuth, long queryTimeoutMs,
+                         TrustStoreRegistry trustStores, CertificateChallengeService certificateChallenges) {
         this.ds = ds;
         this.auth = auth;
         this.requireAuth = requireAuth;
         this.queryTimeoutMs = queryTimeoutMs;
-        this.certificateChallenges = new CertificateChallengeService();
+        this.certificateChallenges = certificateChallenges;
         this.trustStores = trustStores == null ? new TrustStoreRegistry() : trustStores;
     }
 
@@ -104,6 +123,37 @@ public final class RpcDispatcher {
 
     public void clusterStatus(Supplier<ClusterStatusProvider.Status> status) {
         this.clusterStatus = status == null ? ClusterStatusProvider.Status::local : status;
+    }
+
+    /** Espera o nó poder atender uma leitura; sem cluster não há o que esperar. */
+    public void readBarrier(java.util.function.Consumer<ReadConsistency> barrier) {
+        this.readBarrier = barrier == null ? consistency -> { } : barrier;
+    }
+
+    /**
+     * Aplica a consistência pedida no campo {@code consistency} (ou o padrão do nó).
+     *
+     * @return o erro a devolver, ou {@code null} quando a leitura pode seguir
+     */
+    private String awaitRead(AxonValue id, Map<String, AxonValue> request, ClusterStatusProvider.Status cluster) {
+        AxonValue requested = request.get("consistency");
+        ReadConsistency wanted;
+        try {
+            wanted = ReadConsistency.parse(requested != null && requested.isString() ? requested.asString() : null);
+        } catch (IllegalArgumentException invalid) {
+            return rpcError(id, -32602, invalid.getMessage());
+        }
+        if (wanted == null && cluster.isLeader()) {
+            return null;
+        }
+        try {
+            readBarrier.accept(wanted);
+            return null;
+        } catch (StaleReadException stale) {
+            return "{\"id\":" + idJson(id) + ",\"error\":{\"code\":" + STALE_READ + ",\"message\":\""
+                + esc(stale.getMessage()) + "\",\"kind\":\"STALE_READ\",\"leader\":\"" + esc(cluster.leader())
+                + "\",\"leader_address\":\"" + esc(cluster.leaderAddress()) + "\"}}";
+        }
     }
 
     /**
@@ -142,6 +192,11 @@ public final class RpcDispatcher {
             + ",\"message\":\"" + esc(detail) + "\",\"kind\":\"NOT_LEADER\",\"leader\":\""
             + esc(leader == null ? "" : leader) + "\",\"leader_address\":\""
             + esc(address == null ? "" : address) + "\"}}";
+    }
+
+    private static String outcomeUnknownError(AxonValue id, String detail) {
+        return "{\"id\":" + idJson(id) + ",\"error\":{\"code\":" + OUTCOME_UNKNOWN + ",\"message\":\""
+            + esc(detail) + "\",\"kind\":\"OUTCOME_UNKNOWN\"}}";
     }
 
     private boolean authRequired() {
@@ -233,6 +288,19 @@ public final class RpcDispatcher {
             args.get(2).asString(), args.get(3), ttl);
     }
 
+    /**
+     * As chamadas kv_* trazem namespace e banco nos parâmetros: o escopo do token precisa cobrir esses, e não só os
+     * da sessão. Com menos de dois parâmetros a validação de cada método recusa adiante.
+     */
+    private boolean kvScopeAllowed(Map<String, AxonValue> obj, Session session) {
+        List<AxonValue> args = paramsOf(obj);
+        if (!authRequired() || args == null || args.size() < 2) {
+            return true;
+        }
+        return args.get(0).isString() && args.get(1).isString()
+            && auth.allows(claimsOf(session.auth()), args.get(0).asString(), args.get(1).asString());
+    }
+
     private static String[] kvParams(String method, Map<String, AxonValue> obj, int min) {
         AxonValue params = obj.get("params");
         if (params == null || !params.isArray() || params.asArray().size() < min) {
@@ -296,7 +364,7 @@ public final class RpcDispatcher {
             }
             sql = sb.toString();
         }
-        return ds.execute(sql, session, Map.of());
+        return ds.execute(AxonQl.requireSingle(sql, Statement.Select.class), session, Map.of());
     }
 
     /**
@@ -312,6 +380,8 @@ public final class RpcDispatcher {
             return ds.execute(sql, session, Map.of());
         } catch (NotLeaderException moved) {
             throw new WriteRedirect(notLeaderError(id, moved.leader(), moved.leaderAddress()));
+        } catch (CommitOutcomeUnknownException unknown) {
+            throw new WriteRedirect(outcomeUnknownError(id, unknown.getMessage()));
         } catch (QuorumUnavailableException noQuorum) {
             throw new WriteRedirect(rpcError(id, NO_QUORUM, noQuorum.getMessage()));
         }
@@ -326,19 +396,23 @@ public final class RpcDispatcher {
         return switch (method) {
             case "create" -> {
                 requireMin(pa, 2, method);
-                yield "CREATE " + ident(pa.get(0)) + " CONTENT " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("CREATE " + ident(pa.get(0)) + " CONTENT " + contentObject(pa.get(1)),
+                    Statement.Create.class);
             }
             case "insert" -> {
                 requireMin(pa, 2, method);
-                yield "INSERT INTO " + ident(pa.get(0)) + " " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("INSERT INTO " + ident(pa.get(0)) + " " + contentObject(pa.get(1)),
+                    Statement.Insert.class);
             }
             case "update" -> {
                 requireMin(pa, 2, method);
-                yield "UPDATE " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("UPDATE " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1)),
+                    Statement.Update.class);
             }
             case "upsert" -> {
                 requireMin(pa, 2, method);
-                yield "UPSERT " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1));
+                yield AxonQl.requireSingle("UPSERT " + ident(pa.get(0)) + " MERGE " + contentObject(pa.get(1)),
+                    Statement.Update.class);
             }
             case "delete" -> {
                 requireMin(pa, 1, method);
@@ -346,14 +420,14 @@ public final class RpcDispatcher {
                 if (pa.size() > 1 && pa.get(1) != null && !pa.get(1).isNone() && !pa.get(1).isNull()) {
                     sb.append(" WHERE ").append(pa.get(1).asString());
                 }
-                yield sb.toString();
+                yield AxonQl.requireSingle(sb.toString(), Statement.Delete.class);
             }
             case "relate" -> {
                 requireMin(pa, 3, method);
                 StringBuilder sb = new StringBuilder("RELATE ")
                     .append(ident(pa.get(0))).append("->").append(ident(pa.get(1)))
                     .append("->").append(ident(pa.get(2)));
-                if (pa.get(3) != null && pa.get(3).isObject()) {
+                if (pa.size() > 3 && pa.get(3) != null && pa.get(3).isObject()) {
                     sb.append(" SET ");
                     boolean first = true;
                     for (Map.Entry<String, AxonValue> e : pa.get(3).asObject().entrySet()) {
@@ -361,10 +435,10 @@ public final class RpcDispatcher {
                             sb.append(", ");
                         }
                         first = false;
-                        sb.append(e.getKey()).append(" = ").append(e.getValue().toString());
+                        sb.append(propertyPath(e.getKey())).append(" = ").append(AxonQlText.value(e.getValue()));
                     }
                 }
-                yield sb.toString();
+                yield AxonQl.requireSingle(sb.toString(), Statement.Relate.class);
             }
             default -> throw new IllegalArgumentException(Messages.get("rpc_data_method_unsupported", method));
         };
@@ -382,10 +456,19 @@ public final class RpcDispatcher {
             throw new IllegalArgumentException(Messages.get("rpc_identifier_string"));
         }
         String s = v.asString().trim();
-        if (!s.matches("[\\p{L}\\p{N}_.:\\-]+")) {
+        // "--" abre comentário e cortaria o resto do comando, inclusive o WHERE
+        if (!s.matches("[\\p{L}\\p{N}_.:\\-]+") || s.contains("--")) {
             throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", s));
         }
         return s;
+    }
+
+    /** Nome de propriedade de aresta: um nome simples ou um caminho ({@code a.b}). */
+    private static String propertyPath(String key) {
+        if (!key.matches("[\\p{L}_][\\p{L}\\p{Nd}_]*(\\.[\\p{L}_][\\p{L}\\p{Nd}_]*)*")) {
+            throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", key));
+        }
+        return AxonQlText.path(key);
     }
 
     /** Dados de escrita como literal AxonQL (mapa/objeto). */
@@ -393,7 +476,7 @@ public final class RpcDispatcher {
         if (v == null || !v.isObject()) {
             throw new IllegalArgumentException(Messages.get("rpc_data_object"));
         }
-        return v.toString();
+        return AxonQlText.value(v);
     }
 
     private void observeQuery(long startedNanos, boolean error) {
@@ -450,6 +533,12 @@ public final class RpcDispatcher {
             && (session.auth() == null || !authorizedForSession(session))) {
             return rpcError(id, -32003, Messages.get("auth_required"));
         }
+        if (READ_METHODS.contains(method) && !isWrite(method, obj)) {
+            String refused = awaitRead(id, obj, cluster);
+            if (refused != null) {
+                return refused;
+            }
+        }
         AxonValue result = null;
         String error = null;
         int errorCode = -32003;
@@ -498,6 +587,10 @@ public final class RpcDispatcher {
                 ActivityRegistry.Running run = tracker == null ? null : tracker.begin(ActivityRegistry.userOf(session),
                     session.namespace(), session.database(), sql, "ws", tracker.remoteOf(session), tracker.sessionIdOf(session),
                     session);
+                AxonValue workload = obj.get("workload");
+                if (run != null && workload != null && workload.isString()) {
+                    run.handle().requestWorkload(workload.asString());
+                }
                 com.axonbase.core.engine.QueryContext.Handle previousHandle = run == null ? null
                     : com.axonbase.core.engine.QueryContext.attach(run.handle());
                 boolean failed = false;
@@ -507,6 +600,9 @@ public final class RpcDispatcher {
                 } catch (NotLeaderException moved) {
                     failed = true;
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (CommitOutcomeUnknownException unknown) {
+                    failed = true;
+                    return outcomeUnknownError(id, unknown.getMessage());
                 } catch (QuorumUnavailableException noQuorum) {
                     failed = true;
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());
@@ -586,11 +682,18 @@ public final class RpcDispatcher {
                     var verified = certificateChallenges.complete(new CertificateChallengeService.Challenge(
                         completion.id(), completion.challenge(), Instant.EPOCH), completion.store(),
                         session.namespace(), session.database(), completion.chain(), completion.signature(), trustStore);
+                    String declared = AxonServer.certificateIdentity(trustStores, completion.store(),
+                        verified.certificate());
+                    if (declared != null && !declared.equals(completion.user())) {
+                        throw new IllegalArgumentException(Messages.get("cert_user_mismatch"));
+                    }
                     long remainingSec = auth.remainingCooldown(completion.user(), completion.store());
                     if (remainingSec > 0) {
                         throw new IllegalArgumentException(Messages.get("cert_rate_limited", remainingSec));
                     }
-                    result = AxonValue.str(auth.issueTemporaryCredential(completion.user(), completion.store(), verified.fingerprint()));
+                    result = AxonValue.str(declared != null
+                        ? auth.issueCredentialForCertificate(declared, completion.store(), verified.fingerprint())
+                        : auth.issueTemporaryCredential(completion.user(), completion.store(), verified.fingerprint()));
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                 }
@@ -611,7 +714,10 @@ public final class RpcDispatcher {
                     && lp.asArray().get(1).asBool();
                 String sql = "LIVE SELECT * FROM " + table + (diff ? " DIFF" : "");
                 try {
-                    result = ds.execute(sql, session, Map.of());
+                    if (table.contains("--")) {
+                        throw new IllegalArgumentException(Messages.get("rpc_identifier_invalid", table));
+                    }
+                    result = ds.execute(AxonQl.requireSingle(sql, Statement.Live.class), session, Map.of());
                 } catch (RuntimeException e) {
                     error = e.getMessage();
                     errorCode = errorCode(e);
@@ -633,8 +739,14 @@ public final class RpcDispatcher {
                     break;
                 }
                 // LET/SET não tocam o backend: guardam a variável na sessão.
-                session.vars().set(pa.get(0).asString(), pa.get(1));
-                result = pa.get(1);
+                try {
+                    session.requireDefinable(pa.get(0).asString());
+                    session.vars().set(pa.get(0).asString(), pa.get(1));
+                    result = pa.get(1);
+                } catch (RuntimeException e) {
+                    error = e.getMessage();
+                    errorCode = errorCode(e);
+                }
             }
             case "unset" -> {
                 List<AxonValue> pa = paramsOf(obj);
@@ -688,6 +800,12 @@ public final class RpcDispatcher {
                     error = Messages.get("rpc_signup_user_invalid");
                     break;
                 }
+                String refusal = signupRefusal(session, ns, db);
+                if (refusal != null) {
+                    error = refusal;
+                    errorCode = -32002;
+                    break;
+                }
                 try {
                     String token = auth.signup(user, pass, ns, db);
                     if (token == null) {
@@ -721,6 +839,9 @@ public final class RpcDispatcher {
                 } catch (NotLeaderException moved) {
                     ds.cancelSession(session);
                     return notLeaderError(id, moved.leader(), moved.leaderAddress());
+                } catch (CommitOutcomeUnknownException unknown) {
+                    ds.cancelSession(session);
+                    return outcomeUnknownError(id, unknown.getMessage());
                 } catch (QuorumUnavailableException noQuorum) {
                     ds.cancelSession(session);
                     return rpcError(id, NO_QUORUM, noQuorum.getMessage());
@@ -733,10 +854,15 @@ public final class RpcDispatcher {
                 ds.cancelSession(session);
                 result = AxonValue.nul();
             }
-            case "kv_get" -> result = kvRead("kv_get", obj, session);
-            case "kv_set" -> result = kvWrite("kv_set", obj, session);
-            case "kv_del" -> result = kvWrite("kv_del", obj, session);
-            case "kv_scan" -> result = kvRead("kv_scan", obj, session);
+            case "kv_get", "kv_set", "kv_del", "kv_scan" -> {
+                if (!kvScopeAllowed(obj, session)) {
+                    error = Messages.get("rpc_scope_forbidden");
+                    errorCode = -32002;
+                } else {
+                    result = READ_METHODS.contains(method)
+                        ? kvRead(method, obj, session) : kvWrite(method, obj, session);
+                }
+            }
             default -> {
                 error = Messages.get("rpc_method_unsupported", method);
                 errorCode = -32601;
@@ -746,6 +872,28 @@ public final class RpcDispatcher {
             return rpcError(id, errorCode, error);
         }
         return "{\"id\":" + idJson(id) + ",\"result\":" + AxonJson.write(result) + "}";
+    }
+
+    /**
+     * signup cria identidade: exige sessão que possa escrever, papel de administrador e escopo que cubra o destino.
+     * Sem namespace ou banco o próprio {@link AuthService#signup} devolve o erro de escopo ausente.
+     */
+    private String signupRefusal(Session session, String ns, String db) {
+        if (!authRequired()) {
+            return null;
+        }
+        if (session.readOnly()) {
+            return Messages.get("session_read_only");
+        }
+        if (!Authz.atLeast(session.auth(), Authz.Role.ADMIN)) {
+            return Messages.get("auth_role_required", "admin");
+        }
+        // o usuário criado nasce sem auditoria
+        if (Authz.audited(session.auth())) {
+            return Messages.get("audit_user_restricted");
+        }
+        boolean complete = ns != null && !ns.isBlank() && db != null && !db.isBlank();
+        return complete && !Authz.allows(session.auth(), ns, db) ? Messages.get("rpc_scope_forbidden") : null;
     }
 
     private boolean authorizedForSession(Session session) {

@@ -28,9 +28,9 @@ DEFINE FIELD corpo ON TABLE artigo TYPE string;
 DEFINE FIELD emb ON TABLE artigo TYPE vector<1536> EMBEDDING default FROM corpo;
 CREATE INDEX artigo_vetor ON TABLE artigo COLUMNS emb HNSW DIMENSION 1536 DIST cosine;
 
--- Cada CREATE manda o corpo ao provedor, grava o vetor e já o indexa.
-CREATE artigo:1 CONTENT {titulo: 'Motoristas por perto', corpo: 'Como achar os motoristas num raio de dois quilômetros e mostrar todos no mapa.'};
-CREATE artigo:2 CONTENT {titulo: 'Quem segue quem', corpo: 'Relações entre pessoas com RELATE e o caminho mais curto entre duas pessoas.'};
-CREATE artigo:3 CONTENT {titulo: 'Agregações rápidas', corpo: 'Somas, médias e contagens lidas direto do índice columnar, sem carregar os documentos.'};
-CREATE artigo:4 CONTENT {titulo: 'Busca por relevância', corpo: 'O ranking BM25 ordena os documentos pela relevância dos termos buscados.'};
-CREATE artigo:5 CONTENT {titulo: 'Bolo de chocolate', corpo: 'Receita de bolo de chocolate com cobertura de brigadeiro.'};
+-- Cada UPSERT manda o corpo ao provedor, grava o vetor e já o indexa.
+UPSERT artigo:1 CONTENT {titulo: 'Motoristas por perto', corpo: 'Como achar os motoristas num raio de dois quilômetros e mostrar todos no mapa.'};
+UPSERT artigo:2 CONTENT {titulo: 'Quem segue quem', corpo: 'Relações entre pessoas com RELATE e o caminho mais curto entre duas pessoas.'};
+UPSERT artigo:3 CONTENT {titulo: 'Agregações rápidas', corpo: 'Somas, médias e contagens lidas direto do índice columnar, sem carregar os documentos.'};
+UPSERT artigo:4 CONTENT {titulo: 'Busca por relevância', corpo: 'O ranking BM25 ordena os documentos pela relevância dos termos buscados.'};
+UPSERT artigo:5 CONTENT {titulo: 'Bolo de chocolate', corpo: 'Receita de bolo de chocolate com cobertura de brigadeiro.'};

@@ -1,0 +1,30 @@
+name: Publish .NET Package
+
+# Envia só o SDK .NET de uma versão já marcada. A publicação coordenada não envia pré-lançamentos ao NuGet;
+# este envio é feito de propósito, por tag própria. A tag dotnet-vX.Y.Z não casa com o filtro 'v*'.
+
+on:
+  push:
+    tags: ['dotnet-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish-dotnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release version
+        run: |
+          version=$(<VERSION)
+          test "${GITHUB_REF_NAME}" = "dotnet-v${version}"
+          bash scripts/check-versions.sh
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: dotnet run --project axonbase-sdk-dotnet/AxonBaseSdk.Tests/AxonBaseSdk.Tests.csproj -c Release
+      - run: dotnet pack axonbase-sdk-dotnet/AxonBaseSdk/AxonBaseSdk.csproj -c Release -o ./artifacts/nuget
+      - env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push './artifacts/nuget/*.nupkg' --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate

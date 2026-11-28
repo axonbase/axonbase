@@ -30,6 +30,9 @@ import java.util.function.Function;
  * <p>Cada chamada de agregado dentro de uma expressão (inclusive {@code sum(x) / count()}) é trocada por um
  * identificador interno cujo valor é calculado por grupo; a expressão reescrita é avaliada pelo mesmo avaliador
  * das linhas comuns, então operadores e funções funcionam igual.</p>
+ *
+ * <p>As reduções {@code math::*} de um argumento também agregam aqui; fora de uma consulta agrupada continuam sendo
+ * funções de linha sobre listas.</p>
  */
 final class GroupAggregation {
 
@@ -44,6 +47,9 @@ final class GroupAggregation {
     private static final int AVG_SCALE = 10;
     private static final String SLOT = "\u0001agg";
     private static final String ROW_TABLE = "\u0001group";
+    /** Reduzem uma lista numa consulta comum e o grupo inteiro numa consulta agrupada. */
+    private static final Set<String> MATH_REDUCTIONS =
+        Set.of("math::sum", "math::min", "math::max", "math::mean", "math::median", "math::product");
 
     private record Spec(String name, Expr arg) {
     }
@@ -52,7 +58,9 @@ final class GroupAggregation {
     }
 
     private static final class Group {
-        final Document representative;
+        Document representative;
+        /** Chave do primeiro registro, quando o grupo veio de outro shard. */
+        String origin;
         final State[] states;
 
         Group(Document representative, List<Spec> specs) {
@@ -131,13 +139,19 @@ final class GroupAggregation {
         };
     }
 
+    /** {@code math::sum(x)} e afins, desde que não envolvam outro agregado nem sejam a própria expressão do grupo. */
+    private boolean isMathReduction(Expr.Call c) {
+        return c.args().size() == 1 && MATH_REDUCTIONS.contains(c.name().toLowerCase(Locale.ROOT))
+            && !containsAggregate(c.args().get(0)) && !groupExprs.contains(c);
+    }
+
     private static Expr unwrap(Expr f) {
         return f instanceof Expr.Alias a ? a.expr() : f;
     }
 
     private Expr extract(Expr e) {
         return switch (e) {
-            case Expr.Call c when isAggregateName(c.name()) -> {
+            case Expr.Call c when isAggregateName(c.name()) || isMathReduction(c) -> {
                 String slot = SLOT + specs.size();
                 specs.add(new Spec(c.name().toLowerCase(Locale.ROOT), c.args().isEmpty() ? null : c.args().get(0)));
                 yield new Expr.Ident(slot);
@@ -184,6 +198,56 @@ final class GroupAggregation {
                 mine.states[i].merge(e.getValue().states[i]);
             }
         }
+    }
+
+    /** Os grupos com o primeiro documento e os acumuladores, para o gateway fundir (consulta entre shards). */
+    AxonValue exportPartial() {
+        List<AxonValue> out = new ArrayList<>(groups.size());
+        for (Map.Entry<String, Group> e : groups.entrySet()) {
+            Group group = e.getValue();
+            Map<String, AxonValue> item = new LinkedHashMap<>();
+            item.put("key", AxonValue.str(e.getKey()));
+            item.put("at", AxonValue.str(group.representative.id().key().keyString()));
+            item.put("table", AxonValue.str(group.representative.id().table()));
+            item.put("row", group.representative.current());
+            item.put("states", AxonValue.array(java.util.Arrays.stream(group.states).map(State::export).toList()));
+            out.add(AxonValue.object(item));
+        }
+        return AxonValue.array(out);
+    }
+
+    /** Funde os grupos exportados por um shard. O documento do grupo é o de menor chave entre todos os shards. */
+    void absorbPartial(AxonValue exported) {
+        for (AxonValue value : exported.asArray()) {
+            Map<String, AxonValue> item = value.asObject();
+            String key = item.get("key").asString();
+            String at = item.get("at").asString();
+            Document representative = new Document(
+                new RecordId(item.get("table").asString(), AxonValue.str(at)), item.get("row"));
+            Group group = groups.get(key);
+            if (group == null) {
+                group = new Group(representative, specs);
+                group.origin = at;
+                groups.put(key, group);
+            } else if (at.compareTo(group.origin) < 0) {
+                group.representative = representative;
+                group.origin = at;
+            }
+            List<AxonValue> states = item.get("states").asArray();
+            for (int i = 0; i < group.states.length; i++) {
+                group.states[i].absorb(states.get(i));
+            }
+        }
+    }
+
+    /** Põe os grupos fundidos na ordem de chegada de um nó só: a da chave do primeiro registro de cada um. */
+    void orderByOrigin() {
+        List<Map.Entry<String, Group>> ordered = new ArrayList<>(groups.entrySet());
+        ordered.sort(Comparator.comparing((Map.Entry<String, Group> e) -> e.getValue().origin));
+        Map<String, Group> next = new LinkedHashMap<>();
+        ordered.forEach(e -> next.put(e.getKey(), e.getValue()));
+        groups.clear();
+        groups.putAll(next);
     }
 
     private String groupKey(Document doc) {
@@ -286,6 +350,12 @@ final class GroupAggregation {
         /** Soma o acumulador de outro lote (mesmo tipo) a este. */
         void merge(State other);
 
+        /** O acumulador como valor, para atravessar a rede. */
+        AxonValue export();
+
+        /** Soma um acumulador exportado (mesmo tipo) a este. */
+        void absorb(AxonValue exported);
+
         AxonValue result();
 
         static State of(String name) {
@@ -295,8 +365,92 @@ final class GroupAggregation {
                 case "sum" -> new Sum();
                 case "avg" -> new Avg();
                 case "min" -> new Extreme(true);
+                case "math::sum" -> new Numbers(new Sum());
+                case "math::mean" -> new Numbers(new Avg());
+                case "math::min" -> new Numbers(new Extreme(true));
+                case "math::max" -> new Numbers(new Extreme(false));
+                case "math::median" -> new Numbers(new Collected(Functions::median));
+                case "math::product" -> new Numbers(new Collected(Functions::product));
                 default -> new Extreme(false);
             };
+        }
+    }
+
+    /** Entrada de uma redução {@code math::*}: só números contam, e um campo lista contribui com cada item. */
+    private static final class Numbers implements State {
+        private final State inner;
+
+        Numbers(State inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public void add(AxonValue value) {
+            if (value == null) {
+                return;
+            }
+            if (value.isArray()) {
+                value.asArray().forEach(this::add);
+            } else if (value.isSet()) {
+                value.asSet().forEach(this::add);
+            } else if (value.isNumber()) {
+                inner.add(value);
+            }
+        }
+
+        @Override
+        public void merge(State other) {
+            inner.merge(((Numbers) other).inner);
+        }
+
+        @Override
+        public AxonValue export() {
+            return inner.export();
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            inner.absorb(exported);
+        }
+
+        @Override
+        public AxonValue result() {
+            return inner.result();
+        }
+    }
+
+    /** Mediana e produto precisam de todos os valores do grupo, então a memória cresce com as linhas. */
+    private static final class Collected implements State {
+        private final List<AxonValue> values = new ArrayList<>();
+        private final Function<List<AxonValue>, AxonValue> reducer;
+
+        Collected(Function<List<AxonValue>, AxonValue> reducer) {
+            this.reducer = reducer;
+        }
+
+        @Override
+        public void add(AxonValue value) {
+            values.add(value);
+        }
+
+        @Override
+        public void merge(State other) {
+            values.addAll(((Collected) other).values);
+        }
+
+        @Override
+        public AxonValue export() {
+            return AxonValue.array(List.copyOf(values));
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            values.addAll(exported.asArray());
+        }
+
+        @Override
+        public AxonValue result() {
+            return reducer.apply(values);
         }
     }
 
@@ -312,6 +466,16 @@ final class GroupAggregation {
         @Override
         public void merge(State other) {
             n += ((Count) other).n;
+        }
+
+        @Override
+        public AxonValue export() {
+            return AxonValue.num(n);
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            n += exported.asLong();
         }
 
         @Override
@@ -337,6 +501,16 @@ final class GroupAggregation {
         }
 
         @Override
+        public AxonValue export() {
+            return AxonValue.array(seen.stream().map(AxonValue::str).toList());
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            exported.asArray().forEach(item -> seen.add(item.asString()));
+        }
+
+        @Override
         public AxonValue result() {
             return AxonValue.num(seen.size());
         }
@@ -353,6 +527,16 @@ final class GroupAggregation {
         @Override
         public void merge(State other) {
             sum.merge(((Sum) other).sum);
+        }
+
+        @Override
+        public AxonValue export() {
+            return sum.result();
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            sum.add(exported);
         }
 
         @Override
@@ -377,6 +561,20 @@ final class GroupAggregation {
         public void merge(State other) {
             sum = sum.add(((Avg) other).sum);
             count += ((Avg) other).count;
+        }
+
+        @Override
+        public AxonValue export() {
+            Map<String, AxonValue> out = new LinkedHashMap<>();
+            out.put("sum", AxonValue.num(sum));
+            out.put("count", AxonValue.num(count));
+            return AxonValue.object(out);
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            sum = sum.add(exported.asObject().get("sum").asDecimal());
+            count += exported.asObject().get("count").asLong();
         }
 
         @Override
@@ -407,6 +605,16 @@ final class GroupAggregation {
         @Override
         public void merge(State other) {
             add(((Extreme) other).best);
+        }
+
+        @Override
+        public AxonValue export() {
+            return AxonValue.array(best == null ? List.of() : List.of(best));
+        }
+
+        @Override
+        public void absorb(AxonValue exported) {
+            exported.asArray().forEach(this::add);
         }
 
         @Override

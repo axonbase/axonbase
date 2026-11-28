@@ -212,7 +212,7 @@ final class GeoVector {
         return AxonValue.object(out);
     }
 
-    private static double[] pointOf(AxonValue geometry) {
+    static double[] pointOf(AxonValue geometry) {
         AxonValue coordinates = coordinatesOf(geometry);
         if (coordinates == null || !coordinates.isArray() || coordinates.asArray().size() < 2
             || !coordinates.asArray().get(0).isNumber() || !coordinates.asArray().get(1).isNumber()) {

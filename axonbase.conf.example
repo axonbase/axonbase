@@ -29,9 +29,18 @@ root_password = root
 # cors_origins = https://painel.exemplo.com
 
 # TLS: keystore PKCS12 do servidor, senha, e truststore JKS de CAs (certificados de cliente).
+# Com tls_ca o servidor pede o certificado do cliente, mas aceita a conexão sem ele. Para exigir, defina a variável
+# de ambiente AXON_TLS_CLIENT_AUTH=require (não há chave neste arquivo) e deixe plain_port desligada.
 # tls_cert = certs/server/server.p12
 # tls_key = changeit
 # tls_ca = certs/truststores/icpbrasil.jks
+# Login por certificado: certificado revogado é sempre recusado. A revogação é consultada por OCSP e, sem resposta,
+# pela lista (CRL) indicada no certificado. Quando não dá para verificar (serviço fora do ar, sem rede, certificado sem
+# endereço de consulta) o login é recusado; true volta a aceitar nesse caso, com aviso no log.
+# Variável equivalente: AXON_CERT_ALLOW_UNKNOWN_REVOCATION.
+# cert_allow_unknown_revocation = false
+# Atrás de proxy reverso, liste os endereços dele na variável AXON_TRUSTED_PROXIES (separados por vírgula) para o
+# limite de requisições ler X-Forwarded-For. Sem a lista, vale o endereço da conexão.
 
 # Cluster opcional. Deixe cluster_id vazio para modo local.
 # cluster_id = primary

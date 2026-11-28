@@ -19,7 +19,8 @@ public record ServerConfig(String path, String secret, String user, String passw
                              int plainPort, String lang,
                              String aiProvider, String aiModel, String aiApiKey, String aiBaseUrl,
                              boolean auditEnabled, String auditUserFrom,
-                             boolean auditSelect, int auditMaxBody) {
+                             boolean auditSelect, int auditMaxBody,
+                             boolean certAllowUnknownRevocation) {
 
     public static final String DEFAULT_FILE = "axonbase.conf";
 
@@ -31,6 +32,27 @@ public record ServerConfig(String path, String secret, String user, String passw
         return Math.max(32, Runtime.getRuntime().availableProcessors() * 8);
     }
 
+    /** Assinatura anterior a {@code cert_allow_unknown_revocation}: a revogação fica estrita. */
+    public ServerConfig(String path, String secret, String user, String password,
+                        int port, String bind, boolean requireAuth, String clusterId,
+                        String nodeId, String raftBind, String raftPeers,
+                        long queryTimeout, long txnTimeout, int rateLimit,
+                        String corsOrigins, String tlsCert, String tlsKey, String tlsCa,
+                        long shutdownTimeout, int httpThreads, int httpQueue,
+                        String s3Endpoint, String s3Bucket, String s3Prefix,
+                        String s3Access, String s3Secret, long s3Interval,
+                        String s3EncryptKey, int s3Retention,
+                        int plainPort, String lang,
+                        String aiProvider, String aiModel, String aiApiKey, String aiBaseUrl,
+                        boolean auditEnabled, String auditUserFrom,
+                        boolean auditSelect, int auditMaxBody) {
+        this(path, secret, user, password, port, bind, requireAuth, clusterId, nodeId, raftBind, raftPeers,
+            queryTimeout, txnTimeout, rateLimit, corsOrigins, tlsCert, tlsKey, tlsCa,
+            shutdownTimeout, httpThreads, httpQueue, s3Endpoint, s3Bucket, s3Prefix, s3Access, s3Secret,
+            s3Interval, s3EncryptKey, s3Retention, plainPort, lang, aiProvider, aiModel, aiApiKey, aiBaseUrl,
+            auditEnabled, auditUserFrom, auditSelect, auditMaxBody, false);
+    }
+
     public static ServerConfig defaults() {
         return new ServerConfig("memory", "axonbase-dev-secret", "root", "root",
             8000, "127.0.0.1", true, "", "", "", "",
@@ -39,11 +61,16 @@ public record ServerConfig(String path, String secret, String user, String passw
             "", "", "", "", "", 0L,
             "", 10, 0, "pt-BR",
             "", "", "", "",
-            false, "auth", false, 65536);
+            false, "auth", false, 65536,
+            false);
     }
 
     public static ServerConfig load(Path file, Map<String, String> env) throws IOException {
-        ServerConfig base = fromMap(read(file), defaults());
+        Map<String, String> values = read(file);
+        // definida em branco não é o mesmo que ausente: cair na senha padrão abriria o root sem ninguém perceber
+        requireNotBlank(env.get("AXON_ROOT_PASSWORD"), "AXON_ROOT_PASSWORD");
+        requireNotBlank(values.get("root_password"), "root_password");
+        ServerConfig base = fromMap(values, defaults());
         return new ServerConfig(
             envOr(env, "AXON_PATH", base.path()),
             envOr(env, "AXON_SECRET", base.secret()),
@@ -83,7 +110,14 @@ public record ServerConfig(String path, String secret, String user, String passw
             boolOr(env.get("AXON_AUDIT_ENABLED"), base.auditEnabled()),
             envOr(env, "AXON_AUDIT_USER_FROM", base.auditUserFrom()),
             boolOr(env.get("AXON_AUDIT_SELECT"), base.auditSelect()),
-            intOr(env.get("AXON_AUDIT_MAX_BODY"), base.auditMaxBody()));
+            intOr(env.get("AXON_AUDIT_MAX_BODY"), base.auditMaxBody()),
+            boolOr(env.get("AXON_CERT_ALLOW_UNKNOWN_REVOCATION"), base.certAllowUnknownRevocation()));
+    }
+
+    private static void requireNotBlank(String value, String name) {
+        if (value != null && value.isBlank()) {
+            throw new IllegalArgumentException(Messages.get("config_root_password_blank", name));
+        }
     }
 
     private static boolean loopback(String bind) {
@@ -155,7 +189,8 @@ public record ServerConfig(String path, String secret, String user, String passw
             boolOr(values.get("audit_enabled"), defaults.auditEnabled()),
             value(values, "audit_user_from", defaults.auditUserFrom()),
             boolOr(values.get("audit_select"), defaults.auditSelect()),
-            intOr(values.get("audit_max_body"), defaults.auditMaxBody()));
+            intOr(values.get("audit_max_body"), defaults.auditMaxBody()),
+            boolOr(values.get("cert_allow_unknown_revocation"), defaults.certAllowUnknownRevocation()));
     }
 
     private static Map<String, String> read(Path file) throws IOException {

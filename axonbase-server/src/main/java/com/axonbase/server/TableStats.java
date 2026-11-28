@@ -36,6 +36,9 @@ final class TableStats {
 
     /** Usa o índice columnar (uma chave por registro) quando existe; senão percorre as chaves dos registros. */
     static long count(Database db, Catalog.TableDef table) {
+        if (db.catalog().partitioning(table.name()) != null) {
+            return com.axonbase.core.partition.PartitionStore.countRows(db, table.name());
+        }
         String prefix = null;
         for (Catalog.IndexDef i : table.indexes().values()) {
             if (i.columnar() && !i.columns().isEmpty()) {

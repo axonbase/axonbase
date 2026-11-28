@@ -18,7 +18,7 @@ export class SagaTransaction {
   async begin(): Promise<void> {
     if (this.begun) throw new AxonSdkError(`Saga already begun: ${this.correlationId}`);
     const result = await this.axon.query(
-      `BEGIN SAGA ${escapeSagaValue(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`,
+      `BEGIN SAGA ${sagaNameText(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`,
     );
     if (hasStatus(result, "RUNNING")) {
       this.begun = true;
@@ -36,7 +36,7 @@ export class SagaTransaction {
   async commit(): Promise<void> {
     this.assertActive();
     const result = await this.axon.query(
-      `COMMIT SAGA ${escapeSagaValue(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`,
+      `COMMIT SAGA ${sagaNameText(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`,
     );
     this.finished = true;
     if (!hasStatus(result, "COMMITTED")) {
@@ -47,14 +47,14 @@ export class SagaTransaction {
   async rollback(): Promise<void> {
     if (!this.begun || this.finished) return;
     await this.axon.query(
-      `CANCEL SAGA ${escapeSagaValue(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`,
+      `CANCEL SAGA ${sagaNameText(this.sagaName)} WITH CORRELATION '${escapeSagaValue(this.correlationId)}'`,
     );
     this.finished = true;
   }
 
   describe(): Promise<unknown> {
     return this.axon.query(
-      `SHOW SAGA TRANSACTION ${escapeSagaValue(this.sagaName)} '${escapeSagaValue(this.correlationId)}'`,
+      `SHOW SAGA TRANSACTION ${sagaNameText(this.sagaName)} '${escapeSagaValue(this.correlationId)}'`,
     );
   }
 
@@ -69,6 +69,12 @@ function hasStatus(result: unknown, expected: string): boolean {
     && (result as { status?: unknown }).status === expected;
 }
 
+/** Body of an AxonQL string literal: the backslash is the escape character (doubling the quote is not). */
 function escapeSagaValue(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/'/g, "''");
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+}
+
+/** A simple identifier goes as is; any other saga name goes as a string literal. */
+function sagaNameText(value: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value) ? value : `'${escapeSagaValue(value)}'`;
 }

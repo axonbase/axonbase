@@ -19,7 +19,59 @@ public final class Catalog {
     private final ConcurrentMap<String, DataRuleDef> dataRules = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, com.axonbase.core.audit.AiAuditDef> audits = new ConcurrentHashMap<>();
 
+    /** Fora de {@link TableDef}: redefinir a tabela não desfaz a partição nem o TTL dela. */
+    private final ConcurrentMap<String, PartitionSpec> partitioning = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, TtlSpec> ttl = new ConcurrentHashMap<>();
+    /** Partições definidas por uma transação que ainda não confirmou: quem as definiu. */
+    private final ConcurrentMap<String, Object> pendingPartitioning = new ConcurrentHashMap<>();
+
     public Catalog() {
+    }
+
+    public PartitionSpec partitioning(String table) {
+        return partitioning.get(table);
+    }
+
+    public Map<String, PartitionSpec> partitionedTables() {
+        return Map.copyOf(partitioning);
+    }
+
+    public void partitioning(String table, PartitionSpec spec) {
+        partitioning.put(table, spec);
+    }
+
+    /** A transação que está definindo a partição da tabela, ou {@code null}. */
+    public Object pendingOwner(String table) {
+        return pendingPartitioning.get(table);
+    }
+
+    public void pendingPartitioning(String table, Object owner) {
+        pendingPartitioning.put(table, owner);
+    }
+
+    public void publishPartitioning(String table, Object owner) {
+        pendingPartitioning.remove(table, owner);
+    }
+
+    public TtlSpec ttl(String table) {
+        return ttl.get(table);
+    }
+
+    public Map<String, TtlSpec> ttlTables() {
+        return Map.copyOf(ttl);
+    }
+
+    public void ttl(String table, TtlSpec spec) {
+        ttl.put(table, spec);
+    }
+
+    public boolean removeTtl(String table) {
+        return ttl.remove(table) != null;
+    }
+
+    /** {@code true} quando alguma tabela precisa que o acesso aos registros passe pela camada de partição. */
+    public boolean hasTimeData() {
+        return !partitioning.isEmpty() || !ttl.isEmpty();
     }
 
     public void defineAudit(com.axonbase.core.audit.AiAuditDef def) {
@@ -43,6 +95,9 @@ public final class Catalog {
     }
 
     public boolean removeTable(String name) {
+        partitioning.remove(name);
+        pendingPartitioning.remove(name);
+        ttl.remove(name);
         return tables.remove(name) != null;
     }
 
@@ -92,6 +147,9 @@ public final class Catalog {
         private final boolean schemafull;
         private final boolean drop;
         private volatile com.axonbase.parser.ast.Statement.Permissions permissions;
+        private volatile String shardBy;
+        private volatile List<Expr> checks = List.of();
+        private volatile boolean keyedById;
         final ConcurrentMap<String, FieldDef> fields = new ConcurrentHashMap<>();
         final ConcurrentMap<String, IndexDef> indexes = new ConcurrentHashMap<>();
         final ConcurrentMap<String, EventDef> events = new ConcurrentHashMap<>();
@@ -107,6 +165,43 @@ public final class Catalog {
             this.schemafull = schemafull;
             this.drop = drop;
         }
+        /** Campo de {@code SHARD BY}, ou {@code null}. Num nó único é só catálogo; quem divide é o gateway. */
+        public String shardBy() {
+            return shardBy;
+        }
+
+        public void shardBy(String field) {
+            this.shardBy = field;
+        }
+
+        /** Cláusulas {@code CHECK (...)} da tabela. */
+        public List<Expr> checks() {
+            return checks;
+        }
+
+        public void checks(List<Expr> value) {
+            this.checks = List.copyOf(value);
+        }
+
+        /** A chave primária declarada inclui a coluna {@code id}, que já é única. */
+        public boolean keyedById() {
+            return keyedById;
+        }
+
+        public void keyedById(boolean value) {
+            this.keyedById = value;
+        }
+
+        /**
+         * As colunas cuja combinação não pode se repetir, em ordem de nome. Vazio sem chave primária e quando ela
+         * inclui o {@code id}.
+         */
+        public List<String> primaryKey() {
+            // a tabela sem campos, comum na ingestão, não monta o stream a cada escrita
+            return keyedById || fields.isEmpty() ? List.of()
+                : fields.values().stream().filter(FieldDef::primaryKey).map(FieldDef::name).sorted().toList();
+        }
+
         public void permissions(com.axonbase.parser.ast.Statement.Permissions p) {
             this.permissions = p;
         }
@@ -149,6 +244,8 @@ public final class Catalog {
         private final String references;
         private final String embeddingName;
         private final String embeddingFrom;
+        private final boolean notNull;
+        private final boolean primaryKey;
 
         public FieldDef(String name, String type, boolean readonly) {
             this(name, type, readonly, null, null, null);
@@ -179,6 +276,34 @@ public final class Catalog {
             this.references = references;
             this.embeddingName = embeddingName;
             this.embeddingFrom = embeddingFrom;
+            this.notNull = false;
+            this.primaryKey = false;
+        }
+
+        private FieldDef(FieldDef base, boolean notNull, boolean primaryKey) {
+            this.name = base.name;
+            this.type = base.type;
+            this.readonly = base.readonly;
+            this.assertExpr = base.assertExpr;
+            this.defaultExpr = base.defaultExpr;
+            this.references = base.references;
+            this.embeddingName = base.embeddingName;
+            this.embeddingFrom = base.embeddingFrom;
+            this.notNull = notNull;
+            this.primaryKey = primaryKey;
+        }
+
+        /** O mesmo campo com as restrições de coluna do {@code CREATE TABLE} ou do {@code ALTER TABLE}. */
+        public FieldDef constrained(boolean notNull, boolean primaryKey) {
+            return new FieldDef(this, notNull, primaryKey);
+        }
+
+        public boolean notNull() {
+            return notNull;
+        }
+
+        public boolean primaryKey() {
+            return primaryKey;
         }
 
         public String name() {
@@ -291,6 +416,10 @@ public final class Catalog {
         /** Marca o índice como em construção: as escritas o mantêm, as consultas não o usam. */
         public void markBuilding() { built.set(0); ready = false; }
         public void markReady() { ready = true; }
+        private volatile boolean resumed;
+        /** A construção foi retomada ao reler o catálogo, e não pedida por um comando deste nó. */
+        public boolean resumed() { return resumed; }
+        public void markResumed() { resumed = true; }
     }
 
     /** Definição de uma Data Rule (filtro no nível de linha e coluna). */

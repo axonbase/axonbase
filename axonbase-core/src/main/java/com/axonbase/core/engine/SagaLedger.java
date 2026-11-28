@@ -1,9 +1,13 @@
 package com.axonbase.core.engine;
 
+import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
 import com.axonbase.core.Session;
 import com.axonbase.core.catalog.RecordId;
-import com.axonbase.value.AxonJson;
+import com.axonbase.core.security.AuthCatalog;
+import com.axonbase.core.security.Authz;
+import com.axonbase.parser.Render;
+import com.axonbase.parser.ast.Statement;
 import com.axonbase.value.AxonValue;
 
 import java.util.ArrayList;
@@ -11,6 +15,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Ledger de transações SAGA no namespace {@code system}, database {@code saga}.
@@ -19,13 +24,14 @@ import java.util.Map;
  */
 public class SagaLedger {
 
+    private static final System.Logger LOG = System.getLogger(SagaLedger.class.getName());
     private static final String SAGA_NS = "system";
     private static final String SAGA_DB = "saga";
 
     private final Datastore ds;
     private final DatabaseLinkClient linkClient = new DatabaseLinkClient();
-    private static final java.util.concurrent.atomic.AtomicInteger stepCounter =
-        new java.util.concurrent.atomic.AtomicInteger(0);
+    private static final java.util.concurrent.atomic.AtomicLong stepCounter =
+        new java.util.concurrent.atomic.AtomicLong();
 
     public SagaLedger(Datastore ds) {
         this.ds = ds;
@@ -37,6 +43,9 @@ public class SagaLedger {
         ds.execute("DEFINE FIELD correlation_id ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD status ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD created_at ON TABLE saga TYPE datetime;", sagaSession(), null);
+        ds.execute("DEFINE FIELD links ON TABLE saga TYPE array;", sagaSession(), null);
+        ds.execute("DEFINE FIELD link_namespace ON TABLE saga TYPE string;", sagaSession(), null);
+        ds.execute("DEFINE FIELD open_database ON TABLE saga TYPE string;", sagaSession(), null);
         ds.execute("DEFINE INDEX saga_corr ON TABLE saga COLUMNS correlation_id UNIQUE;", sagaSession(), null);
 
         ds.execute("DEFINE TABLE saga_step SCHEMAFULL;", sagaSession(), null);
@@ -48,6 +57,7 @@ public class SagaLedger {
         ds.execute("DEFINE FIELD link_name ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD table_name ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD record_key ON TABLE saga_step TYPE string;", sagaSession(), null);
+        ds.execute("DEFINE FIELD record_literal ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD before ON TABLE saga_step TYPE object;", sagaSession(), null);
         ds.execute("DEFINE FIELD operation ON TABLE saga_step TYPE string;", sagaSession(), null);
         ds.execute("DEFINE FIELD status ON TABLE saga_step TYPE string;", sagaSession(), null);
@@ -58,21 +68,88 @@ public class SagaLedger {
     }
 
     public void beginSaga(String sagaResource, String correlationId) {
-        ds.execute("UPSERT saga:" + escKey(correlationId)
+        beginSaga(sagaResource, correlationId, List.of(), "", "");
+    }
+
+    /**
+     * @param links participantes da definição no momento do BEGIN; vazio quando a SAGA não tem definição
+     * @param linkNamespace namespace de quem abriu a SAGA, onde as ligações dos participantes estão definidas
+     * @param openDatabase banco de quem abriu a SAGA; com o namespace, delimita quem a alcança
+     */
+    public void beginSaga(String sagaResource, String correlationId, List<String> links, String linkNamespace,
+                          String openDatabase) {
+        String participants = Render.value(
+            AxonValue.array(links.stream().map(AxonValue::str).toList()));
+        ds.execute("UPSERT " + ledgerRecord(correlationId)
             + " CONTENT {name: \"" + esc(sagaResource)
             + "\", correlation_id: \"" + esc(correlationId)
+            + "\", links: " + participants
+            + ", link_namespace: \"" + esc(linkNamespace)
+            + "\", open_database: \"" + esc(openDatabase)
             + "\", status: \"RUNNING\", created_at: time::now()}", sagaSession(), null);
     }
 
+    /** O registro da transação no ledger, ou {@code null} quando não há nenhuma com essa correlação. */
+    Map<String, AxonValue> transaction(String correlationId) {
+        if (correlationId == null || correlationId.isBlank()) return null;
+        AxonValue result = ds.execute("SELECT * FROM " + ledgerRecord(correlationId), sagaSession(), null);
+        if (result.isArray()) {
+            result = result.asArray().isEmpty() ? AxonValue.nul() : result.asArray().get(0);
+        }
+        return result.isObject() ? result.asObject() : null;
+    }
+
+    /**
+     * Recusa a identidade que não alcança a SAGA: o namespace e o banco de quem a abriu e o de cada passo local. Num
+     * passo gravado por DATABASE LINK vale o namespace de quem escreveu, porque o banco dele é do participante. Sem
+     * autenticação e com escopo root nada muda; uma correlação desconhecida não tem o que proteger.
+     */
+    void requireReach(AxonValue auth, String correlationId) {
+        if (!Authz.authenticated(auth) || Authz.scope(auth) == AuthCatalog.Scope.ROOT) {
+            return;
+        }
+        Map<String, AxonValue> record = transaction(correlationId);
+        boolean reached = true;
+        if (record != null) {
+            String namespace = strField(record, "link_namespace");
+            String database = strField(record, "open_database");
+            // passos de versões anteriores não têm o banco de abertura: vale o namespace e, abaixo, cada passo
+            if (!namespace.isEmpty()) {
+                reached = database.isEmpty() ? namespace.equals(Authz.ns(auth))
+                    : Authz.allows(auth, namespace, database);
+            }
+        }
+        AxonValue steps = ds.execute("SELECT * FROM saga_step WHERE correlation_id = \""
+            + esc(correlationId == null ? "" : correlationId) + "\"", sagaSession(), null);
+        if (steps.isArray()) {
+            for (AxonValue item : steps.asArray()) {
+                if (item.isObject()) {
+                    reached &= reaches(auth, item.asObject());
+                }
+            }
+        }
+        if (!reached) {
+            throw new AxonError(-32002, Messages.get("saga_scope_refused", correlationId));
+        }
+    }
+
+    private static boolean reaches(AxonValue auth, Map<String, AxonValue> step) {
+        String link = strField(step, "link_name");
+        if (link.isEmpty() || "local".equals(link)) {
+            return Authz.allows(auth, strField(step, "step_ns"), strField(step, "step_db"));
+        }
+        return strField(step, "link_ns").equals(Authz.ns(auth));
+    }
+
     public void commitSaga(String sagaResource, String correlationId) {
-        ds.execute("UPDATE saga:" + escKey(correlationId) + " SET status = 'COMMITTED'",
+        ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'COMMITTED'",
             sagaSession(), null);
     }
 
     public boolean isSagaActive(String correlationId) {
         if (correlationId == null || correlationId.isBlank()) return false;
         AxonValue result = ds.execute(
-            "SELECT VALUE status FROM saga:" + escKey(correlationId), sagaSession(), null);
+            "SELECT VALUE status FROM " + ledgerRecord(correlationId), sagaSession(), null);
         if (result.isString()) return "RUNNING".equals(result.asString());
         if (result.isArray() && !result.asArray().isEmpty()
             && result.asArray().get(0).isObject()) {
@@ -85,13 +162,12 @@ public class SagaLedger {
     /**
      * Registra um step com o snapshot anterior e aplica a compensação.
      */
-    public void recordStep(String correlationId, String stepNs, String stepDb,
+    public long recordStep(String correlationId, String stepNs, String stepDb,
                             String linkNamespace, String linkName, String table,
                             RecordId rid, AxonValue beforeValue, String operation) {
-        if (correlationId == null || correlationId.isBlank()) return;
-        String beforeJson = beforeValue != null && beforeValue.isObject()
-            ? AxonJson.write(beforeValue) : "{}";
-        int order = nextStepOrder(correlationId);
+        if (correlationId == null || correlationId.isBlank()) return 0;
+        String beforeLiteral = beforeLiteral(beforeValue);
+        long order = nextStepOrder();
         ds.execute("CREATE saga_step CONTENT {"
             + "correlation_id: \"" + esc(correlationId) + "\","
             + "step_order: " + order + ","
@@ -101,9 +177,37 @@ public class SagaLedger {
             + "link_name: \"" + esc(linkName) + "\","
             + "table_name: \"" + esc(table) + "\","
             + "record_key: \"" + esc(recordKey(rid)) + "\","
-            + "before: " + beforeJson + ","
+            + "record_literal: \"" + esc(keyLiteral(rid)) + "\","
+            + "before: " + beforeLiteral + ","
             + "operation: \"" + esc(operation) + "\","
             + "status: \"PREPARED\"}", sagaSession(), null);
+        return order;
+    }
+
+    /** O passo de um RELATE local: as duas pontas e o que a aresta tinha antes dele. */
+    long recordEdgeStep(String correlationId, String stepNs, String stepDb, String kind, RecordId from, RecordId to,
+                        boolean existed, Map<String, AxonValue> properties) {
+        Map<String, AxonValue> before = new LinkedHashMap<>();
+        before.put("from_table", AxonValue.str(from.table()));
+        before.put("from_key", AxonValue.str(keyLiteral(from)));
+        before.put("to_table", AxonValue.str(to.table()));
+        before.put("to_key", AxonValue.str(keyLiteral(to)));
+        before.put("existed", AxonValue.bool(existed));
+        before.put("properties", AxonValue.object(properties));
+        return recordStep(correlationId, stepNs, stepDb, "", "local", kind, from, AxonValue.object(before),
+            "RELATE");
+    }
+
+    /** Retira o passo de uma escrita que não chegou a ser gravada. */
+    void discardStep(String correlationId, long stepOrder) {
+        try {
+            ds.execute("DELETE saga_step WHERE correlation_id = \"" + esc(correlationId)
+                + "\" AND step_order = " + stepOrder, sagaSession(), null);
+        } catch (RuntimeException e) {
+            // a falha que descartou a escrita é a que precisa chegar a quem chamou
+            LOG.log(System.Logger.Level.WARNING, "passo " + stepOrder + " da SAGA " + correlationId
+                + " ficou no ledger sem a escrita correspondente", e);
+        }
     }
 
     /**
@@ -117,22 +221,22 @@ public class SagaLedger {
             if (!value.isObject()) continue;
             Map<String, AxonValue> step = value.asObject();
             if (!"local".equals(strField(step, "link_name"))) continue;
-            int participantOrder = (int) longField(step, "step_order");
+            long participantOrder = longField(step, "step_order");
             if (participantOrder <= 0 || participantStepReported(correlationId, linkNamespace, linkName, participantOrder)) {
                 continue;
             }
-            AxonValue before = step.get("before");
-            String beforeJson = before != null && before.isObject() ? AxonJson.write(before) : "{}";
+            String beforeLiteral = beforeLiteral(step.get("before"));
             ds.execute("CREATE saga_step CONTENT {"
                 + "correlation_id: \"" + esc(correlationId) + "\","
-                + "step_order: " + nextStepOrder(correlationId) + ","
+                + "step_order: " + nextStepOrder() + ","
                 + "step_ns: \"" + esc(strField(step, "step_ns")) + "\","
                 + "step_db: \"" + esc(strField(step, "step_db")) + "\","
                 + "link_ns: \"" + esc(linkNamespace) + "\","
                 + "link_name: \"" + esc(linkName) + "\","
                 + "table_name: \"" + esc(strField(step, "table_name")) + "\","
                 + "record_key: \"" + esc(strField(step, "record_key")) + "\","
-                + "before: " + beforeJson + ","
+                + "record_literal: \"" + esc(strField(step, "record_literal")) + "\","
+                + "before: " + beforeLiteral + ","
                 + "operation: \"" + esc(strField(step, "operation")) + "\","
                 + "status: \"REPORTED\","
                 + "participant_step_order: " + participantOrder + ","
@@ -140,7 +244,7 @@ public class SagaLedger {
         }
     }
 
-    private boolean participantStepReported(String correlationId, String linkNamespace, String linkName, int participantOrder) {
+    private boolean participantStepReported(String correlationId, String linkNamespace, String linkName, long participantOrder) {
         AxonValue existing = ds.execute(
             "SELECT * FROM saga_step WHERE correlation_id = \"" + esc(correlationId)
                 + "\" AND link_ns = \"" + esc(linkNamespace)
@@ -155,7 +259,12 @@ public class SagaLedger {
      * Idempotente: cada step é marcado como COMPENSATED e a busca é por status PREPARED.
      */
     public void cancelSaga(String sagaResource, String correlationId) {
-        ds.execute("UPDATE saga:" + escKey(correlationId) + " SET status = 'COMPENSATING'",
+        cancelSaga(sagaResource, correlationId, Session.create());
+    }
+
+    /** @param caller sessão de quem cancela; a compensação local roda com a identidade dela */
+    void cancelSaga(String sagaResource, String correlationId, Session caller) {
+        ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'COMPENSATING'",
             sagaSession(), null);
 
         // Busca steps em ordem reversa que ainda estão PREPARED
@@ -172,26 +281,19 @@ public class SagaLedger {
         }
 
         for (Map<String, AxonValue> step : stepsList) {
-            compensateStep(step, correlationId);
+            compensateStep(step, correlationId, caller);
         }
 
-        ds.execute("UPDATE saga:" + escKey(correlationId) + " SET status = 'FAILED'",
+        ds.execute("UPDATE " + ledgerRecord(correlationId) + " SET status = 'FAILED'",
             sagaSession(), null);
     }
 
-    private void compensateStep(Map<String, AxonValue> step, String corrId) {
-        String operation = strField(step, "operation");
-        AxonValue before = step.get("before");
-        String tableName = strField(step, "table_name");
+    private void compensateStep(Map<String, AxonValue> step, String corrId, Session caller) {
         String stepNs = strField(step, "step_ns");
         String stepDb = strField(step, "step_db");
         String linkNamespace = strField(step, "link_ns");
         String linkName = strField(step, "link_name");
-        int stepOrder = (int) longField(step, "step_order");
-
-        Session targetSession = Session.create();
-        targetSession.namespace(stepNs.isEmpty() ? SAGA_NS : stepNs);
-        targetSession.database(stepDb.isEmpty() ? SAGA_DB : stepDb);
+        long stepOrder = longField(step, "step_order");
 
         Datastore.DatabaseLinkDef linkDef = null;
         if (!"local".equals(linkName)) {
@@ -199,44 +301,64 @@ public class SagaLedger {
             if (linkDef == null) {
                 throw new IllegalStateException(Messages.get("saga_compensation_link_missing", linkName));
             }
+        } else if (stepNs.isEmpty() || stepDb.isEmpty()) {
+            throw new IllegalStateException(Messages.get("saga_compensation_refused", stepNs + "/" + stepDb));
         }
 
-        if (before == null || !before.isObject() || before.asObject().isEmpty()) {
-            if ("CREATE".equalsIgnoreCase(operation)) {
-                String recordKey = strField(step, "record_key");
-                if (!recordKey.isEmpty()) {
-                    executeCompensation(linkDef, "DELETE " + tableName + ":" + recordKey, targetSession);
-                }
+        for (Statement undo : SagaUndo.statements(step)) {
+            if (linkDef == null) {
+                executeLocally(undo, strField(step, "table_name"), caller, stepNs, stepDb);
+            } else {
+                executeRemotely(linkDef, undo);
             }
-            markCompensated(corrId, stepOrder);
-            return;
         }
-
-        AxonValue beforeId = before.asObject().get("id");
-        String keyStr = beforeId != null ? extractKey(beforeId) : "";
-
-        Map<String, AxonValue> restoreData = new LinkedHashMap<>(before.asObject());
-        restoreData.remove("id");
-        String restoreJson = AxonJson.write(AxonValue.object(restoreData));
-
-        String restoreSql = "UPSERT " + tableName + ":" + keyStr
-            + " CONTENT " + restoreJson;
-        executeCompensation(linkDef, restoreSql, targetSession);
-
         markCompensated(corrId, stepOrder);
     }
 
-    private void markCompensated(String corrId, int stepOrder) {
-        ds.execute("UPDATE saga_step SET status = 'COMPENSATED' WHERE correlation_id = \""
-            + esc(corrId) + "\" AND step_order = " + stepOrder, sagaSession(), null);
+    /**
+     * Roda a sentença no banco do passo, com a identidade e o teto de papel de quem cancela, numa sessão que não
+     * executa nada além dela.
+     */
+    private void executeLocally(Statement undo, String table, Session caller, String stepNs, String stepDb) {
+        // a compensação repõe o que já existia: não passa pelas restrições das escritas novas
+        Session target = caller.restoringCopy();
+        target.namespace(stepNs);
+        target.database(stepDb);
+        target.compensation(new SagaCompensation(undo, table));
+        ds.executeCompensation(undo, target);
     }
 
-    private void executeCompensation(Datastore.DatabaseLinkDef linkDef, String sql, Session targetSession) {
-        if (linkDef == null) {
-            ds.execute(sql, targetSession, null);
-        } else {
-            linkClient.query(linkDef, sql);
+    /**
+     * No participante a sentença roda como um comando da credencial da ligação. Um DELETE que as PERMISSIONS de lá
+     * pulam não devolve erro, então o registro é procurado antes de o passo contar como compensado.
+     */
+    private void executeRemotely(Datastore.DatabaseLinkDef linkDef, Statement undo) {
+        String text = SagaUndo.remoteText(undo);
+        requireForwardable(undo, text);
+        linkClient.query(linkDef, text);
+        if (undo instanceof Statement.Delete delete
+            && linkClient.query(linkDef, SagaUndo.remoteProbe(delete)).stream().anyMatch(AxonValue::isObject)) {
+            throw new IllegalStateException(Messages.get("saga_compensation_not_applied", linkDef.name()));
         }
+    }
+
+    /**
+     * A mesma conferência de uma escrita encaminhada: só nomes simples. A sentença única já foi conferida ao montar o
+     * texto.
+     */
+    private static void requireForwardable(Statement undo, String text) {
+        Optional<String> refused = SagaUndo.tableNames(undo).stream()
+            .filter(name -> !LinkGuard.plain(name))
+            .findFirst()
+            .or(() -> LinkGuard.refusedQuotedName(text));
+        if (refused.isPresent()) {
+            throw new IllegalStateException(Messages.get("saga_compensation_refused", refused.get()));
+        }
+    }
+
+    private void markCompensated(String corrId, long stepOrder) {
+        ds.execute("UPDATE saga_step SET status = 'COMPENSATED' WHERE correlation_id = \""
+            + esc(corrId) + "\" AND step_order = " + stepOrder, sagaSession(), null);
     }
 
     private static String recordKey(RecordId recordId) {
@@ -244,24 +366,23 @@ public class SagaLedger {
         return key.isString() ? key.asString() : key.toString();
     }
 
-    /** Extrai a chave de um valor que pode ser string, record id ou object. */
-    private static String extractKey(AxonValue v) {
-        if (v.isRecordId()) {
-            Object key = v.asRecordId().key();
-            if (key instanceof AxonValue kv && kv.isString()) return kv.asString();
-            if (key instanceof AxonValue kv && kv.isNumber()) return kv.toString();
-            return String.valueOf(key);
-        }
-        if (v.isString()) {
-            String s = v.asString();
-            int i = s.indexOf(':');
-            return i >= 0 ? s.substring(i + 1) : s;
-        }
-        return v.toString();
+    /** A chave como literal AxonQL, que preserva o tipo (texto, número, uuid) e aceita hífen e espaço. */
+    private static String keyLiteral(RecordId recordId) {
+        AxonValue key = recordId.key();
+        return key.isNumber() ? Render.numberKey(key) : Render.value(key);
     }
 
-    private int nextStepOrder(String corrId) {
-        return stepCounter.incrementAndGet();
+    /** O estado anterior como literal AxonQL: em JSON, data e decimal voltariam como objetos. */
+    private static String beforeLiteral(AxonValue before) {
+        return before != null && before.isObject() ? Render.value(before) : "{}";
+    }
+
+    /**
+     * Ordem crescente também entre reinícios e trocas de líder: a compensação percorre os passos do maior para o
+     * menor, então um contador que recomeçasse restauraria os estados fora de ordem.
+     */
+    private static long nextStepOrder() {
+        return stepCounter.updateAndGet(previous -> Math.max(previous + 1, System.currentTimeMillis()));
     }
 
     private static Session sagaSession() {
@@ -285,7 +406,12 @@ public class SagaLedger {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
-    private static String escKey(String s) {
-        return s.replaceAll("[^a-zA-Z0-9_\\-]", "_");
+    /**
+     * O registro da transação como literal AxonQL. Uma correlação só de dígitos continua sendo chave numérica, como
+     * nas versões anteriores; as demais vão entre aspas, que é o que aceita hífen (UUID).
+     */
+    private static String ledgerRecord(String correlationId) {
+        String key = correlationId.replaceAll("[^a-zA-Z0-9_\\-]", "_");
+        return key.matches("\\d{1,18}") ? "saga:" + key : "saga:'" + key + "'";
     }
 }

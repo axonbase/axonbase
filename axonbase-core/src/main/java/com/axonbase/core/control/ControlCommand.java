@@ -16,9 +16,9 @@ public record ControlCommand(Kind kind, String namespace, String database, Strin
                              String definition) {
 
     /**
-     * Tipos de definição no plano de controle. A ordem de declaração é a ordem de
-     * replay: um índice com analyzer precisa do analyzer, um campo precisa da
-     * tabela, e a tabela precisa do banco de dados.
+     * Tipos de definição no plano de controle. A ordem de replay é a de {@link #rank()}:
+     * um índice com analyzer precisa do analyzer, um campo precisa da tabela, e a
+     * tabela precisa do banco de dados.
      */
     public enum Kind {
         DATABASE, DATABASE_LINK, ANALYZER, EMBEDDING, TABLE, FIELD, INDEX, EVENT,
@@ -26,7 +26,11 @@ public record ControlCommand(Kind kind, String namespace, String database, Strin
         PACKAGE, FUNCTION, PROCEDURE,
         ACCESS, USER, AUDIT,
         /** Truststore enviado pela API: guarda só nome e caminho do arquivo, nunca a senha. */
-        JKS
+        JKS,
+        /** Partição por tempo e prazo de validade de uma tabela (o nome é a tabela). Reexecutados logo depois dela. */
+        PARTITIONING, TTL,
+        /** Definição de SAGA: global (sem namespace nem banco), com o nome da SAGA. */
+        SAGA
     }
 
     public ControlCommand {
@@ -46,9 +50,17 @@ public record ControlCommand(Kind kind, String namespace, String database, Strin
         return kind.name() + '\u0000' + namespace + '\u0000' + database + '\u0000' + name;
     }
 
-    /** Posição relativa deste comando na ordem de replay. */
+    /**
+     * Posição relativa deste comando na ordem de replay: a ordem de declaração, menos {@code PARTITIONING} e
+     * {@code TTL}, que vêm logo depois de {@code TABLE}. Reexecutar um índice pode retomar a construção dele na hora,
+     * e ela precisa saber que a tabela é particionada para não ficar pronta sem linha alguma.
+     */
     public int rank() {
-        return kind.ordinal();
+        return switch (kind) {
+            case PARTITIONING -> Kind.TABLE.ordinal() * 10 + 1;
+            case TTL -> Kind.TABLE.ordinal() * 10 + 2;
+            default -> kind.ordinal() * 10;
+        };
     }
 
     public static ControlCommand database(String namespace, String database) {

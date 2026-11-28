@@ -20,6 +20,7 @@ public final class ActivityRegistry {
 
     private static final double[] BUCKETS = {0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30};
     private static final int MAX_FINGERPRINTS = 500;
+    private static final int EVICTION_BATCH = MAX_FINGERPRINTS / 10;
 
     private volatile ActivityConfig config;
     private final Map<String, Running> running = new ConcurrentHashMap<>();
@@ -170,19 +171,42 @@ public final class ActivityRegistry {
     }
 
     private void record(Running r, long nanos, boolean error) {
-        Stat st = stats.get(r.fingerprint());
-        if (st == null) {
+        statFor(r.fingerprint()).add(nanos, error, r.ns(), r.db());
+    }
+
+    /**
+     * A estatística do fingerprint, criada se preciso. Só um fingerprint novo entra na trava: sem ela, threads
+     * concorrentes descartariam a mesma entrada, cada uma incluiria a sua, e o mapa cresceria sem limite.
+     */
+    private Stat statFor(String fingerprint) {
+        Stat known = stats.get(fingerprint);
+        if (known != null) {
+            return known;
+        }
+        synchronized (stats) {
+            Stat current = stats.get(fingerprint);
+            if (current != null) {
+                return current;
+            }
             if (stats.size() >= MAX_FINGERPRINTS) {
                 evictOldest();
             }
-            st = stats.computeIfAbsent(r.fingerprint(), k -> new Stat(k));
+            Stat created = new Stat(fingerprint);
+            stats.put(fingerprint, created);
+            return created;
         }
-        st.add(nanos, error, r.ns(), r.db());
     }
 
+    /** Descarta as entradas vistas há mais tempo, em lote, para o mapa cheio não ser ordenado a cada instrução nova. */
     private void evictOldest() {
-        stats.entrySet().stream().min(Comparator.comparingLong(e -> e.getValue().lastSeenMs))
-            .ifPresent(e -> stats.remove(e.getKey()));
+        // a hora é copiada antes de ordenar: ela muda enquanto outras threads somam amostras
+        record Seen(String fingerprint, long atMs) {}
+        stats.values().stream()
+            .map(s -> new Seen(s.fingerprint(), s.lastSeenMs()))
+            .sorted(Comparator.comparingLong(Seen::atMs))
+            .limit(EVICTION_BATCH)
+            .toList()
+            .forEach(s -> stats.remove(s.fingerprint()));
     }
 
     /** Cancela uma consulta pelo id. {@code false} se ela já terminou. */
@@ -266,6 +290,8 @@ public final class ActivityRegistry {
 
         Stat(String fingerprint) {
             this.fingerprint = fingerprint;
+            // recém-criada conta como vista agora: senão sairia no próximo descarte, antes da primeira amostra
+            this.lastSeenMs = System.currentTimeMillis();
         }
 
         synchronized void add(long nanos, boolean error, String ns, String db) {

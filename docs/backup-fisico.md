@@ -2,7 +2,7 @@
 
 O backup físico copia os arquivos do RocksDB (a base de dados embutida do AxonBase) com o `BackupEngine`. Diferente do backup lógico em texto (o `.axbak`, descrito em [backup-e-restauracao.md](backup-e-restauracao.md)), ele não relê registro por registro: copia arquivos SST (Sorted String Table, os arquivos de dados do RocksDB) e o log de escrita de um instante consistente. O backup seguinte reaproveita os arquivos que já foram copiados e só paga pelo que mudou, e qualquer backup restaura sozinho, sem montar cadeia.
 
-Vale só para nó único com armazenamento RocksDB. Em cluster ou com armazenamento em memória a API responde 409.
+Exige armazenamento RocksDB; com armazenamento em memória a API responde 409. Em cluster, o backup é **criado num seguidor ou num learner** (o líder, e qualquer nó durante uma eleição, recusam com 409); listar, verificar, baixar os arquivos e aplicar a retenção valem em qualquer nó, sobre o diretório de backup daquele nó. **Restaurar e importar continuam bloqueados em cluster** (409): trocariam a base de um membro por fora do consenso. O uso de um backup de cluster para incluir um nó novo está em [cluster-raft.md](cluster-raft.md).
 
 ## Onde ficam os backups
 
@@ -30,7 +30,9 @@ Todas ficam sob `/admin/v1/backups/physical`. Criar, listar e verificar pedem o 
 | `DELETE /physical?keep=N` | Mantém só os `N` mais novos (`N >= 1`) e apaga os arquivos que mais nenhum backup usa. |
 | `POST /physical/{id}/restore?confirm=true` | Restaura o backup `id` no lugar da base, dentro do processo, sem reiniciar. |
 
-`version` é a marca d'água de versão do instante do backup. A idade do último backup é o RPO (Recovery Point Objective, a perda máxima de dados aceita) do backup físico.
+Um restore com o parâmetro `at=<instante>` reaplica também o journal até aquela hora (veja [pitr.md](pitr.md)).
+
+`version` é a marca d'água de versão do instante do backup. `stampedAt` e `journalIndex` aparecem nos backups que servem de base para a restauração a um instante. A idade do último backup é o RPO (Recovery Point Objective, a perda máxima de dados aceita) do backup físico.
 
 ### Restaurar
 
@@ -98,7 +100,7 @@ Os `id` de um backup importado são os do motor de origem, e a área `imports/<o
 | 403 | | papel insuficiente. |
 | 404 | `NOT_FOUND` | backup, arquivo ou origem de importação inexistente. |
 | 409 | `PHYSICAL_UNSUPPORTED` | armazenamento em memória. |
-| 409 | `CONFLICT` | cluster (backup físico só vale em nó único). |
+| 409 | `CONFLICT` | em cluster, criar no líder ou durante uma eleição; restaurar ou importar em qualquer nó. |
 | 409 | `BUSY` | o restore não conseguiu esvaziar as operações em 60 s; a base ficou como estava. |
 | 500 | `BACKUP_FAILED` | falha do `BackupEngine` ou do sistema de arquivos. |
 
@@ -137,4 +139,5 @@ Um restore enquanto uma varredura ou construção de índice segura as operaçõ
 ## O que ainda não existe
 
 - Backup físico de cluster com várias réplicas (E2 e E3 do plano de escala).
-- Restauração a um instante (PITR, Point In Time Recovery), que combina este backup com o arquivo de lotes da E2.
+
+A restauração a um instante (PITR, Point-In-Time Recovery), que combina este backup com o journal de lotes, está em [pitr.md](pitr.md).

@@ -1,5 +1,6 @@
 package com.axonbase.core.audit;
 
+import com.axonbase.common.AxonError;
 import com.axonbase.core.Session;
 import com.axonbase.core.engine.Datastore;
 import com.axonbase.core.storage.MemoryBackend;
@@ -90,11 +91,30 @@ class AiAuditInterceptorTest {
     }
 
     @Test
-    void usuarioComAuditInexistenteNaoIntercepta() {
+    void usuarioComAuditInexistenteENegado() {
         Datastore ds = newDs();
+        ds.execute("CREATE users:1", session(), null);
         Session s = sessionAudited("carol", "nao_existe");
-        AxonValue result = ds.execute("DELETE users", s, null);
-        assertNotNull(result);
+
+        AxonError refused = assertThrows(AxonError.class, () -> ds.execute("DELETE users", s, null));
+
+        assertTrue(refused.getMessage().contains("nao_existe"), refused.getMessage());
+        assertEquals(1, ds.execute("SELECT * FROM users", session(), null).asArray().size());
+    }
+
+    @Test
+    void auditDefinidaEmOutroBancoNegaNesteBancoMasPermiteVoltar() {
+        Datastore ds = newDs();
+        ds.createDatabase("test", "outro");
+        defineAudit(ds, "protect");
+        Session s = sessionAudited("dora", "protect");
+        s.database("outro");
+
+        String read = "SELECT * FROM users WHERE idade = 1";
+        assertThrows(AxonError.class, () -> ds.execute(read, s, null));
+        ds.execute("USE test dev", s, null);
+
+        assertNotNull(ds.execute(read, s, null));
     }
 
     @Test

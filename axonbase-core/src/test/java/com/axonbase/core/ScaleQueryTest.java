@@ -228,40 +228,6 @@ class ScaleQueryTest {
     }
 
     @Test
-    @DisplayName("índice GEO antigo (sem marcador, entradas vazias) segue o caminho de hoje e dá o mesmo resultado")
-    void legacyGeoIndexKeepsWorking() {
-        geoTables(1200, 16);
-        String c = point(LON0 + 0.05, LAT0 + 0.05);
-        String radius = " WHERE geo::distance(pos, " + c + ") <= 2500";
-        String knn = " ORDER BY geo::distance(pos, " + c + ") LIMIT 12";
-        List<Long> expectedRadius = sorted(ns("SELECT n FROM h" + radius));
-        List<Long> expectedKnn = ns("SELECT n FROM h" + knn);
-        assertEquals(expectedRadius, sorted(ns("SELECT n FROM g" + radius)));
-
-        // mistura: marcador presente, mas metade das entradas no formato antigo (valor vazio)
-        List<String> entries = backend.inner.keysWithPrefix("SP|test|dev|g|g_pos|");
-        for (int i = 0; i < entries.size(); i += 2) {
-            backend.inner.put(entries.get(i), new byte[0]);
-        }
-        assertEquals(expectedRadius, sorted(ns("SELECT n FROM g" + radius)));
-        assertEquals(expectedKnn, ns("SELECT n FROM g" + knn));
-
-        // índice antigo de verdade: sem marcador e com todas as entradas vazias
-        for (String key : entries) {
-            backend.inner.put(key, new byte[0]);
-        }
-        backend.inner.delete("SPV|test|dev|g|g_pos");
-        assertEquals(expectedRadius, sorted(ns("SELECT n FROM g" + radius)));
-        assertEquals(expectedKnn, ns("SELECT n FROM g" + knn));
-        assertEquals("GEO", strategy("SELECT n FROM g" + radius));
-        assertEquals("FULL_SCAN", strategy("SELECT n FROM g" + knn));
-
-        // escritas novas num índice antigo continuam visíveis
-        run("CREATE g:9001 CONTENT {n: 9001, status: 'x', pos: " + c + "}");
-        assertTrue(ns("SELECT n FROM g" + radius).contains(9001L));
-    }
-
-    @Test
     @DisplayName("posição atualizada e registro apagado saem do índice com coordenadas")
     void updateAndDeleteKeepTheIndexExact() {
         geoTables(300, 17);
@@ -282,7 +248,7 @@ class ScaleQueryTest {
     }
 
     @Test
-    @DisplayName("índice com polígono continua devolvendo as geometrias pelas células, como antes")
+    @DisplayName("índice com polígono continua devolvendo as geometrias como candidatas do raio")
     void polygonsKeepTheOldCoverage() {
         run("DEFINE INDEX geo ON TABLE area COLUMNS shape GEO");
         run("CREATE area:r CONTENT {n: 1, shape: geometry::polygon([[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]])}");

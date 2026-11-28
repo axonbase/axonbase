@@ -110,7 +110,13 @@ final class AdminV1Servlet extends HttpServlet {
                 sse(req, resp, sink -> AxonLog.buffer().subscribe(e -> sink.accept(e.toJson())));
                 return;
             }
+            if (ClusterOpsApi.handle(srv, this, method, seg, req, resp, caller)) {
+                return;
+            }
             if (PhysicalBackupApi.handle(srv, this, method, seg, req, resp, caller)) {
+                return;
+            }
+            if (PitrApi.handle(srv, this, method, seg, req, resp, caller)) {
                 return;
             }
             if (BackupStreamApi.handle(srv, this, method, seg, req, resp, caller)) {
@@ -126,6 +132,8 @@ final class AdminV1Servlet extends HttpServlet {
             writeError(resp, e);
         } catch (NotLeaderException e) {
             writeError(resp, notLeader());
+        } catch (com.axonbase.core.cluster.CommitOutcomeUnknownException e) {
+            writeError(resp, new ApiError(504, "OUTCOME_UNKNOWN", e.getMessage()));
         } catch (AxonError e) {
             writeError(resp, mapEngine(e));
         } catch (IllegalArgumentException e) {
@@ -191,6 +199,8 @@ final class AdminV1Servlet extends HttpServlet {
             }
             if (post && n == 1) {
                 needRoot(c, Authz.Role.ADMIN);
+                // o token de serviço nasce sem auditoria
+                needUnaudited(c);
                 return created(createServiceToken(body(req)));
             }
             if (delete && n == 2) {
@@ -274,8 +284,10 @@ final class AdminV1Servlet extends HttpServlet {
     // ------------------------------------------------------------------
 
     private Caller authenticate(HttpServletRequest req) {
+        // Teto de papel (Axon-Role-Cap): só rebaixa, como nas demais rotas. Valor inválido dá IllegalArgumentException.
+        Authz.Role cap = AxonServer.parseRoleCap(req.getHeader(AxonServer.ROLE_CAP_HEADER));
         if (!srv.requireAuth() || srv.auth() == null) {
-            return new Caller(null, null, Authz.Role.ADMIN);
+            return new Caller(null, null, cap == null ? Authz.Role.ADMIN : cap);
         }
         String header = req.getHeader("Authorization");
         if (header == null || !header.startsWith("Bearer ")) {
@@ -285,7 +297,8 @@ final class AdminV1Servlet extends HttpServlet {
         if (claims == null) {
             throw new ApiError(401, "UNAUTHENTICATED", Messages.get("auth_invalid"));
         }
-        AxonValue auth = AxonServer.claimsValue(claims);
+        // o auth rebaixado segue para o motor em exec() e na depuração
+        AxonValue auth = Authz.cap(AxonServer.claimsValue(claims), cap);
         return new Caller(claims, auth, Authz.role(auth));
     }
 
@@ -301,6 +314,13 @@ final class AdminV1Servlet extends HttpServlet {
         if (c.role().compareTo(min) < 0) {
             throw new ApiError(403, "FORBIDDEN",
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
+        }
+    }
+
+    /** Ações que mudam a auditoria sem passar pelo motor: um usuário auditado não as faz. */
+    private static void needUnaudited(Caller c) {
+        if (Authz.audited(c.auth())) {
+            throw new ApiError(403, "FORBIDDEN", Messages.get("audit_user_restricted"));
         }
     }
 
@@ -587,6 +607,7 @@ final class AdminV1Servlet extends HttpServlet {
     }
 
     private void deleteUser(Caller c, String scopeRaw, String name, HttpServletRequest req) {
+        needUnaudited(c);
         needLeader();
         AuthCatalog.Scope scope;
         try {
@@ -799,6 +820,7 @@ final class AdminV1Servlet extends HttpServlet {
             }
             if (post && n == 4 && seg.get(3).equals("unblock")) {
                 needRoot(c, Authz.Role.OPERATOR);
+                needUnaudited(c);
                 unblock(seg.get(2));
                 return noContent();
             }

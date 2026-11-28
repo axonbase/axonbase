@@ -22,7 +22,7 @@ class AxonBaseDialectTest {
             "Defina AXON_URL para executar a integração Hibernate/JDBC.");
     }
 
-    @Entity
+    @Entity(name = "Person")
     @Table(name = "hibernate_p")
     public static class Person {
         @Id

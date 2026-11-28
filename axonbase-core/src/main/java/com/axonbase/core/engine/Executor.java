@@ -107,6 +107,8 @@ public final class Executor {
 
     private final Datastore ds;
     private Session session;
+    /** Sessão que responde por {@code $auth} e {@code $token} quando não é a corrente (assinante de uma live query). */
+    private Session identitySession;
     private final DatabaseLinkClient linkClient = new DatabaseLinkClient();
     private SagaLedger sagaLedger;
     /** SQL original vindo do Datastore, usado pela intercepção de AI Audit. */
@@ -126,6 +128,7 @@ public final class Executor {
     public AxonValue execute(Query query, Session session, Map<String, AxonValue> webVars) {
         this.session = session;
         if (webVars != null) {
+            webVars.keySet().forEach(session::requireDefinable);
             webVars.forEach(session.vars()::set);
         }
         AxonValue result = AxonValue.nul();
@@ -145,6 +148,39 @@ public final class Executor {
         return ds.requireDatabase(session);
     }
 
+    /** O próximo SELECT executado é a parte de um shard numa consulta espalhada (veja {@link ShardPartial}). */
+    private boolean partialRequested;
+
+    /** Executa um SELECT em modo parcial, com as mesmas permissões e Data Rules de um SELECT comum. */
+    public AxonValue executePartial(Statement.Select select, Session scope, Map<String, AxonValue> webVars) {
+        this.session = scope;
+        if (webVars != null) {
+            webVars.keySet().forEach(scope::requireDefinable);
+            webVars.forEach(scope.vars()::set);
+        }
+        if (!bypassAudit && rawSql != null) {
+            interceptWithAiAudit(rawSql, select);
+        }
+        partialRequested = true;
+        try {
+            return runStatement(select);
+        } finally {
+            partialRequested = false;
+        }
+    }
+
+    /** Uma agregação vazia deste SELECT, onde o gateway funde os grupos exportados pelos shards. */
+    GroupAggregation partialAggregation(Statement.Select select, Session scope) {
+        this.session = scope;
+        return new GroupAggregation(select, groupRowEval(), this::fieldName);
+    }
+
+    /** Avalia uma expressão fora de um statement: o gateway de shards calcula assim chaves e dados de escrita. */
+    public AxonValue evaluate(com.axonbase.parser.ast.Expr expr, Session scope) {
+        this.session = scope;
+        return eval(expr);
+    }
+
     /**
      * Publica uma mudança que o consenso já confirmou nas live queries deste nó.
      *
@@ -162,11 +198,26 @@ public final class Executor {
     /**
      * Persiste uma aresta de grafo no KV com chave direcional dupla.
      * Formato da chave: {@code E|<ns>|<db>|out|<fromTbl>|<fromKey>|<kind>|<toTbl>|<toKey>}.
+     * O valor das duas chaves é o objeto de propriedades da aresta, ou vazio quando não há nenhuma. As novas se
+     * somam às já gravadas, então repetir o RELATE não apaga propriedade.
      */
     private void persistEdge(com.axonbase.core.catalog.Database db, AxonValue.RecordId from,
-                             String kind, AxonValue.RecordId to) {
-        records(db).put(edgeKey(db, "out", from, kind, to), new byte[0]);
-        records(db).put(edgeKey(db, "in", to, kind, from), new byte[0]);
+                             String kind, AxonValue.RecordId to, Map<String, AxonValue> properties) {
+        String outKey = edgeKey(db, "out", from, kind, to);
+        Map<String, AxonValue> merged = new LinkedHashMap<>(edgeProperties(db, outKey));
+        merged.putAll(properties);
+        byte[] value = merged.isEmpty() ? new byte[0] : encode(AxonValue.object(merged));
+        records(db).put(outKey, value);
+        records(db).put(edgeKey(db, "in", to, kind, from), value);
+    }
+
+    private Map<String, AxonValue> edgeProperties(com.axonbase.core.catalog.Database db, String key) {
+        Optional<byte[]> raw = records(db).get(key);
+        if (raw.isEmpty() || raw.get().length == 0) {
+            return Map.of();
+        }
+        AxonValue stored = decode(raw.get());
+        return stored.isObject() ? stored.asObject() : Map.of();
     }
 
     private String edgeKey(com.axonbase.core.catalog.Database db, String dir, AxonValue.RecordId from,
@@ -193,6 +244,14 @@ public final class Executor {
      * activa, usa esa transación; senón, o backend directo.
      */
     private KvBackend records(Database db) {
+        return com.axonbase.core.partition.PartitionedKv.wrap(db, rawRecords(db), partitions, ds.coldTier().records());
+    }
+
+    /** O que o executor sabe das partições durante esta execução. */
+    private final com.axonbase.core.partition.PartitionContext partitions =
+        new com.axonbase.core.partition.PartitionContext();
+
+    private KvBackend rawRecords(Database db) {
         // Ponto único de acesso ao armazenamento: aqui a consulta cancelada (ou que estourou o timeout) para.
         QueryContext.checkCancelled();
         Transaction tx = session.tx();
@@ -206,6 +265,10 @@ public final class Executor {
 
     /** Escritas do statement em curso, gravadas de uma vez (um lote atômico) quando não há transação explícita. */
     private com.axonbase.core.storage.StatementBatch batch;
+
+    /** O statement do lote na primeira tentativa dele, e a contagem de {@link ExternalCalls} no começo dela. */
+    private Statement firstAttempt;
+    private long firstAttemptOutbound;
 
     private static boolean batchable(Statement s) {
         return s instanceof Statement.Create || s instanceof Statement.Insert || s instanceof Statement.Update
@@ -230,18 +293,88 @@ public final class Executor {
         if (!(direct instanceof com.axonbase.core.storage.RocksDbBackend rocks)) {
             return runStatementUnbatched(s);
         }
-        com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
-        batch = mine;
-        try {
-            AxonValue result = runStatementUnbatched(s);
-            batch = null;
-            mine.commit();
-            return result;
-        } finally {
-            batch = null;
-            mine.discard();
+        for (int attempt = 1; ; attempt++) {
+            com.axonbase.core.storage.StatementBatch mine = new com.axonbase.core.storage.StatementBatch(rocks);
+            batch = mine;
+            batchSagaUndo.clear();
+            long outbound = ExternalCalls.count();
+            // uma repetição procura o registro antes de escrever, como qualquer statement
+            firstAttempt = attempt == 1 ? s : null;
+            firstAttemptOutbound = outbound;
+            try {
+                AxonValue result;
+                try {
+                    result = runStatementUnbatched(s);
+                } catch (RuntimeException notWritten) {
+                    discardBatchSagaSteps();
+                    throw notWritten;
+                }
+                batch = null;
+                mine.commit();
+                batchSagaUndo.clear();
+                return result;
+            } catch (com.axonbase.core.storage.VersionConflictException conflict) {
+                discardBatchSagaSteps();
+                // só um lote com condições (id livre, partição, chave primária, UNIQUE) conflita. Nada foi gravado,
+                // então refaz sobre o estado novo, a menos que o statement já tenha chamado para fora
+                if (!mine.conditional() || attempt >= CONDITIONAL_ATTEMPTS || ExternalCalls.count() != outbound) {
+                    throw conflict;
+                }
+                // um id já ocupado não é disputa: a repetição que o recusa não precisa esperar
+                if (!mine.checksAbsence()) {
+                    java.util.concurrent.locks.LockSupport.parkNanos(java.util.concurrent.ThreadLocalRandom.current()
+                        .nextLong(1_000_000L * Math.min(attempt, 10)));
+                }
+            } finally {
+                batch = null;
+                firstAttempt = null;
+                mine.discard();
+            }
         }
     }
+
+    /** Retira os passos de SAGA das escritas do lote em curso, quando ele não é gravado. */
+    private final List<Runnable> batchSagaUndo = new ArrayList<>();
+
+    private void discardBatchSagaSteps() {
+        List<Runnable> undo = List.copyOf(batchSagaUndo);
+        batchSagaUndo.clear();
+        undo.forEach(Runnable::run);
+    }
+
+    /** Registra o passo de uma escrita local. Ele sai junto se o lote ou a transação da escrita for descartado. */
+    private void recordLocalStep(String correlationId, Database db, RecordId rid, AxonValue before,
+                                 String operation) {
+        long order = sagaLedger.recordStep(correlationId, db.ns(), db.db(), "", "local", rid.table(), rid, before,
+            operation);
+        undoStepWithWrite(db, correlationId, order);
+    }
+
+    private void recordEdgeStep(String correlationId, Database db, AxonValue.RecordId from, String kind,
+                                AxonValue.RecordId to) {
+        String outKey = edgeKey(db, "out", from, kind, to);
+        long order = sagaLedger.recordEdgeStep(correlationId, db.ns(), db.db(), kind,
+            new RecordId(from.table(), keyOf(from.key())), new RecordId(to.table(), keyOf(to.key())),
+            records(db).get(outKey).isPresent(), edgeProperties(db, outKey));
+        undoStepWithWrite(db, correlationId, order);
+    }
+
+    /**
+     * O passo é gravado antes da escrita, fora dela. Se a escrita não acontecer, um passo de criação que ficasse
+     * apagaria, no CANCEL, um registro que outro criou depois com a mesma chave.
+     */
+    private void undoStepWithWrite(Database db, String correlationId, long order) {
+        KvBackend target = rawRecords(db);
+        Runnable undo = () -> sagaLedger.discardStep(correlationId, order);
+        if (batch != null && target == batch) {
+            batchSagaUndo.add(undo);
+        } else if (target == session.tx()) {
+            session.onWritesDiscarded(undo);
+        }
+    }
+
+    /** Tentativas de um statement avulso quando outro confirma antes sobre as mesmas linhas particionadas. */
+    private static final int CONDITIONAL_ATTEMPTS = 100;
 
     private AxonError errorStmt(String message) {
         return AxonError.internal(message);
@@ -251,7 +384,16 @@ public final class Executor {
     // Permisos de táboa (PERMISSIONS FOR ... WHERE ...)
     // ------------------------------------------------------------------
 
+    /** A escrita nesta tabela é a que desfaz um passo de SAGA: repõe o que já existia. */
+    private boolean compensates(String table) {
+        SagaCompensation compensation = session.compensation();
+        return compensation != null && compensation.restores(table);
+    }
+
     private boolean allowed(Document doc, String table, String action) {
+        if (!"select".equals(action) && compensates(table)) {
+            return true;
+        }
         Catalog.TableDef def = db().catalog().table(table);
         if (def == null || def.permissions() == null) {
             return true;
@@ -267,11 +409,16 @@ public final class Executor {
         if (cond == null) {
             return true;
         }
+        // como na Data Rule: sem o dado do token, NONE = NONE casaria e liberaria o acesso
+        if (lacksParameterValue(cond, TOKEN_PARAMETERS)) {
+            return false;
+        }
         Document target = doc;
         if (target == null) {
             target = emptyDoc();
         }
-        return truthy(evalExprInDoc(cond, target));
+        Document row = target;
+        return truthy(asPolicy(() -> evalExprInDoc(cond, row)));
     }
 
     private Document emptyDoc() {
@@ -301,8 +448,15 @@ public final class Executor {
         Catalog.TableDef def = db.catalog().table(name);
         if (def == null) {
             def = new Catalog.TableDef(name, false, false);
+            if (session.definitionScope() != null) {
+                return def;
+            }
+            // renderiza antes de mexer no catálogo: um nome que não pode ser citado recusa o comando
+            String definition = com.axonbase.parser.Render.stmt(new DefineTable(name, false, false,
+                Statement.Permissions.none(), null));
             db.catalog().defineTable(def);
-            control(db, ControlCommand.Kind.TABLE, name, "DEFINE TABLE " + name + " SCHEMALESS");
+            session.tableCreated(db.ns(), db.db(), name);
+            control(db, ControlCommand.Kind.TABLE, name, definition);
         }
         return def;
     }
@@ -325,7 +479,10 @@ public final class Executor {
             || s instanceof Statement.DropAiAudit || s instanceof DefineDatabaseLink
             || s instanceof DropDatabaseLink || s instanceof Statement.CreateDatabaseLink
             || s instanceof Statement.AlterDatabaseLink || s instanceof CreateSaga
-            || s instanceof Statement.DropSaga;
+            || s instanceof Statement.DropSaga
+            // o corpo do evento roda na sessão de quem dispara a escrita, inclusive a do root
+            || s instanceof DefineEvent || s instanceof Statement.CreateEvent
+            || s instanceof Statement.DropEvent;
         if (s instanceof Statement.SetAuditCase) {
             min = com.axonbase.core.security.Authz.Role.OPERATOR;
             needs = true;
@@ -341,10 +498,152 @@ public final class Executor {
             throw new com.axonbase.common.AxonError(-32002,
                 Messages.get("auth_role_required", min.name().toLowerCase(java.util.Locale.ROOT)));
         }
+        if (changesSchema(s) && !administersDatabase(auth)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_role_required", "admin"));
+        }
+        // definir ou remover usuário muda a atribuição de auditoria, mesmo quando o texto não a cita
+        if (com.axonbase.core.security.Authz.audited(auth)
+            && (s instanceof Statement.DefineAiAudit || s instanceof Statement.DropAiAudit
+                || s instanceof Statement.DefineUser || s instanceof Statement.CreateUser
+                || s instanceof Statement.DropUser)) {
+            throw refusedToAudited();
+        }
+    }
+
+    private boolean administersDatabase(AxonValue auth) {
+        return com.axonbase.core.security.Authz.atLeast(auth, com.axonbase.core.security.Authz.Role.ADMIN)
+            && com.axonbase.core.security.Authz.allows(auth, session.namespace(), session.database());
+    }
+
+    /**
+     * Apagar tabela, mudar a definição de uma que existe e declarar PERMISSIONS são tarefas do administrador do banco.
+     * Criar tabela, campo ou índice que ainda não existe continua livre, salvo numa tabela com PERMISSIONS. Repetir a
+     * definição em vigor não muda nada. Definir, mudar ou apagar embedding e analyzer é sempre dele.
+     */
+    private boolean changesSchema(Statement s) {
+        return switch (s) {
+            case Statement.DropTable ignored -> true;
+            case Statement.RemoveTable ignored -> true;
+            case Statement.DropIndex ignored -> true;
+            // a URL de um embedding decide para onde o texto vai, e o analyzer muda o que a busca encontra
+            case Statement.DefineEmbedding de -> changesEmbedding(de);
+            case Statement.DropEmbedding ignored -> true;
+            case Statement.DefineAnalyzer da -> changesAnalyzer(
+                new Catalog.AnalyzerDef(da.name(), da.lowercase(), da.stopwords(), da.stemming()));
+            case Statement.CreateAnalyzer ca -> changesAnalyzer(
+                new Catalog.AnalyzerDef(ca.name(), ca.lowercase(), ca.stopwords(), ca.stemming()));
+            case Statement.DropAnalyzer ignored -> true;
+            case DefineTable dt -> restricts(dt.permissions()) || redefines(dt);
+            case Statement.CreateTable ct -> !ct.ifNotExists() && settledTable(ct.name()) != null;
+            case Statement.AlterTable at -> settledTable(at.name()) != null;
+            case DefineField df -> changesField(df);
+            case DefineIndex di -> changesIndex(di.table(), new Catalog.IndexDef(di.name(), di.columns(),
+                di.unique(), di.count(), di.searchAnalyzer(), di.geo(), di.columnar(), di.vectorDimension(),
+                di.vectorDistance(), di.m(), di.efConstruction(), di.efSearch()));
+            case Statement.CreateIndex ci -> changesIndex(ci.table(), new Catalog.IndexDef(ci.name(), ci.columns(),
+                ci.unique(), ci.count(), ci.searchAnalyzer(), ci.geo(), ci.columnar(), ci.vectorDimension(),
+                ci.vectorDistance(), ci.m(), ci.efConstruction(), ci.efSearch()));
+            // partição e TTL mudam a tabela, e DROP PARTITION apaga linhas sem passar pelas PERMISSIONS
+            case Statement.Partition p -> !p.command().readOnly() && settledTable(p.command().table()) != null;
+            default -> false;
+        };
+    }
+
+    /** A tabela que já existe no banco da sessão; {@code null} se é nova ou criada pela importação em curso. */
+    private Catalog.TableDef settledTable(String name) {
+        if (session.namespace() == null || session.database() == null) {
+            return null;
+        }
+        Database db = ds.findDatabase(session.namespace(), session.database());
+        if (db == null || session.importedTable(db.ns(), db.db(), name)) {
+            return null;
+        }
+        return db.catalog().table(name);
+    }
+
+    private boolean changesEmbedding(Statement.DefineEmbedding wanted) {
+        Database db = sessionDatabase();
+        return db == null || !embeddingDef(wanted).equals(db.catalog().embedding(wanted.name()));
+    }
+
+    private boolean changesAnalyzer(Catalog.AnalyzerDef wanted) {
+        Database db = sessionDatabase();
+        return db == null || !wanted.equals(db.catalog().analyzer(wanted.name()));
+    }
+
+    /** O banco da sessão, sem criá-lo; {@code null} se não há. */
+    private Database sessionDatabase() {
+        return session.namespace() == null || session.database() == null ? null
+            : ds.findDatabase(session.namespace(), session.database());
+    }
+
+    private static Catalog.EmbeddingDef embeddingDef(Statement.DefineEmbedding de) {
+        return new Catalog.EmbeddingDef(de.name(), de.url(), de.model(), de.dimension(), de.keyEnv(),
+            de.timeoutSeconds() == null ? Catalog.EmbeddingDef.DEFAULT_TIMEOUT_SECONDS : de.timeoutSeconds(),
+            de.batch() == null ? Catalog.EmbeddingDef.DEFAULT_BATCH : de.batch(), de.documentPrefix(),
+            de.queryPrefix(), de.sendDimension(), de.authHeader());
+    }
+
+    private static boolean restricts(Statement.Permissions perms) {
+        return perms != null && (perms.select() != null || perms.create() != null || perms.update() != null
+            || perms.delete() != null);
+    }
+
+    private boolean redefines(DefineTable dt) {
+        Catalog.TableDef current = settledTable(dt.name());
+        return current != null && (restricts(current.permissions()) || current.schemafull() != dt.schemafull()
+            || current.drop() != dt.drop() || !java.util.Objects.equals(current.shardBy(), dt.shardBy()));
+    }
+
+    private boolean changesField(DefineField df) {
+        Catalog.TableDef table = settledTable(df.table());
+        if (table == null) {
+            return false;
+        }
+        Catalog.FieldDef current = table.fields().get(df.name());
+        if (current == null) {
+            return restricts(table.permissions());
+        }
+        // o DEFINE FIELD tira o NOT NULL e a PRIMARY KEY de uma coluna
+        return current.notNull() || current.primaryKey() || current.readonly() != df.readonly()
+            || !java.util.Objects.equals(current.type(), df.type())
+            || !java.util.Objects.equals(current.assertExpr(), df.assertExpr())
+            || !java.util.Objects.equals(current.defaultExpr(), df.defaultExpr())
+            || !java.util.Objects.equals(current.references(), df.references())
+            || !java.util.Objects.equals(current.embeddingName(), df.embeddingName())
+            || !java.util.Objects.equals(current.embeddingFrom(), df.embeddingFrom());
+    }
+
+    private boolean changesIndex(String tableName, Catalog.IndexDef wanted) {
+        Catalog.TableDef table = settledTable(tableName);
+        if (table == null) {
+            return false;
+        }
+        Catalog.IndexDef current = table.indexes().get(wanted.name());
+        if (current == null) {
+            return restricts(table.permissions());
+        }
+        return !current.columns().equals(wanted.columns()) || current.unique() != wanted.unique()
+            || current.count() != wanted.count() || current.geo() != wanted.geo()
+            || current.columnar() != wanted.columnar()
+            || !java.util.Objects.equals(current.searchAnalyzer(), wanted.searchAnalyzer())
+            || !java.util.Objects.equals(current.vectorDimension(), wanted.vectorDimension())
+            || !java.util.Objects.equals(current.vectorDistance(), wanted.vectorDistance())
+            || current.hnswM() != wanted.hnswM() || current.hnswEfc() != wanted.hnswEfc()
+            || current.hnswEfs() != wanted.hnswEfs();
+    }
+
+    private static com.axonbase.common.AxonError refusedToAudited() {
+        return new com.axonbase.common.AxonError(-32002, Messages.get("audit_user_restricted"));
     }
 
     /** Um usuário nunca cria identidade de escopo maior que o seu, nem fora do seu ns/db. */
     private void authorizeUserScope(Statement.AuthScope target, String ns, String database) {
+        authorizeScope(target, ns, database, "auth_scope_escalation");
+    }
+
+    /** Nenhuma sessão autenticada age sobre algo de escopo maior que o seu, nem fora do seu ns/db. */
+    private void authorizeScope(Statement.AuthScope target, String ns, String database, String messageKey) {
         AxonValue auth = session.auth();
         if (!com.axonbase.core.security.Authz.authenticated(auth)) {
             return;
@@ -358,7 +657,7 @@ public final class Executor {
             || (caller == com.axonbase.core.security.AuthCatalog.Scope.DATABASE
                 && !java.util.Objects.equals(database, com.axonbase.core.security.Authz.db(auth)));
         if (broader || outside) {
-            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_scope_escalation"));
+            throw new com.axonbase.common.AxonError(-32002, Messages.get(messageKey));
         }
     }
 
@@ -384,6 +683,12 @@ public final class Executor {
     private AxonValue runStatementUnbatched(Statement s) {
         // um statement novo pode ver dados que o anterior mudou: o cache de subqueries não atravessa statements
         subqueryCache.clear();
+        SagaCompensation compensation = session.compensation();
+        if (compensation != null && !compensation.permits(s)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("saga_compensation_only"));
+        }
+        requireAllowedInEvent(s);
+        requireReadingOnly(s);
         authorize(s);
         requireWritableIfNeeded(s);
         return switch (s) {
@@ -447,6 +752,7 @@ public final class Executor {
             case Statement.DefineAiAudit aa -> runDefineAiAudit(aa);
             case Statement.DropAiAudit da -> runDropAiAudit(da);
             case Statement.RemoveTable rt -> runRemoveTable(rt);
+            case Statement.Partition p -> runPartition(p.command());
             case Statement.CreateTable ct -> runCreateTable(ct);
             case Statement.ShowAiAudit sa -> runShowAiAudit(sa);
             case Statement.SetReasonAudit sra -> runSetReasonAudit(sra);
@@ -489,7 +795,128 @@ public final class Executor {
 
     /** AxonPL: CREATE/DROP FUNCTION|PROCEDURE|PACKAGE e CALL (a lógica fica em {@code core.pl}). */
     private AxonValue runProgram(Statement s) {
-        return ds.programs().run(s, session, this::eval);
+        if (s instanceof Statement.CallProgram) {
+            return ds.programs().run(s, session, this::eval);
+        }
+        // o padrão de um parâmetro faz parte da definição, e é avaliado de novo a cada reinício
+        return ds.programs().run(s, session, e -> asDefinition(() -> eval(e)));
+    }
+
+    /**
+     * O corpo de um evento roda com a identidade de quem grava, que pode ter mais poder do que quem pode definir o
+     * evento (um administrador do banco). Por isso ele só lê e grava dados do banco da tabela.
+     */
+    private void requireAllowedInEvent(Statement s) {
+        if (session.eventScope() != null && !allowedInEvent(s)) {
+            throw outsideEventScope();
+        }
+    }
+
+    private static boolean allowedInEvent(Statement s) {
+        if (s instanceof Info info) {
+            return !"root".equals(info.kind()) && !"namespace".equals(info.kind());
+        }
+        return s instanceof Statement.Select || s instanceof Statement.Create || s instanceof Statement.Insert
+            || s instanceof Statement.Update || s instanceof Statement.Delete || s instanceof Statement.Relate
+            || s instanceof Statement.Unrelate || s instanceof Statement.Let || s instanceof Statement.Return
+            || s instanceof Statement.IfElse || s instanceof Statement.ErrorStmt || s instanceof Statement.Explain
+            || s instanceof Statement.CallProgram || s instanceof Statement.DescribeTable
+            || s instanceof Statement.ShowDataRules || s instanceof Statement.Savepoint
+            || s instanceof Statement.Release || s instanceof Statement.RollbackTo;
+    }
+
+    /**
+     * Quem escreve uma expressão de esquema ou de política não é quem a avalia: ela roda na sessão de quem grava ou
+     * consulta, que pode ser o root. Por isso ali só passa leitura, também nas subconsultas e nas funções que ela chama.
+     * O corpo de uma função somente leitura segue a mesma regra, sem o limite de banco.
+     */
+    private void requireReadingOnly(Statement s) {
+        Session.EventScope scope = session.definitionScope();
+        if (scope != null && !readsDatabaseOnly(s)) {
+            throw outsideDefinitionScope();
+        }
+        if (session.readOnlyCall() && !readsOnly(s)) {
+            throw refusedInFunction();
+        }
+    }
+
+    private static boolean readsDatabaseOnly(Statement s) {
+        if (s instanceof Info info) {
+            return !"root".equals(info.kind()) && !"namespace".equals(info.kind());
+        }
+        return s instanceof Statement.Select || s instanceof Statement.Return || s instanceof Statement.IfElse
+            || s instanceof Statement.ErrorStmt || s instanceof Statement.DescribeTable;
+    }
+
+    private static boolean readsOnly(Statement s) {
+        if (s instanceof Statement.Use || s instanceof Statement.Begin || s instanceof Statement.Commit
+            || s instanceof Statement.Cancel || s instanceof Statement.Live || s instanceof Kill) {
+            return false;
+        }
+        return Datastore.isReadOnly(s) || s instanceof Statement.IfElse || s instanceof Statement.ErrorStmt;
+    }
+
+    /** Avalia uma expressão que vem do esquema ou de uma política, confinada à leitura do banco corrente. */
+    private <T> T asDefinition(java.util.function.Supplier<T> work) {
+        Session scoped = session;
+        Session.EventScope outer = scoped.definitionScope();
+        if (outer == null) {
+            scoped.definitionScope(new Session.EventScope(scoped.namespace(), scoped.database()));
+        }
+        try {
+            return work.get();
+        } finally {
+            scoped.definitionScope(outer);
+        }
+    }
+
+    private com.axonbase.common.AxonError outsideDefinitionScope() {
+        Session.EventScope scope = session.definitionScope();
+        return new com.axonbase.common.AxonError(-32002,
+            Messages.get("definition_scope_refused", scope.namespace() + "/" + scope.database()));
+    }
+
+    private static com.axonbase.common.AxonError refusedInFunction() {
+        return new com.axonbase.common.AxonError(-32002, Messages.get("function_read_only"));
+    }
+
+    /** Um DATABASE LINK leva a outro servidor: o corpo de um evento não o usa. */
+    private void refuseLinkInEvent() {
+        if (session.eventScope() != null) {
+            throw outsideEventScope();
+        }
+    }
+
+    /**
+     * Passagem de todo {@code banco.tabela}. Numa expressão de esquema ou de política, e num corpo de evento, só vale o
+     * próprio banco, e nunca um DATABASE LINK. Fora disso, outro banco do namespace exige que o escopo da identidade o
+     * alcance, antes de o banco ser lido ou criado.
+     */
+    private void requireInReach(String qualifier) {
+        Session.EventScope definition = session.definitionScope();
+        if (definition != null && leaves(definition, qualifier)) {
+            throw outsideDefinitionScope();
+        }
+        Session.EventScope scope = session.eventScope();
+        if (scope != null && leaves(scope, qualifier)) {
+            throw outsideEventScope();
+        }
+        String ns = session.namespace();
+        if (ns != null && !qualifier.equals(session.database()) && ds.databaseLink(ns, qualifier) == null
+            && !com.axonbase.core.security.Authz.allows(session.auth(), ns, qualifier)) {
+            throw new com.axonbase.common.AxonError(-32002,
+                Messages.get("database_scope_refused", ns + "/" + qualifier));
+        }
+    }
+
+    private boolean leaves(Session.EventScope scope, String qualifier) {
+        return !qualifier.equals(scope.database()) || ds.databaseLink(scope.namespace(), qualifier) != null;
+    }
+
+    private com.axonbase.common.AxonError outsideEventScope() {
+        Session.EventScope scope = session.eventScope();
+        return new com.axonbase.common.AxonError(-32002,
+            Messages.get("event_scope_refused", scope.namespace() + "/" + scope.database()));
     }
 
     /** Sessão somente leitura: só passam instruções de leitura (subconsultas e blocos também passam por aqui). */
@@ -522,13 +949,22 @@ public final class Executor {
      * cliente usa depois no KILL e que vem em cada notificação.
      */
     private AxonValue runLive(Statement.Live lv) {
+        if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            // a notificação não passa pelo filtro nem pela máscara
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_live_refused"));
+        }
         Database db = db();
         String table = tableName(lv.select().from());
         if (table.isEmpty()) {
             throw errorStmt(Messages.get("stmt_live_table_required"));
         }
         ensureTable(db, table);
-        String id = ds.liveBus().register(db.ns(), db.db(), table, lv.select(), lv.diff(), session);
+        // FROM t:chave acompanha só aquele registro; a chave é resolvida agora, com as variáveis de quem assina
+        String watched = lv.select().from() instanceof Expr.RecordId target
+            && (target.key() instanceof Expr.Literal || target.key() instanceof Expr.Ident
+                || target.key() instanceof Expr.Param)
+            ? configRecordId(target).key().keyString() : null;
+        String id = ds.liveBus().register(db.ns(), db.db(), table, watched, lv.select(), lv.diff(), session);
         return AxonValue.str(id);
     }
 
@@ -558,15 +994,38 @@ public final class Executor {
             return;
         }
         for (LiveBus.Subscription sub : subs) {
-            Document doc = new Document(rid, candidate);
-            if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
+            if (sub.recordKey() != null && !sub.recordKey().equals(rid.key().keyString())) {
                 continue;
             }
+            // a sessão pode ter trocado de usuário depois do LIVE SELECT
+            if (sub.owner() != null && com.axonbase.core.security.Authz.hasDataRules(sub.owner().auth())) {
+                continue;
+            }
+            Document doc = new Document(rid, candidate);
             AxonValue payload;
-            if (sub.diff() && !LiveBus.DELETE.equals(action)) {
-                payload = diffOf(before, after);
-            } else {
-                payload = project(sub.select(), doc);
+            // $auth e $token da consulta são os do assinante, não os de quem escreveu
+            Session previousIdentity = identitySession;
+            identitySession = sub.owner();
+            try {
+                payload = asSubscriber(db, sub, () -> {
+                    if (sub.select().cond() != null && !truthy(evalExprInDoc(sub.select().cond(), doc))) {
+                        return null;
+                    }
+                    return sub.diff() && !LiveBus.DELETE.equals(action)
+                        ? diffOf(before, after) : project(sub.select(), doc);
+                });
+            } catch (com.axonbase.common.AxonError refused) {
+                if (refused.code() != -32002) {
+                    throw refused;
+                }
+                // a consulta do assinante pediu o que não pode: ele fica sem o aviso, e a escrita vale
+                System.err.println("{\"event\":\"live_query_refused\",\"id\":\"" + sub.id() + "\"}");
+                continue;
+            } finally {
+                identitySession = previousIdentity;
+            }
+            if (payload == null) {
+                continue;
             }
             LiveBus.Notification note = new LiveBus.Notification(sub.id(), action, payload);
             if (session.inTransaction()) {
@@ -576,6 +1035,32 @@ public final class Executor {
             } else {
                 bus.deliver(sub, note);
             }
+        }
+    }
+
+    /**
+     * O filtro e as colunas de um LIVE são de quem assinou, mas são calculados durante a escrita de outra sessão: valem
+     * com a identidade do assinante e só leem o banco da tabela.
+     */
+    private AxonValue asSubscriber(Database db, LiveBus.Subscription sub,
+                                   java.util.function.Supplier<AxonValue> work) {
+        AxonValue writerAuth = session.auth();
+        String writerNamespace = session.namespace();
+        String writerDatabase = session.database();
+        session.namespace(db.ns());
+        session.database(db.db());
+        if (sub.owner() != null) {
+            session.auth(sub.owner().auth());
+        }
+        SagaCompensation compensation = session.compensation();
+        session.compensation(null);
+        try {
+            return asDefinition(work);
+        } finally {
+            session.compensation(compensation);
+            session.auth(writerAuth);
+            session.namespace(writerNamespace);
+            session.database(writerDatabase);
         }
     }
 
@@ -638,13 +1123,26 @@ public final class Executor {
         session.vars().set("before", before == null ? AxonValue.nul() : before);
         session.vars().set("after", after == null ? AxonValue.nul() : after);
         session.vars().set("value", value == null ? AxonValue.nul() : value);
+        // o que um evento escreve é escrita nova, mesmo quando quem o disparou está repondo dados
+        boolean restoring = session.restoring();
+        session.restoring(false);
+        // nem é compensação: a marca vale só para a escrita que desfaz o passo
+        SagaCompensation compensation = session.compensation();
+        session.compensation(null);
+        // a condição e o corpo enxergam só o banco da tabela, mesmo quando a escrita veio de outro
+        Session.EventScope outerScope = session.eventScope();
+        String writerNamespace = session.namespace();
+        String writerDatabase = session.database();
+        session.eventScope(new Session.EventScope(db.ns(), db.db()));
+        session.namespace(db.ns());
+        session.database(db.db());
         try {
             for (Catalog.EventDef ev : def.events().values()) {
                 if (ev.then().isEmpty()) {
                     continue;
                 }
                 Document doc = new Document(rid, value != null ? value : AxonValue.object(Map.of()));
-                if (ev.whenExpr() != null && !truthy(evalExprInDoc(ev.whenExpr(), doc))) {
+                if (ev.whenExpr() != null && !truthy(asDefinition(() -> evalExprInDoc(ev.whenExpr(), doc)))) {
                     continue;
                 }
                 for (Statement st : ev.then()) {
@@ -652,6 +1150,11 @@ public final class Executor {
                 }
             }
         } finally {
+            session.eventScope(outerScope);
+            session.namespace(writerNamespace);
+            session.database(writerDatabase);
+            session.restoring(restoring);
+            session.compensation(compensation);
             restoreVar("event", prevEvent);
             restoreVar("before", prevBefore);
             restoreVar("after", prevAfter);
@@ -699,6 +1202,7 @@ public final class Executor {
     }
 
     private AxonValue runLet(Statement.Let l) {
+        session.requireDefinable(l.name());
         AxonValue v = eval(l.value());
         session.vars().set(l.name(), v);
         return v;
@@ -893,6 +1397,9 @@ public final class Executor {
         out.put("name", AxonValue.str(def.name()));
         out.put("schema", AxonValue.str(def.schemafull() ? "SCHEMAFULL" : "SCHEMALESS"));
         out.put("drop", AxonValue.bool(def.drop()));
+        if (def.shardBy() != null) {
+            out.put("shard_by", AxonValue.str(def.shardBy()));
+        }
         out.put("fields", AxonValue.object(fields));
         out.put("indexes", AxonValue.object(indexes));
         if (!def.indexFailures().isEmpty()) {
@@ -924,18 +1431,12 @@ public final class Executor {
         ensureTable(db, table);
         AxonValue explicitKey = c.target() instanceof Expr.RecordId rid
             ? recordKey(rid.key()) : null;
-        AxonValue record = createRecord(db, table, evalData(c.data()), explicitKey);
-        // Saga: record step (before=null)
-        String sagaCorr = sagaCorrelation();
-        if (sagaCorr != null && record.isObject()) {
-            AxonValue ridVal = record.asObject().get("id");
-            if (ridVal != null && ridVal.isRecordId()) {
-                var ar = ridVal.asRecordId();
-                RecordId rId = new RecordId(ar.table(), keyOf(ar.key()));
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rId.table(), rId, AxonValue.nul(), "CREATE");
-            }
+        AxonValue record = createRecord(db, table, evalData(c.data(), table), explicitKey, onExisting(false), c);
+        if (c.ret() != null && c.ret().kind() == ReturnKind.NONE) {
+            return AxonValue.nul();
         }
-        return c.only() ? record : AxonValue.array(List.of(record));
+        AxonValue shown = visible(record);
+        return c.only() ? shown : AxonValue.array(List.of(shown));
     }
 
     private AxonValue runCreateViaLink(Statement.Create create, Expr.Qualified target, Expr.RecordId recordId) {
@@ -943,7 +1444,8 @@ public final class Executor {
         if (sagaCorr != null && recordId == null) {
             throw errorStmt(Messages.get("stmt_saga_record_required"));
         }
-        AxonValue result = runWriteViaLink(target, com.axonbase.parser.Render.stmt(create));
+        AxonValue result = runWriteViaLink(target, com.axonbase.parser.Render.stmt(create),
+            Statement.Create.class);
         if (sagaCorr != null) {
             Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), target.link());
             if (linkDef == null) {
@@ -960,40 +1462,153 @@ public final class Executor {
         ensureTable(db, i.table());
         AxonValue data = eval(i.data());
         List<AxonValue> records = new ArrayList<>();
-        if (data.isArray()) {
-            for (AxonValue item : data.asArray()) {
-                if (item.isObject()) {
-                    records.add(createRecord(db, i.table(), item));
+        List<AxonValue> rows = data.isArray() ? data.asArray() : List.of(data);
+        for (AxonValue row : rows) {
+            if (row.isObject()) {
+                AxonValue record = createRecord(db, i.table(), row, null, onExisting(i.ignore()));
+                if (record != null) {
+                    records.add(record);
                 }
             }
-        } else if (data.isObject()) {
-            records.add(createRecord(db, i.table(), data));
         }
+        records.replaceAll(this::visible);
         return output(i.ret(), AxonValue.array(records));
     }
 
-    private AxonValue evalData(Data data) {
+    /**
+     * A parte de criação do UPSERT. Um registro que já está sob o id e não foi alterado (WHERE falso, PERMISSIONS ou
+     * Data Rule) fica como está.
+     */
+    private void upsertCreate(Database db, Statement.Update u, String table, AxonValue explicitKey,
+                              List<AxonValue> results) {
+        AxonValue data = evalData(u.data(), table);
+        AxonValue given = data.isObject() ? data.asObject().get("id") : null;
+        AxonValue key = explicitKey != null || given == null ? explicitKey : resolveKey(unwrapId(given));
+        if (key != null) {
+            RecordId rid = new RecordId(table, key);
+            Document existing = loadDoc(db, rid);
+            if (existing != null) {
+                refuseHiddenRecord(db, rid);
+                if (!allowed(existing, table, "update")) {
+                    throw errorStmt("permission denied");
+                }
+                return;
+            }
+        }
+        // com algo a conferir, um registro criado por outro neste intervalo também não é substituído
+        boolean guarded = u.cond() != null || restrictsWrite(db, table, "update");
+        results.add(createRecord(db, table, data, explicitKey, guarded ? Existing.REFUSE : Existing.REPLACE));
+    }
+
+    /** O usuário tem Data Rule ou a tabela tem PERMISSIONS para a ação. */
+    private boolean restrictsWrite(Database db, String table, String action) {
+        if (compensates(table)) {
+            return false;
+        }
+        if (com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            return true;
+        }
+        Catalog.TableDef def = db.catalog().table(table);
+        if (def == null || def.permissions() == null) {
+            return false;
+        }
+        return ("create".equals(action) ? def.permissions().create() : def.permissions().update()) != null;
+    }
+
+    /** O que uma criação faz quando o id já existe. */
+    private enum Existing { REFUSE, SKIP, REPLACE }
+
+    private Existing onExisting(boolean ignore) {
+        if (ignore) {
+            return Existing.SKIP;
+        }
+        return session.restoring() ? Existing.REPLACE : Existing.REFUSE;
+    }
+
+    /** O registro que já está sob este id, ou {@code null}. Num lote, o commit confere que ninguém o criou no meio. */
+    private AxonValue existingRecord(Database db, RecordId rid, String storageKey) {
+        if (rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch pending) {
+            pending.expect(storageKey);
+        }
+        Document found = loadDoc(db, rid, storageKey);
+        return found == null ? null : found.current();
+    }
+
+    private AxonValue evalData(Data data, String table) {
         return switch (data) {
             case Data.Content c -> eval(c.content());
             case Data.SetClause sc -> {
                 Map<String, AxonValue> m = new LinkedHashMap<>();
                 for (Assignment a : sc.assignments()) {
-                    m.put(fieldOf(a.path()), eval(a.value()));
+                    write(m, assignmentPath(a.path(), table, m), eval(a.value()));
                 }
                 yield AxonValue.object(m);
             }
             case Data.Merge m -> eval(m.merge());
-            case Data.Patch p -> eval(p.patch());
+            case Data.Patch p -> {
+                // numa criação a lista de operações parte de um documento vazio
+                AxonValue patch = eval(p.patch());
+                yield patch.isArray() ? RecordChanges.patch(AxonValue.object(Map.of()), patch.asArray()) : patch;
+            }
             case Data.Replace r -> eval(r.replace());
             case null -> AxonValue.object(Map.of());
         };
     }
 
-    private AxonValue createRecord(Database db, String table, AxonValue input) {
-        return createRecord(db, table, input, null);
+    /**
+     * Os passos do caminho de um SET: nomes de campo e posições de lista. {@code tabela.campo} é a coluna, a menos que
+     * o registro tenha um campo com o nome da tabela.
+     */
+    private List<Object> assignmentPath(Expr path, String table, Map<String, AxonValue> record) {
+        List<Object> steps = new ArrayList<>();
+        if (path instanceof Expr.Ident id) {
+            steps.add(id.name());
+        } else if (path instanceof Expr.Idiom idiom && idiom.base() instanceof Expr.Ident base) {
+            steps.add(base.name());
+            for (Expr.Part part : idiom.parts()) {
+                if (part instanceof Expr.Part.Field field) {
+                    steps.add(field.name());
+                } else if (part instanceof Expr.Part.Index index) {
+                    steps.add(listPosition(eval(index.index())));
+                } else {
+                    throw errorStmt(Messages.get("stmt_path_unsupported", com.axonbase.parser.Render.expr(path)));
+                }
+            }
+        } else {
+            throw errorStmt(Messages.get("stmt_path_unsupported", com.axonbase.parser.Render.expr(path)));
+        }
+        if (steps.size() > 1 && steps.get(0).equals(table) && !record.containsKey(table)
+            && steps.get(1) instanceof String) {
+            steps.remove(0);
+        }
+        return steps;
     }
 
-    private AxonValue createRecord(Database db, String table, AxonValue input, AxonValue explicitKey) {
+    private Integer listPosition(AxonValue value) {
+        if (!value.isNumber() || value.asLong() < 0 || value.asLong() > Integer.MAX_VALUE) {
+            throw errorStmt(Messages.get("stmt_path_index", value));
+        }
+        return (int) value.asLong();
+    }
+
+    private static void write(Map<String, AxonValue> record, List<Object> path, AxonValue value) {
+        Map<String, AxonValue> changed = RecordChanges.set(AxonValue.object(record), path, value).asObject();
+        record.clear();
+        record.putAll(changed);
+    }
+
+    /**
+     * Grava um registro novo, ou substitui o existente quando {@code existing} é {@code REPLACE}. Devolve
+     * {@code null} quando o id já existe e a criação o pula.
+     */
+    private AxonValue createRecord(Database db, String table, AxonValue input, AxonValue explicitKey,
+                                   Existing existing) {
+        return createRecord(db, table, input, explicitKey, existing, null);
+    }
+
+    /** @param create o CREATE que pede este registro, ou {@code null} quando quem cria é outro statement */
+    private AxonValue createRecord(Database db, String table, AxonValue input, AxonValue explicitKey,
+                                   Existing existing, Statement.Create create) {
         Map<String, AxonValue> obj = new LinkedHashMap<>();
         if (input.isObject()) {
             obj.putAll(input.asObject());
@@ -1001,23 +1616,98 @@ public final class Executor {
         Object idKey = obj.containsKey("id") ? unwrapId(obj.remove("id")) : null;
         AxonValue key = explicitKey != null ? explicitKey : resolveKey(idKey);
         RecordId rid = new RecordId(table, key);
+        // um id recém-gerado não existe em lugar algum: não precisa ser procurado
+        boolean generated = explicitKey == null && idKey == null;
+        String storageKey = rid.storageKey(db.ns(), db.db());
+        AxonValue previous = generated || leaveAbsenceToCommit(create, db, table, storageKey, existing)
+            ? null : existingRecord(db, rid, storageKey);
+        if (previous != null) {
+            // antes de pular ou de dizer que existe: sobre um registro oculto pela regra a recusa é sempre a mesma
+            refuseHiddenRecord(db, rid);
+        }
+        boolean skip = previous != null && existing == Existing.SKIP;
+        // sem nada a conferir, pula antes de validar a linha (e de chamar o provedor de embedding)
+        if (skip && !restrictsWrite(db, table, "create")) {
+            return null;
+        }
         obj.put("id", ridAsValue(rid));
         applyFieldSchema(db, table, obj, false);
         injectDataRuleFields(obj);
         AxonValue record = AxonValue.object(obj);
         Document document = new Document(rid, record);
-        ds.auditLog(session, "CREATE", table, rid, null, record);
+        if (!skip) {
+            ds.auditLog(session, "CREATE", table, rid, null, record);
+        }
         if (!dataRuleFilter(document) || !allowed(document, table, "create")) {
             throw errorStmt("permission denied");
         }
-        enforceUnique(db, rid, null, record);
-        records(db).put(rid.storageKey(db.ns(), db.db()), encode(record));
-        indexSearch(db, rid, null, record);
-        indexAdvanced(db, rid, null, record);
-        indexColumnar(db, rid, null, record);
+        // pular também diz que o id existe: só quem poderia criar a linha fica sabendo
+        if (skip) {
+            return null;
+        }
+        // depois da permissão: quem não pode criar não fica sabendo se o id existe
+        if (previous != null && existing == Existing.REFUSE) {
+            throw errorStmt(Messages.get("stmt_record_exists", ridAsValue(rid).asRecordId()));
+        }
+        checkConstraints(db, rid, obj);
+        bindPartition(db, rid, record, generated);
+        if (previous == null && !generated && db.catalog().partitioning(table) != null) {
+            // numa tabela particionada outra criação pode ter confirmado entre a procura e a escolha da partição
+            previous = existingRecord(db, rid, storageKey);
+            if (previous != null) {
+                refuseHiddenRecord(db, rid);
+            }
+            if (previous != null && existing != Existing.REPLACE) {
+                if (existing == Existing.SKIP) {
+                    return null;
+                }
+                throw errorStmt(Messages.get("stmt_record_exists", ridAsValue(rid).asRecordId()));
+            }
+        }
+        enforcePrimaryKey(db, rid, previous, record);
+        enforceUnique(db, rid, previous, record);
+        // Saga: criar se desfaz apagando; regravar um existente (UPSERT), repondo o anterior
+        String sagaCorr = sagaCorrelation();
+        if (sagaCorr != null) {
+            recordLocalStep(sagaCorr, db, rid, previous == null ? AxonValue.nul() : previous,
+                previous == null ? "CREATE" : "UPDATE");
+        }
+        records(db).put(storageKey, encode(record));
+        indexSearch(db, rid, previous, record);
+        indexAdvanced(db, rid, previous, record);
+        indexColumnar(db, rid, previous, record);
         notifyLive(db, rid, LiveBus.CREATE, null, record);
         fireEvents(db, rid, LiveBus.CREATE, null, record);
         return record;
+    }
+
+    /**
+     * O atalho da ingestão: o CREATE do próprio lote, numa tabela em que nada depende do registro anterior, não procura
+     * o id antes de escrever. O commit confere uma vez, sob a trava da chave, que ele está livre; se não está, nada é
+     * gravado e a repetição procura o registro e o recusa. Qualquer condição nova sobre a escrita que precise saber se o
+     * id existe, ou que tenha efeito fora do lote, tem de entrar aqui.
+     *
+     * @return {@code false} quando o chamador precisa procurar o registro
+     */
+    private boolean leaveAbsenceToCommit(Statement.Create create, Database db, String table, String storageKey,
+                                         Existing existing) {
+        if (create == null || create != firstAttempt || existing != Existing.REFUSE
+            || ExternalCalls.count() != firstAttemptOutbound || batch == null || rawRecords(db) != batch) {
+            return false;
+        }
+        if (ds.clustered() || ds.isReplaying() || ds.auditEnabled() || sagaCorrelation() != null
+            || session.compensation() != null || com.axonbase.core.security.Authz.hasDataRules(session.auth()) || !dataRulePredicates().isEmpty()
+            || !ds.liveBus().forTable(db.ns(), db.db(), table).isEmpty()) {
+            return false;
+        }
+        Catalog.TableDef def = db.catalog().table(table);
+        // sem campos não há chave primária, NOT NULL, default nem embedding
+        if (def == null || !def.fields().isEmpty() || !def.checks().isEmpty() || !def.indexes().isEmpty()
+            || !def.events().isEmpty() || restricts(def.permissions())
+            || db.catalog().partitioning(table) != null || db.catalog().ttl(table) != null) {
+            return false;
+        }
+        return batch.expectAbsent(storageKey);
     }
 
     /**
@@ -1035,18 +1725,25 @@ public final class Executor {
         if (def == null) {
             return;
         }
-        autoEmbed(db, def, obj, before);
+        // quem desfaz um passo de SAGA repõe o valor que existia: nada é gerado nem conferido de novo
+        boolean compensating = compensates(table);
+        if (!compensating) {
+            autoEmbed(db, def, obj, before);
+        }
         for (Catalog.FieldDef fd : def.fields().values()) {
             String fieldName = fd.name();
             boolean present = obj.containsKey(fieldName);
             AxonValue value = present ? obj.get(fieldName) : null;
-            if (!present && fd.defaultExpr() != null) {
-                obj.put(fieldName, eval(fd.defaultExpr()));
+            if (!present && fd.defaultExpr() != null && !compensating) {
+                obj.put(fieldName, asDefinition(() -> eval(fd.defaultExpr())));
                 present = true;
                 value = obj.get(fieldName);
             }
             if (present && value != null && fd.type() != null && !value.isNull() && !value.isNone()) {
                 AxonValue coerced = coerceType(fd.type(), value);
+                if (coerced == null && compensating) {
+                    coerced = value;
+                }
                 if (coerced == null) {
                     throw AxonError.internal(Messages.get("stmt_field_type_invalid",
                         fieldName, fd.type(), value));
@@ -1054,13 +1751,15 @@ public final class Executor {
                 obj.put(fieldName, coerced);
                 value = coerced;
             }
-            if (present && value != null && fd.assertExpr() != null) {
-                AxonValue ok = evalWithValue(fd.assertExpr(), value);
+            if (present && value != null && fd.assertExpr() != null && !compensating) {
+                AxonValue asserted = value;
+                AxonValue ok = asDefinition(() -> evalWithValue(fd.assertExpr(), asserted));
                 if (!truthy(ok)) {
                     throw AxonError.internal(Messages.get("stmt_assert_failed", fieldName, value));
                 }
             }
-            if (present && value != null && fd.references() != null && (value.isRecordId() || value.isString())) {
+            if (present && value != null && fd.references() != null && !compensating
+                && (value.isRecordId() || value.isString())) {
                 validateReference(db, fd.references(), value);
             }
         }
@@ -1103,11 +1802,11 @@ public final class Executor {
     private AxonValue coerceType(String type, AxonValue v) {
         String t = type.toLowerCase();
         return switch (t) {
-            case "int" -> v.isNumber() ? AxonValue.num(v.asLong())
+            case "int" -> v.isNumber() ? wholeNumber(v)
                 : v.isString() ? tryLong(v.asString()) : null;
             case "float", "number" -> v.isNumber() ? AxonValue.num(v.asDouble())
                 : v.isString() ? tryDouble(v.asString()) : null;
-            case "string" -> v.isString() ? v : AxonValue.str(v.toString());
+            case "string" -> v.isString() ? v : AxonValue.str(Functions.text(v));
             case "bool" -> v.isBool() ? v : null;
             case "datetime" -> v.isDatetime() ? v
                 : v.isString() ? tryInstant(v.asString()) : null;
@@ -1125,6 +1824,15 @@ public final class Executor {
     private boolean isGeometry(AxonValue value) {
         return value.isObject() && value.asObject().get("type") != null
             && value.asObject().get("type").isString() && value.asObject().get("coordinates") != null;
+    }
+
+    /** O número como inteiro, ou {@code null} quando há fração: um campo int não trunca em silêncio. */
+    private AxonValue wholeNumber(AxonValue v) {
+        try {
+            return AxonValue.num(v.asDecimal().longValueExact());
+        } catch (ArithmeticException | NumberFormatException notWhole) {
+            return null;
+        }
     }
 
     private AxonValue tryLong(String s) {
@@ -1168,6 +1876,8 @@ public final class Executor {
             String sessionNs = session.namespace();
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
+                refuseLinkInEvent();
+                requireForwardable(q, com.axonbase.parser.Render.stmt(u));
                 // Saga: capture BEFORE state for remote write
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && qRid == null) {
@@ -1178,18 +1888,26 @@ public final class Executor {
                     Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
                     if (linkDef != null) {
                         String selectSql = "SELECT * FROM " + q.table() + ":"
-                            + com.axonbase.parser.Render.expr(qRid.key());
-                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                            + com.axonbase.parser.Render.key(qRid.key());
+                        List<AxonValue> rows = queryLink(linkDef, q, selectSql, Statement.Select.class);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
+                        // um UPSERT sobre o que não existe cria: desfazer é apagar
+                        String operation = rows.isEmpty() && u.mode() == UpdateMode.UPSERT ? "CREATE" : "UPDATE";
                         sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
-                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, "UPDATE");
+                            q.table(), new RecordId(q.table(), recordKey(qRid.key())), before, operation);
                     }
                 }
-                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u));
+                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(u), Statement.Update.class);
             }
         }
         boolean retNone = u.ret() != null && u.ret().kind() == ReturnKind.NONE;
-        List<RecordId> targets = resolveMutationTargets(db, u.target(), u.cond());
+        if (u.target() instanceof Expr.Ident table) {
+            ensureTable(db, table.name());
+        }
+        List<RecordId> targets;
+        try (var scope = prunePartitions(u.target(), u.cond())) {
+            targets = resolveMutationTargets(db, u.target(), u.cond());
+        }
         List<AxonValue> results = new ArrayList<>();
         for (RecordId rid : targets) {
             Document doc = loadDoc(db, rid);
@@ -1211,16 +1929,20 @@ public final class Executor {
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
                 // Sem o passo registrado não há como compensar: a falha aborta a escrita.
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "UPDATE");
+                recordLocalStep(sagaCorr, db, rid, doc.current(), "UPDATE");
             }
             Map<String, AxonValue> current = new LinkedHashMap<>(doc.current().asObject());
             if (u.data() != null) {
                 applyMutate(current, u.data(), doc);
             }
+            keepRecordId(current, rid, doc.initial());
             applyFieldSchema(db, tableName(u.target()), current, true, doc.initial());
             injectDataRuleFields(current);
+            checkConstraints(db, rid, current);
             AxonValue next = AxonValue.object(current);
             doc.setCurrent(next);
+            bindPartition(db, rid, next, false);
+            enforcePrimaryKey(db, rid, doc.initial(), next);
             enforceUnique(db, rid, doc.initial(), next);
             records(db).put(rid.storageKey(db.ns(), db.db()), encode(next));
             indexSearch(db, rid, doc.initial(), next);
@@ -1239,14 +1961,15 @@ public final class Executor {
             if (u.target() instanceof Expr.Ident idTarget) {
                 String table = idTarget.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data())));
+                upsertCreate(db, u, table, null, results);
             } else if (u.target() instanceof Expr.RecordId rid
                 && rid.table() instanceof Expr.Ident ridTable) {
                 String table = ridTable.name();
                 ensureTable(db, table);
-                results.add(createRecord(db, table, evalData(u.data()), recordKey(rid.key())));
+                upsertCreate(db, u, table, recordKey(rid.key()), results);
             }
         }
+        results.replaceAll(this::visible);
         return retNone ? AxonValue.none() : AxonValue.array(results);
     }
 
@@ -1259,6 +1982,8 @@ public final class Executor {
             String sessionNs = session.namespace();
             boolean isLocal = sessionNs != null && q.link().equals(sessionNs);
             if (!isLocal) {
+                refuseLinkInEvent();
+                requireForwardable(q, com.axonbase.parser.Render.stmt(d));
                 String sagaCorr = sagaCorrelation();
                 if (sagaCorr != null && dqRid == null) {
                     throw errorStmt(Messages.get("stmt_saga_record_required"));
@@ -1268,17 +1993,20 @@ public final class Executor {
                     Datastore.DatabaseLinkDef linkDef = ds.databaseLink(session.namespace(), q.link());
                     if (linkDef != null) {
                         String selectSql = "SELECT * FROM " + q.table() + ":"
-                            + com.axonbase.parser.Render.expr(dqRid.key());
-                        List<AxonValue> rows = linkClient.query(linkDef, selectSql);
+                            + com.axonbase.parser.Render.key(dqRid.key());
+                        List<AxonValue> rows = queryLink(linkDef, q, selectSql, Statement.Select.class);
                         AxonValue before = rows.isEmpty() ? AxonValue.nul() : rows.get(0);
                         sagaLedger.recordStep(sagaCorr, linkDef.ns(), linkDef.db(), session.namespace(), q.link(),
                             q.table(), new RecordId(q.table(), recordKey(dqRid.key())), before, "DELETE");
                     }
                 }
-                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d));
+                return runWriteViaLink(q, com.axonbase.parser.Render.stmt(d), Statement.Delete.class);
             }
         }
-        List<RecordId> targets = resolveMutationTargets(db, d.target(), d.cond());
+        List<RecordId> targets;
+        try (var scope = prunePartitions(d.target(), d.cond())) {
+            targets = resolveMutationTargets(db, d.target(), d.cond());
+        }
         List<AxonValue> deleted = new ArrayList<>();
         boolean edges = !targets.isEmpty() && hasAnyEdge(db);
         for (RecordId rid : targets) {
@@ -1300,9 +2028,10 @@ public final class Executor {
             // Saga: capture BEFORE state
             String sagaCorr = sagaCorrelation();
             if (sagaCorr != null) {
-                sagaLedger.recordStep(sagaCorr, db.ns(), db.db(), "", "local", rid.table(), rid, doc.current(), "DELETE");
+                recordLocalStep(sagaCorr, db, rid, doc.current(), "DELETE");
             }
             records(db).delete(rid.storageKey(db.ns(), db.db()));
+            enforcePrimaryKey(db, rid, doc.current(), null);
             enforceUnique(db, rid, doc.current(), null);
             if (edges) {
                 removeEdgesOf(db, rid);
@@ -1317,23 +2046,46 @@ public final class Executor {
                 deleted.add(doc.current());
             }
         }
+        deleted.replaceAll(this::visible);
         return deleted.isEmpty() ? AxonValue.array(List.of()) : AxonValue.array(deleted);
+    }
+
+    /**
+     * O id é a identidade do registro: CONTENT e REPLACE não o tiram, e nenhuma escrita o troca. O guardado fica (um
+     * registro que o perdeu o recebe de volta, pela chave).
+     */
+    private void keepRecordId(Map<String, AxonValue> current, RecordId rid, AxonValue before) {
+        AxonValue stored = before.asObject().get("id");
+        if (stored != null && (stored.isNull() || stored.isNone())) {
+            stored = null;
+        }
+        AxonValue given = current.get("id");
+        if (given != null && !given.isNull() && !given.isNone() && !given.equals(stored) && !refersTo(given, rid)) {
+            throw errorStmt(Messages.get("stmt_record_id_immutable", ridAsValue(rid).asRecordId(), given));
+        }
+        current.put("id", stored != null ? stored : ridAsValue(rid));
+    }
+
+    /** O valor nomeia este registro: o record id, o texto {@code tabela:chave} ou a própria chave, no mesmo tipo. */
+    private boolean refersTo(AxonValue value, RecordId rid) {
+        AxonValue.RecordId self = ridAsValue(rid).asRecordId();
+        if (value.isRecordId()) {
+            return value.asRecordId().equals(self);
+        }
+        if (value.isString()) {
+            return value.asString().equals(self.toString())
+                || (rid.key().isString() && value.asString().equals(rid.key().asString()));
+        }
+        return value.isNumber() && rid.key().isNumber() && value.keyString().equals(rid.key().keyString());
     }
 
     private void applyMutate(Map<String, AxonValue> current, Data data, Document doc) {
         switch (data) {
             case Data.SetClause sc -> {
                 for (Assignment a : sc.assignments()) {
-                    String fieldName;
-                    if (a.path() instanceof Expr.Ident id) {
-                        fieldName = id.name();
-                    } else if (a.path() instanceof Expr.Idiom idiom) {
-                        fieldName = fieldOf(idiom);
-                    } else {
-                        continue;
-                    }
+                    List<Object> path = assignmentPath(a.path(), doc.id().table(), current);
                     AxonValue newValue = evalOnDocument(a.value(), doc);
-                    AxonValue existing = current.get(fieldName);
+                    AxonValue existing = path.size() == 1 ? current.get((String) path.get(0)) : null;
                     if (existing != null && existing.isNumber() && newValue.isString()) {
                         try {
                             String s = newValue.asString().trim();
@@ -1342,19 +2094,29 @@ public final class Executor {
                                 : AxonValue.num(Long.parseLong(s));
                         } catch (NumberFormatException ignored) {}
                     }
-                    current.put(fieldName, newValue);
+                    write(current, path, newValue);
                 }
             }
             case Data.Merge m -> {
                 AxonValue mv = evalExpr(m.merge());
                 if (mv.isObject()) {
-                    current.putAll(mv.asObject());
+                    Map<String, AxonValue> merged = RecordChanges.merge(current, mv.asObject());
+                    current.clear();
+                    current.putAll(merged);
                 }
             }
             case Data.Patch p -> {
                 AxonValue pv = evalExpr(p.patch());
                 if (pv.isObject()) {
                     current.putAll(pv.asObject());
+                } else if (pv.isArray()) {
+                    refuseMaskedPatch(pv.asArray());
+                    Map<String, AxonValue> patched =
+                        RecordChanges.patch(AxonValue.object(current), pv.asArray()).asObject();
+                    current.clear();
+                    current.putAll(patched);
+                } else {
+                    throw errorStmt(Messages.get("stmt_patch_invalid", pv));
                 }
             }
             case Data.Replace r -> {
@@ -1374,12 +2136,98 @@ public final class Executor {
         }
     }
 
+    /**
+     * Num PATCH, {@code test}, {@code copy} e {@code move} leem o registro. Com uma coluna mascarada, o resultado ou o
+     * erro entregaria o valor: ficam recusados sobre ela e sobre o registro inteiro, e nenhum caminho entra nela.
+     */
+    private void refuseMaskedPatch(List<AxonValue> operations) {
+        if (!masksColumns()) {
+            return;
+        }
+        for (AxonValue operation : operations) {
+            if (!operation.isObject()) {
+                continue; // o próprio PATCH recusa
+            }
+            Map<String, AxonValue> fields = operation.asObject();
+            AxonValue op = fields.get("op");
+            String name = op != null && op.isString() ? op.asString() : "";
+            boolean copies = "copy".equals(name) || "move".equals(name);
+            if (reachesMasked(fields.get("path"), "test".equals(name))
+                || copies && reachesMasked(fields.get("from"), true)) {
+                throw errorStmt("permission denied");
+            }
+        }
+    }
+
+    /** O ponteiro lê ({@code reads}) ou percorre uma coluna mascarada. O ponteiro vazio é o registro inteiro. */
+    private boolean reachesMasked(AxonValue pointer, boolean reads) {
+        if (pointer == null || !pointer.isString()) {
+            return false;
+        }
+        String text = pointer.asString();
+        if (text.isEmpty()) {
+            return reads;
+        }
+        if (!text.startsWith("/")) {
+            return false;
+        }
+        String[] steps = text.substring(1).split("/", -1);
+        String column = steps[0].replace("~1", "/").replace("~0", "~");
+        return (reads || steps.length > 1) && maskedColumn(column);
+    }
+
     // ------------------------------------------------------------------
     // DQL: Select
     // ------------------------------------------------------------------
 
     private AxonValue runSelect(Statement.Select sel) {
-        return runSelectResolved(rewriteEmbeddingMatches(sel));
+        // lido e apagado aqui para as subqueries desta consulta rodarem inteiras
+        boolean partial = partialRequested;
+        partialRequested = false;
+        Statement.Select resolved = rewriteEmbeddingMatches(sel);
+        // com junção o WHERE fala de mais de uma tabela: lê todas as partições
+        try (var scope = prunePartitions(resolved.from(), resolved.joins().isEmpty() ? resolved.cond() : null)) {
+            return runSelectResolved(resolved, partial);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Partições por tempo e TTL (a lógica fica em core.partition)
+    // ------------------------------------------------------------------
+
+    /** Numa tabela particionada, restringe as varreduras dela à faixa de tempo que o WHERE permite. */
+    private com.axonbase.core.partition.PartitionContext.Scope prunePartitions(Expr from, Expr cond) {
+        if (!(from instanceof Expr.Ident id) || session.namespace() == null || session.database() == null) {
+            return () -> { };
+        }
+        Database db = ds.findDatabase(session.namespace(), session.database());
+        var spec = db == null ? null : db.catalog().partitioning(id.name());
+        if (spec == null) {
+            return () -> { };
+        }
+        return partitions.prune(com.axonbase.core.partition.PartitionedKv.rangeKey(db, id.name()),
+            com.axonbase.core.partition.TimeRange.of(cond, spec.field(), this::eval));
+    }
+
+    /** Numa tabela particionada, define a partição de destino antes de os índices serem gravados. */
+    private void bindPartition(Database db, RecordId rid, AxonValue record, boolean generated) {
+        if (records(db) instanceof com.axonbase.core.partition.PartitionedKv view) {
+            view.bind(rid, record, generated);
+        }
+    }
+
+    private com.axonbase.core.partition.PartitionRunner partitionRunner(Database db) {
+        return new com.axonbase.core.partition.PartitionRunner(ds, session, db, rawRecords(db),
+            batch != null || db.indexLock().getReadHoldCount() > 0, this::eval);
+    }
+
+    private AxonValue runPartition(com.axonbase.parser.ast.PartitionCommand command) {
+        Database db = db();
+        if (command instanceof com.axonbase.parser.ast.PartitionCommand.Define
+            || command instanceof com.axonbase.parser.ast.PartitionCommand.DefineTtl) {
+            ensureTable(db, command.table());
+        }
+        return partitionRunner(db).run(command);
     }
 
     /**
@@ -1460,10 +2308,18 @@ public final class Executor {
         return new Expr.Binary(Expr.BinaryOp.MATCH, b.left(), new Expr.Literal(vector));
     }
 
-    private AxonValue runSelectResolved(Statement.Select sel) {
+    private AxonValue runSelectResolved(Statement.Select sel, boolean partial) {
         // Check if FROM is AUDIT_CASES virtual table
         if (sel.from() instanceof Expr.Ident id) {
             String tableName = id.name();
+            // as duas guardam o conteúdo original: filtro e máscara não as alcançam
+            if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName))
+                && com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+                throw new com.axonbase.common.AxonError(-32002, Messages.get("data_rule_audit_refused"));
+            }
+            if ((isAuditCasesTable(tableName) || isAuditLogTable(tableName)) && session.definitionScope() != null) {
+                throw outsideDefinitionScope();
+            }
             if (isAuditCasesTable(tableName)) return runSelectAuditCases(sel);
             if (isAuditLogTable(tableName)) return runSelectAuditLog(sel);
         }
@@ -1519,7 +2375,11 @@ public final class Executor {
             Window window = streamable ? windowFor(db, sel) : null;
             // WHERE a = 1 AND b > 2: um índice que atende só uma das partes já reduz a leitura; o WHERE inteiro
             // é reavaliado abaixo sobre os candidatos.
-            docs = conjunctIndexDocs(db, sel, window);
+            // a busca textual vem antes: um índice de outra parte não leva o analisador do @@
+            docs = combinedSearchDocs(db, sel);
+            if (docs == null) {
+                docs = conjunctIndexDocs(db, sel, window);
+            }
             if (docs == null) {
                 docs = uniqueLookupSourceDocs(db, sel,
                     () -> vectorSourceDocs(db, sel, () -> geoSourceDocs(db, sel, window,
@@ -1548,7 +2408,10 @@ public final class Executor {
                 docs.removeIf(doc -> !truthy(evalCond(sel.cond(), doc)));
             }
             applyDataRulesFilter(docs);
-            applySearchScores(sel, docs);
+            if (hy == null) {
+                // a busca híbrida já pontuou os documentos
+                applySearchScores(sel, docs);
+            }
             docs.removeIf(doc -> sel.from() != null && !allowed(doc, tableName(sel.from()), "select"));
         }
         boolean joined = !sel.joins().isEmpty();
@@ -1572,11 +2435,16 @@ public final class Executor {
                 docs.sort(cmp);
             }
         }
+        if (partial) {
+            return partialResult(sel, docs, orders, aggregating, streamedAggregation);
+        }
         int start = sel.start() != null ? (int) eval(sel.start()).asLong() : 0;
         int limit = sel.limit() != null ? (int) eval(sel.limit()).asLong() : docs.size();
         int stop = Math.min(docs.size(), start + limit);
         List<AxonValue> out = new ArrayList<>();
         boolean scalarAggregate = false;
+        // as colunas são mascaradas na origem: apelido, SELECT VALUE, ONLY e agregados veem o valor mascarado
+        boolean masking = masksColumns();
         if (aggregating) {
             // FETCH resolve antes da agregación, que traballa sobre todo o conxunto
             if (!sel.fetch().isEmpty()) {
@@ -1586,6 +2454,9 @@ public final class Executor {
             if (aggregation == null) {
                 aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
                 for (Document d : docs) {
+                    if (masking) {
+                        d.setCurrent(applyDataRuleMask(d.current()));
+                    }
                     aggregation.accept(d);
                 }
             }
@@ -1602,6 +2473,9 @@ public final class Executor {
                 if (!sel.fetch().isEmpty() && !joined) {
                     fetchDocs(d, sel.fetch());
                 }
+                if (masking && !joined) {
+                    d.setCurrent(applyDataRuleMask(d.current()));
+                }
                 AxonValue row = joined ? projectJoin(sel, d) : project(sel, d);
                 // FETCH também vale para colunas calculadas (->comprou->produto AS p ... FETCH p)
                 out.add(!sel.fetch().isEmpty() && !joined ? fetchProjected(row, sel.fetch()) : row);
@@ -1610,7 +2484,7 @@ public final class Executor {
         if (scalarAggregate) {
             return out.get(0);
         }
-        if (!sel.only() && !sel.valueOnly()) {
+        if (masking) {
             out.replaceAll(this::applyDataRuleMask);
         }
         if (out.size() == 1 && (sel.only() || (sel.from() != null && isSingleTarget(sel.from())))) {
@@ -1629,6 +2503,82 @@ public final class Executor {
             }
         }
         return AxonValue.array(out);
+    }
+
+    /**
+     * A parte de um shard numa consulta espalhada: grupos com os acumuladores, ou as primeiras {@code START + LIMIT}
+     * linhas, cada uma com os valores do ORDER BY e a chave do registro, para o gateway intercalar.
+     */
+    private AxonValue partialResult(Statement.Select sel, List<Document> docs, List<OrderTerm> orders,
+                                    boolean aggregating, GroupAggregation streamed) {
+        if (ds.auditSelect() && sel.from() != null) {
+            ds.auditLog(session, "SELECT", tableName(sel.from()), null, null, null);
+        }
+        if (aggregating) {
+            if (masksColumns()) {
+                // o mascaramento depende do catálogo do shard e valeria só depois de fundir: recusar não vaza nada
+                throw errorStmt(ShardPartial.maskedAggregation());
+            }
+            GroupAggregation aggregation = streamed;
+            if (aggregation == null) {
+                aggregation = new GroupAggregation(sel, groupRowEval(), this::fieldName);
+                for (Document d : docs) {
+                    aggregation.accept(d);
+                }
+            }
+            return ShardPartial.groups(aggregation);
+        }
+        // a resposta parcial leva a chave do registro e os valores do ORDER BY, que a máscara da linha não cobre
+        if (masksColumns() && !MaskedOrder.safe(sel, orders, this::maskedColumn)) {
+            throw errorStmt(ShardPartial.maskedOrder());
+        }
+        long window = docs.size();
+        if (sel.limit() != null) {
+            long start = sel.start() != null ? eval(sel.start()).asLong() : 0;
+            window = Math.min(window, Math.max(0, start) + Math.max(0, eval(sel.limit()).asLong()));
+        }
+        List<AxonValue> rows = new ArrayList<>();
+        for (int i = 0; i < window; i++) {
+            Document d = docs.get(i);
+            // as chaves de ordenação usam o valor real: MaskedOrder já recusou o que vazaria coluna mascarada
+            var keys = sortKeys(orders, d);
+            boolean masking = masksColumns();
+            if (masking) {
+                d.setCurrent(applyDataRuleMask(d.current()));
+            }
+            AxonValue row = project(sel, d);
+            if (masking) {
+                row = applyDataRuleMask(row);
+            }
+            rows.add(ShardPartial.row(d.id().key().keyString(), keys, row));
+        }
+        return ShardPartial.rows(rows);
+    }
+
+    private boolean masksColumns() {
+        AxonValue auth = session.auth();
+        if (auth == null || !auth.isObject()) {
+            return false;
+        }
+        for (String ruleName : dataRuleNames(auth)) {
+            Catalog.DataRuleDef def = db().catalog().dataRule(ruleName);
+            if (def != null && !def.maskPatterns().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Alguma Data Rule do usuário mascara uma coluna com este nome. */
+    private boolean maskedColumn(String name) {
+        for (String ruleName : dataRuleNames(session.auth())) {
+            Catalog.DataRuleDef def = db().catalog().dataRule(ruleName);
+            if (def != null && def.maskPatterns().stream()
+                .anyMatch(pattern -> name.toLowerCase().matches(sqlLikeToRegex(pattern)))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -1678,6 +2628,8 @@ public final class Executor {
         boolean[] stopped = {false};
         for (String lead : RECORD_KEY_LEADS) {
             kv.scanPrefix(prefix + lead, key -> {
+                // por registro: cancelamento e orçamento do QoS valem também nas varreduras seriais
+                QueryContext.checkCancelled();
                 if (!visitor.test(key)) {
                     stopped[0] = true;
                     return false;
@@ -1699,6 +2651,7 @@ public final class Executor {
         boolean[] stopped = {false};
         for (String lead : RECORD_KEY_LEADS) {
             kv.scanEntries(prefix + lead, (key, value) -> {
+                QueryContext.checkCancelled();
                 if (!visitor.test(new RawRecord(key, value))) {
                     stopped[0] = true;
                     return false;
@@ -1722,6 +2675,7 @@ public final class Executor {
         Catalog.TableDef def = db.catalog().table(table);
         boolean checkPermissions = def != null && def.permissions() != null;
         String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        boolean masking = masksColumns();
         java.util.function.BiConsumer<GroupAggregation, String> consume = (agg, key) -> {
             Document doc = loadDoc(db, new RecordId(table, parseKey(key.substring(prefix.length()))));
             if (doc == null) {
@@ -1730,7 +2684,7 @@ public final class Executor {
             if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
                 return;
             }
-            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+            if (combinedRules != null && !truthy(asPolicy(() -> evalCond(combinedRules, doc)))) {
                 return;
             }
             if (checkPermissions && !allowed(doc, table, "select")) {
@@ -1738,6 +2692,9 @@ public final class Executor {
             }
             if (!sel.fetch().isEmpty()) {
                 fetchDocs(doc, sel.fetch());
+            }
+            if (masking) {
+                doc.setCurrent(applyDataRuleMask(doc.current()));
             }
             agg.accept(doc);
         };
@@ -1827,6 +2784,12 @@ public final class Executor {
         }
     }
 
+    private static Statement.Select withoutOrders(Statement.Select sel) {
+        return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), sel.cond(), List.of(),
+            sel.group(), sel.limit(), sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(),
+            sel.groupAll());
+    }
+
     private static Statement.Select withCond(Statement.Select sel, Expr cond) {
         return new Statement.Select(sel.fields(), sel.valueOnly(), sel.only(), sel.from(), cond, sel.orders(),
             sel.group(), sel.limit(), sel.start(), sel.fetch(), sel.joins(), sel.timeTravel(), sel.having(),
@@ -1848,7 +2811,9 @@ public final class Executor {
         for (Expr part : parts) {
             Statement.Select probe = withCond(sel, part);
             List<Document> hit = uniqueLookupSourceDocs(db, probe,
-                () -> geoSourceDocs(db, probe, window, () -> columnarSourceDocs(db, probe, window, () -> null)));
+                // sem ORDER BY para o GEO: os mais próximos só valem com o WHERE inteiro, nunca com uma parte dele
+                () -> geoSourceDocs(db, withoutOrders(probe), window,
+                    () -> columnarSourceDocs(db, probe, window, () -> null)));
             if (hit != null) {
                 return hit;
             }
@@ -1880,7 +2845,7 @@ public final class Executor {
             if (sel.cond() != null && !truthy(evalCond(sel.cond(), doc))) {
                 return false;
             }
-            if (combinedRules != null && !truthy(evalCond(combinedRules, doc))) {
+            if (combinedRules != null && !truthy(asPolicy(() -> evalCond(combinedRules, doc)))) {
                 return false;
             }
             return !checkPermissions || allowed(doc, table, "select");
@@ -2020,7 +2985,9 @@ public final class Executor {
                                     Statement.Join join, String outerTable) {
         String outerKey = lastFieldName(join.left());
         String innerKey = lastFieldName(join.right());
-        List<Document> inner = dbDocs(db, join.source());
+        List<Document> inner = new ArrayList<>(dbDocs(db, join.source()));
+        applyDataRulesFilter(inner);
+        boolean masking = masksColumns();
         List<Document> out = new ArrayList<>();
         for (Document lo : outer) {
             AxonValue ok = fieldValue(lo.current(), outerKey);
@@ -2030,7 +2997,8 @@ public final class Executor {
             for (Document li : inner) {
                 AxonValue ik = fieldValue(li.current(), innerKey);
                 if (!unspecified(ik) && ok.equals(ik)) {
-                    out.add(flattenJoin(outerTable, lo, innerTable, li));
+                    out.add(flattenJoin(outerTable, masking ? masked(lo) : lo,
+                        innerTable, masking ? masked(li) : li));
                 }
             }
         }
@@ -2168,19 +3136,19 @@ public final class Executor {
      */
     private Set<String> hnswCandidates(Database db, String table, Catalog.IndexDef index,
                                        AxonValue query, int efSearch) {
-        int top = maxLevel(db, table, index);
-        String entry = entryAt(db, table, index.name(), top);
+        GraphTop top = graphTop(db, table, index);
+        String entry = top.entry();
         if (entry == null) {
             return new LinkedHashSet<>();
         }
-        for (int level = top; level > 0; level--) {
-            List<Neighbor> near = searchLevel(db, table, index, level, entry, query, 1);
+        for (int level = top.level(); level > 0; level--) {
+            List<Neighbor> near = searchLevel(db, table, index, level, List.of(entry), query, 1);
             if (!near.isEmpty()) {
                 entry = near.get(0).key();
             }
         }
         Set<String> out = new LinkedHashSet<>();
-        for (Neighbor candidate : searchLevel(db, table, index, 0, entry, query, Math.max(1, efSearch))) {
+        for (Neighbor candidate : searchLevel(db, table, index, 0, List.of(entry), query, Math.max(1, efSearch))) {
             out.add(candidate.key());
         }
         return out;
@@ -2304,20 +3272,26 @@ public final class Executor {
     }
 
     /**
-     * Busca greedy num nível: devolve até <code>ef</code> candidatos ordenados pela
-     * menor distância, usando as arestas persistidas VH|...|<nivel>|<key>|<vizinho>.
+     * Busca greedy num nível a partir de um ou mais pontos de entrada: devolve até <code>ef</code> candidatos
+     * ordenados pela menor distância, usando as arestas persistidas VH|...|<nivel>|<key>|<vizinho>.
      */
     private List<Neighbor> searchLevel(Database db, String table, Catalog.IndexDef index, int level,
-                                       String entry, AxonValue query, int ef) {
+                                       List<String> entries, AxonValue query, int ef) {
         PriorityQueue<Neighbor> candidates = new PriorityQueue<>(
             Comparator.comparingDouble(Neighbor::distance));
         PriorityQueue<Neighbor> results = new PriorityQueue<>(
             java.util.Comparator.comparingDouble(Neighbor::distance).reversed());
         Set<String> visited = new HashSet<>();
-        double start = vectorNodeDistance(db, table, index, entry, query);
-        visited.add(entry);
-        candidates.add(new Neighbor(entry, start));
-        results.add(new Neighbor(entry, start));
+        for (String entry : entries) {
+            if (visited.add(entry)) {
+                Neighbor start = new Neighbor(entry, vectorNodeDistance(db, table, index, entry, query));
+                candidates.add(start);
+                results.add(start);
+            }
+        }
+        while (results.size() > ef) {
+            results.poll();
+        }
         while (!candidates.isEmpty()) {
             Neighbor current = candidates.poll();
             Neighbor furthest = results.peek();
@@ -2375,10 +3349,6 @@ public final class Executor {
             ? vectorDistance(index.vectorDistance(), vector, query) : Double.MAX_VALUE;
     }
 
-    /** Usa a grade GEO para pré-filtrar uma distância radial antes do WHERE exato. */
-    /** Teto de células geohash que a busca por polígono lê; acima disso a varredura completa sai mais barata. */
-    private static final int GEO_CONTAINS_MAX_CELLS = 4096;
-
     /**
      * {@code WHERE geo::contains(<polígono>, campo)} com um índice GEO em {@code campo}: lê só as células que
      * cobrem a caixa do polígono. O polígono não pode depender da linha (literal, variável, {@code $parent...}
@@ -2389,9 +3359,7 @@ public final class Executor {
         if (!(call.args().get(1) instanceof Expr.Ident field) || !isRowIndependent(call.args().get(0))) {
             return fallback.get();
         }
-        Catalog.TableDef def = db.catalog().table(table.name());
-        Catalog.IndexDef index = def == null ? null : def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        Catalog.IndexDef index = geoIndexOn(db.catalog().table(table.name()), field.name());
         if (index == null) {
             return fallback.get();
         }
@@ -2404,29 +3372,25 @@ public final class Executor {
         if (box == null) {
             return fallback.get();
         }
-        double midLat = (box[1] + box[3]) / 2;
-        double heightMeters = (box[3] - box[1]) * 111_320d;
-        double widthMeters = (box[2] - box[0]) * 111_320d * Math.max(0.01, Math.cos(Math.toRadians(midLat)));
-        int precision = geoPrecision(Math.max(heightMeters, widthMeters) / 2);
-        java.util.Set<String> cells = GeoHash.covering(box[1], box[0], box[3], box[2], precision);
-        if (cells.size() > GEO_CONTAINS_MAX_CELLS) {
-            return fallback.get();
-        }
-        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
-        String base = geoIndexBase(db, table.name(), index.name());
-        for (String cell : cells) {
-            for (String key : records(db).keysWithPrefix(base + cell)) {
-                ids.add(key.substring(key.lastIndexOf('|') + 1));
-            }
-        }
         List<Document> docs = new ArrayList<>();
-        for (String id : ids) {
+        geoIndex(db, table.name(), index).box(records(db), box, id -> {
             Document doc = loadDoc(db, new RecordId(table.name(), parseKey(id)));
             if (doc != null) {
                 docs.add(doc);
             }
-        }
+            return true;
+        });
         return docs;
+    }
+
+    /** Índice GEO pronto cuja coluna indexada (a primeira) é o campo. */
+    private static Catalog.IndexDef geoIndexOn(Catalog.TableDef def, String column) {
+        return def == null ? null : def.indexes().values().stream().filter(Catalog.IndexDef::ready)
+            .filter(i -> i.geo() && i.columns().get(0).equals(column)).findFirst().orElse(null);
+    }
+
+    private static GeoIndex geoIndex(Database db, String table, Catalog.IndexDef index) {
+        return new GeoIndex(db.ns(), db.db(), table, index.name());
     }
 
     /** A expressão não lê campos da linha (só literais, variáveis e subqueries), então vale o mesmo para todas. */
@@ -2456,9 +3420,10 @@ public final class Executor {
     }
 
     /**
-     * Fonte pelo índice GEO. Raio: {@code geo::distance(campo, ponto) <= raio}; vizinhos mais próximos:
-     * {@code ORDER BY geo::distance(campo, ponto) LIMIT n}; e {@code geo::contains}. Com {@code window} a leitura
-     * para ao completar START+LIMIT linhas que passam no filtro.
+     * Fonte pelo índice GEO (ver {@link GeoIndex}). Raio: {@code geo::distance(campo, ponto) <= raio}; vizinhos mais
+     * próximos: {@code ORDER BY geo::distance(campo, ponto) LIMIT n}; e {@code geo::contains}. O WHERE inteiro é
+     * reavaliado sobre os documentos devolvidos. Com {@code window} a leitura para ao completar START+LIMIT linhas
+     * que passam no filtro.
      */
     private List<Document> geoSourceDocs(Database db, Statement.Select sel, Window window,
                                          java.util.function.Supplier<List<Document>> fallback) {
@@ -2474,149 +3439,46 @@ public final class Executor {
             List<Document> nearest = geoNearestDocs(db, sel);
             return nearest != null ? nearest : fallback.get();
         }
+        // centro e raio precisam valer para todas as linhas: aqui eles são avaliados sem nenhuma
+        if (!isRowIndependent(distance.args().get(1)) || !isRowIndependent(comparison.right())) {
+            return fallback.get();
+        }
         AxonValue center = eval(distance.args().get(1));
         AxonValue radius = eval(comparison.right());
-        double[] point = geoPoint(center);
+        double[] point = GeoIndex.pointOf(center);
         if (point == null || !radius.isNumber()) {
             return fallback.get();
         }
-        Catalog.TableDef def = db.catalog().table(table.name());
-        if (def == null) {
-            return fallback.get();
-        }
-        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        Catalog.IndexDef index = geoIndexOn(db.catalog().table(table.name()), field.name());
         if (index == null) {
             return fallback.get();
         }
-        double meters = radius.asDouble();
-        double latRange = meters / 111_320d;
-        double lonRange = meters / Math.max(1d, 111_320d * Math.cos(Math.toRadians(point[1])));
-        boolean withCoordinates = geoHasCoordinates(db, table.name(), index);
-        // só pontos: células finas e podadas pela distância; com linhas ou polígonos no índice, as mesmas células do índice antigo
-        boolean pointsOnly = withCoordinates && !geoHasNonPoint(db, table.name(), index);
-        int precision = pointsOnly ? GEO_PRECISION : geoPrecision(meters);
-        java.util.Set<String> cells = GeoHash.covering(
-            point[1] - latRange, point[0] - lonRange,
-            point[1] + latRange, point[0] + lonRange, precision);
-        String base = geoIndexBase(db, table.name(), index.name());
-        if (withCoordinates) {
-            return geoRadiusDocs(db, table.name(), base, cells, point, meters, window, pointsOnly);
-        }
-        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
-        for (String cell : cells) {
-            for (String key : records(db).keysWithPrefix(base + cell)) {
-                ids.add(key.substring(key.lastIndexOf('|') + 1));
-            }
-        }
         List<Document> docs = new ArrayList<>();
-        for (String id : ids) {
+        boolean served = geoIndex(db, table.name(), index).radius(records(db), point, radius.asDouble(), id -> {
             Document doc = loadDoc(db, new RecordId(table.name(), parseKey(id)));
-            if (doc != null) {
+            if (doc != null && (window == null || window.accepts().test(doc))) {
                 docs.add(doc);
             }
-        }
-        return docs;
+            return window == null || docs.size() < window.wanted();
+        });
+        return served ? docs : fallback.get();
     }
-
-    private boolean geoHasNonPoint(Database db, String table, Catalog.IndexDef index) {
-        return records(db).get(GeoEntry.nonPointKey(db.ns(), db.db(), table, index.name())).isPresent();
-    }
-
-    /** O índice foi gravado inteiro no formato com coordenadas (marcador {@code SPV|...}). */
-    private boolean geoHasCoordinates(Database db, String table, Catalog.IndexDef index) {
-        return records(db).get(GeoEntry.readyKey(db.ns(), db.db(), table, index.name())).isPresent();
-    }
-
-    /**
-     * Candidatos do raio com o índice no formato novo: cada entrada traz o ponto, então quem está fora do raio nem
-     * chega a ser carregado. As células vão da mais próxima do centro para a mais distante, e células que a
-     * circunferência não alcança são puladas. A distância é a mesma conta de {@code geo::distance}; o WHERE inteiro
-     * ainda é reavaliado sobre os documentos devolvidos, então a margem do corte só precisa ser conservadora.
-     */
-    private List<Document> geoRadiusDocs(Database db, String table, String base, java.util.Set<String> cells,
-                                         double[] center, double meters, Window window, boolean prune) {
-        double limit = meters * 1.000001 + 1e-3;
-        record Reach(String cell, double meters) {
-        }
-        List<Reach> reach = new ArrayList<>();
-        for (String cell : cells) {
-            double near = prune ? geoCellDistance(cell, center) : 0;
-            if (near <= limit) {
-                reach.add(new Reach(cell, near));
-            }
-        }
-        if (prune) {
-            reach.sort(Comparator.comparingDouble(Reach::meters));
-        }
-        List<Document> docs = new ArrayList<>();
-        java.util.Set<String> seen = new java.util.HashSet<>();
-        boolean[] done = {false};
-        for (Reach r : reach) {
-            if (done[0]) {
-                break;
-            }
-            records(db).scanEntries(base + r.cell(), (key, value) -> {
-                double[] at = GeoEntry.decode(value);
-                if (at != null && GeoVector.haversine(at[0], at[1], center[0], center[1]) > limit) {
-                    return true;
-                }
-                String id = key.substring(key.lastIndexOf('|') + 1);
-                if (!seen.add(id)) {
-                    return true;
-                }
-                Document doc = loadDoc(db, new RecordId(table, parseKey(id)));
-                if (doc == null) {
-                    return true;
-                }
-                if (window == null) {
-                    docs.add(doc);
-                    return true;
-                }
-                if (window.accepts().test(doc)) {
-                    docs.add(doc);
-                }
-                done[0] = docs.size() >= window.wanted();
-                return !done[0];
-            });
-        }
-        return docs;
-    }
-
-    /**
-     * Menor distância (m) do centro à célula. Células menores que ~0,1 grau usam o ponto da caixa mais perto do
-     * centro; células grandes (raios enormes) não são podadas.
-     */
-    private double geoCellDistance(String cell, double[] center) {
-        if (cell.length() < 5) {
-            return 0;
-        }
-        double[] box = GeoHash.bounds(cell);
-        double lat = Math.max(box[0], Math.min(box[2], center[1]));
-        double lon = Math.max(box[1], Math.min(box[3], center[0]));
-        return Math.max(0, GeoVector.haversine(center[0], center[1], lon, lat) - 1);
-    }
-
-    /** Metros por grau de latitude, para baixo: a caixa de busca nunca fica menor que o raio. */
-    private static final double KNN_METERS_PER_DEGREE = 111_000d;
-    private static final double KNN_EARTH_RADIUS = 6_371_008.8;
-    /** Raio inicial da busca dos mais próximos e limite de células antes de varrer o índice todo. */
-    private static final double KNN_START_METERS = 1_000d;
-    private static final int KNN_MAX_CELLS = 4_096;
 
     /** Plano dos vizinhos mais próximos: tabela, índice, centro e quantos (START+LIMIT). */
     private record NearestPlan(String table, Catalog.IndexDef index, double[] center, int wanted) {
     }
 
     /**
-     * {@code ORDER BY geo::distance(campo, ponto) [ASC] LIMIT n} sobre tabela simples com índice GEO no formato novo,
-     * ou {@code null}. O WHERE (se houver) é reavaliado em cada candidato.
+     * {@code ORDER BY geo::distance(campo, ponto) [ASC] LIMIT n} sobre tabela simples com índice GEO que só guarda
+     * pontos, ou {@code null}. O WHERE (se houver) é reavaliado em cada candidato.
      */
     private NearestPlan nearestPlan(Database db, Statement.Select sel) {
         if (!(sel.from() instanceof Expr.Ident table) || sel.limit() == null || sel.orders().size() != 1
             || !sel.joins().isEmpty() || sel.grouped() || sel.having() != null
             || sel.fields().stream().anyMatch(this::isAggregateCall)
-            || (sel.cond() != null && isSearchMatch(sel.cond()))) {
+            || (sel.cond() != null && isSearchMatch(sel.cond()))
+            // numa transação a busca registraria faixas do tamanho de continentes como lidas
+            || (session.tx() != null && session.tx().isOpen())) {
             return null;
         }
         OrderTerm term = ordersByAlias(sel).get(0);
@@ -2625,253 +3487,48 @@ public final class Executor {
             || !isRowIndependent(call.args().get(1))) {
             return null;
         }
-        Catalog.TableDef def = db.catalog().table(table.name());
-        if (def == null) {
+        Catalog.IndexDef index = geoIndexOn(db.catalog().table(table.name()), field.name());
+        if (index == null || geoIndex(db, table.name(), index).hasUnlocated(records(db))) {
             return null;
         }
-        Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
-        if (index == null || !geoHasCoordinates(db, table.name(), index) || geoHasNonPoint(db, table.name(), index)) {
-            return null;
-        }
-        double[] center = geoPoint(eval(call.args().get(1)));
+        double[] center = GeoIndex.pointOf(eval(call.args().get(1)));
         int wanted = windowEnd(sel);
-        return center == null || wanted <= 0 ? null : new NearestPlan(table.name(), index, center, wanted);
+        return !GeoIndex.isLocatable(center) || wanted <= 0 ? null
+            : new NearestPlan(table.name(), index, center, wanted);
     }
 
-    private record Candidate(String id, double meters) {
-    }
-
-    /**
-     * Os {@code n} mais próximos do ponto, em ordem de distância, sem varrer o raio inteiro: amplia a caixa de busca
-     * (dobrando o raio) e só lê as células novas, até ter {@code n} linhas válidas dentro de um raio já inteiramente
-     * lido, o que garante que não existe outra mais perto. Passando de {@code KNN_MAX_CELLS} células lê o índice todo.
-     */
+    /** Os {@code n} mais próximos do ponto, em ordem de distância, sem ler o índice além do necessário. */
     private List<Document> geoNearestDocs(Database db, Statement.Select sel) {
         NearestPlan plan = nearestPlan(db, sel);
         if (plan == null) {
             return null;
         }
-        String base = geoIndexBase(db, plan.table(), plan.index().name());
         String column = plan.index().columns().get(0);
         Catalog.TableDef tableDef = db.catalog().table(plan.table());
         boolean filtered = sel.cond() != null || !dataRulePredicates().isEmpty()
             || (tableDef != null && tableDef.permissions() != null);
         Window filter = filtered ? windowFor(db, sel) : null;
-        java.util.Set<String> scanned = new java.util.HashSet<>();
-        java.util.Set<String> listed = new java.util.HashSet<>();
-        List<Candidate> candidates = new ArrayList<>();
-        java.util.Map<String, Document> accepted = new java.util.HashMap<>();
-        java.util.Set<String> rejected = new java.util.HashSet<>();
-        double[] center = plan.center();
-        double radius = KNN_START_METERS;
-        boolean everything = false;
-        while (true) {
-            List<String> fresh = new ArrayList<>();
-            if (!everything) {
-                double delta = Math.toDegrees(Math.min(Math.PI / 2, radius * 1.01 / KNN_EARTH_RADIUS));
-                double latRange = radius * 1.01 / KNN_METERS_PER_DEGREE;
-                java.util.Set<String> cells = null;
-                if (Math.abs(center[1]) + delta < 85) {
-                    double lonRange = Math.toDegrees(Math.asin(Math.min(1d,
-                        Math.sin(Math.toRadians(delta)) / Math.cos(Math.toRadians(Math.abs(center[1]) + delta)))));
-                    cells = GeoHash.cellsInBox(center[1] - latRange, center[0] - lonRange,
-                        center[1] + latRange, center[0] + lonRange, GEO_PRECISION, KNN_MAX_CELLS);
-                }
-                if (cells == null) {
-                    everything = true;
-                } else {
-                    for (String cell : cells) {
-                        if (scanned.add(cell)) {
-                            fresh.add(base + cell);
-                        }
-                    }
-                }
+        List<Document> out = new ArrayList<>();
+        java.util.Set<String> taken = new java.util.HashSet<>();
+        int[] inPlace = {0};
+        geoIndex(db, plan.table(), plan.index()).nearest(records(db), plan.center(), (id, meters, at) -> {
+            if (taken.contains(id)) {
+                return true;
             }
-            if (everything) {
-                fresh = List.of(base);
-            }
-            for (String prefix : fresh) {
-                records(db).scanEntries(prefix, (key, value) -> {
-                    String id = key.substring(key.lastIndexOf('|') + 1);
-                    if (!listed.add(id)) {
-                        return true;
-                    }
-                    double[] at = GeoEntry.decode(value);
-                    if (at == null) {
-                        // entrada sem coordenadas: o ponto vem do documento
-                        Document doc = loadDoc(db, new RecordId(plan.table(), parseKey(id)));
-                        at = doc != null && doc.current().isObject() ? geoPoint(doc.current().asObject().get(column)) : null;
-                        if (at == null) {
-                            return true;
-                        }
-                    }
-                    candidates.add(new Candidate(id, GeoVector.haversine(at[0], at[1], center[0], center[1])));
-                    return true;
-                });
-            }
-            candidates.sort((a, b) -> {
-                int c = Double.compare(a.meters(), b.meters());
-                return c != 0 ? c : a.id().compareTo(b.id());
-            });
-            double certain = everything ? Double.POSITIVE_INFINITY : radius;
-            List<Document> out = new ArrayList<>();
-            for (Candidate c : candidates) {
-                if (c.meters() > certain || out.size() >= plan.wanted()) {
-                    break;
-                }
-                if (rejected.contains(c.id())) {
-                    continue;
-                }
-                Document doc = accepted.get(c.id());
-                if (doc == null) {
-                    doc = loadDoc(db, new RecordId(plan.table(), parseKey(c.id())));
-                    if (doc == null || (filter != null && !filter.accepts().test(doc))) {
-                        rejected.add(c.id());
-                        continue;
-                    }
-                    accepted.put(c.id(), doc);
-                }
+            Document doc = loadDoc(db, new RecordId(plan.table(), parseKey(id)));
+            if (doc != null && GeoIndex.hasPoint(doc.current(), column)
+                && (filter == null || filter.accepts().test(doc))) {
+                taken.add(id);
                 out.add(doc);
-            }
-            if (out.size() >= plan.wanted() || everything) {
-                return out;
-            }
-            radius *= 2;
-        }
-    }
-
-    /** Precisão do geohash usado pelo índice espacial (≈5 km por célula). */
-    private static final int GEO_PRECISION = 6;
-
-    private int geoPrecision(double meters) {
-        for (int p = GEO_PRECISION; p >= 0; p--) {
-            double cellMeters = 111_320d * GeoHash.cellSizeDegrees(p);
-            if (cellMeters * 2 >= meters) {
-                return p;
-            }
-        }
-        return 0;
-    }
-
-    /** Atualiza as células geohash de um documento após uma mutação geo. */
-    /**
-     * Troca as células geohash do registro no índice GEO. As células antigas vêm da chave reversa
-     * ({@code SPR|...|id}, lista de células separada por vírgula), então o custo de cada escrita não depende do
-     * tamanho do índice. Registros gravados antes da chave reversa existir só têm as células achadas olhando o
-     * índice inteiro, uma única vez: a primeira atualização ou exclusão deles grava a chave reversa.
-     *
-     * @param existed o registro já estava gravado (atualização ou exclusão); numa criação não há células antigas
-     */
-    private void cellsUpdate(Database db, RecordId rid, Catalog.IndexDef index, AxonValue value, boolean existed) {
-        KvBackend kv = records(db);
-        String base = geoIndexBase(db, rid.table(), index.name());
-        String key = rid.key().keyString();
-        String reverse = geoReverseKey(db, rid, index);
-        Optional<byte[]> old = kv.get(reverse);
-        if (old.isPresent()) {
-            for (String cell : new String(old.get(), java.nio.charset.StandardCharsets.UTF_8).split(",")) {
-                if (!cell.isEmpty()) {
-                    kv.delete(base + cell + "|" + key);
+                // Quem se moveu depois de a entrada ser lida também entra (o ORDER BY reordena pelo ponto atual),
+                // mas só quem está onde a entrada diz conta para encerrar a busca.
+                if (GeoIndex.isAt(doc.current(), column, at)) {
+                    inPlace[0]++;
                 }
             }
-        } else if (existed) {
-            String suffix = "|" + key;
-            for (String stale : kv.keysWithPrefix(base)) {
-                if (stale.endsWith(suffix)) {
-                    kv.delete(stale);
-                }
-            }
-        }
-        java.util.Set<String> cells = geoCoverCells(value);
-        if (cells.isEmpty()) {
-            kv.delete(reverse);
-            return;
-        }
-        double[] point = geoPoint(value);
-        byte[] entry = GeoEntry.encode(point);
-        if (point == null) {
-            String flag = GeoEntry.nonPointKey(db.ns(), db.db(), rid.table(), index.name());
-            if (kv.get(flag).isEmpty()) {
-                kv.put(flag, new byte[]{1});
-            }
-        }
-        for (String cell : cells) {
-            kv.put(base + cell + "|" + key, entry);
-        }
-        kv.put(reverse, String.join(",", cells).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-    }
-
-    private String geoReverseKey(Database db, RecordId rid, Catalog.IndexDef index) {
-        return "SPR|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|" + index.name() + "|" + rid.key().keyString();
-    }
-
-    private String geoIndexBase(Database db, String table, String index) {
-        return "SP|" + db.ns() + "|" + db.db() + "|" + table + "|" + index + "|";
-    }
-
-    /** Células geohash que cobrem a geometria (ponto, linha ou polígono). */
-    private java.util.Set<String> geoCoverCells(AxonValue geometry) {
-        java.util.Set<String> cells = new java.util.LinkedHashSet<>();
-        if (geometry == null || !geometry.isObject()) {
-            return cells;
-        }
-        AxonValue coords = geometry.asObject().get("coordinates");
-        if (coords == null || !coords.isArray()) {
-            return cells;
-        }
-        for (double[] p : geoFlatten(coords)) {
-            cells.add(GeoHash.encode(p[1], p[0], GEO_PRECISION));
-        }
-        double[] centroid = geoCentroid(coords);
-        if (centroid != null) {
-            cells.add(GeoHash.encode(centroid[1], centroid[0], GEO_PRECISION));
-        }
-        return cells;
-    }
-
-    /** Achata coordenadas de Point, LineString ou Polygon numa lista [lon, lat]. */
-    private List<double[]> geoFlatten(AxonValue coords) {
-        List<double[]> out = new ArrayList<>();
-        if (!coords.isArray()) {
-            return out;
-        }
-        if (coords.asArray().get(0).isNumber()) {
-            double[] p = geoPoint(AxonValue.object(Map.of("coordinates", coords)));
-            if (p != null) {
-                out.add(p);
-            }
-            return out;
-        }
-        for (AxonValue child : coords.asArray()) {
-            out.addAll(geoFlatten(child));
-        }
+            return inPlace[0] < plan.wanted();
+        });
         return out;
-    }
-
-    private double[] geoCentroid(AxonValue coords) {
-        List<double[]> pts = geoFlatten(coords);
-        if (pts.isEmpty()) {
-            return null;
-        }
-        double x = 0, y = 0;
-        for (double[] p : pts) {
-            x += p[0];
-            y += p[1];
-        }
-        return new double[] {x / pts.size(), y / pts.size()};
-    }
-
-    private double[] geoPoint(AxonValue geometry) {
-        if (geometry == null || !geometry.isObject()) {
-            return null;
-        }
-        AxonValue coords = geometry.asObject().get("coordinates");
-        if (coords == null || !coords.isArray() || coords.asArray().size() < 2
-            || !coords.asArray().get(0).isNumber() || !coords.asArray().get(1).isNumber()) {
-            return null;
-        }
-        return new double[] { coords.asArray().get(0).asDouble(), coords.asArray().get(1).asDouble() };
     }
 
     /** Parámetros BM25 clásicos (Robertson–Walker). */
@@ -2888,32 +3545,98 @@ public final class Executor {
      * Os termos da consulta saen do analyzer do índice, non de un split cru.
      */
     private void applySearchScores(Statement.Select sel, List<Document> docs) {
-        if (!(sel.cond() instanceof Expr.Binary match) || match.op() != Expr.BinaryOp.MATCH
-            || !(match.left() instanceof Expr.Ident field)) {
+        if (sel.from() == null) {
             return;
         }
-        Catalog.IndexDef index = searchIndexFor(db(), tableName(sel.from()), sel);
-        if (index == null) {
-            return;
-        }
-        Catalog.AnalyzerDef analyzer = db().catalog().analyzer(index.searchAnalyzer());
-        if (analyzer == null) {
-            return;
-        }
-        AxonValue query = eval(match.right());
-        if (!query.isString()) {
-            return;
-        }
-        List<String> terms = analyze(query.asString(), analyzer).stream().distinct().toList();
+        List<TextSearch> searches = textSearches(db(), sel);
+        List<String> terms = searches.stream().flatMap(search -> search.terms().stream()).distinct().toList();
         if (terms.isEmpty()) {
             return;
         }
         String table = tableName(sel.from());
-        Bm25Stats stats = bm25Stats(db(), table, index);
-        for (Document doc : docs) {
-            doc.searchScore(bm25Score(db(), table, index, stats, terms, doc));
-            doc.searchTerms(terms);
+        double[] scores = new double[docs.size()];
+        for (TextSearch search : searches) {
+            Bm25Stats stats = bm25Stats(db(), table, search.index());
+            List<String> wanted = search.terms().stream().distinct().toList();
+            for (int i = 0; i < scores.length; i++) {
+                scores[i] += bm25Score(db(), table, search.index(), stats, wanted, docs.get(i));
+            }
         }
+        for (int i = 0; i < scores.length; i++) {
+            docs.get(i).searchScore(scores[i]);
+            docs.get(i).searchTerms(terms);
+        }
+    }
+
+    /** Um {@code campo @@ "texto"} atendido pelo índice SEARCH do campo, com os termos já passados pelo analisador. */
+    private record TextSearch(Catalog.IndexDef index, List<String> terms) {
+    }
+
+    /** As buscas textuais indexadas do WHERE: ele próprio ou as partes ligadas por AND no topo. */
+    private List<TextSearch> textSearches(Database db, Statement.Select sel) {
+        String table = tableName(sel.from());
+        Catalog.TableDef def = table == null || table.isBlank() ? null : db.catalog().table(table);
+        if (def == null || sel.cond() == null) {
+            return List.of();
+        }
+        List<TextSearch> out = new ArrayList<>();
+        for (Expr part : conjuncts(sel.cond())) {
+            // numa condição combinada, um lado direito que dependa da linha continua sendo comparado linha a linha
+            if (!(part instanceof Expr.Binary match) || match.op() != Expr.BinaryOp.MATCH
+                || !(match.left() instanceof Expr.Ident field)
+                || part != sel.cond() && !isRowIndependent(match.right())) {
+                continue;
+            }
+            Catalog.IndexDef index = def.indexes().values().stream().filter(Catalog.IndexDef::ready)
+                .filter(i -> i.search() && i.columns().contains(field.name())).findFirst().orElse(null);
+            Catalog.AnalyzerDef analyzer = index == null ? null : db.catalog().analyzer(index.searchAnalyzer());
+            if (analyzer == null) {
+                continue;
+            }
+            AxonValue query = eval(match.right());
+            if (query.isString()) {
+                out.add(new TextSearch(index, analyze(query.asString(), analyzer)));
+            }
+        }
+        return out;
+    }
+
+    /** Chaves dos registros que têm todos os termos no índice; vazio quando não há termo. */
+    private java.util.Set<String> postingKeys(Database db, String table, Catalog.IndexDef index, List<String> terms) {
+        java.util.Set<String> keys = null;
+        for (String term : terms) {
+            java.util.Set<String> termKeys = records(db).keysWithPrefix(
+                searchPrefix(db, table, index.name(), term)).stream()
+                .map(key -> key.substring(key.lastIndexOf('|') + 1))
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+            if (keys == null) {
+                keys = termKeys;
+            } else {
+                keys.retainAll(termKeys);
+            }
+        }
+        return keys == null ? new java.util.LinkedHashSet<>() : keys;
+    }
+
+    /**
+     * Candidatos de {@code campo @@ "texto" AND ...} sobre tabela simples: os registros que todos os índices de busca
+     * devolvem, ou {@code null} quando o WHERE não é um AND com busca indexada. O WHERE inteiro é reavaliado depois.
+     */
+    private List<Document> combinedSearchDocs(Database db, Statement.Select sel) {
+        if (!(sel.from() instanceof Expr.Ident table) || !sel.joins().isEmpty()
+            || !(sel.cond() instanceof Expr.Binary and) || and.op() != Expr.BinaryOp.AND) {
+            return null;
+        }
+        java.util.Set<String> keys = null;
+        for (TextSearch search : textSearches(db, sel)) {
+            java.util.Set<String> found = postingKeys(db, table.name(), search.index(), search.terms());
+            if (keys == null) {
+                keys = found;
+            } else {
+                keys.retainAll(found);
+            }
+        }
+        return keys == null ? null : docsFromKeys(db, table.name(), keys);
     }
 
     /** Agrega o conxunto de FTLEN do índice: nº de docs e lonxitude media. */
@@ -3195,6 +3918,9 @@ return score;
             return sourceDocsQualifiedRecordId(q, rid);
         }
         List<Document> docs = new ArrayList<>();
+        if (from instanceof Expr.Ident table) {
+            ensureTable(db, table.name());
+        }
         for (RecordId rid2 : resolveTargets(from)) {
             Document doc = loadDoc(db, rid2);
             if (doc != null) {
@@ -3210,16 +3936,17 @@ return score;
      */
     private AxonValue runSelectViaLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q,
                                         Statement.Select sel) {
+        requireInReach(q.link());
         // Render the SELECT, then replace qualified FROM with unqualified one
         String rendered = com.axonbase.parser.Render.stmt(sel);
-        String qualifiedFrom = q.link() + "." + q.table();
+        String qualifiedFrom = renderedQualified(q);
         String unqualifiedFrom = q.table();
         String axonql = rendered.replace(qualifiedFrom, unqualifiedFrom);
         // Fix internal AST rendering: *->expr should be just ->expr
         axonql = axonql.replace("SELECT *->", "SELECT ->");
         axonql = axonql.replace("VALUE *->", "VALUE ->");
         try {
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, Statement.Select.class);
             if (rows.isEmpty()) return AxonValue.array(List.of());
             if (rows.size() == 1 && !rows.get(0).isObject() && !rows.get(0).isArray()) {
                 return rows.get(0);
@@ -3230,6 +3957,7 @@ return score;
         }
     }
     private List<Document> sourceDocsQualified(Expr.Qualified q) {
+        requireInReach(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3238,13 +3966,12 @@ return score;
         Datastore.DatabaseLinkDef linkDef = ds.databaseLink(ns, q.link());
         if (linkDef != null) {
             String axonql = "SELECT * FROM " + q.table();
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, Statement.Select.class);
             return rowsToDocs(rows, q.table());
         }
         // Local database (other db in same ns)
-        Database targetDb = ds.ensureDatabase(session, ns, q.link());
+        Database targetDb = localQualifiedDatabase(ns, q);
         String tableName = q.table();
-        ensureTable(targetDb, tableName);
         String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + tableName + "\u0000";
         List<Document> docs = new ArrayList<>();
         for (String k : records(targetDb).keysWithPrefix(prefix)) {
@@ -3258,12 +3985,28 @@ return score;
         return docs;
     }
 
+    /** {@code banco.tabela} aponta para um banco do próprio namespace, e não para um DATABASE LINK. */
+    private boolean isLocalQualified(Expr.Qualified q) {
+        String ns = session.namespace();
+        return ns != null && !ns.isBlank() && ds.databaseLink(ns, q.link()) == null;
+    }
+
+    /** O banco do namespace citado em {@code banco.tabela}, já com a tabela garantida. */
+    private Database localQualifiedDatabase(String ns, Expr.Qualified q) {
+        requireInReach(q.link());
+        Database targetDb = ds.ensureDatabase(session, ns, q.link());
+        ensureTable(targetDb, q.table());
+        return targetDb;
+    }
+
     /**
      * Roteia uma escrita qualificada ({@code CREATE/UPDATE/DELETE/RELATE "link"."table"})
      * para o servidor remoto via DATABASE LINK. A sentença renderizada tem o prefixo
      * do link removido e é enviada ao endpoint {@code /sql} do link.
      */
-    private AxonValue runWriteViaLink(Expr.Qualified q, String renderedSql) {
+    private AxonValue runWriteViaLink(Expr.Qualified q, String renderedSql,
+                                      Class<? extends Statement> expected) {
+        refuseLinkInEvent();
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
@@ -3272,10 +4015,9 @@ return score;
         if (linkDef == null) {
             throw errorStmt(Messages.get("stmt_database_link_missing", q.link()));
         }
-        String labeled = q.link() + "." + q.table();
-        String axonql = renderedSql.replace(labeled, q.table());
+        String axonql = forwardedText(q, renderedSql);
         try {
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, expected);
             if (rows.isEmpty()) return AxonValue.array(List.of());
             if (rows.size() == 1 && !rows.get(0).isObject() && !rows.get(0).isArray()) {
                 return rows.get(0);
@@ -3286,17 +4028,64 @@ return score;
         }
     }
 
+    /** O comando como segue para o participante: sem o nome da ligação. */
+    private static String forwardedText(Expr.Qualified q, String renderedSql) {
+        return renderedSql.replace(renderedQualified(q), q.table());
+    }
+
+    /** Antes de qualquer envio ou passo de SAGA: o comando recusado não lê o participante nem entra no ledger. */
+    private void requireForwardable(Expr.Qualified q, String renderedSql) {
+        requireForwardablePayload(forwardedText(q, renderedSql));
+    }
+
+    private void requireForwardablePayload(String axonql) {
+        Optional<String> refused = LinkPayload.refusal(axonql);
+        if (refused.isPresent()) {
+            throw errorStmt("comando não aceito num DATABASE LINK: " + refused.get());
+        }
+    }
+
+    /** Como o Render escreve {@code link.tabela}. */
+    private static String renderedQualified(Expr.Qualified q) {
+        return com.axonbase.value.AxonQlText.identifier(q.link()) + "."
+            + com.axonbase.value.AxonQlText.identifier(q.table());
+    }
+
+    /**
+     * Envia ao servidor do DATABASE LINK, com a credencial dele, uma única sentença do tipo pedido, sem nada aninhado
+     * nem com efeito ({@link LinkPayload}). O nome da tabela precisa ser simples: o outro servidor pode ser de uma
+     * versão que não cita nomes ao gravar o catálogo.
+     */
+    private List<AxonValue> queryLink(Datastore.DatabaseLinkDef linkDef, Expr.Qualified q, String axonql,
+                                      Class<? extends Statement> expected) {
+        if (!LinkGuard.plain(q.table())) {
+            throw errorStmt("nome de tabela não aceito num DATABASE LINK: " + q.table());
+        }
+        try {
+            com.axonbase.parser.AxonQl.requireSingle(axonql, expected);
+        } catch (IllegalArgumentException e) {
+            throw errorStmt(e.getMessage());
+        }
+        Optional<String> refused = LinkGuard.refusedQuotedName(axonql);
+        if (refused.isPresent()) {
+            throw errorStmt("nome não aceito num DATABASE LINK: " + refused.get());
+        }
+        requireForwardablePayload(axonql);
+        return linkClient.query(linkDef, axonql);
+    }
+
     /** Resolve a qualified record ID {@code "link"."table":key}. */
     private List<Document> sourceDocsQualifiedRecordId(Expr.Qualified q, Expr.RecordId rid) {
+        requireInReach(q.link());
         String ns = session.namespace();
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_database_link_namespace"));
         }
         Datastore.DatabaseLinkDef linkDef = ds.databaseLink(ns, q.link());
         if (linkDef != null) {
-            String keyStr = com.axonbase.parser.Render.expr(rid.key());
+            String keyStr = com.axonbase.parser.Render.key(rid.key());
             String axonql = "SELECT * FROM " + q.table() + ":" + keyStr;
-            List<AxonValue> rows = linkClient.query(linkDef, axonql);
+            List<AxonValue> rows = queryLink(linkDef, q, axonql, Statement.Select.class);
             return rowsToDocs(rows, q.table());
         }
         // Local database
@@ -3371,6 +4160,14 @@ return score;
      * vector, geo, full-text e por último varrido completo.
      */
     private ExplainPlan planExplain(Database db, Statement.Select sel) {
+        // @@ junto de outra condição: o índice de busca abre a leitura, como na execução
+        if (sel.from() instanceof Expr.Ident table && sel.joins().isEmpty()
+            && sel.cond() instanceof Expr.Binary and && and.op() == Expr.BinaryOp.AND && hybridSearch(sel) == null) {
+            List<TextSearch> searches = textSearches(db, sel);
+            if (!searches.isEmpty()) {
+                return new ExplainPlan(PS_FULLTEXT, searches.get(0).index(), table.name());
+            }
+        }
         // WHERE a AND b: se uma das partes tem índice (UNIQUE, columnar ou GEO) é ela que abre a leitura
         List<Expr> parts = sel.cond() == null || !(sel.from() instanceof Expr.Ident) ? List.of() : conjuncts(sel.cond());
         if (parts.size() > 1) {
@@ -3463,22 +4260,17 @@ return score;
             && contains.args().size() == 2 && contains.args().get(1) instanceof Expr.Ident containsField
             && isRowIndependent(contains.args().get(0))) {
             Catalog.TableDef tdef = db.catalog().table(table);
-            return tdef == null ? null : tdef.indexes().values().stream().filter(Catalog.IndexDef::ready)
-                .filter(i -> i.geo() && i.columns().contains(containsField.name())).findFirst().orElse(null);
+            return geoIndexOn(tdef, containsField.name());
         }
         if (table.isBlank() || !(sel.cond() instanceof Expr.Binary comparison)
             || (comparison.op() != Expr.BinaryOp.LT && comparison.op() != Expr.BinaryOp.LE)
             || !(comparison.left() instanceof Expr.Call distance)
             || !distance.name().equals("geo::distance") || distance.args().size() != 2
-            || !(distance.args().get(0) instanceof Expr.Ident field)) {
+            || !(distance.args().get(0) instanceof Expr.Ident field)
+            || !isRowIndependent(distance.args().get(1)) || !isRowIndependent(comparison.right())) {
             return null;
         }
-        Catalog.TableDef def = db.catalog().table(table);
-        if (def == null) {
-            return null;
-        }
-        return def.indexes().values().stream().filter(Catalog.IndexDef::ready)
-            .filter(i -> i.geo() && i.columns().contains(field.name())).findFirst().orElse(null);
+        return geoIndexOn(db.catalog().table(table), field.name());
     }
 
     /** `campo @@ "termos"` con índice SEARCH do campo. */
@@ -3504,6 +4296,9 @@ return score;
             throw errorStmt(Messages.get("stmt_no_table"));
         }
         KvBackend bk = records(db);
+        if (bk instanceof com.axonbase.core.partition.PartitionedKv view && db.catalog().partitioning(table) == null) {
+            bk = view.base(); // a vista só importa para tabela particionada; o histórico precisa do armazenamento
+        }
         if (!(bk instanceof VersionedKvBackend vbk)) {
             throw errorStmt(Messages.get("stmt_no_wal"));
         }
@@ -3538,16 +4333,71 @@ return score;
             return 1;
         }
         if (PS_COLUMNAR_AGG.equals(plan.strategy())) {
-            return columnarEntryCount(db, plan);
+            return estimatedColumnarEntries(db, plan);
         }
-        return fullScanDocs(db, sel).size();
+        return countSourceRows(db, sel.from());
+    }
+
+    /**
+     * Quantos documentos {@link #sourceDocs} devolveria. Numa tabela, conta as chaves em fluxo, sem montar a lista
+     * nem ler os valores; as demais origens (registro, subconsulta, lista, DATABASE LINK) passam por
+     * {@code sourceDocs}. Como ele, não filtra por regra de acesso.
+     */
+    private long countSourceRows(Database db, Expr from) {
+        if (from instanceof Expr.Ident table) {
+            ensureTable(db, table.name());
+            return countRecords(db, table.name());
+        }
+        if (from instanceof Expr.Qualified q && isLocalQualified(q)) {
+            return countRecords(localQualifiedDatabase(session.namespace(), q), q.table());
+        }
+        return sourceDocs(db, from).size();
+    }
+
+    private long countRecords(Database db, String table) {
+        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+        KvBackend kv = countingRecords(db);
+        long[] count = {0};
+        scanRecordKeys(kv, prefix, key -> {
+            // como a leitura por loadDoc: vale a chave que o id lido dela alcança. No caso normal é ela mesma, e
+            // nada é lido
+            String reached = new RecordId(table, parseKey(key.substring(prefix.length())))
+                .storageKey(db.ns(), db.db());
+            if (reached.equals(key) || kv.get(reached).isPresent()) {
+                count[0]++;
+            }
+            return true;
+        });
+        return count[0];
+    }
+
+    /** Como {@link #records}, para só contar: numa transação, não registra leituras nem guarda o que passa. */
+    private KvBackend countingRecords(Database db) {
+        KvBackend raw = rawRecords(db);
+        if (raw instanceof Transaction tx) {
+            raw = tx.untrackedReads();
+        }
+        return com.axonbase.core.partition.PartitionedKv.wrap(db, raw, partitions, ds.coldTier().records());
+    }
+
+    private long estimatedColumnarEntries(Database db, ExplainPlan plan) {
+        long[] count = {0};
+        countingRecords(db).scanPrefix(columnarCountPrefix(db, plan), key -> {
+            QueryContext.checkCancelled();
+            count[0]++;
+            return true;
+        });
+        return count[0];
     }
 
     /** Entradas de uma coluna do índice columnar (uma por linha da tabela). */
     private long columnarEntryCount(Database db, ExplainPlan plan) {
-        String prefix = com.axonbase.core.storage.ColumnarIndex.columnPrefix(
+        return records(db).keysWithPrefix(columnarCountPrefix(db, plan)).size();
+    }
+
+    private String columnarCountPrefix(Database db, ExplainPlan plan) {
+        return com.axonbase.core.storage.ColumnarIndex.columnPrefix(
             db.ns(), db.db(), plan.table(), plan.index().name(), plan.index().columns().get(0));
-        return records(db).keysWithPrefix(prefix).size();
     }
 
     private long explainedRows(Database db, Statement.Select whole, ExplainPlan plan) {
@@ -3557,7 +4407,10 @@ return score;
         }
         List<Document> docs = switch (plan.strategy()) {
             case PS_UNIQUE -> loadUniqueDocs(db, sel, plan.index());
-            case PS_FULLTEXT -> searchSourceDocs(db, sel);
+            case PS_FULLTEXT -> {
+                List<Document> combined = combinedSearchDocs(db, sel);
+                yield combined != null ? combined : searchSourceDocs(db, sel);
+            }
             case PS_GEO, PS_GEO_KNN -> geoSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_VECTOR -> vectorSourceDocs(db, sel, () -> fullScanDocs(db, sel));
             case PS_HYBRID -> hybridSourceDocs(db, sel, hybridSearch(sel));
@@ -3723,7 +4576,14 @@ return score;
     private AxonValue fetchOne(AxonValue.RecordId rid) {
         try {
             Document doc = loadDoc(db(), new RecordId(rid.table(), rid.key() instanceof AxonValue ? (AxonValue) rid.key() : keyOf(rid.key())));
-            return doc != null ? doc.current() : null;
+            if (doc == null) {
+                return null;
+            }
+            if (evaluatingPolicy.get() != null || !com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+                return doc.current();
+            }
+            // acesso por id e FETCH: registro oculto não aparece e o visível vem mascarado
+            return dataRuleFilter(doc) ? applyDataRuleMask(doc.current()) : null;
         } catch (Exception e) {
             return null;
         }
@@ -3826,12 +4686,22 @@ return score;
         Expr.Qualified rq = (rFrom instanceof Expr.RecordId rr && rr.table() instanceof Expr.Qualified q) ? q : null;
         if (rq != null || rFrom instanceof Expr.Qualified || rTo instanceof Expr.Qualified
             || (rTo instanceof Expr.RecordId tr && tr.table() instanceof Expr.Qualified)) {
+            if (sagaCorrelation() != null) {
+                // o estado anterior da aresta remota não é capturado, então o CANCEL não teria como desfazer
+                throw errorStmt(Messages.get("stmt_saga_relate_link_unsupported"));
+            }
             return runWriteViaLink(rq != null ? rq : (Expr.Qualified) qualifiedOf(rFrom, rTo),
-                com.axonbase.parser.Render.stmt(r));
+                com.axonbase.parser.Render.stmt(r), Statement.Relate.class);
         }
         AxonValue from = mapping(r.from());
         AxonValue to = mapping(r.to());
         String kind = tableOf(r.kind());
+        Map<String, AxonValue> assigned = new LinkedHashMap<>();
+        if (r.data() instanceof Data.SetClause sc) {
+            for (Assignment a : sc.assignments()) {
+                assigned.put(fieldOf(a.path()), evalExpr(a.value()));
+            }
+        }
         if (from.isRecordId() && to.isRecordId()) {
             AxonValue.RecordId fromR = from.asRecordId();
             AxonValue.RecordId toR = to.asRecordId();
@@ -3840,16 +4710,20 @@ return score;
             if (Datastore.PLAIN_NAME.matcher(kind).matches()) {
                 ensureTable(db, kind);
             }
-            persistEdge(db, fromR, kind, toR);
+            // in e out são as pontas da aresta, não propriedades
+            Map<String, AxonValue> properties = new LinkedHashMap<>(assigned);
+            properties.remove("in");
+            properties.remove("out");
+            String sagaCorr = sagaCorrelation();
+            if (sagaCorr != null) {
+                recordEdgeStep(sagaCorr, db, fromR, kind, toR);
+            }
+            persistEdge(db, fromR, kind, toR, properties);
         }
         Map<String, AxonValue> edge = new LinkedHashMap<>();
         edge.put("in", from);
         edge.put("out", to);
-        if (r.data() instanceof Data.SetClause sc) {
-            for (Assignment a : sc.assignments()) {
-                edge.put(fieldOf(a.path()), evalExpr(a.value()));
-            }
-        }
+        edge.putAll(assigned);
         return AxonValue.object(edge);
     }
 
@@ -3990,11 +4864,57 @@ return score;
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());
             def.events().putAll(previous.events());
+            def.checks(previous.checks());
+            def.keyedById(previous.keyedById());
         }
         def.permissions(dt.permissions());
+        def.shardBy(dt.shardBy());
         db.catalog().defineTable(def);
-        control(db, ControlCommand.Kind.TABLE, dt.name(), com.axonbase.parser.Render.stmt(dt));
+        if (previous == null) {
+            session.tableCreated(db.ns(), db.db(), dt.name());
+        }
+        persistTable(db, dt.name());
         return AxonValue.nul();
+    }
+
+    /**
+     * Grava a tabela como ela está agora. O plano de controle guarda uma definição por tabela, então gravar o comando
+     * recebido (um ALTER, um DEFINE TABLE, um segundo CREATE TABLE) faria o reinício esquecer o que veio antes. As
+     * colunas declaradas por CREATE ou ALTER TABLE vão num CREATE TABLE; as de DEFINE FIELD têm definição própria.
+     */
+    private void persistTable(Database db, String table) {
+        if (ds.isReplaying()) {
+            return;
+        }
+        Catalog.TableDef def = db.catalog().table(table);
+        java.util.Set<String> fieldDefinitions = ds.controlSnapshot().commands().stream()
+            .filter(c -> c.kind() == ControlCommand.Kind.FIELD && c.namespace().equals(db.ns())
+                && c.database().equals(db.db()))
+            .map(ControlCommand::name)
+            .collect(java.util.stream.Collectors.toSet());
+        List<Statement.ColumnDef> columns = def.fields().values().stream()
+            .filter(field -> !fieldDefinitions.contains(table + ":" + field.name()))
+            .sorted(java.util.Comparator.comparing(Catalog.FieldDef::name))
+            .map(field -> new Statement.ColumnDef(field.name(), field.type() == null ? "any" : field.type(),
+                field.primaryKey(), field.notNull(), field.defaultExpr(), field.assertExpr(), field.references()))
+            .collect(java.util.stream.Collectors.toList());
+        if (def.keyedById()) {
+            // a coluna id não vira campo, mas precisa voltar para a chave composta continuar sendo a mesma
+            columns.add(0, new Statement.ColumnDef("id", "string", true, false, null, null, null));
+        }
+        String definition = com.axonbase.parser.Render.stmt(new DefineTable(table, def.schemafull(), def.drop(),
+            def.permissions(), def.shardBy()));
+        if (!columns.isEmpty() || !def.checks().isEmpty()) {
+            // o CREATE TABLE vem primeiro: o DEFINE TABLE mantém as colunas e repõe as opções da tabela
+            definition = com.axonbase.parser.Render.stmt(new Statement.CreateTable(table, false, def.schemafull(),
+                columns, def.checks())) + ";\n" + definition;
+        }
+        control(db, ControlCommand.Kind.TABLE, table, definition);
+    }
+
+    /** A coluna passou a ser declarada pela tabela (ou saiu dela): um DEFINE FIELD antigo não pode repô-la. */
+    private void forgetFieldDefinition(Database db, String table, String field) {
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.FIELD, table + ":" + field);
     }
 
     private AxonValue runCreateTable(Statement.CreateTable ct) {
@@ -4003,16 +4923,30 @@ return score;
             return AxonValue.nul();
         }
         Catalog.TableDef previous = db.catalog().table(ct.name());
-        Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), false);
+        Catalog.TableDef def = new Catalog.TableDef(ct.name(), ct.schemafull(), previous != null && previous.drop());
         if (previous != null) {
+            def.permissions(previous.permissions());
+            def.indexFailures().putAll(previous.indexFailures());
+            def.shardBy(previous.shardBy());
             def.fields().putAll(previous.fields());
             def.indexes().putAll(previous.indexes());
             def.events().putAll(previous.events());
+            def.checks(previous.checks());
+            def.keyedById(previous.keyedById());
         }
+        List<Expr> checks = new ArrayList<>(def.checks());
+        ct.checks().stream().filter(check -> !checks.contains(check)).forEach(checks::add);
+        def.checks(checks);
         db.catalog().defineTable(def);
+        if (previous == null) {
+            session.tableCreated(db.ns(), db.db(), ct.name());
+        }
 
         for (Statement.ColumnDef col : ct.columns()) {
             if ("id".equalsIgnoreCase(col.name())) {
+                if (col.primaryKey()) {
+                    def.keyedById(true);
+                }
                 continue;
             }
             Catalog.FieldDef fd = new Catalog.FieldDef(
@@ -4023,10 +4957,12 @@ return score;
                 col.defaultExpr(),
                 col.references()
             );
-            def.fields().put(col.name(), fd);
+            def.fields().put(col.name(), fd.constrained(col.notNull(), col.primaryKey()));
+            forgetFieldDefinition(db, ct.name(), col.name());
         }
 
-        control(db, ControlCommand.Kind.TABLE, ct.name(), com.axonbase.parser.Render.stmt(ct));
+        persistTable(db, ct.name());
+        refreshPrimaryKey(db, ct.name());
         return AxonValue.nul();
     }
 
@@ -4036,18 +4972,29 @@ return score;
         if (df.embeddingName() != null) {
             checkEmbeddingField(db, def, df);
         }
+        Catalog.FieldDef previous = def.fields().get(df.name());
         def.fields().put(df.name(),
             new Catalog.FieldDef(df.name(), df.type(), df.readonly(), df.assertExpr(), df.defaultExpr(),
                 df.references(), df.embeddingName(), df.embeddingFrom()));
         control(db, ControlCommand.Kind.FIELD, df.table() + ":" + df.name(),
             com.axonbase.parser.Render.stmt(df));
+        if (previous != null && previous.primaryKey()) {
+            // a coluna saiu da chave: as entradas e o marcador antigos não podem ficar
+            refreshPrimaryKey(db, df.table());
+        }
         return AxonValue.nul();
     }
 
     private AxonValue runDefineIndex(DefineIndex di) {
         Database db = db();
         Catalog.TableDef def = ensureTable(db, di.table());
-        if (di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
+        // no replay a definição já foi aceita: recusá-la agora impediria a base de abrir
+        if (!ds.isReplaying()) {
+            com.axonbase.core.partition.PartitionRunner.checkIndex(db, di.table(), di.name(),
+                di.searchAnalyzer() != null || di.geo() || di.vectorDimension() != null || di.count());
+        }
+        // no replay o analyzer pode ter sido apagado depois do índice: o índice continua, como antes do reinício
+        if (!ds.isReplaying() && di.searchAnalyzer() != null && db.catalog().analyzer(di.searchAnalyzer()) == null) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", di.searchAnalyzer()));
         }
         if (di.vectorDimension() != null) {
@@ -4066,29 +5013,50 @@ return score;
         boolean sameUnique = previous != null && previous.unique() && di.unique()
             && previous.columns().equals(di.columns());
         boolean advanced = di.searchAnalyzer() != null || di.geo() || di.columnar() || di.vectorDimension() != null;
+        // em construção sem ninguém construindo: parou (queda ou camada fria fora), e redefinir é tentar de novo
+        boolean stalled = previous != null && !previous.ready()
+            && !IndexBuilder.running(ds, db.ns(), db.db(), di.table(), di.name());
         String marker = buildMarkerKey(db, di.table(), di.name());
         def.indexFailures().remove(di.name());
         String definition = com.axonbase.parser.Render.stmt(di);
         String controlName = di.table() + ":" + di.name();
         if (ds.isReplaying()) {
             // No replay as entradas já estão no KV. Só um marcador de construção (queda no meio) manda refazer.
-            boolean interrupted = records(db).get(marker).isPresent();
+            // O GEO decide pelo próprio formato: índice geohash antigo ou atrasado é reconstruído (ver GeoMigration).
+            boolean interrupted = di.geo() ? GeoMigration.mustRebuild(db, di.table(), di.name())
+                : records(db).get(marker).isPresent();
             if (interrupted) {
                 newIndex.markBuilding();
+                newIndex.markResumed();
             }
             def.indexes().put(di.name(), newIndex);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
             if (interrupted) {
-                IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), true);
+                // se a construção anterior ainda está saindo, outra começa quando ela terminar
+                IndexBuilder.restartAsync(ds, db.ns(), db.db(), di.table(), di.name());
             }
             return AxonValue.nul();
         }
         // Redefinir o mesmo UNIQUE é idempotente: só um índice novo precisa olhar os dados.
-        if (!((di.unique() && !sameUnique) || advanced)) {
+        if (!((di.unique() && !sameUnique) || advanced || stalled)) {
+            if (previous != null && previous.geo()) {
+                // o GEO deixa marcador e entradas: saem junto com a troca, sem escrita no meio
+                java.util.concurrent.locks.Lock swap = exclusiveIndexLock(db);
+                swap.lock();
+                try {
+                    purgeIndexEntries(db, di.table(), previous);
+                    records(db).delete(marker);
+                    def.indexes().put(di.name(), newIndex);
+                } finally {
+                    swap.unlock();
+                }
+            }
             def.indexes().put(di.name(), newIndex);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
             return AxonValue.nul();
         }
+        // sem as linhas frias ao alcance, nada é apagado nem registrado
+        ds.coldTier().requireReadable(db, di.table());
         java.util.concurrent.locks.Lock write = db.indexLock().writeLock();
         write.lock();
         try {
@@ -4103,15 +5071,24 @@ return score;
         } finally {
             write.unlock();
         }
-        if (countRows(db, di.table(), db.indexInlineRows() + 1) <= db.indexInlineRows()) {
+        // numa importação a construção em segundo plano não veria as linhas da transação ainda não confirmada
+        if (session.restoring() || countRows(db, di.table(), db.indexInlineRows() + 1) <= db.indexInlineRows()) {
             // tabela pequena: constrói no próprio comando, e uma duplicata falha aqui, sem registrar nada
-            IndexBuilder.build(ds, this, db.ns(), db.db(), di.table(), di.name(), false);
+            IndexBuilder.build(ds, this, db.ns(), db.db(), di.table(), di.name(), false, stalled);
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
         } else {
             control(db, ControlCommand.Kind.INDEX, controlName, definition);
             IndexBuilder.startAsync(ds, db.ns(), db.db(), di.table(), di.name(), false);
         }
         return AxonValue.nul();
+    }
+
+    /**
+     * O lado de escrita do indexLock, ou a própria leitura quando esta thread já a segura (um evento que faz DDL no
+     * meio de uma escrita): pedir a escrita nesse caso travaria para sempre.
+     */
+    private static java.util.concurrent.locks.Lock exclusiveIndexLock(Database db) {
+        return db.indexLock().getReadHoldCount() > 0 ? db.indexLock().readLock() : db.indexLock().writeLock();
     }
 
     /** Avança a época de índices; o DDL da própria transação aberta não a invalida. */
@@ -4170,11 +5147,40 @@ return score;
 
     /** Indexa um bloco de registros (chaves já sem o prefixo da tabela). Lança em duplicata de UNIQUE. */
     void buildChunk(Database db, String table, Catalog.IndexDef index, List<String> keyParts) {
+        if (index.geo()) {
+            buildGeoChunk(db, table, index, keyParts);
+            return;
+        }
         inBatch(db, () -> {
             for (String part : keyParts) {
                 indexRow(db, table, index, new RecordId(table, parseKey(part)));
             }
         });
+    }
+
+    /**
+     * Bloco do índice GEO. Num seguidor, um lote replicado pode mudar um registro entre a leitura e a gravação da
+     * entrada (o consenso não usa o indexLock): cada registro é relido depois de gravar e refeito se mudou.
+     */
+    private void buildGeoChunk(Database db, String table, Catalog.IndexDef index, List<String> keyParts) {
+        String column = index.columns().get(0);
+        List<String> pending = keyParts;
+        while (!pending.isEmpty()) {
+            List<String> round = pending;
+            Map<String, byte[]> seen = new java.util.HashMap<>();
+            inBatch(db, () -> {
+                for (String part : round) {
+                    RecordId rid = new RecordId(table, parseKey(part));
+                    byte[] raw = records(db).get(rid.storageKey(db.ns(), db.db())).orElse(null);
+                    seen.put(part, raw);
+                    AxonValue record = raw == null ? null : decode(raw);
+                    AxonValue geometry = record != null && record.isObject() ? record.asObject().get(column) : null;
+                    geoIndex(db, table, index).update(records(db), rid.key().keyString(), geometry);
+                }
+            });
+            pending = round.stream().filter(part -> !java.util.Arrays.equals(seen.get(part), records(db)
+                .get(new RecordId(table, parseKey(part)).storageKey(db.ns(), db.db())).orElse(null))).toList();
+        }
     }
 
     private void indexRow(Database db, String table, Catalog.IndexDef index, RecordId rid) {
@@ -4186,11 +5192,19 @@ return score;
         if (index.unique()) {
             String prefix = uniqueIndexPrefix(db, table, index, current);
             if (prefix != null) {
-                String own = prefix + rid.key().keyString();
-                if (records(db).keysWithPrefix(prefix).stream().anyMatch(k -> !k.equals(own))) {
-                    throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
+                String own = rid.key().keyString();
+                List<String> forms = uniqueIndexForms(db, table, index, current);
+                if (!heldByAnother(db, table, index, forms, own, current)) {
+                    records(db).put(prefix + own, new byte[0]);
+                    // a mesma chave que a escrita normal grava: o índice construído fica igual ao mantido desde o começo
+                    records(db).put(uniqueClaimKey(db, table, index, prefix), new byte[0]);
+                } else {
+                    // se um lote replicado mudou a linha depois da leitura, quem a mudou já a indexou
+                    Document now = loadDoc(db, rid);
+                    if (now != null && prefix.equals(uniqueIndexPrefix(db, table, index, now.current()))) {
+                        throw AxonError.internal(Messages.get("stmt_unique_index_violation", index.name()));
+                    }
                 }
-                records(db).put(own, new byte[0]);
             }
         }
         onlyIndex = index;
@@ -4199,7 +5213,7 @@ return score;
             if (index.search() && records(db).get(docLenKey(db, table, index.name(), rid)).isEmpty()) {
                 indexSearch(db, rid, null, current);
             }
-            if (index.geo() || index.vector()) {
+            if (index.vector()) {
                 indexAdvanced(db, rid, null, current);
             }
             if (index.columnar()) {
@@ -4210,18 +5224,48 @@ return score;
         }
     }
 
-    /** Última etapa: grava as chaves de "pronto" e apaga o marcador no mesmo lote. */
-    void finishIndex(Database db, String table, Catalog.IndexDef index) {
+    /** Limpa as entradas parciais antes de refazer o índice. O marcador de construção é gravado antes de tudo. */
+    void purgeForRebuild(Database db, String table, Catalog.IndexDef index) {
+        records(db).put(buildMarkerKey(db, table, index.name()), new byte[]{1});
+        purgeIndexEntries(db, table, index);
+    }
+
+    /** Apaga o que o índice geohash deixou, depois de garantir o marcador para o binário antigo. */
+    void dropLegacyGeoEntries(Database db, String table, Catalog.IndexDef index) {
+        if (index.geo()) {
+            records(db).put(buildMarkerKey(db, table, index.name()), new byte[]{1});
+            geoIndex(db, table, index).purgeLegacy(records(db), prefix -> deleteAll(db, prefix));
+        }
+    }
+
+    /**
+     * Última etapa: grava as chaves de "pronto" e apaga o marcador no mesmo lote. O índice GEO mantém o marcador de
+     * propósito (ver {@link GeoIndex#tripwireKey}).
+     *
+     * @return {@code false} quando a construção precisa ser refeita: um binário antigo escreveu entradas geohash
+     *     durante a varredura
+     */
+    boolean finishIndex(Database db, String table, Catalog.IndexDef index) {
+        if (hasLegacyGeoEntries(db, table, index)) {
+            return false;
+        }
         inBatch(db, () -> {
             if (index.columnar()) {
                 records(db).put(com.axonbase.core.storage.ColumnarIndex.readyKey(db.ns(), db.db(), table, index.name()),
                     new byte[]{1});
             }
             if (index.geo()) {
-                records(db).put(GeoEntry.readyKey(db.ns(), db.db(), table, index.name()), new byte[]{1});
+                geoIndex(db, table, index).markReady(records(db));
+            } else {
+                records(db).delete(buildMarkerKey(db, table, index.name()));
             }
-            records(db).delete(buildMarkerKey(db, table, index.name()));
         });
+        return true;
+    }
+
+    /** Há escrita de um binário antigo no índice GEO. */
+    boolean hasLegacyGeoEntries(Database db, String table, Catalog.IndexDef index) {
+        return index.geo() && geoIndex(db, table, index).hasLegacyEntries(records(db));
     }
 
     /** Desfaz uma construção que falhou: tira o índice do catálogo e do plano de controle e apaga suas entradas. */
@@ -4264,6 +5308,7 @@ return score;
             if (!sharedColumn) {
                 String head = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000!uidx\u0000";
                 deleteAll(db, head + (index.columns().size() == 1 ? index.columns().get(0) : name) + "\u0000");
+                deleteAll(db, uniqueClaimPrefix(db, table) + uniqueSegment(index) + "|");
             }
         }
         if (index.columnar()) {
@@ -4276,10 +5321,7 @@ return score;
             deleteAll(db, "VH" + base);
         }
         if (index.geo()) {
-            records(db).delete(GeoEntry.readyKey(db.ns(), db.db(), table, name));
-            records(db).delete(GeoEntry.nonPointKey(db.ns(), db.db(), table, name));
-            deleteAll(db, geoIndexBase(db, table, name));
-            deleteAll(db, "SPR" + base);
+            geoIndex(db, table, index).purge(records(db), prefix -> deleteAll(db, prefix));
         }
         if (index.search()) {
             deleteAll(db, "FT" + base);
@@ -4325,10 +5367,7 @@ return score;
             throw errorStmt(Messages.get("embedding_provider_unsupported", de.provider()));
         }
         ds.embeddings().checkUrl(de.url());
-        db.catalog().defineEmbedding(new Catalog.EmbeddingDef(de.name(), de.url(), de.model(), de.dimension(),
-            de.keyEnv(), de.timeoutSeconds() == null ? Catalog.EmbeddingDef.DEFAULT_TIMEOUT_SECONDS : de.timeoutSeconds(),
-            de.batch() == null ? Catalog.EmbeddingDef.DEFAULT_BATCH : de.batch(), de.documentPrefix(),
-            de.queryPrefix(), de.sendDimension(), de.authHeader()));
+        db.catalog().defineEmbedding(embeddingDef(de));
         control(db, ControlCommand.Kind.EMBEDDING, de.name(), com.axonbase.parser.Render.stmt(de));
         return AxonValue.nul();
     }
@@ -4594,6 +5633,7 @@ return score;
         ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.USER, ns, database,
             identity(du.name(), du.scope(), ns, database),
             com.axonbase.parser.Render.stmt(replayable)));
+        ds.pruneUserControl(session, du.name());
         return AxonValue.nul();
     }
 
@@ -4609,6 +5649,7 @@ return score;
         if (da.scope() == Statement.AuthScope.DATABASE && (database == null || database.isBlank())) {
             throw errorStmt(Messages.get("stmt_access_needs_db"));
         }
+        authorizeUserScope(da.scope(), ns, database);
         ds.authCatalog().defineAccess(da.name(), authScope(da.scope()), ns, database);
         ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.ACCESS, ns, database,
             identity(da.name(), da.scope(), ns, database),
@@ -4621,6 +5662,7 @@ return score;
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_link_needs_ns"));
         }
+        authorizeLink(ns);
         var def = new com.axonbase.core.engine.Datastore.DatabaseLinkDef(
             ddl.name(), ddl.url(), ddl.ns(), ddl.db(), ddl.user(), ddl.password());
         ds.defineDatabaseLink(ns, ddl.name(), def);
@@ -4634,7 +5676,9 @@ return score;
         if (ns == null || ns.isBlank()) {
             throw errorStmt(Messages.get("stmt_link_drop_needs_ns"));
         }
+        authorizeLink(ns);
         ds.dropDatabaseLink(ns, ddl.name());
+        ds.removeControl(session, ns, "", ControlCommand.Kind.DATABASE_LINK, ddl.name());
         return AxonValue.nul();
     }
 
@@ -4642,9 +5686,22 @@ return score;
     // SAGA (stubs — implementação nas fases 2-3)
     // ------------------------------------------------------------------
 
+    /** O link vale para o namespace inteiro, então exige escopo que o cubra. */
+    private void authorizeLink(String ns) {
+        authorizeScope(Statement.AuthScope.NAMESPACE, ns, null, "auth_scope_forbidden");
+    }
+
+    /** A definição de saga é global ao servidor, então criar, substituir ou apagar exige escopo ROOT. */
+    private void authorizeSagaDefinition() {
+        authorizeScope(Statement.AuthScope.ROOT, null, null, "auth_scope_forbidden");
+    }
+
     private AxonValue runCreateSaga(CreateSaga cs) {
+        authorizeSagaDefinition();
         var def = new Datastore.SagaDef(cs.name(), cs.links());
         ds.defineSaga(cs.name(), def);
+        ds.applyControl(session, ControlCommand.of(ControlCommand.Kind.SAGA, "", "", cs.name(),
+            com.axonbase.parser.Render.stmt(cs)));
         return AxonValue.nul();
     }
 
@@ -4754,6 +5811,8 @@ return score;
     }
 
     private AxonValue runShowSagaTransaction(ShowSagaTransaction st) {
+        // o ledger é lido com sessão interna: o escopo de quem pergunta é conferido antes
+        sagaLedger.requireReach(session.auth(), st.correlationId());
         // Query the saga ledger
         AxonValue saga = ds.execute(
             "SELECT * FROM saga WHERE correlation_id = \"" + SagaLedger.esc(st.correlationId()) + "\"",
@@ -4770,8 +5829,13 @@ return score;
 
     private AxonValue runBeginSaga(BeginSaga bs) {
         sagaLedger.ensureTables();
-        sagaLedger.beginSaga(bs.name(), bs.correlationId());
-        coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false);
+        // reabrir a correlação de outro escopo tomaria a SAGA dele
+        sagaLedger.requireReach(session.auth(), bs.correlationId());
+        Datastore.SagaDef definition = ds.saga(bs.name());
+        String linkNamespace = session.namespace() == null ? "" : session.namespace();
+        sagaLedger.beginSaga(bs.name(), bs.correlationId(), definition == null ? List.of() : definition.links(),
+            linkNamespace, session.database() == null ? "" : session.database());
+        coordinateSagaParticipants(bs.name(), bs.correlationId(), "BEGIN", false, session.namespace());
         return AxonValue.object(Map.of(
             "saga", AxonValue.str(bs.name()),
             "correlation_id", AxonValue.str(bs.correlationId()),
@@ -4779,28 +5843,54 @@ return score;
         ));
     }
 
-    private AxonValue runCommitSaga(CommitSaga cs) {
-        if (!sagaLedger.isSagaActive(cs.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", cs.correlationId()));
+    /**
+     * A transação precisa estar ativa, ter sido aberta com este nome e ainda ter a definição que usou no BEGIN.
+     *
+     * @param resumable aceita também a transação parada em {@code COMPENSATING}, para o CANCEL terminar o serviço
+     * @return o estado encontrado
+     */
+    private String requireSaga(String name, String correlationId, boolean resumable) {
+        // antes de tudo: o estado e o nome de uma SAGA fora do escopo não são revelados
+        sagaLedger.requireReach(session.auth(), correlationId);
+        Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
+        AxonValue value = record == null ? null : record.get("status");
+        String status = value != null && value.isString() ? value.asString() : "";
+        if (!"RUNNING".equals(status) && !(resumable && "COMPENSATING".equals(status))) {
+            throw errorStmt(Messages.get("stmt_saga_inactive", correlationId));
         }
-        coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false);
+        AxonValue opened = record.get("name");
+        if (opened != null && opened.isString() && !opened.asString().equals(name)) {
+            throw errorStmt(Messages.get("stmt_saga_other_name", name, correlationId, opened.asString()));
+        }
+        AxonValue links = record.get("links");
+        // sem a definição, os participantes não seriam avisados e o comando informaria um sucesso falso
+        if ("RUNNING".equals(status) && links != null && links.isArray() && !links.asArray().isEmpty()
+            && ds.saga(name) == null) {
+            throw errorStmt(Messages.get("stmt_saga_missing", name));
+        }
+        return status;
+    }
+
+    private AxonValue runCommitSaga(CommitSaga cs) {
+        requireSaga(cs.name(), cs.correlationId(), false);
+        coordinateSagaParticipants(cs.name(), cs.correlationId(), "COMMIT", false,
+            linkNamespace(cs.correlationId()));
         sagaLedger.commitSaga(cs.name(), cs.correlationId());
         return AxonValue.object(Map.of("status", AxonValue.str("COMMITTED")));
     }
 
     private AxonValue runCancelSaga(CancelSaga cs) {
-        if (!sagaLedger.isSagaActive(cs.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", cs.correlationId()));
+        // em COMPENSATING os participantes já responderam: falta só terminar a compensação local
+        if ("RUNNING".equals(requireSaga(cs.name(), cs.correlationId(), true))) {
+            coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true,
+                linkNamespace(cs.correlationId()));
         }
-        coordinateSagaParticipants(cs.name(), cs.correlationId(), "CANCEL", true);
-        sagaLedger.cancelSaga(cs.name(), cs.correlationId());
+        sagaLedger.cancelSaga(cs.name(), cs.correlationId(), session);
         return AxonValue.object(Map.of("status", AxonValue.str("FAILED")));
     }
 
     private AxonValue runJoinSaga(JoinSaga js) {
-        if (!sagaLedger.isSagaActive(js.correlationId())) {
-            throw errorStmt(Messages.get("stmt_saga_inactive", js.correlationId()));
-        }
+        requireSaga(js.name(), js.correlationId(), false);
         session.sagaBegin(js.name(), js.correlationId());
         session.vars().set("saga_corr", AxonValue.str(js.correlationId()));
         return AxonValue.object(Map.of("status", AxonValue.str("RUNNING")));
@@ -4812,7 +5902,22 @@ return score;
         return AxonValue.object(Map.of("ok", AxonValue.str("1")));
     }
 
-    private void coordinateSagaParticipants(String sagaName, String correlationId, String action, boolean reverse) {
+    /**
+     * Namespace onde procurar as ligações dos participantes. A API de gestão executa em {@code system}: nesse caso
+     * vale o namespace de quem abriu a SAGA. Nas demais sessões vale o da própria sessão.
+     */
+    private String linkNamespace(String correlationId) {
+        if (!"system".equals(session.namespace())) {
+            return session.namespace();
+        }
+        Map<String, AxonValue> record = sagaLedger.transaction(correlationId);
+        AxonValue opened = record == null ? null : record.get("link_namespace");
+        return opened != null && opened.isString() && !opened.asString().isEmpty()
+            ? opened.asString() : session.namespace();
+    }
+
+    private void coordinateSagaParticipants(String sagaName, String correlationId, String action, boolean reverse,
+                                            String linkNamespace) {
         Datastore.SagaDef definition = ds.saga(sagaName);
         if (definition == null) {
             return;
@@ -4821,23 +5926,23 @@ return score;
         if (reverse) {
             java.util.Collections.reverse(links);
         }
-        String statement = action + " SAGA " + sagaName + " WITH CORRELATION '"
-            + SagaLedger.esc(correlationId) + "'";
+        String statement = sagaCommandText(sagaCommand(action, sagaName, correlationId));
+        String show = "BEGIN".equals(action)
+            ? null : sagaCommandText(new ShowSagaTransaction(sagaName, correlationId));
         for (String linkName : links) {
-            Datastore.DatabaseLinkDef link = ds.databaseLink(session.namespace(), linkName);
+            Datastore.DatabaseLinkDef link = ds.databaseLink(linkNamespace, linkName);
             if (link == null) {
                 throw errorStmt(Messages.get("stmt_saga_link_missing", linkName));
             }
             try {
                 // Participant cancellation owns its local steps. Mirror them first as
                 // reporting-only records so the orchestrator never compensates them again.
-                if (!"BEGIN".equals(action)) {
-                    List<AxonValue> transaction = linkClient.query(link,
-                        "SHOW SAGA TRANSACTION " + sagaName + " '" + SagaLedger.esc(correlationId) + "'");
+                if (show != null) {
+                    List<AxonValue> transaction = linkClient.query(link, show);
                     if (!transaction.isEmpty() && transaction.get(0).isObject()) {
                         AxonValue steps = transaction.get(0).asObject().get("steps");
                         if (steps != null && steps.isArray()) {
-                            sagaLedger.reportParticipantSteps(correlationId, session.namespace(), linkName, steps.asArray());
+                            sagaLedger.reportParticipantSteps(correlationId, linkNamespace, linkName, steps.asArray());
                         }
                     }
                 }
@@ -4848,6 +5953,33 @@ return score;
         }
     }
 
+    private static Statement sagaCommand(String action, String name, String correlationId) {
+        return switch (action) {
+            case "BEGIN" -> new BeginSaga(name, correlationId);
+            case "COMMIT" -> new CommitSaga(name, correlationId);
+            case "CANCEL" -> new CancelSaga(name, correlationId);
+            default -> throw new IllegalStateException(action);
+        };
+    }
+
+    /**
+     * O texto que segue por um DATABASE LINK para coordenar uma SAGA. Como numa escrita encaminhada, é uma única
+     * sentença; relida, ela precisa voltar como o mesmo comando (um nome que é palavra-chave volta em minúsculas).
+     */
+    private String sagaCommandText(Statement command) {
+        String text = com.axonbase.parser.Render.stmt(command);
+        List<Statement> parsed;
+        try {
+            parsed = AxonQl.parse(text).statements();
+        } catch (RuntimeException e) {
+            throw errorStmt(e.getMessage());
+        }
+        if (parsed.size() != 1 || !com.axonbase.parser.Render.stmt(parsed.get(0)).equalsIgnoreCase(text)) {
+            throw errorStmt("comando de SAGA não aceito num DATABASE LINK: " + text);
+        }
+        return text;
+    }
+
     // ------------------------------------------------------------------
     // DATA RULES
     // ------------------------------------------------------------------
@@ -4856,7 +5988,9 @@ return score;
         Database db = db();
         Map<String, Expr> injections = extractInjections(cd.predicate());
         db.catalog().defineDataRule(new Catalog.DataRuleDef(cd.name(), cd.predicate(), cd.maskPatterns(), injections));
-        control(db, ControlCommand.Kind.TABLE, cd.name(), com.axonbase.parser.Render.stmt(cd));
+        ds.removeDataRuleControl(session, db.ns(), db.db(), cd.name());
+        // nome próprio no plano de controle: o nome puro é o da definição da tabela
+        control(db, ControlCommand.Kind.TABLE, "datarule:" + cd.name(), com.axonbase.parser.Render.stmt(cd));
         return AxonValue.nul();
     }
 
@@ -4865,21 +5999,45 @@ return score;
         if (!db.catalog().removeDataRule(dr.name())) {
             throw errorStmt(Messages.get("stmt_data_rule_missing", dr.name()));
         }
+        ds.removeDataRuleControl(session, db.ns(), db.db(), dr.name());
         return AxonValue.nul();
     }
 
     private AxonValue runRemoveTable(Statement.RemoveTable rt) {
         Database db = db();
         String table = rt.name();
-        if (!db.catalog().removeTable(table)) {
-            throw errorStmt(Messages.get("stmt_table_undefined", table));
+        boolean dropped;
+        // sem construção nem escrita no meio: nada pode regravar entradas GEO depois da limpeza
+        java.util.concurrent.locks.Lock write = exclusiveIndexLock(db);
+        write.lock();
+        try {
+            Catalog.TableDef removed = db.catalog().table(table);
+            // tabela particionada sai de uma vez, por faixa, antes de o catálogo esquecer que ela é particionada
+            dropped = removed != null && partitionRunner(db).dropTable(table);
+            if (!db.catalog().removeTable(table)) {
+                throw errorStmt(Messages.get("stmt_table_undefined", table));
+            }
+            if (removed != null) {
+                for (Catalog.IndexDef index : removed.indexes().values()) {
+                    if (index.geo()) {
+                        purgeIndexEntries(db, table, index);
+                        records(db).delete(buildMarkerKey(db, table, index.name()));
+                    }
+                }
+            }
+        } finally {
+            write.unlock();
         }
-        String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
-        for (String key : records(db).keysWithPrefix(prefix)) {
-            records(db).delete(key);
+        if (!dropped) {
+            String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+            for (String key : records(db).keysWithPrefix(prefix)) {
+                records(db).delete(key);
+            }
         }
         // se a tabela era um tipo de aresta (RELATE), as arestas dele saem junto
         removeEdgesOfKind(db, table);
+        records(db).delete(primaryKeyMarker(db, table));
+        deleteAll(db, uniqueClaimPrefix(db, table));
         ds.removeTableControl(session, db.ns(), db.db(), table);
         return AxonValue.nul();
     }
@@ -4908,37 +6066,64 @@ return score;
     private AxonValue runAlterTable(Statement.AlterTable at) {
         Database db = db();
         Catalog.TableDef def = ensureTable(db, at.name());
+        // no replay um ALTER gravado pela rc1 no lugar da tabela fala de colunas que já não estão no catálogo
+        if (!ds.isReplaying()) {
+            checkAlterColumns(def, at);
+        }
         for (Statement.AlterOp op : at.operations()) {
             switch (op) {
                 case Statement.AddColumn ac -> {
                     def.fields().put(ac.name(), new Catalog.FieldDef(ac.name(), ac.type(), false,
-                        ac.checkExpr(), ac.defaultExpr(), ac.references()));
+                        ac.checkExpr(), ac.defaultExpr(), ac.references())
+                        .constrained(ac.notNull(), ac.primaryKey()));
+                    forgetFieldDefinition(db, at.name(), ac.name());
                 }
                 case Statement.DropColumn dc -> {
-                    if (def.fields().remove(dc.name()) == null) {
-                        throw errorStmt(Messages.get("stmt_field_missing", dc.name(), at.name()));
-                    }
+                    def.fields().remove(dc.name());
+                    forgetFieldDefinition(db, at.name(), dc.name());
                 }
                 case Statement.ModifyColumn mc -> {
                     Catalog.FieldDef existing = def.fields().get(mc.name());
-                    if (existing == null) {
-                        throw errorStmt(Messages.get("stmt_field_missing", mc.name(), at.name()));
-                    }
                     def.fields().put(mc.name(), new Catalog.FieldDef(mc.name(), mc.type(),
-                        existing.readonly(),
-                        mc.checkExpr() != null ? mc.checkExpr() : existing.assertExpr(),
-                        mc.defaultExpr() != null ? mc.defaultExpr() : existing.defaultExpr(),
-                        existing.references()));
+                        existing != null && existing.readonly(),
+                        mc.checkExpr() != null || existing == null ? mc.checkExpr() : existing.assertExpr(),
+                        mc.defaultExpr() != null || existing == null ? mc.defaultExpr() : existing.defaultExpr(),
+                        existing == null ? null : existing.references())
+                        .constrained(mc.notNull() || existing != null && existing.notNull(),
+                            existing != null && existing.primaryKey()));
+                    forgetFieldDefinition(db, at.name(), mc.name());
                 }
             }
         }
-        control(db, ControlCommand.Kind.TABLE, at.name(), com.axonbase.parser.Render.stmt(at));
+        persistTable(db, at.name());
+        refreshPrimaryKey(db, at.name());
         return AxonValue.nul();
+    }
+
+    /** Confere o ALTER inteiro antes de mudar o catálogo: ou todas as operações valem, ou nenhuma. */
+    private void checkAlterColumns(Catalog.TableDef def, Statement.AlterTable at) {
+        java.util.Set<String> columns = new java.util.HashSet<>(def.fields().keySet());
+        for (Statement.AlterOp op : at.operations()) {
+            String missing = switch (op) {
+                case Statement.AddColumn ac -> {
+                    columns.add(ac.name());
+                    yield null;
+                }
+                case Statement.DropColumn dc -> columns.remove(dc.name()) ? null : dc.name();
+                case Statement.ModifyColumn mc -> columns.contains(mc.name()) ? null : mc.name();
+            };
+            if (missing != null) {
+                throw errorStmt(Messages.get("stmt_field_missing", missing, at.name()));
+            }
+        }
     }
 
     private AxonValue runDropIndex(Statement.DropIndex di) {
         Database db = db();
         for (Catalog.TableDef def : db.catalog().tables()) {
+            if (di.table() != null && !di.table().equals(def.name())) {
+                continue;
+            }
             java.util.concurrent.locks.Lock write = db.indexLock().writeLock();
             write.lock();
             Catalog.IndexDef removed;
@@ -4953,18 +6138,21 @@ return score;
                 write.unlock();
             }
             if (removed != null) {
-                control(db, ControlCommand.Kind.INDEX, di.name(),
-                    "DROP INDEX " + di.name());
+                // o plano de controle só sabe substituir: a definição sai dele, senão o reinício a recriaria
+                ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.INDEX,
+                    def.name() + ":" + removed.name());
                 return AxonValue.nul();
             }
         }
-        throw errorStmt(Messages.get("stmt_index_missing", di.name()));
+        throw errorStmt(di.table() == null ? Messages.get("stmt_index_missing", di.name())
+            : Messages.get("stmt_index_missing_on_table", di.name(), di.table()));
     }
 
     private AxonValue runDropEvent(Statement.DropEvent de) {
         Database db = db();
         for (Catalog.TableDef def : db.catalog().tables()) {
             if (def.events().remove(de.name()) != null) {
+                ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.EVENT, def.name() + ":" + de.name());
                 return AxonValue.nul();
             }
         }
@@ -4973,31 +6161,90 @@ return score;
 
     private AxonValue runDropAnalyzer(Statement.DropAnalyzer da) {
         Database db = db();
+        for (Catalog.TableDef def : db.catalog().tables()) {
+            for (Catalog.IndexDef index : def.indexes().values()) {
+                // sem o analyzer o índice deixa de ser mantido, e a exportação dele não importa
+                if (da.name().equals(index.searchAnalyzer()) && db.catalog().analyzer(da.name()) != null) {
+                    throw errorStmt(Messages.get("stmt_analyzer_in_use", da.name(), index.name(), def.name(),
+                        index.name(), def.name()));
+                }
+            }
+        }
         if (!db.catalog().removeAnalyzer(da.name())) {
             throw errorStmt(Messages.get("stmt_analyzer_missing", da.name()));
         }
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.ANALYZER, da.name());
         return AxonValue.nul();
     }
 
     private AxonValue runDropUser(Statement.DropUser du) {
-        Database db = db();
         String ns = session.namespace();
         String database = session.database();
-        this.ds.authCatalog().removeUser(du.name(), ns, database);
-        control(db, ControlCommand.Kind.USER, du.name(),
-            com.axonbase.parser.Render.stmt(du));
+        if (ds.isReplaying()) {
+            replayDropUser(du.name(), ns, database);
+            return AxonValue.nul();
+        }
+        db();
+        AuthCatalog catalog = this.ds.authCatalog();
+        // vale o escopo da identidade encontrada, que pode ser maior que o da sessão
+        AuthCatalog.User target = catalog.user(du.name(), ns, database);
+        if (target == null) {
+            return AxonValue.nul();
+        }
+        authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
+            "auth_scope_forbidden");
+        if (catalog.isInitialRoot(target.name(), target.scope())) {
+            if (com.axonbase.core.security.Authz.authenticated(session.auth())) {
+                throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_initial_root_protected"));
+            }
+            // modo embutido ou servidor sem autenticação: não remove e não falha
+            return AxonValue.nul();
+        }
+        if (catalog.removeUser(du.name(), ns, database)) {
+            ds.pruneUserControl(session, du.name());
+        }
         return AxonValue.nul();
+    }
+
+    /**
+     * Um {@code DROP USER} gravado por versão anterior. O gravado pela API para escopo de namespace ou root não tem
+     * banco, e exigir um impedia o servidor de subir; sem banco, só o escopo exato é removido.
+     */
+    private void replayDropUser(String name, String ns, String database) {
+        if (database != null) {
+            ds.authCatalog().removeUser(name, ns, database);
+        } else {
+            ds.authCatalog().removeUserExact(name, ns == null
+                ? com.axonbase.core.security.AuthCatalog.Scope.ROOT
+                : com.axonbase.core.security.AuthCatalog.Scope.NAMESPACE, ns, null);
+        }
+        System.err.println(Messages.get("user_drop_legacy", name));
     }
 
     private AxonValue runRevokeAccess(Statement.RevokeAccess ra) {
         String ns = session.namespace();
         String database = session.database();
-        this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+        AuthCatalog.Access target = this.ds.authCatalog().access(ra.name(), ns, database);
+        if (target != null) {
+            authorizeScope(Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database(),
+                "auth_scope_forbidden");
+            this.ds.authCatalog().removeAccess(ra.name(), ns, database);
+            // sem tirar a definição do plano de controle, o reinício devolveria o acesso
+            String targetNs = target.namespace() == null ? "" : target.namespace();
+            String targetDb = target.database() == null ? "" : target.database();
+            ds.removeControl(session, targetNs, targetDb, ControlCommand.Kind.ACCESS, identity(target.name(),
+                Statement.AuthScope.valueOf(target.scope().name()), target.namespace(), target.database()));
+        }
         return AxonValue.nul();
     }
 
     private AxonValue runDropSaga(Statement.DropSaga d) {
-        this.ds.dropSaga(d.name());
+        authorizeSagaDefinition();
+        if (ds.saga(d.name()) == null) {
+            throw errorStmt(Messages.get("stmt_saga_missing", d.name()));
+        }
+        ds.dropSaga(d.name());
+        ds.removeControl(session, "", "", ControlCommand.Kind.SAGA, d.name());
         return AxonValue.nul();
     }
 
@@ -5009,9 +6256,84 @@ return score;
         List<Expr> predicates = new ArrayList<>();
         for (String name : dataRuleNames(auth)) {
             Catalog.DataRuleDef def = db.catalog().dataRule(name);
-            if (def != null) predicates.add(def.predicate());
+            // regra que não existe neste banco nega: liberar tornaria um nome errado em acesso total
+            if (def == null) return DENY_ALL;
+            if (lacksParameterValue(def.predicate(), name2 -> true)) return DENY_ALL;
+            predicates.add(def.predicate());
         }
         return predicates;
+    }
+
+    /** Ligado enquanto o motor avalia regras e permissões: ali a travessia de um link lê o registro como ele é. */
+    private final ThreadLocal<Boolean> evaluatingPolicy = new ThreadLocal<>();
+
+    private AxonValue asPolicy(java.util.function.Supplier<AxonValue> work) {
+        Boolean previous = evaluatingPolicy.get();
+        evaluatingPolicy.set(Boolean.TRUE);
+        try {
+            return asDefinition(work);
+        } finally {
+            if (previous == null) {
+                evaluatingPolicy.remove();
+            } else {
+                evaluatingPolicy.set(previous);
+            }
+        }
+    }
+
+    /** Predicado que não deixa passar linha alguma. */
+    private static final List<Expr> DENY_ALL = List.of(new Expr.Literal(AxonValue.bool(false)));
+
+    /** Os parâmetros que trazem dados do token da sessão. */
+    private static final java.util.function.Predicate<String> TOKEN_PARAMETERS =
+        name -> "auth".equals(name) || "token".equals(name);
+
+    /**
+     * Algum {@code $parametro} conferido da regra (ou o campo pedido a ele, como {@code $auth.tenant}) está sem valor.
+     * Comparar a falta com um campo ausente daria verdadeiro, então a condição inteira passa a negar.
+     */
+    private boolean lacksParameterValue(Expr e, java.util.function.Predicate<String> checked) {
+        java.util.function.Predicate<Expr> lacks = part -> lacksParameterValue(part, checked);
+        return switch (e) {
+            case null -> false;
+            case Expr.Param p -> !"parent".equals(p.name()) && checked.test(p.name()) && isMissing(eval(p));
+            case Expr.Idiom i -> idiomLacksValue(i, checked);
+            case Expr.Binary b -> lacks.test(b.left()) || lacks.test(b.right());
+            case Expr.Unary u -> lacks.test(u.operand());
+            case Expr.Cast c -> lacks.test(c.operand());
+            case Expr.Alias a -> lacks.test(a.expr());
+            case Expr.Call c -> c.args().stream().anyMatch(lacks);
+            case Expr.ArrayLit a -> a.items().stream().anyMatch(lacks);
+            case Expr.SetLit s -> s.items().stream().anyMatch(lacks);
+            case Expr.ObjectLit o -> o.entries().stream().anyMatch(en -> lacks.test(en.value()));
+            case Expr.RecordId r -> lacks.test(r.key());
+            case Expr.Range r -> lacks.test(r.start()) || lacks.test(r.end());
+            case Expr.SubQuery sq -> sq.query().statements().stream()
+                .anyMatch(st -> st instanceof Statement.Select sel && lacks.test(sel.cond()));
+            case Expr.Literal l -> false;
+            case Expr.Ident id -> false;
+            case Expr.Qualified q -> false;
+            case Expr.Path p -> false;
+            case Expr.Block b -> false;
+        };
+    }
+
+    /** Confere o trecho {@code $parametro.campo.campo} de um idiom; o que vier depois é percorrido como expressão. */
+    private boolean idiomLacksValue(Expr.Idiom i, java.util.function.Predicate<String> checked) {
+        if (!(i.base() instanceof Expr.Param p)) {
+            return lacksParameterValue(i.base(), checked);
+        }
+        if ("parent".equals(p.name()) || !checked.test(p.name())) {
+            return false;
+        }
+        List<Expr.Part> fields = i.parts().stream().takeWhile(part -> part instanceof Expr.Part.Field).toList();
+        Expr value = fields.isEmpty() ? p : new Expr.Idiom(p, fields);
+        // como avaliação de política: se o parâmetro for um record id, a leitura não volta a aplicar as regras
+        return isMissing(asPolicy(() -> eval(value)));
+    }
+
+    private static boolean isMissing(AxonValue v) {
+        return v == null || v.isNone() || v.isNull();
     }
 
     /** Extrai os nomes das Data Rules do objeto auth (array ou CSV). */
@@ -5066,8 +6388,11 @@ return score;
 
     /** Injeta nos campos do novo registro os valores mapeados pelas data rules do usuário. */
     private void injectDataRuleFields(Map<String, AxonValue> obj) {
+        if (session.compensation() != null) {
+            return;
+        }
         for (var entry : dataRuleInjections().entrySet()) {
-            AxonValue value = eval(entry.getValue());
+            AxonValue value = asPolicy(() -> eval(entry.getValue()));
             if (value != null && !value.isNone()) {
                 obj.put(entry.getKey(), value);
             }
@@ -5097,6 +6422,26 @@ return score;
         return result;
     }
 
+    /** O registro devolvido por uma escrita, com as máscaras do usuário. */
+    private AxonValue visible(AxonValue record) {
+        return masksColumns() ? applyDataRuleMask(record) : record;
+    }
+
+    private Document masked(Document d) {
+        return new Document(d.id(), applyDataRuleMask(d.current()));
+    }
+
+    /** CREATE e UPSERT gravam sobre a chave: um registro que a regra esconde não pode ser tocado. */
+    private void refuseHiddenRecord(Database db, RecordId rid) {
+        if (!com.axonbase.core.security.Authz.hasDataRules(session.auth())) {
+            return;
+        }
+        Document existing = loadDoc(db, rid);
+        if (existing != null && !dataRuleFilter(existing)) {
+            throw errorStmt("permission denied");
+        }
+    }
+
     /** Converte padrão SQL LIKE (com %) para regex. */
     private static String sqlLikeToRegex(String pattern) {
         StringBuilder regex = new StringBuilder("(?i)");
@@ -5119,16 +6464,17 @@ return score;
         if (predicates.isEmpty()) return;
         Expr combined = predicates.size() == 1 ? predicates.get(0)
             : Expr.and(predicates);
-        docs.removeIf(doc -> !truthy(evalCond(combined, doc)));
+        docs.removeIf(doc -> !truthy(asPolicy(() -> evalCond(combined, doc))));
     }
 
     /** Retorna true se o documento passa pelo filtro das Data Rules. */
     private boolean dataRuleFilter(Document doc) {
+        if (session.compensation() != null && compensates(doc.id().table())) return true;
         List<Expr> predicates = dataRulePredicates();
         if (predicates.isEmpty()) return true;
         Expr combined = predicates.size() == 1 ? predicates.get(0)
             : Expr.and(predicates);
-        return truthy(evalOnDocument(combined, doc));
+        return truthy(asPolicy(() -> evalOnDocument(combined, doc)));
     }
 
     private Session sagaSession() {
@@ -5196,9 +6542,9 @@ return score;
         if (target instanceof Expr.RecordId rid) {
             return List.of(configRecordId(rid));
         }
+        // não registra a tabela: um DELETE de um nome errado não pode criá-la
         if (target instanceof Expr.Ident ident) {
             String table = ident.name();
-            ensureTable(db, table);
             String prefix = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
             List<RecordId> out = new ArrayList<>();
             for (String k : records(db).keysWithPrefix(prefix)) {
@@ -5213,6 +6559,7 @@ return score;
             String table = q.link().equals(ns) ? q.table() : q.link();
             Database targetDb = db();
             if (!q.link().equals(ns)) {
+                requireInReach(q.link());
                 targetDb = ds.ensureDatabase(session, ns, q.link());
             }
             String prefix = targetDb.ns() + "\u0000" + targetDb.db() + "\u0000" + table + "\u0000";
@@ -5224,7 +6571,7 @@ return score;
             return out;
         }
         if (target instanceof Expr.Param p) {
-            AxonValue v = session.vars().get(p.name());
+            AxonValue v = parameter(p.name());
             if (v != null && v.isRecordId()) {
                 AxonValue.RecordId r = v.asRecordId();
                 return List.of(new RecordId(r.table(), keyOf(r.key())));
@@ -5266,7 +6613,7 @@ return score;
             case Expr.Ident id -> id.name();
             case Expr.RecordId rid -> rid.table() instanceof Expr.Ident id2 ? id2.name() : "";
             case Expr.Param p -> {
-                AxonValue v = session.vars().get(p.name());
+                AxonValue v = parameter(p.name());
                 yield v != null && v.isRecordId() ? v.asRecordId().table() : "";
             }
             default -> "";
@@ -5319,6 +6666,12 @@ return score;
     // Evaluación de expresións
     // ------------------------------------------------------------------
 
+    /** Resolvedor único de parâmetros, ou {@code null} quando não há valor. */
+    private AxonValue parameter(String name) {
+        Session source = identitySession != null && Session.isIdentityVariable(name) ? identitySession : session;
+        return source.parameter(name);
+    }
+
     private AxonValue eval(Expr e) {
         if (e == null) {
             return AxonValue.nul();
@@ -5335,7 +6688,10 @@ return score;
                 yield AxonValue.table(def != null ? def.name() : name);
             }
             case Expr.Qualified q -> AxonValue.table(q.table());
-            case Expr.Param p -> session.vars().getOrMissing(p.name());
+            case Expr.Param p -> {
+                AxonValue v = parameter(p.name());
+                yield v == null ? AxonValue.none() : v;
+            }
             case Expr.Path p -> invokePath(p);
             case Expr.Call c -> invokeCall(c);
             case Expr.RecordId rid -> mapping(rid);
@@ -5354,11 +6710,58 @@ return score;
     }
 
     private AxonValue evalIdiom(Expr.Idiom i, Document doc) {
-        AxonValue base = idiomBase(i.base(), doc);
-        for (Expr.Part p : i.parts()) {
-            base = applyPart(base, p);
+        // ->aresta.campo chega como idiom dentro de idiom: achatado, o passo de grafo fica ao lado do campo
+        List<Expr.Part> parts = new ArrayList<>(i.parts());
+        Expr root = i.base();
+        while (root instanceof Expr.Idiom nested) {
+            parts.addAll(0, nested.parts());
+            root = nested.base();
+        }
+        AxonValue base = idiomBase(root, doc);
+        for (int at = 0; at < parts.size(); at++) {
+            AxonValue from = base;
+            base = applyPart(base, parts.get(at));
+            if (at + 1 < parts.size() && parts.get(at) instanceof Expr.Part.Graph graph
+                && graph.lookup() instanceof Expr.Ident edge
+                && parts.get(at + 1) instanceof Expr.Part.Field field) {
+                // ->aresta.campo: vale o campo do registro alcançado; sem ele, a propriedade da aresta
+                AxonValue read = fieldAccess(base, field.name());
+                boolean missing = read.isNull() || read.isNone() || read.isArray() && read.asArray().isEmpty();
+                base = missing ? edgeProperty(from, graph.direction(), edge.name(), field.name(), read) : read;
+                at++;
+            }
         }
         return base;
+    }
+
+    /** A propriedade {@code name} das arestas {@code kind} que saem (ou chegam) nos registros de {@code from}. */
+    private AxonValue edgeProperty(AxonValue from, Expr.Direction direction, String kind, String name,
+                                   AxonValue absent) {
+        Database db = db();
+        List<String> dirs = direction == Expr.Direction.BOTH
+            ? List.of("out", "in")
+            : List.of(direction == Expr.Direction.IN ? "in" : "out");
+        List<AxonValue> sources = from.isArray() ? from.asArray() : List.of(from);
+        List<AxonValue> found = new ArrayList<>();
+        for (AxonValue source : sources) {
+            AxonValue id = source.isObject() ? source.asObject().get("id") : source;
+            if (id == null || !id.isRecordId()) {
+                continue;
+            }
+            for (String dir : dirs) {
+                String prefix = edgePrefix(db, dir, id.asRecordId()) + kind + "|";
+                for (String key : records(db).keysWithPrefix(prefix)) {
+                    AxonValue value = edgeProperties(db, key).get(name);
+                    if (value != null && !value.isNull() && !value.isNone()) {
+                        found.add(value);
+                    }
+                }
+            }
+        }
+        if (found.isEmpty()) {
+            return absent;
+        }
+        return found.size() == 1 ? found.get(0) : AxonValue.array(found);
     }
 
     /**
@@ -5820,14 +7223,11 @@ return score;
     private AxonValue evalCast(Expr.Cast c) {
         AxonValue v = eval(c.operand());
         return switch (c.type().toLowerCase()) {
-            case "int" -> {
-                if (v.isNumber()) yield AxonValue.num(v.asLong());
-                if (v.isString()) yield AxonValue.num(Long.parseLong(v.asString()));
-                yield AxonValue.nul();
-            }
+            case "int" -> Functions.call("type::int", List.of(v));
             case "float", "number" -> AxonValue.num(v.asDouble());
-            case "string" -> AxonValue.str(v.toString());
-            case "bool" -> AxonValue.bool(truthy(v));
+            case "decimal" -> Functions.call("type::decimal", List.of(v));
+            case "string" -> v.isNull() || v.isNone() ? v : AxonValue.str(Functions.text(v));
+            case "bool" -> Functions.call("type::bool", List.of(v));
             case "datetime" -> v;
             default -> v;
         };
@@ -5883,6 +7283,14 @@ return score;
         String db = session.database();
         if (ns == null || ns.isBlank() || db == null || db.isBlank()) {
             throw AxonError.internal(Messages.get("stmt_kv_scope_required"));
+        }
+        if (name.equals("kv::set") || name.equals("kv::del")) {
+            if (session.definitionScope() != null) {
+                throw outsideDefinitionScope();
+            }
+            if (session.readOnlyCall()) {
+                throw refusedInFunction();
+            }
         }
         return switch (name.substring(4)) {
             case "get" -> ds.kvGet(session, ns, db, kvStr(args, 0));
@@ -6190,7 +7598,9 @@ return score;
         }
         try {
             Executor sub = new Executor(ds);
-            return sub.execute(sq.query(), session, session.vars().copy());
+            sub.identitySession = identitySession;
+            // as variáveis já estão na sessão: nada a repassar
+            return sub.execute(sq.query(), session, null);
         } finally {
             if (outer != null) {
                 session.vars().set("parent",
@@ -6265,10 +7675,6 @@ return score;
         return generateKey(idKey);
     }
 
-    private AxonValue dataExpr(Statement.Data data) {
-        return evalData(data);
-    }
-
     private AxonValue ridAsValue(RecordId rid) {
         return AxonValue.record(rid.table(), rid.key());
     }
@@ -6333,7 +7739,12 @@ return score;
     }
 
     private Document loadDoc(Database db, RecordId rid) {
-        Optional<byte[]> raw = records(db).get(rid.storageKey(db.ns(), db.db()));
+        return loadDoc(db, rid, rid.storageKey(db.ns(), db.db()));
+    }
+
+    /** Como {@link #loadDoc(Database, RecordId)}, com a chave física que o chamador já calculou. */
+    private Document loadDoc(Database db, RecordId rid, String storageKey) {
+        Optional<byte[]> raw = records(db).get(storageKey);
         if (raw.isEmpty()) {
             return null;
         }
@@ -6349,6 +7760,239 @@ return score;
         return AxonJson.decode(b);
     }
 
+    // ------------------------------------------------------------------
+    // Restrições de tabela: NOT NULL, PRIMARY KEY e CHECK
+    // ------------------------------------------------------------------
+
+    /**
+     * NOT NULL e CHECK de tabela valem nas escritas novas; o que já estava gravado não é conferido, e quem repõe dados
+     * (importação, saga, movimentação de shard) não passa por aqui. Como o CHECK de coluna, o de tabela não é avaliado
+     * quando um campo citado está ausente.
+     */
+    private void checkConstraints(Database db, RecordId rid, Map<String, AxonValue> record) {
+        Catalog.TableDef def = db.catalog().table(rid.table());
+        if (def == null || session.restoring()) {
+            return;
+        }
+        for (Catalog.FieldDef field : def.fields().values()) {
+            if (!field.notNull() && !field.primaryKey()) {
+                continue;
+            }
+            AxonValue value = record.get(field.name());
+            if (value == null || value.isNull() || value.isNone()) {
+                throw errorStmt(Messages.get("stmt_not_null_violation", field.name(), rid.table()));
+            }
+        }
+        for (Expr check : def.checks()) {
+            java.util.Set<String> cited = new java.util.HashSet<>();
+            citedFields(check, cited);
+            // a restrição é do esquema: avaliada como política, lê um registro ligado como ele é, sem a regra de quem grava
+            if (record.keySet().containsAll(cited)
+                && !truthy(asPolicy(() -> evalExprInDoc(check, new Document(rid, AxonValue.object(record)))))) {
+                throw errorStmt(Messages.get("stmt_table_check_violation", rid.table(),
+                    com.axonbase.parser.Render.expr(check)));
+            }
+        }
+    }
+
+    private static void citedFields(Expr expr, java.util.Set<String> out) {
+        switch (expr) {
+            case Expr.Ident ident -> out.add(ident.name());
+            case Expr.Binary binary -> {
+                citedFields(binary.left(), out);
+                citedFields(binary.right(), out);
+            }
+            case Expr.Unary unary -> citedFields(unary.operand(), out);
+            case Expr.Cast cast -> citedFields(cast.operand(), out);
+            case Expr.Call call -> call.args().forEach(argument -> citedFields(argument, out));
+            case Expr.ArrayLit array -> array.items().forEach(item -> citedFields(item, out));
+            case Expr.Idiom idiom -> citedFields(idiom.base(), out);
+            default -> { }
+        }
+    }
+
+    /**
+     * Mantém as entradas da chave primária ({@code !uidx\0!pk\0colunas\0valores\0chave}) e recusa um valor que outro
+     * registro já tem. Uma escrita que não muda o valor passa: dados antigos repetidos continuam regraváveis.
+     */
+    private void enforcePrimaryKey(Database db, RecordId rid, AxonValue before, AxonValue after) {
+        Catalog.TableDef def = db.catalog().table(rid.table());
+        List<String> columns = def == null ? List.of() : def.primaryKey();
+        if (columns.isEmpty()) {
+            return;
+        }
+        String previous = primaryKeySlot(db, rid.table(), columns, before);
+        String next = primaryKeySlot(db, rid.table(), columns, after);
+        if (next != null && next.equals(previous)) {
+            return;
+        }
+        // em cluster, as entradas deste nó são conferidas com os registros antes de valerem
+        ds.primaryKeyEntries().ensure(session, db, rid.table(), columns);
+        String own = rid.key().keyString();
+        // a marca disputada faz duas escritas simultâneas do mesmo valor conflitarem; numa tabela particionada a
+        // entrada mora na partição da linha e a marca não existe
+        boolean contended = db.catalog().partitioning(rid.table()) == null;
+        if (next != null) {
+            if (contended) {
+                contend(db, next);
+            }
+            if (!session.restoring() && primaryKeyTaken(db, rid.table(), columns,
+                primaryKeySlots(db, rid.table(), columns, after), own)) {
+                throw errorStmt(Messages.get("stmt_primary_key_violation", rid.table(), String.join(", ", columns)));
+            }
+        }
+        for (String slot : primaryKeySlots(db, rid.table(), columns, before)) {
+            records(db).delete(slot + own);
+            if (contended && records(db).keysWithPrefix(slot).stream().allMatch(slot::equals)) {
+                records(db).delete(slot);
+            }
+        }
+        if (next != null) {
+            if (contended) {
+                records(db).put(next, new byte[0]);
+            }
+            records(db).put(next + own, new byte[0]);
+        }
+    }
+
+    /**
+     * Prende o commit à versão que a chave disputada tem agora. Chame antes de procurar quem tem o valor: a versão
+     * registrada só na gravação já seria a de quem confirmou depois da procura, e as duas escritas passariam. Vale
+     * para o lote de um comando e para a transação, que é por onde o cluster executa um comando avulso e onde a
+     * leitura da faixa não é conferida.
+     */
+    private void contend(Database db, String key) {
+        KvBackend target = rawRecords(db);
+        if (target instanceof com.axonbase.core.storage.StatementBatch pending) {
+            pending.expect(key);
+        } else if (target instanceof Transaction tx) {
+            tx.get(key);
+        }
+    }
+
+    static String primaryKeyPrefix(Database db, String table) {
+        return db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000!uidx\u0000!pk\u0000";
+    }
+
+    static String primaryKeyMarker(Database db, String table) {
+        return "PKB|" + db.ns() + "|" + db.db() + "|" + table;
+    }
+
+    /** O prefixo das entradas de um valor, ou {@code null} quando o registro não tem a chave inteira. */
+    private static String primaryKeySlot(Database db, String table, List<String> columns, AxonValue record) {
+        List<String> slots = primaryKeySlots(db, table, columns, record);
+        return slots.isEmpty() ? null : slots.get(0);
+    }
+
+    /**
+     * Os prefixos sob os quais o valor pode ter entradas; vazio quando o registro não tem a chave inteira. O primeiro
+     * é o do valor relido do disco, o único que se grava. Os outros só existem com record link e são os que versões
+     * anteriores derivavam do valor em memória.
+     */
+    private static List<String> primaryKeySlots(Database db, String table, List<String> columns, AxonValue record) {
+        if (record == null || !record.isObject()) {
+            return List.of();
+        }
+        List<List<AxonValue>> combinations = List.of(List.of());
+        for (String column : columns) {
+            AxonValue value = record.asObject().get(column);
+            if (value == null || value.isNull() || value.isNone()) {
+                return List.of();
+            }
+            AxonValue stored = StoredForm.of(value);
+            // 1 e 1.0 são o mesmo valor; 1 e '1' não
+            List<AxonValue> forms = java.util.stream.Stream.of(stored, StoredForm.withLinks(stored), value)
+                .map(form -> AxonValue.str(form.keyString())).distinct().toList();
+            combinations = combinations.stream()
+                .flatMap(head -> forms.stream().map(form -> java.util.stream.Stream
+                    .concat(head.stream(), java.util.stream.Stream.of(form)).toList()))
+                .toList();
+        }
+        String head = primaryKeyPrefix(db, table) + AxonJson.write(AxonValue.array(columns.stream().map(AxonValue::str)
+            .toList())) + "\u0000";
+        return combinations.stream().map(values -> head + AxonJson.write(AxonValue.array(values)) + "\u0000").toList();
+    }
+
+    /** Outro registro tem o valor, em qualquer das formas de {@link #primaryKeySlots}. */
+    private boolean primaryKeyTaken(Database db, String table, List<String> columns, List<String> slots, String own) {
+        String current = slots.get(0);
+        for (String slot : slots) {
+            for (String key : records(db).keysWithPrefix(slot)) {
+                if (key.equals(slot) || key.equals(slot + own)) {
+                    continue;
+                }
+                // na forma antiga pode sobrar a entrada de um valor que o registro já soltou
+                if (!slot.equals(current) && db.catalog().partitioning(table) == null && !current.equals(
+                    storedKeySlot(records(db), db, table, columns, key.substring(slot.length())))) {
+                    records(db).delete(key);
+                    continue;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** O prefixo das entradas do valor que o registro gravado sob {@code own} tem agora, ou {@code null}. */
+    static String storedKeySlot(KvBackend store, Database db, String table, List<String> columns, String own) {
+        return store.get(db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000" + own)
+            .map(raw -> primaryKeySlot(db, table, columns, AxonJson.decode(raw)))
+            .orElse(null);
+    }
+
+    /** Depois de um DDL, ou ao abrir uma base de versão anterior: refaz as entradas se a chave primária mudou. */
+    private void refreshPrimaryKey(Database db, String table) {
+        if (ds.isReplaying()) {
+            return;
+        }
+        java.util.concurrent.locks.Lock write = exclusiveIndexLock(db);
+        write.lock();
+        try {
+            rebuildPrimaryKey(db, table);
+        } finally {
+            write.unlock();
+        }
+    }
+
+    /** Grava as entradas das linhas que já existem, sem conferir se elas se repetem. */
+    void rebuildPrimaryKey(Database db, String table) {
+        Catalog.TableDef def = db.catalog().table(table);
+        List<String> columns = def == null ? List.of() : def.primaryKey();
+        String marker = primaryKeyMarker(db, table);
+        String wanted = String.join(",", columns);
+        String built = records(db).get(marker)
+            .map(raw -> new String(raw, java.nio.charset.StandardCharsets.UTF_8)).orElse("");
+        if (built.equals(wanted)) {
+            return;
+        }
+        deleteAll(db, primaryKeyPrefix(db, table));
+        if (columns.isEmpty()) {
+            records(db).delete(marker);
+        } else {
+            boolean contended = db.catalog().partitioning(table) == null;
+            // em fluxo: uma tabela grande não vira uma lista de ids em memória
+            KvBackend store = records(db);
+            String rows = db.ns() + "\u0000" + db.db() + "\u0000" + table + "\u0000";
+            store.scanPrefix(rows, key -> {
+                String own = key.substring(rows.length());
+                if (own.isEmpty() || own.charAt(0) == '!') {
+                    return true;
+                }
+                String slot = storedKeySlot(store, db, table, columns, own);
+                if (slot != null) {
+                    if (contended) {
+                        store.put(slot, new byte[0]);
+                    }
+                    store.put(slot + own, new byte[0]);
+                }
+                return true;
+            });
+            records(db).put(marker, wanted.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        // uma transação aberta antes disso montou as escritas sem estas entradas
+        bumpIndexEpoch(db);
+    }
+
     private void enforceUnique(Database db, RecordId rid, AxonValue before, AxonValue after) {
         Catalog.TableDef def = db.catalog().table(rid.table());
         if (def == null) {
@@ -6359,22 +8003,136 @@ return score;
                 continue;
             }
             String nextPrefix = uniqueIndexPrefix(db, rid.table(), ix, after);
+            String previousPrefix = uniqueIndexPrefix(db, rid.table(), ix, before);
+            String own = rid.key().keyString();
             if (nextPrefix != null) {
-                String ownEntry = nextPrefix + rid.key().keyString();
-                var existing = records(db).keysWithPrefix(nextPrefix);
-                if (existing.stream().anyMatch(key -> !key.equals(ownEntry))) {
+                // construção retomada por este nó: sem as entradas das linhas antigas não há como conferir um valor
+                if (ds.clustered() && !ix.ready() && ix.resumed() && !session.restoring()
+                    && !nextPrefix.equals(previousPrefix)) {
+                    throw errorStmt(Messages.get("stmt_unique_index_building", ix.name()));
+                }
+                // antes de ler: se outra escrita tomar ou soltar o valor no meio, este commit conflita
+                List<String> forms = uniqueIndexForms(db, rid.table(), ix, after);
+                forms.forEach(form -> contend(db, uniqueClaimKey(db, rid.table(), ix, form)));
+                if (heldByAnother(db, rid.table(), ix, forms, own, after)) {
                     throw AxonError.internal(Messages.get("stmt_unique_index_violation", ix.name()));
                 }
             }
 
-            String previousPrefix = uniqueIndexPrefix(db, rid.table(), ix, before);
             if (previousPrefix != null) {
-                records(db).delete(previousPrefix + rid.key().keyString());
+                // valor trocado ou apagado: saem as entradas do registro em todas as formas
+                boolean sameValue = java.util.Objects.equals(storedUniquePrefix(db, rid.table(), ix, before),
+                    storedUniquePrefix(db, rid.table(), ix, after));
+                List<String> released = sameValue ? List.of(previousPrefix)
+                    : uniqueIndexForms(db, rid.table(), ix, before);
+                for (String form : released) {
+                    records(db).delete(form + own);
+                    if (!form.equals(nextPrefix)) {
+                        records(db).delete(uniqueClaimKey(db, rid.table(), ix, form));
+                    }
+                }
             }
             if (nextPrefix != null) {
-                records(db).put(nextPrefix + rid.key().keyString(), new byte[0]);
+                records(db).put(nextPrefix + own, new byte[0]);
+                if (!nextPrefix.equals(previousPrefix)) {
+                    records(db).put(uniqueClaimKey(db, rid.table(), ix, nextPrefix), new byte[0]);
+                }
             }
         }
+    }
+
+    /**
+     * Outro registro tem o valor, em qualquer das formas de {@link #uniqueIndexForms}. Em cluster, e quando há mais
+     * de uma forma numa escrita atômica, entradas que o registro não confirma são apagadas no caminho.
+     */
+    private boolean heldByAnother(Database db, String table, Catalog.IndexDef index, List<String> forms, String own,
+                                  AxonValue record) {
+        boolean held = false;
+        for (String prefix : forms) {
+            for (String key : records(db).keysWithPrefix(prefix)) {
+                String other = key.substring(prefix.length());
+                if (other.equals(own)) {
+                    continue;
+                }
+                // fora de cluster, só confere o dono quando entrada e registro são gravados juntos
+                boolean verifiable = forms.size() > 1 && (rawRecords(db) instanceof Transaction
+                    || rawRecords(db) instanceof com.axonbase.core.storage.StatementBatch);
+                if (leftoverEntry(db, table, index, other, record, verifiable)) {
+                    records(db).delete(key);
+                } else {
+                    held = true;
+                }
+            }
+        }
+        return held;
+    }
+
+    /**
+     * Um seguidor constrói o índice enquanto aplica o log, e pode sobrar a entrada de um valor que o registro já
+     * soltou; o mesmo vale para as entradas de record link que versões anteriores não apagavam. O valor do dono e o
+     * do registro em escrita são comparados como voltam do disco. Na dúvida (tabela particionada, id que não se relê
+     * da chave) a entrada vale.
+     */
+    private boolean leftoverEntry(Database db, String table, Catalog.IndexDef index, String other, AxonValue record,
+                                  boolean verifiable) {
+        if ((!ds.clustered() && !verifiable) || db.catalog().partitioning(table) != null
+            || other.indexOf('\u0000') >= 0) {
+            return false;
+        }
+        RecordId owner = new RecordId(table, parseKey(other));
+        if (!owner.key().keyString().equals(other)) {
+            return false;
+        }
+        Document doc = loadDoc(db, owner);
+        return doc == null || !java.util.Objects.equals(storedUniquePrefix(db, table, index, doc.current()),
+            storedUniquePrefix(db, table, index, record));
+    }
+
+    /** O prefixo do valor como volta do disco: é com ele que dois registros se comparam. */
+    private String storedUniquePrefix(Database db, String table, Catalog.IndexDef index, AxonValue record) {
+        return uniqueIndexPrefix(db, table, index, StoredForm.columns(record, index.columns(), StoredForm::of));
+    }
+
+    /**
+     * Os prefixos sob os quais o valor pode ter entradas: o do valor como veio, o do relido do disco e o de quando
+     * os links dele eram ids em memória. Só diferem com record link (ou número e lista que mudam de texto na volta).
+     * O formato em disco é o de sempre.
+     */
+    private List<String> uniqueIndexForms(Database db, String table, Catalog.IndexDef index, AxonValue record) {
+        String asGiven = uniqueIndexPrefix(db, table, index, record);
+        if (asGiven == null) {
+            return List.of();
+        }
+        AxonValue stored = StoredForm.columns(record, index.columns(), StoredForm::of);
+        return java.util.stream.Stream.of(asGiven, uniqueIndexPrefix(db, table, index, stored),
+                uniqueIndexPrefix(db, table, index,
+                    StoredForm.columns(stored, index.columns(), StoredForm::withLinks)))
+            .distinct().toList();
+    }
+
+    /**
+     * A chave disputada por quem toma um valor UNIQUE: duas escritas simultâneas do mesmo valor a gravam, e a segunda
+     * conflita. Fica fora do prefixo da tabela, então nenhuma leitura de índice ou de registros a encontra, e vale
+     * também para tabela particionada. As entradas do índice continuam sendo a verdade sobre quem tem o valor.
+     */
+    private static String uniqueClaimKey(Database db, String table, Catalog.IndexDef index, String valuePrefix) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(valuePrefix.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return uniqueClaimPrefix(db, table) + uniqueSegment(index) + "|"
+                + java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private static String uniqueClaimPrefix(Database db, String table) {
+        return "UQL|" + db.ns() + "|" + db.db() + "|" + table + "|";
+    }
+
+    /** O trecho das chaves que identifica o índice: a coluna quando é uma só, senão o nome dele. */
+    private static String uniqueSegment(Catalog.IndexDef index) {
+        return index.columns().size() == 1 ? index.columns().get(0) : index.name();
     }
 
     private String uniqueIndexPrefix(Database db, String table, Catalog.IndexDef index, AxonValue record) {
@@ -6527,7 +8285,7 @@ return score;
             if (index.geo()) {
                 AxonValue geometry = after != null && after.isObject() && !index.columns().isEmpty()
                     ? after.asObject().get(index.columns().get(0)) : null;
-                cellsUpdate(db, rid, index, geometry, before != null);
+                geoIndex(db, rid.table(), index).update(records(db), rid.key().keyString(), geometry);
                 continue;
             }
             String vectorKey = "VX|" + db.ns() + "|" + db.db() + "|" + rid.table() + "|"
@@ -6802,59 +8560,60 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
     }
 
     /**
-     * Insere o vetor no grafo HNSW multicamado. O nível do novo nó é sorteado
-     * com probabilidade {@code e^-L}; em cada nível ele é ligado aos vizinhos
-     * mais próximos (limite {@code M}), com entrada global preservada na busca.
+     * Insere o vetor no grafo HNSW multicamado. O nó entra só do nível 0 até o nível sorteado para ele, de modo que
+     * os níveis de cima ficam esparsos e levam a busca depressa para perto do alvo. Em cada nível em que entra, ele é
+     * ligado aos vizinhos mais próximos (limite {@code M}).
      */
     private void linkHnsw(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector) {
         String key = rid.key().keyString();
-        int nodeTop = randomLevel();
-        int topExisting = maxLevel(db, rid.table(), index);
-        int top = Math.max(nodeTop, topExisting);
-        // a entrada do nível mais alto é lida antes de o nó novo aparecer no grafo, para que ele não se ache a si mesmo
-        String entry = topExisting >= 0 ? entryAt(db, rid.table(), index.name(), topExisting) : null;
-        for (int level = 0; level <= top; level++) {
-            records(db).put(vhPresenceKey(db, rid.table(), index.name(), level, key), new byte[0]);
-        }
-        if (top > topExisting) {
-            records(db).put(vhTopKey(db, rid.table(), index.name()),
-                Integer.toString(top).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        }
         int maxLinks = Math.max(4, index.hnswM());
         int efConstruction = Math.max(Math.max(16, index.hnswEfc()), maxLinks * 2);
+        int nodeTop = randomLevel(maxLinks);
+        // a entrada do nível mais alto é lida antes de o nó novo aparecer no grafo, para que ele não se ache a si mesmo
+        GraphTop current = graphTop(db, rid.table(), index);
+        int topExisting = current.level();
+        for (int level = 0; level <= nodeTop; level++) {
+            records(db).put(vhPresenceKey(db, rid.table(), index.name(), level, key), new byte[0]);
+        }
+        if (nodeTop > topExisting) {
+            records(db).put(vhTopKey(db, rid.table(), index.name()),
+                Integer.toString(nodeTop).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
         // Inserção HNSW: desce do nível mais alto seguindo a busca no grafo e liga o nó aos mais próximos de cada
         // nível. O custo depende de efConstruction e M, não do número de nós do índice.
         hnswDistances = new java.util.HashMap<>();
         try {
-            linkLevels(db, rid, index, vector, key, top, topExisting, entry, maxLinks, efConstruction);
+            linkLevels(db, rid, index, vector, key, nodeTop, topExisting, current.entry(), maxLinks, efConstruction);
         } finally {
             hnswDistances = null;
         }
     }
 
-    private void linkLevels(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector, String key, int top,
-                            int topExisting, String entry, int maxLinks, int efConstruction) {
-        for (int level = top; level >= 0; level--) {
+    private void linkLevels(Database db, RecordId rid, Catalog.IndexDef index, AxonValue vector, String key,
+                            int nodeTop, int topExisting, String entry, int maxLinks, int efConstruction) {
+        // acima do nível do nó a busca só aproxima o ponto de entrada
+        for (int level = topExisting; level > nodeTop; level--) {
+            List<Neighbor> near = searchLevel(db, rid.table(), index, level, List.of(entry), vector, 1);
+            if (!near.isEmpty()) {
+                entry = near.get(0).key();
+            }
+        }
+        // o nível de baixo parte de todos os candidatos achados no de cima, não só do mais próximo: assim a busca
+        // cobre regiões vizinhas que ainda não têm caminho curto entre si, e o nó novo passa a ligá-las
+        List<String> entries = entry == null ? List.of() : List.of(entry);
+        for (int level = nodeTop; level >= 0; level--) {
             List<Neighbor> nearest = List.of();
-            if (entry != null && level <= topExisting) {
-                // o nível 0 usa a largura cheia; nos de cima basta a vizinhança (os nós estão em todos os níveis)
-                nearest = searchLevel(db, rid.table(), index, level, entry, vector,
-                    level == 0 ? efConstruction : Math.max(maxLinks, 8));
+            if (!entries.isEmpty() && level <= topExisting) {
+                nearest = searchLevel(db, rid.table(), index, level, entries, vector, efConstruction).stream()
+                    .filter(nb -> !nb.key().equals(key) && nb.distance() != Double.MAX_VALUE).toList();
             }
             int linkLimit = level == 0 ? maxLinks : Math.max(2, maxLinks / 2);
-            int linked = 0;
-            for (Neighbor nb : nearest) {
-                if (nb.key().equals(key) || nb.distance() == Double.MAX_VALUE) {
-                    continue;
-                }
-                if (linked == 0) {
-                    entry = nb.key();
-                }
-                if (linked++ >= linkLimit) {
-                    break;
-                }
+            for (Neighbor nb : nearest.subList(0, Math.min(linkLimit, nearest.size()))) {
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, key) + nb.key(), new byte[0]);
                 records(db).put(vhNodePrefix(db, rid.table(), index.name(), level, nb.key()) + key, new byte[0]);
+            }
+            if (!nearest.isEmpty()) {
+                entries = nearest.stream().map(Neighbor::key).toList();
             }
             String entryKey = vhEntryKey(db, rid.table(), index.name(), level);
             if (records(db).get(entryKey).isEmpty()) {
@@ -6870,6 +8629,7 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
      */
     private void unlinkHnsw(Database db, RecordId rid, Catalog.IndexDef index) {
         String key = rid.key().keyString();
+        boolean removed = false;
         for (int level = 0; level < 64; level++) {
             String presence = vhPresenceKey(db, rid.table(), index.name(), level, key);
             boolean present = records(db).get(presence).isPresent();
@@ -6877,24 +8637,87 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             if (!present && edges.isEmpty()) {
                 break;
             }
+            List<String> neighbors = new ArrayList<>(edges.size());
             for (String edge : edges) {
                 String neighbor = edge.substring(edge.lastIndexOf('|') + 1);
                 records(db).delete(edge);
                 records(db).delete(vhNodePrefix(db, rid.table(), index.name(), level, neighbor) + key);
+                neighbors.add(neighbor);
             }
             if (present) {
                 records(db).delete(presence);
             }
+            reconnectNeighbors(db, rid.table(), index, level, neighbors);
+            removed = true;
+        }
+        if (removed) {
+            graphTop(db, rid.table(), index);
         }
     }
 
-    /** Sorteia o nível topo de um novo nó (probabilidade e^-L por camada). */
-    private int randomLevel() {
-        int level = 0;
-        while (level < 24 && java.util.concurrent.ThreadLocalRandom.current().nextDouble() < 0.3678794412) {
-            level++;
+    /**
+     * Mantém ligados entre si os vizinhos de um nó retirado. Sem isso, o nó que fazia a ponte levaria junto o único
+     * caminho até parte do grafo, e nem a busca nem as inserções voltariam a chegar lá. Cada vizinho precisa alcançar
+     * o seguinte por uma aresta direta ou por um vizinho em comum; só quando não alcança os dois são ligados.
+     */
+    private void reconnectNeighbors(Database db, String table, Catalog.IndexDef index, int level,
+                                    List<String> neighbors) {
+        if (neighbors.size() < 2) {
+            return;
         }
-        return level;
+        Set<String> previousLinks = linksOf(db, table, index, level, neighbors.get(0));
+        for (int i = 1; i < neighbors.size(); i++) {
+            String previous = neighbors.get(i - 1);
+            String node = neighbors.get(i);
+            Set<String> links = linksOf(db, table, index, level, node);
+            if (!links.contains(previous) && java.util.Collections.disjoint(links, previousLinks)) {
+                records(db).put(vhNodePrefix(db, table, index.name(), level, node) + previous, new byte[0]);
+                records(db).put(vhNodePrefix(db, table, index.name(), level, previous) + node, new byte[0]);
+                links.add(previous);
+            }
+            previousLinks = links;
+        }
+    }
+
+    /** Vizinhos de um nó num nível. */
+    private Set<String> linksOf(Database db, String table, Catalog.IndexDef index, int level, String node) {
+        Set<String> links = new HashSet<>();
+        for (String edge : records(db).keysWithPrefix(vhNodePrefix(db, table, index.name(), level, node))) {
+            links.add(edge.substring(edge.lastIndexOf('|') + 1));
+        }
+        return links;
+    }
+
+    /** Maior nível do grafo HNSW que ainda tem nó, com a entrada dele; nível -1 e entrada nula no grafo vazio. */
+    private record GraphTop(int level, String entry) {
+    }
+
+    /**
+     * O nível mais alto só guarda os nós criados desde que ele surgiu. Quando todos saem, o contador desce aqui:
+     * partindo de um nível vazio a busca não acharia nada, e os nós inseridos depois ficariam sem aresta alguma.
+     */
+    private GraphTop graphTop(Database db, String table, Catalog.IndexDef index) {
+        int stored = maxLevel(db, table, index);
+        for (int level = stored; level >= 0; level--) {
+            String entry = entryAt(db, table, index.name(), level);
+            if (entry != null) {
+                if (level < stored) {
+                    records(db).put(vhTopKey(db, table, index.name()),
+                        Integer.toString(level).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                return new GraphTop(level, entry);
+            }
+        }
+        if (stored >= 0) {
+            records(db).delete(vhTopKey(db, table, index.name()));
+        }
+        return new GraphTop(-1, null);
+    }
+
+    /** Sorteia o nível topo de um nó novo: de cada nível para o seguinte sobe cerca de 1 em cada {@code M} nós. */
+    private int randomLevel(int links) {
+        double draw = 1d - java.util.concurrent.ThreadLocalRandom.current().nextDouble();
+        return (int) Math.min(24d, -Math.log(draw) / Math.log(links));
     }
 
     private record Neighbor(String key, double distance) {
@@ -6994,8 +8817,15 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         return AxonValue.array(out);
     }
 
+    /** Cabeçalho (comentário AxonQL) com o que o texto do comando não carrega: regras geradas, data e autor. */
+    private static final String AUDIT_HEADER = "-- aiaudit ";
+
     private AxonValue runDefineAiAudit(Statement.DefineAiAudit aa) {
-        if (!ds.aiProvider().isConfigured()) {
+        if (ds.isReplaying()) {
+            restoreAiAudit(aa);
+            return AxonValue.nul();
+        }
+        if (ds.aiProvider() == null || !ds.aiProvider().isConfigured()) {
             throw errorStmt(Messages.get("audit_not_configured"));
         }
         Database db = db();
@@ -7016,19 +8846,65 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             aa.name(), aa.warningWhen(), aa.dangerWhen(),
             warningRules, dangerRules, System.currentTimeMillis(), userId);
         db.catalog().defineAudit(def);
-        control(db, ControlCommand.Kind.AUDIT, aa.name(), com.axonbase.parser.Render.stmt(aa));
+        Map<String, AxonValue> stored = new LinkedHashMap<>();
+        stored.put("rules", AxonValue.str(rulesJson));
+        stored.put("created_at", AxonValue.num(def.createdAt()));
+        stored.put("created_by", AxonValue.str(def.createdBy() == null ? "" : def.createdBy()));
+        String header = AUDIT_HEADER
+            + com.axonbase.value.AxonJson.write(AxonValue.object(stored)).replace('\n', ' ') + "\n";
+        control(db, ControlCommand.Kind.AUDIT, aa.name(), header + com.axonbase.parser.Render.stmt(aa));
         return AxonValue.object(java.util.Map.of(
             "name", AxonValue.str(aa.name()),
             "rules", AxonValue.str(rulesJson),
             "status", AxonValue.str("CREATED")));
     }
 
+    /**
+     * Recria a auditoria na releitura do catálogo sem chamar o provedor de IA, que ainda não está configurado nesse
+     * momento. Definições gravadas por versões anteriores não têm as regras: voltam sem nenhuma, com um aviso.
+     */
+    private void restoreAiAudit(Statement.DefineAiAudit aa) {
+        Database db = db();
+        java.util.List<com.axonbase.core.audit.AiAuditRule> warningRules = new java.util.ArrayList<>();
+        java.util.List<com.axonbase.core.audit.AiAuditRule> dangerRules = new java.util.ArrayList<>();
+        long createdAt = 0;
+        String createdBy = "";
+        boolean restored = false;
+        for (ControlCommand command : ds.controlSnapshot().commands()) {
+            String text = command.definition();
+            if (command.kind() != ControlCommand.Kind.AUDIT || !command.namespace().equals(db.ns())
+                || !command.database().equals(db.db()) || !command.name().equals(aa.name())
+                || !text.startsWith(AUDIT_HEADER)) {
+                continue;
+            }
+            try {
+                Map<String, AxonValue> stored = com.axonbase.value.AxonJson.parseDocument(
+                    text.substring(AUDIT_HEADER.length(), text.indexOf('\n'))).asObject();
+                parseRules(stored.get("rules").asString(), warningRules, dangerRules);
+                createdAt = stored.get("created_at").asLong();
+                createdBy = stored.get("created_by").asString();
+                restored = true;
+            } catch (RuntimeException unreadable) {
+                System.err.println(Messages.get("audit_parse_error", unreadable.getMessage()));
+            }
+        }
+        if (!restored) {
+            System.err.println(Messages.get("audit_rules_not_stored", aa.name()));
+        }
+        db.catalog().defineAudit(new com.axonbase.core.audit.AiAuditDef(
+            aa.name(), aa.warningWhen(), aa.dangerWhen(), warningRules, dangerRules, createdAt, createdBy));
+    }
+
     private AxonValue runDropAiAudit(Statement.DropAiAudit da) {
         Database db = db();
         if (!db.catalog().removeAudit(da.name())) {
+            // versões anteriores gravavam o próprio DROP no plano de controle
+            if (ds.isReplaying()) {
+                return AxonValue.nul();
+            }
             throw errorStmt(Messages.get("audit_not_found", da.name()));
         }
-        control(db, ControlCommand.Kind.AUDIT, da.name(), com.axonbase.parser.Render.stmt(da));
+        ds.removeControl(session, db.ns(), db.db(), ControlCommand.Kind.AUDIT, da.name());
         return AxonValue.nul();
     }
 
@@ -7058,6 +8934,10 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (!"PENDING".equals(auditCase.status())) {
             throw errorStmt(Messages.get("audit_case_resolved", auditCase.status()));
         }
+        if (com.axonbase.core.security.Authz.audited(session.auth())
+            && !sessionUserId().equals(auditCase.userId())) {
+            throw refusedToAudited();
+        }
         auditCase.setReason(sra.reason(), sessionUserId());
         return AxonValue.object(java.util.Map.of(
             "hash", AxonValue.str(sra.hash()),
@@ -7078,6 +8958,14 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (userId.equals(auditCase.userId()) && cat.isBlocked(userId)) {
             throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_self_decision"));
         }
+        // quem pediu não decide, bloqueado ou não, e um auditado não desbloqueia ninguém
+        boolean unblocks = "AUTHORIZED".equals(sac.status()) && "DANGER".equals(auditCase.classification());
+        if (userId.equals(auditCase.userId())
+            || unblocks && com.axonbase.core.security.Authz.audited(session.auth())) {
+            throw refusedToAudited();
+        }
+        // montada antes de decidir: sem a identidade do autor o caso continua pendente
+        Session author = "AUTHORIZED".equals(sac.status()) ? authorSession(auditCase) : null;
         auditCase.resolve(sac.status(), userId, sac.reason());
         cat.addEvent(sac.hash(), new com.axonbase.core.audit.AuditCaseEvent(
             sac.status().equals("AUTHORIZED") ? "AUTHORIZED" : "DENIED", userId, sac.reason(), System.currentTimeMillis()));
@@ -7087,8 +8975,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
             cat.unblockUser(auditCase.userId());
         }
 
-        // If AUTHORIZED, execute the original SQL
-        if ("AUTHORIZED".equals(sac.status())) {
+        // O comando aprovado roda com a identidade e o poder de quem o pediu
+        if (author != null) {
             try {
                 String originalSql = auditCase.sql();
                 // Execute the original SQL that was blocked - bypass audit to avoid recursion
@@ -7096,7 +8984,19 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
                 exec.bypassAudit = true;
                 exec.rawSql = originalSql;
                 Query q = com.axonbase.parser.AxonQl.parse(originalSql);
-                return exec.execute(q, session, null);
+                boolean shared = session.inTransaction();
+                if (shared) {
+                    // a escrita aprovada vai na mesma transação da decisão (é o que a replica no cluster)
+                    author.tx(session.tx());
+                    author.txControlVersion(session.txControlVersion());
+                    author.txIndexEpoch(session.txIndexEpoch());
+                }
+                AxonValue result = exec.execute(q, author, auditCase.author().vars());
+                if (shared) {
+                    // as notificações de live query saem no COMMIT de quem abriu a transação
+                    session.queueLive(author::flushLive);
+                }
+                return result;
             } catch (Exception e) {
                 throw errorStmt(Messages.get("audit_exec_error", e.getMessage()));
             }
@@ -7105,6 +9005,69 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         return AxonValue.object(java.util.Map.of(
             "hash", AxonValue.str(sac.hash()),
             "status", AxonValue.str(sac.status())));
+    }
+
+    /**
+     * Sessão com a identidade do autor do caso. Para quem entrou por signin valem os papéis e as Data Rules de hoje,
+     * sem passar do papel que o autor tinha ao pedir o comando; autor removido não executa nada.
+     */
+    private Session authorSession(com.axonbase.core.audit.AuditCase auditCase) {
+        com.axonbase.core.audit.AuditAuthor author = auditCase.author();
+        if (author == null) {
+            throw errorStmt(Messages.get("audit_no_author"));
+        }
+        Map<String, AxonValue> claims = new LinkedHashMap<>(author.claims().asObject());
+        // o comando já passou pela auditoria
+        claims.remove("audit");
+        AxonValue effective = AxonValue.object(claims);
+        AxonValue type = claims.get("typ");
+        if (type != null && type.isString() && "access".equals(type.asString())) {
+            AuthCatalog.User current = currentIdentity(claims);
+            if (current == null) {
+                throw errorStmt(Messages.get("audit_author_gone"));
+            }
+            putOrRemove(claims, "roles", current.roles());
+            putOrRemove(claims, "data_rules", current.dataRules());
+            effective = com.axonbase.core.security.Authz.cap(AxonValue.object(claims),
+                com.axonbase.core.security.Authz.role(author.claims()));
+        }
+        Session result = new Session(session.namespace(), session.database());
+        result.auth(effective);
+        if (author.readOnly()) {
+            result.roleCap(com.axonbase.core.security.Authz.Role.VIEWER);
+        }
+        return result;
+    }
+
+    private AuthCatalog.User currentIdentity(Map<String, AxonValue> claims) {
+        return ds.authCatalog().users().stream()
+            .filter(u -> claimEquals(claims, "id", u.name()) && claimEquals(claims, "scope", u.scope().name())
+                && claimEquals(claims, "ns", u.namespace()) && claimEquals(claims, "db", u.database()))
+            .findFirst().orElse(null);
+    }
+
+    private static boolean claimEquals(Map<String, AxonValue> claims, String key, String expected) {
+        AxonValue v = claims.get(key);
+        return java.util.Objects.equals(v != null && v.isString() ? v.asString() : null, expected);
+    }
+
+    private static void putOrRemove(Map<String, AxonValue> claims, String key, List<String> values) {
+        if (values.isEmpty()) {
+            claims.remove(key);
+        } else {
+            claims.put(key, AxonValue.str(String.join(",", values)));
+        }
+    }
+
+    /** O que a execução futura de um comando retido precisa saber sobre quem o pediu. */
+    private com.axonbase.core.audit.AuditAuthor currentAuthor() {
+        Map<String, AxonValue> claims = new LinkedHashMap<>(session.auth().asObject());
+        claims.remove("jti");
+        claims.remove("exp");
+        Map<String, AxonValue> vars = new LinkedHashMap<>(session.vars().copy());
+        vars.keySet().removeIf(Session::isIdentityVariable);
+        vars.values().removeIf(java.util.Objects::isNull);
+        return new com.axonbase.core.audit.AuditAuthor(AxonValue.object(claims), vars, session.readOnly());
     }
 
     // ---- AUDIT_CASES virtual table ----
@@ -7201,6 +9164,8 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
      */
     private AxonValue interceptWithAiAudit(String sql, Statement s) {
         if (isAuditCommand(s)) return null; // audit commands pass through
+        // sem isto, quem está num banco onde a auditoria não existe não conseguiria sair dele
+        if (s instanceof Statement.Use) return null;
         Database db = db();
         String userId = sessionUserId();
         if (userId == null || userId.isBlank()) return null; // no authenticated user
@@ -7226,14 +9191,18 @@ private String advancedPrefix(Database db, String table, String index, RecordId 
         if (auditName == null || auditName.isBlank()) return null;
 
         var def = db.catalog().audit(auditName);
-        if (def == null) return null;
+        // como a Data Rule: auditoria que não existe neste banco nega, senão um nome errado liberaria tudo
+        if (def == null) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("audit_missing", auditName));
+        }
 
         String classification = def.classify(sql);
         if ("SAFE".equals(classification)) return null;
 
         // Generate hash
         String hash = sha256Hex(sql + System.currentTimeMillis() + userId);
-        var auditCase = new com.axonbase.core.audit.AuditCase(hash, userId, sql, auditName, classification, System.currentTimeMillis());
+        var auditCase = new com.axonbase.core.audit.AuditCase(hash, userId, sql, auditName, classification,
+            System.currentTimeMillis(), currentAuthor());
 
         if ("DANGER".equals(classification)) {
             // Block the user

@@ -1,5 +1,6 @@
 package com.axonbase.core.cluster;
 import com.axonbase.common.Messages;
+import com.axonbase.core.hlc.HlcTimestamp;
 import java.io.*; import java.util.*;
 /** Codec do batch replicado para o payload de AppendEntries e de snapshot. */
 public final class RaftPayload {
@@ -9,12 +10,16 @@ public final class RaftPayload {
    out.writeInt(batch.puts().size());for(var e:batch.puts().entrySet()){out.writeUTF(e.getKey());out.writeInt(e.getValue().length);out.write(e.getValue());}
    out.writeInt(batch.deletes().size());for(String key:batch.deletes())out.writeUTF(key);
    out.writeBoolean(batch.fullSnapshot());
+   // carimbo HLC no fim: nó antigo ignora os bytes a mais; lote sem carimbo não muda de formato
+   if(!batch.stamp().isNone()){out.writeLong(batch.stamp().physical());out.writeInt(batch.stamp().logical());}
    out.flush();return bytes.toByteArray();}catch(IOException e){throw new IllegalStateException(e);} }
  public static CommittedBatch decode(byte[] raw){ try(var in=new DataInputStream(new ByteArrayInputStream(raw))){
    String tx=in.readUTF();int n=in.readInt();Map<String,byte[]> p=new LinkedHashMap<>();for(int i=0;i<n;i++){String k=in.readUTF();int len=in.readInt();byte[] v=in.readNBytes(len);if(v.length!=len)throw new EOFException();p.put(k,v);}
    int deletes=in.readInt();Set<String>d=new LinkedHashSet<>();for(int i=0;i<deletes;i++)d.add(in.readUTF());
    boolean full=true;if(in.available()>0)full=in.readBoolean();
-   return new CommittedBatch(tx,p,d,full);}catch(IOException e){throw new IllegalArgumentException(Messages.get("cluster_raft_payload_invalid"),e);} }
+   // lote anterior à 0.11 termina aqui; havendo bytes, são os 12 do carimbo (cortados: payload inválido)
+   HlcTimestamp stamp=HlcTimestamp.NONE;if(in.available()>0)stamp=new HlcTimestamp(in.readLong(),in.readInt());
+   return new CommittedBatch(tx,p,d,full,stamp);}catch(IOException e){throw new IllegalArgumentException(Messages.get("cluster_raft_payload_invalid"),e);} }
  public static byte[] append(long previousIndex,long previousTerm,CommittedBatch batch){try(var bytes=new ByteArrayOutputStream();var out=new DataOutputStream(bytes)){out.writeInt(0x41585045);out.writeLong(previousIndex);out.writeLong(previousTerm);out.write(encode(batch));out.flush();return bytes.toByteArray();}catch(IOException e){throw new IllegalStateException(e);}}
  public static Append decodeAppend(byte[] raw){try(var in=new DataInputStream(new ByteArrayInputStream(raw))){if(in.readInt()!=0x41585045)throw new IllegalArgumentException(Messages.get("cluster_raft_append_legacy"));long index=in.readLong(),term=in.readLong();return new Append(index,term,decode(in.readAllBytes()));}catch(IOException e){throw new IllegalArgumentException(Messages.get("cluster_raft_append_invalid"),e);}}
  public static byte[] vote(long lastIndex,long lastTerm){try(var bytes=new ByteArrayOutputStream();var out=new DataOutputStream(bytes)){out.writeLong(lastIndex);out.writeLong(lastTerm);out.flush();return bytes.toByteArray();}catch(IOException e){throw new IllegalStateException(e);}}

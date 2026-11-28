@@ -2,7 +2,7 @@ import os
 
 from fastapi import FastAPI, Header, HTTPException
 
-from common import sql
+from common import identifier, sql
 
 app = FastAPI(title="stock-service")
 ORCHESTRATOR = os.getenv("ORCHESTRATOR_URL", "http://127.0.0.1:8000")
@@ -11,6 +11,8 @@ STOCK_DB = os.getenv("STOCK_DB_URL", "http://127.0.0.1:8013")
 
 @app.post("/reservations")
 def reserve_stock(order_id: str, x_correlation_id: str = Header()):
+    order_id = identifier(order_id)
+    x_correlation_id = identifier(x_correlation_id)
     try:
         sql(STOCK_DB, "UPDATE stock:main SET quantity = quantity - 1", "stock", x_correlation_id)
         sql(ORCHESTRATOR, f"COMMIT SAGA pedido WITH CORRELATION '{x_correlation_id}'", "orchestrator", x_correlation_id)

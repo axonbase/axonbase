@@ -77,6 +77,23 @@ class LiveQueryTest {
     }
 
     @Test
+    @DisplayName("LIVE SELECT de um registro não recebe mudanças de outros registros")
+    void liveDeUmRegistroIgnoraOsDemais() {
+        Datastore ds = ns();
+        Session s = session();
+        ds.execute("CREATE produto:1 SET n = 1", s, null);
+        ds.execute("CREATE produto:2 SET n = 2", s, null);
+        List<LiveBus.Notification> got = collect(s);
+        ds.execute("LIVE SELECT * FROM produto:1", s, null);
+
+        ds.execute("UPDATE produto:2 SET n = 3", s, null);
+        ds.execute("UPDATE produto:1 SET n = 4", s, null);
+
+        assertEquals(1, got.size(), got.toString());
+        assertEquals(4, got.get(0).result().asObject().get("n").asLong());
+    }
+
+    @Test
     @DisplayName("WHERE filtra as notificações")
     void liveComWhereFiltra() {
         Datastore ds = ns();

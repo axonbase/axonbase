@@ -1,6 +1,7 @@
 package com.axonbase.jdbc;
 
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.SQLException;
@@ -28,6 +29,9 @@ public final class JdbcProxy {
             try {
                 Method real = delegate.getClass().getMethod(method.getName(), method.getParameterTypes());
                 return real.invoke(delegate, args);
+            } catch (InvocationTargetException e) {
+                // quem chama o driver espera a SQLException, não o invólucro da reflexão
+                throw e.getCause();
             } catch (NoSuchMethodException e) {
                 throw new SQLFeatureNotSupportedException(
                     "method " + method.getName() + " not supported by this driver");

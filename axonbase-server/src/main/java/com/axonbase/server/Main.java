@@ -1,15 +1,21 @@
 package com.axonbase.server;
 
 import com.axonbase.core.engine.Datastore;
+import com.axonbase.core.hlc.HybridClock;
+import com.axonbase.core.journal.PitrJournal;
 import com.axonbase.common.Messages;
 import com.axonbase.core.storage.KvBackend;
 import com.axonbase.core.storage.MemoryBackend;
 import com.axonbase.core.storage.RocksDbBackend;
 import com.axonbase.core.storage.WalBackend;
 import com.axonbase.core.storage.VersionedKvBackend;
+import com.axonbase.core.cluster.ClockHooks;
+import com.axonbase.core.cluster.ReplicationHooks;
 import com.axonbase.core.cluster.ClusterConfig;
 import com.axonbase.core.cluster.ClusterRuntime;
 import com.axonbase.core.cluster.TcpRaftCommitCoordinator;
+import com.axonbase.core.shard.backup.ShardBackupNode;
+import com.axonbase.core.shard.backup.ShardJournalHooks;
 import com.axonbase.core.backup.S3SyncManager;
 
 import java.nio.file.Files;
@@ -30,6 +36,14 @@ public final class Main {
             return;
         }
         String cmd = args[0];
+        if ("gateway".equals(cmd)) {
+            GatewayMain.run(System.getenv());
+            return;
+        }
+        if ("restore-shards".equals(cmd)) {
+            ShardRestoreMain.run(java.util.Arrays.copyOfRange(args, 1, args.length));
+            return;
+        }
         if (!"start".equals(cmd)) {
             System.err.println(Messages.get("cli_unknown_command", cmd));
             usage();
@@ -74,7 +88,8 @@ public final class Main {
             config.plainPort(), config.lang(),
             config.aiProvider(), config.aiModel(), config.aiApiKey(), config.aiBaseUrl(),
             config.auditEnabled(), config.auditUserFrom(),
-            config.auditSelect(), config.auditMaxBody());
+            config.auditSelect(), config.auditMaxBody(),
+            config.certAllowUnknownRevocation());
 
         String insecure = ServerConfig.insecureDefaultsProblem(config, System.getenv());
         if (insecure != null) {
@@ -83,14 +98,63 @@ public final class Main {
             return;
         }
 
+        // um valor mal escrito derruba o processo aqui, antes de abrir a base, uma porta ou um nó no cluster
+        AxonServer.validateSettings(System::getenv);
+
+        if (StatePaths.envPathIgnored(System.getenv("AXON_PATH"), path)) {
+            AxonLog.log("warn", "env_path_ignored",
+                Messages.get("server_env_path_ignored", System.getenv("AXON_PATH"), path));
+        }
+        // o local do estado do consenso é decidido antes de abrir a base: com estado em dois lugares o nó não sobe
+        Path raftDir = null;
+        if (!config.clusterId().isBlank()) {
+            try {
+                raftDir = StatePaths.raftDir(path);
+            } catch (IllegalStateException refused) {
+                System.err.println(refused.getMessage());
+                System.exit(2);
+                return;
+            }
+            if (StatePaths.outsideDataDir(path, raftDir)) {
+                AxonLog.log("warn", "raft_state_outside_data",
+                    Messages.get("server_raft_state_outside", raftDir));
+            }
+            if (StatePaths.dataWithoutRaftState(path)) {
+                AxonLog.log("warn", "raft_state_missing", Messages.get("server_raft_state_missing", raftDir));
+            }
+        }
+
+        // Réplica de leitura: recebe o log, não vota. A base pode vir de um backup físico de um membro.
+        boolean learner = "true".equalsIgnoreCase(System.getenv("AXON_RAFT_LEARNER"));
+        String bootstrapBackup = System.getenv("AXON_RAFT_BOOTSTRAP_BACKUP");
+        if (learner && (config.clusterId().isBlank() || path.equals("memory"))) {
+            throw new IllegalArgumentException(Messages.get("server_learner_requires"));
+        }
+        if (learner && bootstrapBackup != null && !bootstrapBackup.isBlank()) {
+            String directory = path.startsWith("rocksdb:") ? path.substring(8) : path;
+            // um backup com partições frias só é restaurado com a camada fria configurada e completa
+            try (var cold = com.axonbase.core.partition.ColdTier.fromEnvironment(System.getenv())) {
+                com.axonbase.core.cluster.LearnerBootstrap
+                    .restore(java.nio.file.Path.of(bootstrapBackup.trim()), java.nio.file.Path.of(directory), cold)
+                    .ifPresent(applied -> System.out.println(
+                        Messages.get("server_learner_restored", applied.index(), bootstrapBackup.trim())));
+            }
+        }
+
         KvBackend backend = switch (path) {
             case "memory" -> new MemoryBackend();
             case String s when s.startsWith("rocksdb:") -> new RocksDbBackend(s.substring(8));
             default -> new RocksDbBackend(path);
         };
 
+        // o journal entra antes do Datastore, para arquivar também as escritas da subida; em cluster startPitr
+        // devolve null e o journal nasce junto dos ganchos do consenso, mais abaixo
+        PitrSettings pitrSettings = PitrSettings.fromEnvironment();
+        PitrJournal journal = startPitr(pitrSettings, backend, config.clusterId());
+
         // Create Datastore before default databases so S3 restore can replay into it.
-        Datastore ds = new Datastore(backend);
+        Datastore ds = new Datastore(backend,
+            com.axonbase.core.partition.ColdTier.fromEnvironment(System.getenv()));
         ds.aiProvider(new com.axonbase.core.audit.AiProviderClient(
             config.aiProvider(), config.aiModel(), config.aiApiKey(), config.aiBaseUrl()));
         ds.auditConfig(config.auditEnabled(), config.auditUserFrom(),
@@ -100,20 +164,13 @@ public final class Main {
         // backend non-empty and skip the restore).
         if (!config.s3Bucket().isBlank() && !config.s3Endpoint().isBlank()) {
             java.util.function.Supplier<Long> commitIndex = () -> null;
-            var s3 = new S3SyncManager(ds, config, commitIndex);
             try {
-                if (backend.keysWithPrefix("").isEmpty()) {
-                    boolean restored = s3.restoreFromS3();
-                    if (restored) {
-                        System.out.println(Messages.get("server_s3_restored"));
-                    } else {
-                        System.out.println(Messages.get("server_s3_empty"));
-                        ds.createDatabase("axonbase", "main");
-                        ds.createDatabase("app", "main");
-                    }
-                }
-            } catch (Exception e) {
-                System.out.println(Messages.get("server_s3_empty"));
+                restoreAtStartup(ds, backend, new S3SyncManager(ds, config, commitIndex));
+            } catch (IllegalStateException refused) {
+                // sai antes de abrir porta ou ligar o backup periódico, que gravaria a base incompleta no balde
+                System.err.println(refused.getMessage());
+                System.exit(2);
+                return;
             }
         } else {
             ds.createDatabase("axonbase", "main");
@@ -121,6 +178,7 @@ public final class Main {
         }
 
         ClusterRuntime cluster = null;
+        ShardBackupNode shardBackup = null;
         if (!config.clusterId().isBlank()) {
             if (config.nodeId().isBlank() || config.raftBind().isBlank()) {
                 throw new IllegalArgumentException(Messages.get("server_cluster_missing"));
@@ -130,8 +188,29 @@ public final class Main {
             }
             ClusterConfig clusterConfig = ClusterConfig.parse(config.nodeId(), config.clusterId(),
                 config.raftBind(), config.raftPeers());
-            cluster = new ClusterRuntime(clusterConfig, java.nio.file.Path.of(path + ".raft"),
-                (VersionedKvBackend) backend);
+            if (learner) {
+                clusterConfig = clusterConfig.asLearner();
+            }
+            // os ganchos ficam prontos antes do nó: abrir o journal pode demorar, e o nó já aplicaria lotes sem eles.
+            // O consenso aceita um só conjunto: o journal de cluster é um só e faz também o papel do ClockHooks
+            ShardJournalHooks archived = null;
+            if (pitrSettings.enabled() && backend instanceof RocksDbBackend rocks) {
+                // em cluster os lotes do journal vêm do log Raft; a restauração é a do backup de cluster com shards
+                // (restore-shards) ou a do exercício de DR (DrTool)
+                archived = ShardJournalHooks.open(rocks.clock(), pitrSettings.directoryFor(rocks),
+                    pitrSettings.options());
+                // quem fecha é o desligamento do servidor, depois de atender as requisições em curso
+                journal = archived.journal();
+            }
+            ReplicationHooks hooks = archived != null ? archived : new ClockHooks(clockFor(backend));
+            cluster = new ClusterRuntime(clusterConfig, raftDir, (VersionedKvBackend) backend);
+            // logo depois de construir: o relógio precisa ver a cauda do log antes de carimbar qualquer lote
+            cluster.hooks(hooks);
+            if (archived != null) {
+                RocksDbBackend rocks = (RocksDbBackend) backend;
+                shardBackup = new ShardBackupNode(cluster, rocks, archived, shardBackupDir(rocks),
+                    java.time.Duration.ofSeconds(60), ds);
+            }
         }
         if (cluster != null) {
             cluster.appliedBatchListener(ds.appliedBatchListener());
@@ -139,6 +218,11 @@ public final class Main {
         }
 
         AxonServer server = AxonServer.start(ds, secret, config);
+        server.pitr(journal);
+        server.qos(System::getenv);
+        server.operations(System::getenv);
+        server.shardBackup(shardBackup);
+        server.shardSecret(System.getenv(com.axonbase.core.shard.ShardHttp.SECRET_VARIABLE));
         if (cluster != null) {
             server.clusterStatus(cluster);
         }
@@ -148,6 +232,10 @@ public final class Main {
         }
         server.metricsPerDatabase("true".equalsIgnoreCase(System.getenv("AXON_METRICS_PER_DATABASE")));
         server.metricsRequireAuth("true".equalsIgnoreCase(System.getenv("AXON_METRICS_REQUIRE_AUTH")));
+        // retenção por partição e TTL; em cluster só o líder age
+        server.maintenance(new com.axonbase.core.partition.PartitionMaintenance(ds,
+            com.axonbase.core.partition.PartitionMaintenance.Options.fromEnvironment(System.getenv()),
+            System::currentTimeMillis).start());
         AxonLog.log("info", "server_started", Messages.get("server_started", BuildInfo.version(), bind, port, path));
         if (cluster != null) {
             System.out.println(Messages.get("server_cluster", config.clusterId(), config.nodeId(),
@@ -173,6 +261,58 @@ public final class Main {
         }
 
         Thread.currentThread().join();
+    }
+
+    /**
+     * Chamado só com o S3 configurado, que é como se pede a restauração: numa base vazia, restaura o que houver no
+     * balde; com o balde sem backup, cria os bancos iniciais. Uma base que já tem dados fica como está.
+     *
+     * @throws IllegalStateException se a restauração falha, ou se uma anterior deixou a base pela metade
+     */
+    static void restoreAtStartup(Datastore ds, KvBackend backend, S3SyncManager s3) {
+        if (ds.restoreInterrupted()) {
+            throw new IllegalStateException(Messages.get("server_s3_restore_interrupted"));
+        }
+        if (!backend.keysWithPrefix("").isEmpty()) {
+            return;
+        }
+        if (s3.restoreAtStartup() == S3SyncManager.StartupRestore.RESTORED) {
+            System.out.println(Messages.get("server_s3_restored"));
+        } else {
+            System.out.println(Messages.get("server_s3_empty"));
+            ds.createDatabase("axonbase", "main");
+            ds.createDatabase("app", "main");
+        }
+    }
+
+    /**
+     * Liga o journal de PITR quando pedido, em nó único com RocksDB. No cluster os lotes vêm do log Raft e quem liga
+     * o journal é {@link ShardJournalHooks}, junto dos ganchos do consenso.
+     */
+    static PitrJournal startPitr(PitrSettings settings, KvBackend backend, String clusterId) {
+        if (!settings.enabled()) {
+            return null;
+        }
+        if (!(backend instanceof RocksDbBackend rocks)) {
+            AxonLog.log("warn", "pitr_unavailable", Messages.get("pitr_unavailable"));
+            return null;
+        }
+        if (!clusterId.isBlank()) {
+            return null;
+        }
+        // quem fecha é o desligamento do servidor, depois de atender as requisições em curso
+        return PitrJournal.attach(rocks, settings.directoryFor(rocks), settings.options());
+    }
+
+    /** Onde os backups físicos de shard ficam: {@code AXON_SHARD_BACKUP_DIR}, ou ao lado dos dados. */
+    private static Path shardBackupDir(RocksDbBackend rocks) {
+        // dentro do diretório de dados o nome precisa começar com ponto, como o do journal
+        return Path.of(envOr("AXON_SHARD_BACKUP_DIR", rocks.directory().resolve(".shard-backups").toString()));
+    }
+
+    /** O relógio do armazenamento já guarda em disco um teto do que emite; sem RocksDB, o do sistema basta. */
+    static HybridClock clockFor(KvBackend backend) {
+        return backend instanceof RocksDbBackend rocks ? rocks.clock() : HybridClock.system();
     }
 
     private static String envOr(String key, String def) {

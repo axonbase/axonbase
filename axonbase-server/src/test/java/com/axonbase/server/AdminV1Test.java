@@ -208,7 +208,8 @@ class AdminV1Test {
         HttpResponse<String> list = get("/service-tokens", root);
         assertEquals(200, list.statusCode());
         assertTrue(list.body().contains(id));
-        assertFalse(list.body().contains(token.substring(token.lastIndexOf('_') + 1)), list.body());
+        // o segredo é tudo que vem depois de "axsvc_<id>_": em Base64 de URL ele pode conter '_'
+        assertFalse(list.body().contains(token.substring(("axsvc_" + id + "_").length())), list.body());
         assertTrue(list.body().contains("lastUsedAt"));
 
         assertEquals(204, call("DELETE", "/service-tokens/" + id, root, null).statusCode());

@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.HashMap;
+import java.util.function.Predicate;
 
 /**
  * Transacción: unha vista {@link KvBackend} que bufferiza os writes e deixa ver
@@ -33,6 +34,10 @@ public final class Transaction implements KvBackend {
     private final java.util.ArrayDeque<SavepointSnapshot> savepoints = new java.util.ArrayDeque<>();
     private boolean open = true;
     private final long openedAtMs = System.currentTimeMillis();
+    /** Faixas que o commit vai apagar: para esta transação, o que está nelas na base já não existe. */
+    private final java.util.List<RangeDelete.Range> dropped = new java.util.ArrayList<>();
+    /** Condições conferidas (e travas tomadas) no commit, uma por identificador. */
+    private final java.util.Map<String, CommitGuard> guards = new java.util.LinkedHashMap<>();
 
     public Transaction(KvBackend base) {
         this.base = base;
@@ -46,6 +51,17 @@ public final class Transaction implements KvBackend {
     /** Quantidade de escritas e de remoções pendentes (leitura aproximada, sem copiar). */
     public int stagedWriteCount() { return staged.size(); }
     public int stagedDeleteCount() { return deleted.size(); }
+    /** Tamanho aproximado do lote que o commit levaria: chaves e valores gravados e chaves apagadas. */
+    public long stagedBytes() {
+        long bytes = 0;
+        for (var entry : staged.entrySet()) {
+            bytes += entry.getKey().length() + (long) entry.getValue().length;
+        }
+        for (String key : deleted) {
+            bytes += key.length();
+        }
+        return bytes;
+    }
     public java.util.Map<String, byte[]> stagedWrites() { return java.util.Map.copyOf(staged); }
     public java.util.Set<String> stagedDeletes() { return java.util.Set.copyOf(deleted); }
 
@@ -59,6 +75,9 @@ public final class Transaction implements KvBackend {
         if (v != null) {
             return Optional.of(v.clone());
         }
+        if (isDropped(key)) {
+            return Optional.empty();
+        }
         Optional<byte[]> cached = snapshot.get(key);
         if (cached != null) {
             return cached.map(byte[]::clone);
@@ -66,8 +85,17 @@ public final class Transaction implements KvBackend {
         Optional<byte[]> read;
         if (base instanceof VersionedKvBackend versioned) {
             Optional<VersionedKvBackend.VersionedValue> value = versioned.getVersioned(key);
-            readVersions.put(key, value.map(VersionedKvBackend.VersionedValue::version)
-                .orElseGet(() -> versioned.versionOf(key)));
+            long version;
+            if (value.isPresent()) {
+                version = value.get().version();
+            } else {
+                // a versão de uma chave ausente é lida antes da leitura que confirma a ausência: lida só depois,
+                // seria a de quem a criou no meio, e este commit gravaria por cima
+                long before = versioned.versionOf(key);
+                value = versioned.getVersioned(key);
+                version = value.isPresent() ? value.get().version() : before;
+            }
+            readVersions.put(key, version);
             read = value.map(VersionedKvBackend.VersionedValue::value);
         } else {
             read = base.get(key);
@@ -84,8 +112,201 @@ public final class Transaction implements KvBackend {
         if (!staged.containsKey(key) && !snapshot.containsKey(key)) {
             get(key);
         }
+        stageMarker(key, value);
         staged.put(key, value.clone());
         deleted.remove(key);
+    }
+
+    /** A chave está numa faixa que esta transação vai apagar (e não foi gravada de novo depois). */
+    public boolean isDropped(String key) {
+        for (RangeDelete.Range range : dropped) {
+            if (range.contains(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Uma marca de remoção por faixa: o que a transação já tinha gravado ali deixa de existir (no commit a faixa é
+     * apagada antes das gravações, que de outro modo a sobreviveriam) e as leituras seguintes não veem mais a base.
+     */
+    private void stageMarker(String key, byte[] value) {
+        if (!RangeDelete.isMarker(key)) {
+            return;
+        }
+        RangeDelete.Range range = RangeDelete.parse(key, value);
+        staged.subMap(range.from(), true, range.to(), false).clear();
+        dropped.add(range);
+    }
+
+    /** Esta transação gravou ou apagou a chave. */
+    public boolean writes(String key) {
+        ensureOpen();
+        return staged.containsKey(key) || deleted.contains(key) || isDropped(key);
+    }
+
+    /**
+     * Lê como {@link #get}, mas sem registrar a leitura: outra transação que mude a chave não conflita com esta.
+     * Serve para metadados cuja validade é conferida por uma {@link CommitGuard}.
+     */
+    public Optional<byte[]> peek(String key) {
+        ensureOpen();
+        if (deleted.contains(key)) {
+            return Optional.empty();
+        }
+        byte[] v = staged.get(key);
+        if (v != null) {
+            return Optional.of(v.clone());
+        }
+        return isDropped(key) ? Optional.empty() : base.get(key);
+    }
+
+    /** Lista as chaves do prefixo como {@link #keysWithPrefix}, sem registrar a faixa nem as leituras. */
+    public List<String> peekKeys(String prefix) {
+        ensureOpen();
+        java.util.TreeSet<String> keys = new java.util.TreeSet<>(base.keysWithPrefix(prefix));
+        keys.removeIf(this::isDropped);
+        for (String k : staged.keySet()) {
+            if (k.startsWith(prefix)) {
+                keys.add(k);
+            }
+        }
+        keys.removeAll(deleted);
+        return List.copyOf(keys);
+    }
+
+    /**
+     * Vista só de leitura que não registra nada, nem chaves lidas nem faixas varridas, então o commit não passa a
+     * depender delas. {@code scanPrefix} entrega as chaves em fluxo, sem montar a lista. Para quem só conta (a
+     * estimativa do EXPLAIN) e não pode crescer com a tabela. A varredura mostra o que a transação gravou, apagou ou
+     * já viu ausente.
+     */
+    public KvBackend untrackedReads() {
+        ensureOpen();
+        return new KvBackend() {
+            @Override
+            public Optional<byte[]> get(String key) {
+                return peek(key);
+            }
+
+            @Override
+            public List<String> keysWithPrefix(String prefix) {
+                return peekKeys(prefix);
+            }
+
+            @Override
+            public void scanPrefix(String prefix, Predicate<String> visitor) {
+                streamKeys(prefix, visitor);
+            }
+
+            @Override
+            public void put(String key, byte[] value) {
+                throw new UnsupportedOperationException("vista só de leitura");
+            }
+
+            @Override
+            public boolean putIfAbsent(String key, byte[] value) {
+                throw new UnsupportedOperationException("vista só de leitura");
+            }
+
+            @Override
+            public boolean delete(String key) {
+                throw new UnsupportedOperationException("vista só de leitura");
+            }
+        };
+    }
+
+    /** Intercala, em ordem de chave, a varredura da base com o que a transação gravou. */
+    private void streamKeys(String prefix, Predicate<String> visitor) {
+        ensureOpen();
+        List<String> written = staged.tailMap(prefix, true).keySet().stream()
+            .takeWhile(k -> k.startsWith(prefix)).toList();
+        int[] next = {0};
+        boolean[] stopped = {false};
+        base.scanPrefix(prefix, key -> {
+            // a chave gravada aqui sai da lista das gravadas, e não duas vezes
+            if (staged.containsKey(key) || deleted.contains(key) || isDropped(key) || seenAbsent(key)) {
+                return true;
+            }
+            while (!stopped[0] && next[0] < written.size() && written.get(next[0]).compareTo(key) < 0) {
+                stopped[0] = !visitor.test(written.get(next[0]++));
+            }
+            if (!stopped[0]) {
+                stopped[0] = !visitor.test(key);
+            }
+            return !stopped[0];
+        });
+        while (!stopped[0] && next[0] < written.size()) {
+            stopped[0] = !visitor.test(written.get(next[0]++));
+        }
+    }
+
+    /** Leitura repetível: a transação já leu a chave e ela não existia. */
+    private boolean seenAbsent(String key) {
+        Optional<byte[]> seen = snapshot.get(key);
+        return seen != null && seen.isEmpty();
+    }
+
+    /**
+     * Esquece as faixas varridas: o commit deixa de conferir leitura fantasma (e de correr sozinho no armazenamento).
+     * As chaves lidas continuam conferidas. Para o trabalho de segundo plano, que não pode parar as escritas.
+     */
+    public void forgetScans() {
+        ensureOpen();
+        readRanges.clear();
+    }
+
+    /** Grava sem exigir que a chave esteja igual no commit: a última gravação vence. */
+    public void putBlind(String key, byte[] value) {
+        ensureOpen();
+        stageMarker(key, value);
+        staged.put(key, value.clone());
+        deleted.remove(key);
+    }
+
+    /** Condição do commit: pega o que precisar, confere e devolve o que soltar depois de gravar. */
+    public interface CommitGuard {
+        /** Condições exclusivas entram primeiro: quem já tem a escrita pode pegar a leitura, o contrário trava. */
+        boolean exclusive();
+
+        /** @throws VersionConflictException quando a condição não vale mais */
+        Held enter();
+    }
+
+    /** O que soltar depois do commit. */
+    public interface Held extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /** Registra uma condição; um identificador repetido vale uma vez. */
+    public void guard(String id, CommitGuard guard) {
+        ensureOpen();
+        guards.putIfAbsent(id, guard);
+    }
+
+    /** Há condições a conferir no commit. */
+    public boolean hasGuards() {
+        return !guards.isEmpty();
+    }
+
+    /** Entra em todas as condições. Se uma falhar, solta as anteriores e relança. */
+    public Held enterGuards() {
+        java.util.Deque<Held> held = new java.util.ArrayDeque<>();
+        try {
+            for (boolean exclusive : new boolean[] {true, false}) {
+                for (CommitGuard guard : guards.values()) {
+                    if (guard.exclusive() == exclusive) {
+                        held.push(guard.enter());
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            held.forEach(Held::close);
+            throw e;
+        }
+        return () -> held.forEach(Held::close);
     }
 
     @Override
@@ -121,14 +342,19 @@ public final class Transaction implements KvBackend {
         readRanges.add(prefix);
         java.util.TreeSet<String> keys = new java.util.TreeSet<>();
         for (String k : base.keysWithPrefix(prefix)) {
+            if (isDropped(k)) {
+                continue;
+            }
             // Captura o valor/versão de cada chave do scan para validá-la no commit.
             get(k);
             keys.add(k);
         }
-        for (String k : staged.keySet()) {
-            if (k.startsWith(prefix)) {
-                keys.add(k);
+        // só o trecho do prefixo: numa transação grande (importação) percorrer tudo a cada leitura não termina
+        for (String k : staged.tailMap(prefix, true).keySet()) {
+            if (!k.startsWith(prefix)) {
+                break;
             }
+            keys.add(k);
         }
         keys.removeAll(deleted);
         return List.copyOf(keys);
@@ -174,6 +400,20 @@ public final class Transaction implements KvBackend {
         }
     }
 
+    /** Chaves lidas, escritas ou apagadas: as que decidem se outra transação conflita com esta. */
+    public java.util.Set<String> touchedKeys() {
+        java.util.Set<String> keys = new java.util.HashSet<>(readVersions.keySet());
+        keys.addAll(staged.keySet());
+        keys.addAll(deleted);
+        return keys;
+    }
+
+    /** Fecha a transação cujas escritas já foram aplicadas ao backend pelo consenso. */
+    public void finishApplied() {
+        ensureOpen();
+        finish();
+    }
+
     /**
      * Aplica o staged sen revalidar as precondicións e pecha a transacción.
      *
@@ -202,7 +442,7 @@ public final class Transaction implements KvBackend {
      * fóra do savepoint e non se botan ao retroceder.
      */
     private record SavepointSnapshot(String name, java.util.Map<String, byte[]> staged,
-                                     java.util.Set<String> deleted) {
+                                     java.util.Set<String> deleted, java.util.List<RangeDelete.Range> dropped) {
     }
 
     /** Crea un checkpoint co estado actual dos writes e deletes, baixo o nome dado. */
@@ -212,7 +452,7 @@ public final class Transaction implements KvBackend {
             throw new IllegalArgumentException(Messages.get("txn_savepoint_name_required"));
         }
         savepoints.push(new SavepointSnapshot(name,
-            new java.util.TreeMap<>(staged), new java.util.HashSet<>(deleted)));
+            new java.util.TreeMap<>(staged), new java.util.HashSet<>(deleted), java.util.List.copyOf(dropped)));
     }
 
     /**
@@ -268,6 +508,8 @@ public final class Transaction implements KvBackend {
         staged.putAll(target.staged());
         deleted.clear();
         deleted.addAll(target.deleted());
+        dropped.clear();
+        dropped.addAll(target.dropped());
     }
 
     private void finish() {
@@ -278,6 +520,8 @@ public final class Transaction implements KvBackend {
         readVersions.clear();
         readRanges.clear();
         savepoints.clear();
+        guards.clear();
+        dropped.clear();
     }
 
     /** Descarta o estado en tocar o base. */

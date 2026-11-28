@@ -55,6 +55,29 @@ public final class Session {
         return auth;
     }
 
+    /** {@code $auth} e {@code $token}: numa sessão autenticada o servidor os preenche com os claims. */
+    public static boolean isIdentityVariable(String name) {
+        return "auth".equals(name) || "token".equals(name);
+    }
+
+    /** Recusa a definição, pelo cliente, de uma variável de identidade numa sessão autenticada. */
+    public void requireDefinable(String name) {
+        if (isIdentityVariable(name) && Authz.authenticated(auth)) {
+            throw new com.axonbase.common.AxonError(-32002, Messages.get("auth_param_reserved", name));
+        }
+    }
+
+    /**
+     * Valor de um parâmetro {@code $nome}, ou {@code null} quando não há. As variáveis de identidade vêm dos claims
+     * sempre que a sessão está autenticada, mesmo que exista uma variável com o mesmo nome definida antes.
+     */
+    public AxonValue parameter(String name) {
+        if (isIdentityVariable(name) && Authz.authenticated(auth)) {
+            return auth;
+        }
+        return vars.get(name);
+    }
+
     /**
      * Define os claims da sessão. Aplica o teto de papel (se houver) e recalcula a
      * marca de somente leitura: papel explícito viewer vira somente leitura.
@@ -79,6 +102,113 @@ public final class Session {
     /** True quando o motor deve recusar qualquer escrita nesta sessão. */
     public boolean readOnly() {
         return capReadOnly || authReadOnly;
+    }
+
+    private boolean restoring;
+
+    /**
+     * Sessão que repõe dados que já existiam (importação de dump, movimentação de shard, compensação de saga): um
+     * CREATE ou INSERT sobre um id existente o substitui, e as restrições de tabela não são conferidas. Só o motor
+     * liga isto; nenhum pedido de cliente chega aqui.
+     */
+    public boolean restoring() {
+        return restoring;
+    }
+
+    public void restoring(boolean value) {
+        this.restoring = value;
+    }
+
+    private com.axonbase.core.engine.SagaCompensation compensation;
+
+    /** A compensação de SAGA em curso nesta sessão, ou {@code null}. Só o motor constrói a marca. */
+    public com.axonbase.core.engine.SagaCompensation compensation() {
+        return compensation;
+    }
+
+    public void compensation(com.axonbase.core.engine.SagaCompensation value) {
+        this.compensation = value;
+    }
+
+    /**
+     * Sessão nova para repor dados em nome desta: mesmo namespace e banco, mesma identidade e mesmo teto de papel, sem
+     * a transação, as variáveis nem as live queries dela.
+     */
+    public Session restoringCopy() {
+        Session copy = new Session(namespace, database);
+        copy.auth = auth;
+        copy.roleCap = roleCap;
+        copy.capReadOnly = capReadOnly;
+        copy.authReadOnly = authReadOnly;
+        copy.restoring = true;
+        return copy;
+    }
+
+    /** Banco ao qual o corpo de um evento fica confinado. */
+    public record EventScope(String namespace, String database) {
+    }
+
+    private EventScope eventScope;
+
+    /**
+     * O banco do evento em execução, ou {@code null} fora de um evento. Só o motor liga isto. Vale seja qual for a
+     * identidade da sessão, inclusive a trocada por uma função {@code SECURITY DEFINER}.
+     */
+    public EventScope eventScope() {
+        return eventScope;
+    }
+
+    public void eventScope(EventScope scope) {
+        this.eventScope = scope;
+    }
+
+    // por thread: a varredura paralela avalia PERMISSIONS e Data Rules da mesma sessão em várias ao mesmo tempo
+    private final ThreadLocal<EventScope> definitionScope = new ThreadLocal<>();
+
+    /**
+     * O banco da expressão de esquema ou de política em avaliação nesta thread (DEFAULT, ASSERT, CHECK, PERMISSIONS,
+     * Data Rule, condição de evento, filtro de LIVE), ou {@code null} fora de uma. Enquanto vale, a sessão só lê esse
+     * banco. Só o motor liga isto.
+     */
+    public EventScope definitionScope() {
+        return definitionScope.get();
+    }
+
+    public void definitionScope(EventScope scope) {
+        if (scope == null) {
+            definitionScope.remove();
+        } else {
+            definitionScope.set(scope);
+        }
+    }
+
+    private boolean readOnlyCall;
+
+    /** Uma função somente leitura está em execução: nada do que ela dispara escreve. Só o motor liga isto. */
+    public boolean readOnlyCall() {
+        return readOnlyCall;
+    }
+
+    public void readOnlyCall(boolean value) {
+        this.readOnlyCall = value;
+    }
+
+    private java.util.Set<String> importedTables;
+
+    /** Começa a anotar as tabelas que uma importação cria. */
+    public void trackImportedTables() {
+        this.importedTables = new java.util.HashSet<>();
+    }
+
+    public void tableCreated(String ns, String db, String table) {
+        if (importedTables != null) {
+            importedTables.add(ns + "\u0000" + db + "\u0000" + table);
+        }
+    }
+
+    /** A tabela foi criada pela importação em curso, que ainda está completando a definição dela. */
+    public boolean importedTable(String ns, String db, String table) {
+        return importedTables != null && importedTables.contains(ns + "\u0000" + db + "\u0000" + table);
     }
 
     // ------------------------------------------------------------------
@@ -200,6 +330,32 @@ public final class Session {
     /** Descarta as notificações acumuladas (chamado no CANCEL). */
     public void discardLive() {
         pendingLive.clear();
+    }
+
+    // ------------------------------------------------------------------
+    // Ações presas ao destino das escritas da transação
+    // ------------------------------------------------------------------
+
+    private final java.util.List<Runnable> discardActions = new java.util.ArrayList<>();
+
+    /** Ação a executar se as escritas da transação em curso forem descartadas. */
+    public synchronized void onWritesDiscarded(Runnable action) {
+        discardActions.add(action);
+    }
+
+    /** A transação foi desfeita sem gravar: executa as ações registradas. */
+    public void writesDiscarded() {
+        java.util.List<Runnable> copy;
+        synchronized (this) {
+            copy = new java.util.ArrayList<>(discardActions);
+            discardActions.clear();
+        }
+        copy.forEach(Runnable::run);
+    }
+
+    /** As escritas foram gravadas, ou não se sabe: as ações são esquecidas. */
+    public synchronized void keepWrites() {
+        discardActions.clear();
     }
 
     // ------------------------------------------------------------------

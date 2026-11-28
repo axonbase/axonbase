@@ -1,7 +1,12 @@
 package com.axonbase.server;
 
+import com.axonbase.common.AxonError;
 import com.axonbase.common.Messages;
+import com.axonbase.core.partition.ColdBackups;
+import com.axonbase.core.cluster.ClusterRole;
 import com.axonbase.core.backup.StreamEncryption;
+import com.axonbase.core.journal.PitrRestore;
+import com.axonbase.core.storage.CommitWatermark;
 import com.axonbase.core.security.Authz;
 import com.axonbase.core.storage.PhysicalBackups;
 import com.axonbase.core.storage.PhysicalFiles;
@@ -18,7 +23,8 @@ import java.util.Map;
 /**
  * Backup físico pela API administrativa ({@code /admin/v1/backups/physical}), sobre o {@code BackupEngine} do
  * RocksDB: criar, listar, verificar, aplicar retenção e restaurar. O restore troca a base dentro do processo,
- * sem reiniciar o servidor. Só vale em nó único com armazenamento RocksDB.
+ * sem reiniciar o servidor. Exige armazenamento RocksDB. Em cluster, o backup é criado num seguidor ou learner
+ * (listar, verificar, baixar e aplicar retenção valem em qualquer nó); restaurar e importar só em nó único.
  *
  * <p>O diretório de backup é {@code AXON_BACKUP_DIR} (ou a propriedade {@code axon.backup.dir}); sem isso, fica
  * em {@code <dados>/.physical-backups}, dentro do mesmo volume e ignorado pelo RocksDB.</p>
@@ -95,14 +101,30 @@ final class PhysicalBackupApi {
         }
     }
 
-    private static RocksDbBackend rocks(AxonServer srv) {
+    static RocksDbBackend rocks(AxonServer srv) {
         RocksDbBackend rocks = srv.ds().rocksBackend()
             .orElseThrow(() -> new AdminV1Servlet.ApiError(409, "PHYSICAL_UNSUPPORTED",
                 Messages.get("physical_unsupported")));
-        if (!"local".equals(srv.clusterStatus().status().clusterId())) {
+        return rocks;
+    }
+
+    static boolean clustered(AxonServer srv) {
+        return !"local".equals(srv.clusterStatus().status().clusterId());
+    }
+
+    /** Restaurar ou importar mexeria na base de um membro por fora do consenso. */
+    static void requireStandalone(AxonServer srv) {
+        if (clustered(srv)) {
+            throw new AdminV1Servlet.ApiError(409, "CONFLICT", Messages.get("physical_cluster_restore"));
+        }
+    }
+
+    /** Criar o backup pesa no disco: em cluster fica com uma réplica, para não atrasar as escritas do líder. */
+    private static void requireBackupSource(AxonServer srv) {
+        var role = srv.clusterStatus().status().role();
+        if (clustered(srv) && role != ClusterRole.FOLLOWER && role != ClusterRole.LEARNER) {
             throw new AdminV1Servlet.ApiError(409, "CONFLICT", Messages.get("physical_cluster"));
         }
-        return rocks;
     }
 
     static Path backupDir(RocksDbBackend rocks) {
@@ -121,7 +143,37 @@ final class PhysicalBackupApi {
         m.put("sizeBytes", i.sizeBytes());
         m.put("files", i.files());
         m.put("version", i.version());
+        if (!i.watermark().equals(CommitWatermark.NONE)) {
+            // só backups com carimbo servem de base para restaurar a um instante
+            m.put("stampedAt", AdminJson.iso(i.watermark().stamp().physical()));
+            m.put("journalIndex", i.watermark().index());
+        }
         return m;
+    }
+
+    /** Os backups do diretório do motor ou de uma área de importação. */
+    static List<PhysicalBackups.Info> backups(RocksDbBackend rocks, String source) {
+        Path dir = sourceDir(rocks, source, true);
+        synchronized (LOCK) {
+            try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
+                return pb.list();
+            } catch (PhysicalBackups.BackupFailedException e) {
+                throw failed(e);
+            }
+        }
+    }
+
+    /** O cabeçalho opcional {@code X-Axon-Size}, ou -1. */
+    static long declaredSize(HttpServletRequest req) {
+        String header = req.getHeader("X-Axon-Size");
+        if (header == null) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(header.trim());
+        } catch (NumberFormatException e) {
+            throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", "X-Axon-Size");
+        }
     }
 
     private static void list(AxonServer srv, HttpServletResponse resp) throws IOException {
@@ -139,12 +191,17 @@ final class PhysicalBackupApi {
 
     private static void create(AxonServer srv, HttpServletResponse resp) throws IOException {
         RocksDbBackend rocks = rocks(srv);
+        requireBackupSource(srv);
         PhysicalBackups.Info info;
         synchronized (LOCK) {
-            try (PhysicalBackups pb = PhysicalBackups.open(backupDir(rocks))) {
-                info = pb.create(rocks);
+            Path dir = backupDir(rocks);
+            try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
+                // os objetos frios não são copiados: o backup os referencia e os bloqueia
+                info = ColdBackups.createPhysical(srv.ds(), pb, rocks, dir);
             } catch (PhysicalBackups.BackupFailedException e) {
                 throw failed(e);
+            } catch (AxonError e) {
+                throw new AdminV1Servlet.ApiError(409, "COLD_HOLD_FAILED", e.getMessage());
             }
         }
         AdminV1Servlet.write(resp, 200, AdminJson.of(toJson(info)));
@@ -177,11 +234,15 @@ final class PhysicalBackupApi {
         }
         List<Object> out = new ArrayList<>();
         synchronized (LOCK) {
-            try (PhysicalBackups pb = PhysicalBackups.open(backupDir(rocks))) {
+            Path dir = backupDir(rocks);
+            try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
                 pb.purgeKeeping(keep);
+                ColdBackups.releasePurged(srv.ds(), dir, pb.list());
                 pb.list().forEach(i -> out.add(toJson(i)));
             } catch (PhysicalBackups.BackupFailedException e) {
                 throw failed(e);
+            } catch (AxonError e) {
+                throw new AdminV1Servlet.ApiError(409, "COLD_HOLD_FAILED", e.getMessage());
             }
         }
         AdminV1Servlet.write(resp, 200, AdminJson.obj("backups", out));
@@ -189,21 +250,38 @@ final class PhysicalBackupApi {
 
     private static void restore(AxonServer srv, int id, HttpServletRequest req, HttpServletResponse resp)
             throws IOException {
+        requireStandalone(srv);
         if (!"true".equals(req.getParameter("confirm"))) {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("admin_restore_confirm"));
         }
         RocksDbBackend rocks = rocks(srv);
-        Path dir = sourceDir(rocks, req.getParameter("source"), true);
+        String source = req.getParameter("source");
+        String at = req.getParameter("at");
+        Path dir = sourceDir(rocks, source, true);
         Path previous;
         long version;
+        PitrRestore.Prepared pitr = null;
         synchronized (LOCK) {
             try {
                 try (PhysicalBackups pb = PhysicalBackups.open(dir)) {
                     requireExists(pb, id);
                     version = pb.list().stream().filter(i -> i.id() == id).findFirst().orElseThrow().version();
                 }
-                // 1) restaura num diretório vizinho e prova que abre, com o servidor atendendo normalmente
-                Path prepared = PhysicalBackups.prepareRestore(dir, id, rocks.directory());
+                // 1) restaura num diretório vizinho e prova que abre, com o servidor atendendo normalmente; com
+                // "at", reaplica também o journal até o instante pedido
+                Path prepared;
+                if (at == null) {
+                    prepared = PhysicalBackups.prepareRestore(dir, id, rocks.directory());
+                } else {
+                    pitr = PitrApi.prepare(srv, rocks, dir, id, source, at);
+                    prepared = pitr.directory();
+                }
+                try {
+                    ColdBackups.requireRestorable(srv.ds(), prepared);
+                } catch (AxonError missing) {
+                    PhysicalBackups.discardPrepared(rocks.directory());
+                    throw new AdminV1Servlet.ApiError(409, "COLD_MISSING", missing.getMessage());
+                }
                 // 2) segura as operações, troca a base e reabre; desiste sem tocar na base se não esvaziar a tempo
                 try {
                     previous = rocks.replaceWith(prepared, QUIESCE_TIMEOUT_MS);
@@ -220,8 +298,17 @@ final class PhysicalBackupApi {
                 srv.auth().ensureRoot(srv.config().user(), srv.config().password());
             }
         }
-        AdminV1Servlet.write(resp, 200, AdminJson.obj("restored", true, "id", id, "version", version,
-            "previous", previous.getFileName().toString()));
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("restored", true);
+        body.put("id", id);
+        body.put("version", version);
+        body.put("previous", previous.getFileName().toString());
+        if (pitr != null) {
+            body.put("at", at);
+            body.put("appliedBatches", pitr.appliedBatches());
+            body.put("restoredUntil", AdminJson.iso(pitr.position().stamp().physical()));
+        }
+        AdminV1Servlet.write(resp, 200, AdminJson.of(body));
     }
 
     // ---- transferência de arquivos ----
@@ -288,21 +375,14 @@ final class PhysicalBackupApi {
 
     private static void writeFile(AxonServer srv, HttpServletRequest req, HttpServletResponse resp)
             throws IOException {
+        requireStandalone(srv);
         RocksDbBackend rocks = rocks(srv);
         String source = req.getParameter("source");
         String path = req.getParameter("path");
         if (source == null || source.isBlank()) {
             throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", Messages.get("physical_source_required"));
         }
-        long declared = -1;
-        String header = req.getHeader("X-Axon-Size");
-        if (header != null) {
-            try {
-                declared = Long.parseLong(header.trim());
-            } catch (NumberFormatException e) {
-                throw new AdminV1Servlet.ApiError(400, "BAD_REQUEST", "X-Axon-Size");
-            }
-        }
+        long declared = declaredSize(req);
         long written;
         try (java.io.InputStream plain = BackupStreamApi.openPlain(
                 new java.io.BufferedInputStream(req.getInputStream(), 1 << 16), srv.config().s3EncryptKey())) {
@@ -317,6 +397,7 @@ final class PhysicalBackupApi {
     }
 
     private static void deleteImport(AxonServer srv, String source, HttpServletResponse resp) throws IOException {
+        requireStandalone(srv);
         RocksDbBackend rocks = rocks(srv);
         try {
             sourceDir(rocks, source, true);

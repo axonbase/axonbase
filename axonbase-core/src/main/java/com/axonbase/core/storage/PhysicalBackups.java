@@ -1,5 +1,6 @@
 package com.axonbase.core.storage;
 
+import com.axonbase.core.hlc.HlcTimestamp;
 import org.rocksdb.BackupEngine;
 import org.rocksdb.BackupEngineOptions;
 import org.rocksdb.BackupInfo;
@@ -26,8 +27,14 @@ import java.util.stream.Stream;
  */
 public final class PhysicalBackups implements AutoCloseable {
 
-    /** Um backup do diretório. {@code version} é a marca d'água de versão do instante do backup. */
-    public record Info(int id, long timestampSeconds, long sizeBytes, int files, long version) {
+    /**
+     * Um backup do diretório. {@code version} é a marca d'água de versão do instante do backup; {@code watermark},
+     * a posição HLC lida antes de copiar (o backup contém todos os lotes até ela), é
+     * {@link CommitWatermark#NONE} em backups anteriores à 0.11, que não servem de base para a restauração a um
+     * instante.
+     */
+    public record Info(int id, long timestampSeconds, long sizeBytes, int files, long version,
+                       CommitWatermark watermark) {
     }
 
     /** Falha de backup físico, com a causa original do RocksDB ou do sistema de arquivos. */
@@ -42,6 +49,9 @@ public final class PhysicalBackups implements AutoCloseable {
     }
 
     private static final String META_PREFIX = "axon-version=";
+    private static final String META_STAMP = "axon-hlc=";
+    private static final String META_INDEX = "axon-idx=";
+    private static final String META_TIMELINE = "axon-tl=";
 
     static {
         // ferramentas que só restauram (sem abrir um RocksDbBackend antes) precisam da biblioteca nativa carregada
@@ -78,8 +88,12 @@ public final class PhysicalBackups implements AutoCloseable {
     /** Cria um backup do banco em uso, sem pará-lo: descarrega o memtable e copia os arquivos. */
     public Info create(RocksDbBackend backend) {
         long version = backend.currentVersion();
+        // antes de copiar: o backup contém tudo até esta marca
+        CommitWatermark mark = backend.watermark();
+        String metadata = META_PREFIX + version + ";" + META_STAMP + mark.stamp().physical() + "."
+            + mark.stamp().logical() + ";" + META_INDEX + mark.index() + ";" + META_TIMELINE + mark.timeline();
         try {
-            backend.createPhysicalBackup(engine, META_PREFIX + version);
+            backend.createPhysicalBackup(engine, metadata);
         } catch (RocksDBException e) {
             throw new BackupFailedException("falha ao criar o backup físico", e);
         }
@@ -91,7 +105,8 @@ public final class PhysicalBackups implements AutoCloseable {
     public List<Info> list() {
         List<Info> out = new ArrayList<>();
         for (BackupInfo b : engine.getBackupInfo()) {
-            out.add(new Info(b.backupId(), b.timestamp(), b.size(), b.numberFiles(), parseVersion(b.appMetadata())));
+            out.add(new Info(b.backupId(), b.timestamp(), b.size(), b.numberFiles(), parseVersion(b.appMetadata()),
+                parseWatermark(b.appMetadata())));
         }
         out.sort(Comparator.comparingInt(Info::id));
         return out;
@@ -156,6 +171,25 @@ public final class PhysicalBackups implements AutoCloseable {
 
     private Path backupDirOf() {
         return Path.of(options.backupDir());
+    }
+
+    /**
+     * A marca de um backup lida direto do manifesto {@code meta/<id>}, sem abrir o {@code BackupEngine}, que não pode
+     * ser aberto por dois processos ao mesmo tempo. {@link CommitWatermark#NONE} se o manifesto não a traz.
+     */
+    public static CommitWatermark watermarkOfMeta(Path metaFile) {
+        try {
+            for (String line : Files.readAllLines(metaFile, java.nio.charset.StandardCharsets.UTF_8)) {
+                if (line.startsWith("metadata ")) {
+                    String hex = line.substring("metadata ".length()).trim();
+                    return parseWatermark(new String(java.util.HexFormat.of().parseHex(hex),
+                        java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+            return CommitWatermark.NONE;
+        } catch (IOException | IllegalArgumentException e) {
+            throw new BackupFailedException("manifesto ilegível: " + metaFile, e);
+        }
     }
 
     // ---- restore ----
@@ -235,6 +269,23 @@ public final class PhysicalBackups implements AutoCloseable {
         return restoring;
     }
 
+    /**
+     * Põe no lugar de {@code liveDir}, que não pode estar aberta, o diretório preparado por {@link #prepareRestore}.
+     * Uma queda no meio é desfeita na próxima abertura.
+     */
+    public static Path commitPrepared(Path liveDir) {
+        try {
+            return DirectorySwap.swap(liveDir, DirectorySwap.restoringDir(liveDir));
+        } catch (IOException e) {
+            try {
+                DirectorySwap.recover(liveDir);
+            } catch (IOException recoverFailed) {
+                e.addSuppressed(recoverFailed);
+            }
+            throw new BackupFailedException("falha ao trocar a base restaurada pela original", e);
+        }
+    }
+
     /** Descarta o diretório preparado por {@link #prepareRestore} quando a troca desistiu. */
     public static void discardPrepared(Path liveDir) {
         DirectorySwap.deleteTree(DirectorySwap.restoringDir(liveDir));
@@ -263,14 +314,36 @@ public final class PhysicalBackups implements AutoCloseable {
     }
 
     private static long parseVersion(String meta) {
-        if (meta != null && meta.startsWith(META_PREFIX)) {
-            try {
-                return Long.parseLong(meta.substring(META_PREFIX.length()).trim());
-            } catch (NumberFormatException ignored) {
-                return 0L;
+        try {
+            return Long.parseLong(field(meta, META_PREFIX));
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    private static CommitWatermark parseWatermark(String meta) {
+        try {
+            String[] stamp = field(meta, META_STAMP).split("\\.", 2);
+            if (stamp.length < 2) {
+                return CommitWatermark.NONE;
+            }
+            return new CommitWatermark(new HlcTimestamp(Long.parseLong(stamp[0]), Integer.parseInt(stamp[1])),
+                Long.parseLong(field(meta, META_INDEX)), Long.parseLong(field(meta, META_TIMELINE)));
+        } catch (NumberFormatException ignored) {
+            return CommitWatermark.NONE;
+        }
+    }
+
+    /** O valor do campo {@code name=} nos metadados {@code a=1;b=2}, ou vazio. */
+    private static String field(String meta, String name) {
+        if (meta != null) {
+            for (String part : meta.split(";")) {
+                if (part.startsWith(name)) {
+                    return part.substring(name.length()).trim();
+                }
             }
         }
-        return 0L;
+        return "";
     }
 
     private static void deleteQuietly(Path dir) {

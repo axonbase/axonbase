@@ -107,6 +107,7 @@ public final class AuthCatalog {
     /** Cria o usuário se ele ainda não existir no escopo indicado. */
     public void ensureUser(String name, String password) {
         String key = userKey(name, Scope.ROOT, null, null);
+        initialRoots.add(name);
         if (!users.containsKey(key)) {
             defineUser(name, Scope.ROOT, null, null, password, List.of("OWNER"), List.of());
             User created = users.get(key);
@@ -122,6 +123,14 @@ public final class AuthCatalog {
      * {@link #restoreBootstrap()}; sem isso ninguém consegue abrir uma nova sessão até o servidor reiniciar.
      */
     private final Map<String, User> bootstrap = new ConcurrentHashMap<>();
+
+    /** Nomes do root configurado no arranque. Vale mesmo quando a definição gravada no catálogo prevalece. */
+    private final java.util.Set<String> initialRoots = ConcurrentHashMap.newKeySet();
+
+    /** O root inicial do servidor, que não pode ser apagado. */
+    public boolean isInitialRoot(String name, Scope scope) {
+        return scope == Scope.ROOT && name != null && initialRoots.contains(name);
+    }
 
     /** Devolve os usuários de arranque que o plano de controle não redefiniu (a definição persistida prevalece). */
     public void restoreBootstrap() {
@@ -217,6 +226,11 @@ public final class AuthCatalog {
     /** Remove exatamente a identidade do escopo indicado, sem procurar escopos mais específicos. */
     public boolean removeUserExact(String name, Scope scope, String namespace, String database) {
         return users.remove(userKey(name, scope, namespace, database)) != null;
+    }
+
+    /** Há uma identidade exatamente neste escopo? */
+    public boolean hasUserExact(String name, Scope scope, String namespace, String database) {
+        return users.containsKey(userKey(name, scope, namespace, database));
     }
 
     /** Remove um access method em qualquer escopo compatível com ns/db. */

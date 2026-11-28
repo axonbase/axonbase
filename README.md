@@ -2,21 +2,79 @@
 
 Multi-model database written in Java 21+, combining document, graph, relational, key-value, full-text, vector, and geospatial models in a single engine with a unified query language (AxonQL), HTTP and WebSocket server, and SDKs in 8 languages.
 
+Release notes (in Portuguese): [1.0.0](docs/notas-1.0.0.md). Behavior changes since 0.10.1 are in the [1.0.0-rc2](docs/notas-1.0.0-rc2.md) and [1.0.0-rc1](docs/notas-1.0.0-rc1.md) notes.
+
+## Security limitations and experimental features
+
+Read this before using version 1.0.0 in production.
+
+> **Do not rely on table `PERMISSIONS` to hide data in reads by record id, `FETCH`, linked record reads or `LIVE SELECT`.** The read condition is not applied on those paths. A fix is planned for 1.0.1.
+
+- `PERMISSIONS` for reading do not apply to direct access by id (`RETURN t:1.field`), to `FETCH` or to the read of a linked record. Do not give free AxonQL access to anyone who may not read the whole table.
+- `LIVE SELECT` does not apply read `PERMISSIONS` to notifications, and a `$parameter` in its filter is read from the variables of whoever writes.
+- `SHOW SAGA TRANSACTION` shows the previous state of records without `PERMISSIONS`, data rules or masks. Whoever reaches a saga and can write can cancel it, which restores that state even where `PERMISSIONS` would deny the write.
+- A saga correlation id (`$saga_corr` or `X-Correlation-Id`) grants no scope check of its own, and a saga opened without a namespace and without steps can be finished by any identity that writes.
+- `REEMBED` does not require an administrator and rewrites rows without checking `PERMISSIONS`.
+- A database link is visible to the whole namespace and runs with its stored credential.
+- A `database.table` query by a namespace or root identity applies the `PERMISSIONS` and data rules of the session database.
+- A `viewer` still stores a table definition by querying a table that does not exist.
+- AI Audit assigned with `AUDITED BY` after login only applies at the next login, and two audited operators can approve each other's `WARNING` cases. Through the Enterprise panel, an audited operator can decide their own case.
+- The Raft port has no authentication or encryption, and without TLS (Transport Layer Security) the shard secret travels in clear text between gateway and shards. Keep both on a private network.
+- Data rules are not a complete isolation boundary (see [coverage and limits](#data-rules-coverage-and-limits)).
+
+**Experimental** features pass the functional tests, but their load and failure targets were not measured on separate machines, and their behavior or storage format may change in a 1.x release:
+
+| Experimental feature | Enabled by |
+|---|---|
+| [Multiple shards](docs/shards.md): `SHARD BY`, gateway and shard backup | gateway and `SHARD BY` |
+| [Time partitions](docs/particoes-e-camada-fria.md) | `DEFINE PARTITION` |
+| [TTL](docs/particoes-e-camada-fria.md) (Time To Live), record expiration | `DEFINE TTL` |
+| [Cold tier](docs/particoes-e-camada-fria.md), never tested against a real S3 (Simple Storage Service) compatible store | `AXON_COLD_DIR` or `AXON_COLD_S3` |
+| [Workload priority](docs/operacao-e-resiliencia.md), or QoS (Quality of Service) | `AXON_QOS`, off by default |
+
 ## Features
 
 - **Multi-model engine**: documents, graph edges, relational tables, key-value, time series, geospatial (GeoJSON), and vectors in one ACID-compliant engine
 - **AxonQL**: SQL-like query language with graph traversal (`->`/`<-`), subqueries, aggregations, 130+ built-in functions, and EXPLAIN/EXPLAIN ANALYZE
 - **Native sagas**: `BEGIN SAGA`, `COMMIT SAGA`, `CANCEL SAGA` with correlation IDs, automatic compensation, remote rollback via Database Link, and ledger tracking
-- **AI Audit**: LLM-generated security rules classify every query as `SAFE`, `WARNING`, or `DANGER` before execution — no production data reaches the AI provider
-- **Data Rules**: row-level security with predicate ANDing and automatic field masking, enforced across all queries without application changes
-- **Search engines**: BM25 full-text with configurable analyzers, HNSW vector search (cosine/Euclidean/Manhattan), geo spatial with a geohash grid, graph traversal, and columnar indexes for direct aggregation (count/sum/avg/min/max)
+- **AI Audit**: LLM-generated security rules classify every query as `SAFE`, `WARNING`, or `DANGER` before execution — no production data reaches the AI provider. An audited user cannot decide their own case or change audits and users, and an audit that is assigned but missing from the current database denies the statement
+- **Data Rules**: row-level security with predicate ANDing and automatic masking of top level fields (see [coverage and limits](#data-rules-coverage-and-limits))
+- **Search engines**: BM25 full-text with configurable analyzers, HNSW vector search (cosine/Euclidean/Manhattan), geo spatial with an H3 hierarchical hexagonal index, graph traversal, and columnar indexes for direct aggregation (count/sum/avg/min/max)
 - **Multi-model indexes**: unique, count, full-text (SEARCH ANALYZER), HNSW vector, GEO spatial, and COLUMNAR analytical
 - **MVCC transactions**: snapshot isolation, savepoints, optimistic retry, phantom protection via read ranges, and `VersionConflictException`
-- **Raft consensus**: TCP Raft with leader election, quorum, dynamic membership (join/leave via joint consensus), catch-up, snapshots, and consistent hash sharding
+- **Raft consensus**: TCP Raft with leader election, quorum, dynamic membership (join/leave as one log entry per change, without joint consensus; run one change at a time), catch-up, snapshots, and consistent hash sharding
 - **Authentication**: JWT (HS256) with root/namespace/database scope, certificate-based (ICP-Brasil compatible), mTLS, and Data Rules from JWT claims
 - **Protocols**: JSON-RPC over WebSocket and HTTP, REST (`/sql`, `/table`), GraphQL, MCP (Model Context Protocol), and JDBC
 - **Observability**: Prometheus metrics (`/metrics`), health/ready/status endpoints, structured JSON logging, S3 backup with AES-256-GCM encryption
 - **Configuration**: file-based (`axonbase.conf`), environment variables (`AXON_*`), and CLI flags with precedence chain
+
+## Data Rules coverage and limits
+
+A data rule filters rows in `SELECT` (including `JOIN`), `UPDATE` and `DELETE`, and restricts what `CREATE`, `INSERT` and `UPSERT` can write. It masks top level fields in query results and write responses, including `SELECT VALUE`, aliases, access by record id and `FETCH`. Access is denied when a rule assigned to the user does not exist in the current database, or when the rule needs a value the session does not have (for example `$auth.tenant` without that claim). A user with a data rule cannot open `LIVE SELECT`, call `/export` or read the `AUDIT_LOG` and `AUDIT_CASES` virtual tables. An `UPSERT` over an existing record that a rule or a permission refuses leaves it untouched.
+
+Table `PERMISSIONS` follow the same principle for token data: a condition that mentions a missing `$auth` or `$token` value denies. The database export carries table permissions and data rules, never users, passwords, tokens, accesses or link credentials.
+
+In an authenticated session, a database administrator is required to drop a table, to declare `PERMISSIONS`, and to change an existing one (`DEFINE`, `CREATE` or `ALTER TABLE`, `DROP INDEX`, partitions and TTL (Time To Live), and replacing a field or index, or adding one to a table with permissions). Creating a new table without permissions, adding fields and indexes to an unprotected table and repeating a definition unchanged stay open to writers.
+
+Expressions that come from a schema or a policy (field `DEFAULT` and `ASSERT`, `CHECK`, `PERMISSIONS`, data rules, event conditions, program parameter defaults and `LIVE SELECT` filters and columns) only read, and only the database of the table. This holds for subqueries and for the programs they call: writes, schema, user, access, saga, `USE`, transaction, `KILL` and `LIVE` statements, `kv::set`, `kv::del`, other databases and database links are refused. Stored definitions still load on restart and fail when evaluated. An AxonPL function only reads, also through subqueries.
+
+Naming another database of the namespace (`database.table`) requires a namespace or root identity. In an authenticated session, `DEFINE`, `CREATE` and `DROP` of embeddings and analyzers require a database administrator, except repeating the current definition unchanged. The same applies to `CREATE`, `CREATE OR REPLACE` and `DROP` of AxonPL functions, procedures and packages (only an unchanged `CREATE OR REPLACE` stays open to writers). Calling them does not change. Programs stored earlier keep running as the caller, so review them with `INFO FOR DATABASE` and `INFO FOR FUNCTION`, `PROCEDURE` or `PACKAGE`.
+
+`$auth` and `$token` hold the claims of the session token (`$auth.id` is the user name). An authenticated session cannot set them.
+
+The following paths are **not** covered, so a data rule is not a complete isolation boundary:
+
+- `WHERE` and `ORDER BY` on a masked field use the real value, which can therefore be inferred
+- a write that copies a masked field into another field of the same row (`SET copy = cpf`, `SET extra.copy = cpf`) exposes the value. A `PATCH` list is stricter: `test`, `copy` and `move` are refused on a masked field and on the whole record
+- masks do not reach nested fields such as `address.cpf`
+- edge properties read through graph traversal are not masked
+- a record id stored in a field is read back as text, so a predicate such as `owner.team = 'a'` does not follow it and denies the row. Graph traversal (`->member->team.name`) is followed
+- event bodies (`DEFINE EVENT`, which requires an administrator) receive `$before` and `$after` without masks. They run as the writer but only read and write data of the table's database: schema, user, access, saga and link statements are refused, and so is any other database
+- functions that read storage directly, such as `kv::`, and queries sent through a database link
+- schema statements, as well as `RELATE` and `UNRELATE`, are not restricted by data rules (dropping or changing an existing table requires a database administrator, see below)
+- error messages, such as a unique index or primary key violation, can reveal that a hidden value exists
+- a program declared `SECURITY DEFINER` runs with the rules of its owner
+- backup and management routes, which require an administrative role
 
 ## SDKs
 
@@ -24,14 +82,14 @@ All 8 SDKs expose the same public API with feature parity, tested independently:
 
 | Language | Registry | Install |
 |---|---|---|
-| Java | Maven Central | `mvn dependency:get -Dartifact=com.axondatabase:axonbase-sdk-java:0.2.1` |
-| Node.js / TypeScript | npm | `npm install @axonbase/sdk@0.1.1` |
-| Python | PyPI | `python -m pip install axonbase-sdk==0.1.1` |
-| Go | Go module proxy | `go get github.com/axonbase/axonbase/axonbase-sdk-go@v0.1.0` |
-| Rust | crates.io | `cargo add axonbase-sdk@0.1.1` |
-| .NET | NuGet | `dotnet add package AxonBase.Sdk --version 0.1.0` |
-| PHP | Packagist | `composer require axonbase/sdk:^0.1` |
-| Ruby / Rails | RubyGems | `gem install axonbase-sdk -v 0.1.0` |
+| Java | Maven Central | `mvn dependency:get -Dartifact=com.axondatabase:axonbase-sdk-java:1.0.0` |
+| Node.js / TypeScript | npm | `npm install @axonbase/sdk@1.0.0` |
+| Python | PyPI | `python -m pip install axonbase-sdk==1.0.0` |
+| Go | Go module proxy | `go get github.com/axonbase/axonbase/axonbase-sdk-go@v1.0.0` |
+| Rust | crates.io | `cargo add axonbase-sdk@1.0.0` |
+| .NET | NuGet | `dotnet add package AxonBase.Sdk --version 1.0.0` |
+| PHP | Packagist | `composer require axonbase/sdk:^1.0` |
+| Ruby / Rails | RubyGems | `gem install axonbase-sdk -v 1.0.0` |
 
 Every SDK implements: `connect`, `use`, `signin`, `authenticate`, `query`, `select`, `create`, `insert`, `update`, `upsert`, `delete`, `relate`, `begin`/`commit`/`cancel`, `kv_get`/`kv_set`/`kv_del`/`kv_scan`, `live`/`kill`, `certificateBegin`/`certificateComplete`, mTLS, typed RPC errors, Migrator (.axql), and `SagaTransaction`/`SagaParticipantTransaction`.
 
@@ -87,8 +145,9 @@ The server refuses to start with the default root password or the default JWT se
 export AXON_ROOT_PASSWORD='choose-a-strong-password'
 export AXON_SECRET="$(openssl rand -hex 32)"
 docker run -d --name axonbase -p 8000:8000 \
+  -v axonbase-data:/data \
   -e AXON_ROOT_PASSWORD -e AXON_SECRET \
-  axonbase/axonbase:latest
+  axonbase/axonbase:1.0.0
 
 # Sign in (returns a JWT valid for 30 minutes)
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/signin \
@@ -118,6 +177,10 @@ const rows = await axon.select('person');
 ```
 
 For local experiments only, `AXON_ALLOW_INSECURE_DEFAULTS=true` lifts the startup check, and `--no-auth` turns authentication off.
+
+## Certificate revocation
+
+Certificate login (HTTP and RPC) always rejects a revoked certificate. The server asks the issuer through OCSP (Online Certificate Status Protocol) and falls back to the CRL (Certificate Revocation List) named in the certificate. When the status cannot be verified (service down, no network, certificate with no lookup address) the login is rejected. Setting `AXON_CERT_ALLOW_UNKNOWN_REVOCATION=true`, or `cert_allow_unknown_revocation = true` in `axonbase.conf`, accepts that case with a warning in the log. It never accepts a revoked certificate and never relaxes chain, validity or key usage checks. Details, in Portuguese: [certificate revocation](docs/operacao-e-resiliencia.md#revogação-de-certificado-no-login).
 
 ## Inspect a table
 

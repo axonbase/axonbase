@@ -512,7 +512,8 @@ class AxonQlTest {
     void roundTripAlterTableAddColumn() {
         assertEquals("ALTER TABLE person ADD COLUMN email STRING NOT NULL",
             AxonQl.render(AxonQl.parse("ALTER TABLE person ADD COLUMN email VARCHAR(255) NOT NULL")));
-        assertEquals("ALTER TABLE product ADD COLUMN price DECIMAL DEFAULT 0",
+        // 0.0 é real: renderizar "0" o releria como inteiro
+        assertEquals("ALTER TABLE product ADD COLUMN price DECIMAL DEFAULT 0.0",
             AxonQl.render(AxonQl.parse("ALTER TABLE product ADD COLUMN price DECIMAL(10,2) DEFAULT 0.0")));
         assertEquals("ALTER TABLE user ADD COLUMN age INT DEFAULT 18 CHECK ($value >= 0)",
             AxonQl.render(AxonQl.parse("ALTER TABLE user ADD COLUMN age INT DEFAULT 18 CHECK (age >= 0)")));
@@ -633,5 +634,14 @@ class AxonQlTest {
             () -> AxonQl.parse("DEFINE EMBEDDING e PROVIDER http MODEL \"m\" DIMENSION 8"));
         org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,
             () -> AxonQl.parse("DEFINE EMBEDDING e PROVIDER http URL \"u\" MODEL \"m\" DIMENSION 0"));
+    }
+
+    @Test
+    void createTableIfNotExistsEhAceitoSemReservarAPalavraExists() {
+        String rendered = AxonQl.render(AxonQl.parse("CREATE TABLE if not Exists item (nome STRING NOT NULL)"));
+        org.junit.jupiter.api.Assertions.assertTrue(rendered.startsWith("CREATE TABLE IF NOT EXISTS item ("), rendered);
+        assertEquals(rendered, AxonQl.render(AxonQl.parse(rendered)));
+        // identificadores chamados exists continuam valendo, com a caixa que o texto trouxe
+        assertRoundTrip("SELECT Exists FROM exists");
     }
 }

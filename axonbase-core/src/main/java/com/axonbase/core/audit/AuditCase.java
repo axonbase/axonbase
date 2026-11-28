@@ -21,9 +21,17 @@ public final class AuditCase {
     private String resolvedBy;
     private String resolutionNote;
     private long resolvedAt;
+    /** Quem pediu o comando; {@code null} em casos gravados sem essa informação. */
+    private final AuditAuthor author;
 
     public AuditCase(String hash, String userId, String sql, String auditName,
                      String classification, long createdAt) {
+        this(hash, userId, sql, auditName, classification, createdAt, null);
+    }
+
+    public AuditCase(String hash, String userId, String sql, String auditName,
+                     String classification, long createdAt, AuditAuthor author) {
+        this.author = author;
         this.hash = hash;
         this.userId = userId;
         this.sql = sql;
@@ -56,6 +64,7 @@ public final class AuditCase {
         addEvent(newStatus.equals("AUTHORIZED") ? "AUTHORIZED" : "DENIED", by, note);
     }
 
+    public AuditAuthor author() { return author; }
     public String hash() { return hash; }
     public String userId() { return userId; }
     public String sql() { return sql; }

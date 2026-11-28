@@ -12,7 +12,7 @@ Regras de segurança e efeito:
 - `commit=true` confirma a transação ao final e exige papel `admin` (e líder, em cluster). Se a execução falhar ou for parada, nada é confirmado.
 - Sem `commit`, sentenças de esquema (DDL, Data Definition Language) dentro do programa são recusadas.
 - Funções continuam somente leitura. Procedures e packages escrevem na transação da sessão.
-- Quem depura usa a própria identidade (mesmas Data Rules e permissões). Exige o mesmo nível de `CREATE FUNCTION`: papel diferente de `viewer` e escopo que cubra o banco.
+- Quem depura usa a própria identidade (mesmas Data Rules e permissões). Exige papel diferente de `viewer` e escopo que cubra o banco. Criar, substituir e apagar programas exige administrador do banco.
 - Os limites do AxonPL (passos, profundidade, memória e prazo de `AXON_QUERY_TIMEOUT`) valem. O tempo parado num breakpoint **não conta** contra o prazo.
 - Uma sessão pausada sem comando por mais que a ociosidade é cancelada e revertida (estado `timeout`). O padrão é 300 segundos e a variável opcional `AXON_PL_DEBUG_IDLE` (segundos, 0 desliga) o altera.
 - No máximo 4 sessões ativas ao mesmo tempo por servidor. Passar disso devolve 429.

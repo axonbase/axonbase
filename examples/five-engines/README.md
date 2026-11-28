@@ -7,7 +7,7 @@ vizinhos mais próximos), geo, grafo e columnar.
 ## Como usar
 
 1. Crie um banco só para o exemplo (por exemplo `app/cinco`) e abra o Workspace nele.
-2. Rode `seed.sql` com "Run all". Pode ser repetido: `CREATE` e `RELATE` regravam os mesmos registros.
+2. Rode `seed.sql` com "Run all". Pode ser repetido: `UPSERT` e `RELATE` regravam os mesmos registros.
 3. Rode as consultas de `queries.sql` uma a uma. Cada resultado ganha a aba que combina com ele.
 
 ## O que o seed cria
@@ -16,7 +16,7 @@ vizinhos mais próximos), geo, grafo e columnar.
 |---|---|---|
 | Texto (BM25) | `artigo` (8 artigos em português) | `SEARCH ANALYZER pt`, com minúsculas, radicais e palavras vazias |
 | Vetor (HNSW) | `artigo.emb` (vetores de 3 dimensões, só para o exemplo) | `HNSW DIMENSION 3 DIST cos` (distância do cosseno) |
-| Geo | `restaurante` (6 pontos em São Paulo) | `GEO`, uma grade geohash |
+| Geo | `restaurante` (6 pontos em São Paulo) | `GEO`, o índice hexagonal H3 |
 | Grafo | `pessoa`, `segue`, `curtiu` | arestas criadas com `RELATE` |
 | Columnar | `venda` (240 vendas em 6 meses e 5 regiões) e as colunas `views` e `categoria` de `artigo` | `COLUMNAR` em cada coluna usada nas agregações |
 

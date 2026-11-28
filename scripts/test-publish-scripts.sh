@@ -16,7 +16,8 @@ case "$*" in
   "status --porcelain")
     [[ ${GIT_DIRTY:-0} == 1 ]] && printf ' M pom.xml\n'
     ;;
-  "describe --exact-match --tags HEAD") echo v0.2.0 ;;
+  # o publish-maven.sh filtra as tags com --match 'v*'; o publish-docker.sh não
+  "describe --exact-match --tags HEAD" | "describe --exact-match --tags HEAD --match v*") echo "v${FAKE_VERSION:-0.2.0}" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -25,7 +26,7 @@ cat > "$temp_dir/bin/mvn" <<'EOF'
 #!/usr/bin/env bash
 printf 'mvn %s\n' "$*" >> "$COMMAND_LOG"
 case "$*" in
-  *help:evaluate*) echo 0.2.0 ;;
+  *help:evaluate*) echo "${FAKE_VERSION:-0.2.0}" ;;
 esac
 EOF
 
@@ -39,13 +40,20 @@ chmod +x "$temp_dir/bin/git" "$temp_dir/bin/mvn" "$temp_dir/bin/docker"
 bash "$root_dir/scripts/publish-maven.sh"
 command_log=$(<"$COMMAND_LOG")
 [[ "$command_log" == *"mvn clean install -pl axonbase-server -am -Dmaven.test.skip=true -Dmaven.javadoc.skip=true"* ]]
-[[ "$command_log" == *"mvn deploy -pl :axonbase,axonbase-common,axonbase-value,axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -Dmaven.test.skip=true"* ]]
+[[ "$command_log" == *"mvn -Pcentral-publishing deploy -pl :axonbase,axonbase-common,axonbase-value,axonbase-parser,axonbase-core,axonbase-server,axonbase-sdk-java,axonbase-jdbc,axonbase-spring-data -DskipTests -Dmaven.javadoc.skip=true"* ]]
 
 : > "$COMMAND_LOG"
 bash "$root_dir/scripts/publish-docker.sh"
 command_log=$(<"$COMMAND_LOG")
 [[ "$command_log" == *"mvn clean test -pl axonbase-server -am"* ]]
 [[ "$command_log" == *"docker buildx build --platform linux/amd64,linux/arm64 --tag axonbase/axonbase:0.2.0 --tag axonbase/axonbase:latest --push ."* ]]
+
+# um pré-lançamento publica só a própria tag: latest continua na última versão final
+: > "$COMMAND_LOG"
+FAKE_VERSION=0.3.0-rc1 bash "$root_dir/scripts/publish-docker.sh"
+command_log=$(<"$COMMAND_LOG")
+[[ "$command_log" == *"docker buildx build --platform linux/amd64,linux/arm64 --tag axonbase/axonbase:0.3.0-rc1 --push ."* ]]
+[[ "$command_log" != *"axonbase/axonbase:latest"* ]]
 
 if GIT_DIRTY=1 bash "$root_dir/scripts/publish-maven.sh"; then
   printf 'expected publish-maven.sh to reject a dirty worktree\n' >&2

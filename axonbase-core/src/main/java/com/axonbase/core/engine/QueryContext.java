@@ -17,6 +17,41 @@ public final class QueryContext {
 
     private QueryContext() {}
 
+    /** Ponto de contenção de uma consulta, chamado a cada acesso ao armazenamento (veja o QoS). */
+    @FunctionalInterface
+    public interface Pacer {
+        /** Pode pausar a thread, ou lançar para interromper a consulta. */
+        void checkpoint();
+
+        /** A thread começou um lote ou voltou de uma espera: o tempo parado não conta como execução. */
+        default void resumed() {
+        }
+    }
+
+    private static final ThreadLocal<Boolean> SHARED_WORKER = new ThreadLocal<>();
+
+    /** Marca a thread atual como parte de um pool usado por todas as consultas, que não deve ser pausada. */
+    public static void sharedWorker(boolean shared) {
+        if (shared) {
+            SHARED_WORKER.set(Boolean.TRUE);
+        } else {
+            SHARED_WORKER.remove();
+        }
+    }
+
+    public static boolean onSharedWorker() {
+        return SHARED_WORKER.get() != null;
+    }
+
+    /** Avisa a contenção da consulta desta thread de que ela voltou a executar. */
+    public static void resumed() {
+        Handle h = CURRENT.get();
+        Pacer pacer = h == null ? null : h.pacer;
+        if (pacer != null) {
+            pacer.resumed();
+        }
+    }
+
     /** Uma consulta em andamento. {@code cancel()} pode vir de qualquer thread. */
     public static final class Handle {
         private final String id;
@@ -24,11 +59,30 @@ public final class QueryContext {
         private final long startedAtMs = System.currentTimeMillis();
         private volatile boolean cancelled;
         private volatile String cancelledBy;
+        private volatile Pacer pacer;
+        private volatile String requestedWorkload;
         private final java.util.concurrent.CopyOnWriteArrayList<Runnable> cancelHooks =
             new java.util.concurrent.CopyOnWriteArrayList<>();
 
         public Handle(String id) {
             this.id = id;
+        }
+
+        public Pacer pacer() {
+            return pacer;
+        }
+
+        public void pacer(Pacer pacer) {
+            this.pacer = pacer;
+        }
+
+        /** O tipo de carga que o cliente pediu para esta consulta, ou {@code null}. */
+        public String requestedWorkload() {
+            return requestedWorkload;
+        }
+
+        public void requestWorkload(String workload) {
+            this.requestedWorkload = workload;
         }
 
         public String id() {
@@ -95,8 +149,15 @@ public final class QueryContext {
     /** Lança se a consulta desta thread foi cancelada. Barata: uma leitura de ThreadLocal e de um campo volátil. */
     public static void checkCancelled() {
         Handle h = CURRENT.get();
-        if (h != null && h.cancelled) {
+        if (h == null) {
+            return;
+        }
+        if (h.cancelled) {
             throw new AxonError(CANCELLED, Messages.get("query_cancelled"));
+        }
+        Pacer pacer = h.pacer;
+        if (pacer != null) {
+            pacer.checkpoint();
         }
     }
 }

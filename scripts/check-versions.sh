@@ -20,7 +20,11 @@ require_version axonbase-sdk-nodejs/package.json "\"version\": \"${version}\""
 require_version axonbase-sdk-nodejs/package-lock.json "\"version\": \"${version}\""
 require_version axonbase-sdk-python/pyproject.toml "version = \"${version}\""
 require_version axonbase-sdk-dotnet/AxonBaseSdk/AxonBaseSdk.csproj "<Version>${version}</Version>"
-require_version axonbase-sdk-ruby/axonbase-sdk.gemspec "spec.version = \"${version}\""
+# o RubyGems escreve o pré-lançamento com ponto: 1.0.0-rc1 vira 1.0.0.rc1
+require_version axonbase-sdk-ruby/axonbase-sdk.gemspec "spec.version = \"${version/-/.}\""
 require_version axonbase-sdk-rust/Cargo.toml "version = \"${version}\""
+# arquivos de instalação: o que o usuário copia aponta para esta versão, nunca para latest
+require_version docker-compose.cluster.yml "axonbase/axonbase:\${AXONBASE_IMAGE_TAG:-${version}}"
+require_version README.md "axonbase/axonbase:${version}"
 
 printf 'All publishable connector versions match %s.\n' "$version"

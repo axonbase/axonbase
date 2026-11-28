@@ -76,11 +76,28 @@ public final class Messages {
         Map.entry("admin_field_required", "campo obrigatório: %s"),
         Map.entry("admin_not_found", "recurso não encontrado"),
         Map.entry("audit_self_decision", "usuário bloqueado não pode decidir o próprio caso de auditoria"),
+        Map.entry("audit_user_restricted", "um usuário auditado não altera auditorias nem decide o próprio caso"),
+        Map.entry("audit_missing", "a AI AUDIT %s atribuída ao usuário não existe neste banco"),
+        Map.entry("data_rule_audit_refused", "usuário com Data Rule não pode ler AUDIT_LOG nem AUDIT_CASES"),
         Map.entry("http_shard_not_implemented", "mover shard ainda não está implementado"),
         Map.entry("config_insecure_password", "a senha do root é a padrão (defina AXON_ROOT_PASSWORD)"),
+        Map.entry("config_root_password_blank", "%s está em branco: defina uma senha ou remova a configuração"),
+        Map.entry("config_tls_client_auth_invalid", "AXON_TLS_CLIENT_AUTH inválido: %s (use optional ou require)"),
+        Map.entry("config_tls_client_auth_incomplete", "AXON_TLS_CLIENT_AUTH=require precisa de AXON_TLS_CERT, AXON_TLS_KEY, AXON_TLS_CA e da porta sem TLS desligada"),
         Map.entry("config_insecure_secret", "o segredo JWT é o padrão (defina AXON_SECRET)"),
         Map.entry("config_insecure_defaults", "recusando subir em %s com credenciais padrão: %s. Para liberar, defina AXON_ALLOW_INSECURE_DEFAULTS=true"),
         Map.entry("auth_scope_escalation", "não é permitido criar identidade de escopo maior que o seu"),
+        Map.entry("auth_scope_forbidden", "operação fora do alcance do seu escopo"),
+        Map.entry("data_rule_live_refused", "usuário com Data Rule não pode abrir LIVE SELECT"),
+        Map.entry("event_scope_refused", "o corpo de um evento só lê e grava dados do banco da tabela (%s)"),
+        Map.entry("definition_scope_refused", "uma expressão de esquema, de política ou de LIVE só lê dados do banco da tabela (%s)"),
+        Map.entry("function_read_only", "uma função só lê dados: escrita, esquema, usuários e controle de sessão são recusados, também em subconsultas"),
+        Map.entry("database_scope_refused", "o escopo do token não alcança o banco %s"),
+        Map.entry("data_rule_export_refused", "usuário com Data Rule não pode exportar o banco"),
+        Map.entry("audit_no_author", "o caso não guarda a identidade do autor: negue o caso e peça que o comando seja repetido"),
+        Map.entry("audit_author_gone", "o autor do caso não existe mais: negue o caso"),
+        Map.entry("auth_param_reserved", "a variável $%s é reservada e não pode ser definida numa sessão autenticada"),
+        Map.entry("auth_initial_root_protected", "o usuário root inicial não pode ser apagado"),
         Map.entry("stmt_no_table", "Time Travel exige uma tabela no FROM"),
         Map.entry("stmt_no_wal", "Time Travel requer backend versionado (WAL)"),
         Map.entry("stmt_tt_invalid", "Time Travel TIMESTAMP inválido: %s"),
@@ -98,10 +115,19 @@ public final class Messages {
         ,Map.entry("server_cluster", "cluster=%s node=%s raft=%s quorum=%d/%d")
         ,Map.entry("server_s3_restored", "Restaurado do S3 com sucesso")
         ,Map.entry("server_s3_empty", "Nenhum backup S3 encontrado, iniciando novo")
+        ,Map.entry("server_s3_restore_refused", "a restauração do S3 pedida pela configuração falhou e o servidor não vai subir com a base incompleta: %s. Corrija a causa e suba de novo")
+        ,Map.entry("server_s3_restore_interrupted", "uma restauração do S3 parou no meio e esta base está incompleta: apague o diretório de dados e suba de novo para repetir a restauração")
         ,Map.entry("server_s3_shutdown_error", "Erro no backup S3 durante desligamento: %s")
         ,Map.entry("server_usage", "Uso: axonbase start [--config axonbase.conf] [--path memory|<arquivo>] [--port 8000] [--secret <segredo>] [--user root] [--pass root] [--no-auth]")
         ,Map.entry("server_cluster_missing", "cluster_id requer node_id e raft_bind")
         ,Map.entry("server_cluster_backend", "cluster exige backend versionado; use path=memory ou WAL")
+        ,Map.entry("server_env_path_ignored", "AXON_PATH=%s foi ignorado: a linha de comando abriu a base em %s")
+        ,Map.entry("server_raft_state_ambiguous", "há estado do Raft em %s e em %s; o nó não sobe para não escolher o errado. Deixe só o diretório atual e mova o outro para fora (docs/cluster-raft.md)")
+        ,Map.entry("server_raft_state_outside", "o estado do Raft continua em %s, fora do diretório de dados; num contêiner ele se perde ao recriar (docs/cluster-raft.md)")
+        ,Map.entry("server_raft_state_missing", "a base já tem dados, mas não há estado do Raft em %s. Se este nó veio de um contêiner recriado, pare e leia docs/cluster-raft.md antes de atualizar os demais")
+        ,Map.entry("server_truststore_adopt_failed", "não foi possível copiar os truststores do local antigo: %s")
+        ,Map.entry("server_learner_requires", "AXON_RAFT_LEARNER exige cluster_id e armazenamento em disco")
+        ,Map.entry("server_learner_restored", "learner restaurado até o índice %d a partir de %s")
         ,Map.entry("config_invalid", "configuração inválida em %s:%d")
         ,Map.entry("config_invalid_long", "long inválido: %s")
         ,Map.entry("config_invalid_int", "inteiro inválido: %s")
@@ -112,6 +138,8 @@ public final class Messages {
         ,Map.entry("cert_store_required", "store JKS é obrigatório: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "parâmetros ns e db são obrigatórios")
         ,Map.entry("cert_user_missing", "usuário de certificado não existe no escopo ativo")
+        ,Map.entry("cert_user_mismatch", "o usuário informado não é o identificado pelo certificado")
+        ,Map.entry("cert_fingerprint_required", "o certificado não identifica o usuário: só entra o usuário definido com o FINGERPRINT deste certificado")
         ,Map.entry("cert_rate_limited", "Nova credencial disponível em %d segundos. Cada credencial só pode ser gerada a cada 10 minutos.")
 
         ,Map.entry("audit_not_configured", "AI Audit não configurado. Defina AXON_AI_PROVIDER, AXON_AI_MODEL e AXON_AI_API_KEY.")
@@ -162,13 +190,23 @@ public final class Messages {
          ,Map.entry("backup_counts_mismatch", "contagens do segmento %d não conferem com o conteúdo")
          ,Map.entry("backup_since_ahead", "since (%d) é maior que a versão atual do motor (%d): a linhagem mudou, faça um backup completo")
          ,Map.entry("physical_unsupported", "backup físico só existe com o armazenamento RocksDB")
-         ,Map.entry("physical_cluster", "o backup físico por esta rota só vale em nó único; em cluster use réplica e o log")
+         ,Map.entry("physical_cluster", "em cluster o backup físico é criado num seguidor ou learner, não no líder nem durante eleição")
+         ,Map.entry("physical_cluster_restore", "restore e importação de backup físico só valem em nó único")
+         ,Map.entry("cluster_outcome_unknown", "desfecho desconhecido da escrita no grupo %s: ela pode ter sido confirmada ou ainda vir a ser; consulte o estado antes de repetir")
          ,Map.entry("physical_not_found", "backup físico %d não existe")
          ,Map.entry("physical_busy", "há operações em curso que não terminaram a tempo: tente de novo em instantes")
          ,Map.entry("physical_failed", "falha no backup físico: %s")
          ,Map.entry("physical_source_not_found", "a origem de importação %s não existe")
          ,Map.entry("physical_file_not_found", "arquivo do backup físico não existe: %s")
          ,Map.entry("physical_source_required", "a gravação de arquivo exige o parâmetro source (origem)")
+         ,Map.entry("pitr_disabled", "o journal de PITR está desligado: ligue com AXON_PITR=on")
+         ,Map.entry("pitr_invalid_instant", "instante inválido: %s (use ISO 8601, por exemplo 2026-11-26T14:32:10Z)")
+         ,Map.entry("pitr_segment_not_found", "segmento do journal não existe: %s")
+         ,Map.entry("pitr_no_base_stamp", "o backup físico %d não tem carimbo de tempo; tire um backup novo")
+         ,Map.entry("pitr_base_too_new", "o backup físico %d já contém escritas posteriores a %s: escolha um backup mais antigo")
+         ,Map.entry("pitr_unreachable", "o journal não cobre o instante pedido a partir do backup %d; último instante alcançável: %s")
+         ,Map.entry("pitr_bad_journal", "journal ilegível: %s")
+         ,Map.entry("pitr_unavailable", "AXON_PITR foi ignorado: o journal de PITR exige armazenamento RocksDB")
          ,Map.entry("txn_active", "já existe uma transação ativa")
          ,Map.entry("kv_scope_key_required", "kv precisa de ns, db e key")
          ,Map.entry("stmt_live_table_required", "LIVE SELECT precisa de uma tabela como origem")
@@ -177,6 +215,7 @@ public final class Messages {
          ,Map.entry("stmt_info_table_required", "INFO FOR TABLE exige o nome da tabela")
          ,Map.entry("stmt_table_undefined", "tabela não definida: %s")
          ,Map.entry("stmt_saga_record_required", "SAGA via DATABASE LINK exige um record ID")
+         ,Map.entry("stmt_saga_relate_link_unsupported", "RELATE por DATABASE LINK não é suportado dentro de uma SAGA: o CANCEL não teria como desfazer a aresta")
          ,Map.entry("stmt_database_link_missing", "database link não encontrado: %s")
          ,Map.entry("stmt_field_type_invalid", "tipo inválido para o campo '%s': esperado %s, recebido %s")
          ,Map.entry("stmt_assert_failed", "assert falhou no campo '%s' com %s")
@@ -185,12 +224,17 @@ public final class Messages {
          ,Map.entry("stmt_database_link_error", "erro de database link: %s")
          ,Map.entry("stmt_database_link_namespace", "database link exige namespace selecionado")
          ,Map.entry("stmt_analyzer_missing", "analyzer não definido: %s")
+         ,Map.entry("stmt_analyzer_in_use", "analyzer %s está em uso pelo índice %s da tabela %s; apague o índice antes (DROP INDEX %s ON TABLE %s)")
          ,Map.entry("stmt_access_needs_ns", "DEFINE ACCESS no escopo NAMESPACE/DATABASE exige namespace selecionado")
          ,Map.entry("stmt_access_needs_db", "DEFINE ACCESS ON DATABASE exige banco selecionado")
          ,Map.entry("stmt_link_needs_ns", "DEFINE DATABASE LINK exige namespace selecionado")
          ,Map.entry("stmt_link_drop_needs_ns", "DROP DATABASE LINK exige namespace selecionado")
          ,Map.entry("stmt_saga_missing", "SAGA não encontrada: %s")
          ,Map.entry("stmt_saga_inactive", "não há transação SAGA ativa para a correlação: %s")
+         ,Map.entry("stmt_saga_other_name", "a SAGA %s não corresponde à correlação %s, aberta pela SAGA %s")
+         ,Map.entry("fn_conversion_invalid", "valor inválido para a conversão %s: %s")
+         ,Map.entry("audit_rules_not_stored", "a auditoria %s voltou sem regras (gravada por versão anterior): remova e crie de novo")
+         ,Map.entry("user_drop_legacy", "há um DROP USER de %s gravado por versão anterior; se o usuário ainda existir, repita o DROP USER")
          ,Map.entry("stmt_saga_link_missing", "database link não encontrado para SAGA: %s")
          ,Map.entry("stmt_saga_participant_failed", "participante SAGA %s falhou durante %s: %s")
          ,Map.entry("stmt_data_rule_missing", "DATA RULE %s não encontrada")
@@ -205,6 +249,22 @@ public final class Messages {
          ,Map.entry("stmt_graph_function_unknown", "função graph desconhecida: %s")
          ,Map.entry("stmt_identifier_expected", "era esperado um identificador, encontrado %s")
          ,Map.entry("stmt_unique_index_violation", "violação de índice único '%s'")
+         ,Map.entry("stmt_record_id_immutable", "o id do registro %s não pode ser alterado (recebido %s)")
+         ,Map.entry("stmt_not_null_violation", "o campo '%s' da tabela '%s' não aceita nulo nem ausência")
+         ,Map.entry("stmt_primary_key_violation", "chave primária repetida na tabela '%s' (%s)")
+         ,Map.entry("stmt_unique_index_building", "índice único '%s' em construção neste nó, repita a escrita em instantes")
+         ,Map.entry("stmt_table_check_violation", "CHECK da tabela '%s' recusou o registro: %s")
+         ,Map.entry("stmt_path_unsupported", "caminho de SET não suportado: %s")
+         ,Map.entry("stmt_path_not_object", "'%s' não é um objeto: não há campo para gravar dentro dele")
+         ,Map.entry("stmt_path_not_array", "'%s' não é uma lista: não há posição para gravar dentro dela")
+         ,Map.entry("stmt_path_index", "posição de lista inválida: %s")
+         ,Map.entry("stmt_patch_invalid", "operação PATCH inválida: %s")
+         ,Map.entry("stmt_patch_path_missing", "caminho PATCH inexistente: %s")
+         ,Map.entry("stmt_patch_test_failed", "o teste do PATCH não conferiu: %s")
+         ,Map.entry("stmt_import_too_large", "importação recusada, nada foi gravado: %d bytes passam do limite de transação de %d bytes. Divida o arquivo")
+         ,Map.entry("stmt_import_transaction_control", "importação recusada, nada foi gravado: o arquivo não pode conter %s, porque ele já entra numa transação só")
+         ,Map.entry("stmt_record_exists", "o registro %s já existe; use UPDATE ou UPSERT para alterá-lo")
+         ,Map.entry("stmt_export_edge_unreadable", "a exportação não consegue representar a aresta '%s'")
          ,Map.entry("stmt_hash_algorithm_unavailable", "algoritmo de hash não disponível: %s")
          ,Map.entry("fn_timezone_invalid", "fuso horário inválido: %s (use por exemplo America/Sao_Paulo ou UTC)")
          ,Map.entry("fn_duration_invalid", "duração inválida: %s (use por exemplo 30s, 10m, 1h ou 1d)")
@@ -267,6 +327,10 @@ public final class Messages {
          ,Map.entry("http_shard_fields_required", "body precisa \"ns\", \"db\" e \"to\"")
          ,Map.entry("query_timeout", "query timeout excedido")
          ,Map.entry("query_cancelled", "consulta cancelada")
+         ,Map.entry("txn_external_not_retried", "a escrita não foi gravada, mas o comando já chamou um serviço externo: confira antes de repetir (%s)")
+         ,Map.entry("qos_queue_full", "consulta analítica recusada: a fila está cheia")
+         ,Map.entry("qos_queue_timeout", "consulta analítica recusada: nenhuma vaga em %s ms")
+         ,Map.entry("qos_budget", "consulta analítica passou do tempo máximo de %s ms")
          ,Map.entry("admin_activity_not_found", "consulta, sessão ou transação não encontrada (talvez já tenha terminado)")
          ,Map.entry("admin_activity_self", "não é possível encerrar a própria sessão")
          ,Map.entry("admin_activity_root", "sessões do usuário root não podem ser encerradas por aqui")
@@ -277,6 +341,7 @@ public final class Messages {
          ,Map.entry("mcp_method_required", "method obrigatório")
          ,Map.entry("mcp_parameters_invalid", "params inválidos")
          ,Map.entry("mcp_name_required", "name obrigatório")
+         ,Map.entry("mcp_session_not_found", "sessão MCP não encontrada")
          ,Map.entry("mcp_tool_not_found", "tool não encontrada: %s")
          ,Map.entry("graphql_query_empty", "query vazia")
          ,Map.entry("rate_limit_exceeded", "limite de requisições excedido")
@@ -285,16 +350,19 @@ public final class Messages {
          ,Map.entry("cert_x509_invalid", "certificado X.509 inválido")
          ,Map.entry("cert_trust_anchors_missing", "JKS sem autoridades certificadoras confiáveis")
          ,Map.entry("cert_chain_rejected", "cadeia de certificado rejeitada")
+         ,Map.entry("cert_revoked", "certificado revogado")
+         ,Map.entry("cert_revocation_unavailable", "não foi possível verificar a revogação do certificado")
          ,Map.entry("cert_algorithm_unsupported", "algoritmo de certificado não suportado")
          ,Map.entry("cert_signature_invalid", "assinatura de certificado inválida")
          ,Map.entry("cert_signature_verify_failed", "não foi possível verificar assinatura de certificado")
          ,Map.entry("auth_signup_user_invalid", "usuário inválido para signup")
+         ,Map.entry("auth_signup_user_exists", "o usuário já existe neste banco; signup não altera usuário existente")
          ,Map.entry("cert_store_name_path_required", "nome e caminho do JKS são obrigatórios")
          ,Map.entry("cert_store_password_required", "senha do JKS é obrigatória")
          ,Map.entry("cert_store_load_failed", "não foi possível carregar o JKS %s")
          ,Map.entry("jks_reload_failed", "truststore %s não pôde ser recarregado ao iniciar: %s")
-         ,Map.entry("geo_precision_invalid", "precisão fora de 0..12")
-         ,Map.entry("geo_hash_invalid", "geohash inválido: %s")
+         ,Map.entry("geo_h3_unavailable", "biblioteca nativa H3 indisponível: %s")
+         ,Map.entry("geo_h3_too_many_cells", "%s geraria células demais (limite %s)")
         ,Map.entry("value_string_null", "valor de string não pode ser nulo")
         ,Map.entry("value_uuid_null", "valor de UUID não pode ser nulo")
         ,Map.entry("value_datetime_null", "valor de datetime não pode ser nulo")
@@ -349,6 +417,7 @@ public final class Messages {
         ,Map.entry("parser_unexpected_define", "DEFINE inesperado na posição %d: '%s'")
         ,Map.entry("parser_drop_data_expected_rule", "DROP DATA esperava RULE na posição %d")
         ,Map.entry("parser_unexpected_drop", "DROP inesperado na posição %d: '%s'")
+         ,Map.entry("parser_delete_table", "DELETE TABLE não existe: use DROP TABLE %s para remover a tabela, ou DELETE %s para apagar os registros")
         ,Map.entry("parser_invalid_auth_target", "DEFINE USER/ACCESS exige ON ROOT, ON NAMESPACE ou ON DATABASE")
         ,Map.entry("parser_invalid_info", "INFO inválido na posição %d")
         ,Map.entry("parser_invalid_audit_case_status", "SET AUDIT CASE espera AUTHORIZED ou DENIED, mas apareceu '%s'")
@@ -363,6 +432,7 @@ public final class Messages {
           ,Map.entry("parser_unexpected_create", "CREATE inesperado na posição %d: '%s'")
           ,Map.entry("stmt_field_missing", "campo '%s' não encontrado na tabela '%s'")
           ,Map.entry("stmt_index_missing", "índice '%s' não encontrado")
+          ,Map.entry("stmt_index_missing_on_table", "índice %s não definido na tabela %s")
           ,Map.entry("stmt_event_missing", "evento '%s' não encontrado")
          ,Map.entry("backup_s3_uri_required", "URI deve começar com s3://")
          ,Map.entry("backup_s3_upload_failed", "erro S3 no upload: %s")
@@ -385,6 +455,10 @@ public final class Messages {
          ,Map.entry("database_link_remote_error", "erro remoto de database link: %s")
          ,Map.entry("database_link_connection_failed", "conexão de database link falhou: %s")
          ,Map.entry("saga_compensation_link_missing", "database link não encontrado para compensação: %s")
+         ,Map.entry("saga_compensation_refused", "passo de SAGA não pode ser compensado com segurança: %s")
+         ,Map.entry("saga_compensation_only", "a sessão de compensação de SAGA só executa a própria compensação")
+         ,Map.entry("saga_scope_refused", "o escopo do token não alcança a SAGA %s")
+         ,Map.entry("saga_compensation_not_applied", "o participante %s não removeu o registro: a compensação continua pendente")
          ,Map.entry("storage_version_conflict", "conflito de versão na chave '%s'")
          ,Map.entry("storage_phantom_read", "leitura fantasma no prefixo '%s': '%s'")
          ,Map.entry("rocksdb_open_failed", "falha ao abrir RocksDB em %s")
@@ -414,6 +488,10 @@ public final class Messages {
           ,Map.entry("jdbc_invalid_identifier", "identificador SQL inválido: %s")
           ,Map.entry("jdbc_statement_closed", "statement fechado")
           ,Map.entry("jdbc_param_not_set", "parâmetro %d não definido")
+          ,Map.entry("jdbc_batch_failed", "falha no comando %d do lote: %s")
+          ,Map.entry("jdbc_batch_query_refused", "consulta que devolve linhas não é aceita em lote")
+          ,Map.entry("jdbc_batch_sql_on_prepared", "addBatch(String) não vale para PreparedStatement; defina os parâmetros e chame addBatch()")
+          ,Map.entry("jdbc_feature_unsupported", "recurso não suportado pelo driver JDBC do AxonBase: %s")
           ,Map.entry("jdbc_param_invalid_index", "índice de parâmetro inválido: %d")
           ,Map.entry("jdbc_parent_logger_unsupported", "getParentLogger não é suportado")
           ,Map.entry("sdk_connect_failed", "falha ao conectar a %s: %s: %s")
@@ -517,11 +595,28 @@ public final class Messages {
         Map.entry("admin_field_required", "required field: %s"),
         Map.entry("admin_not_found", "resource not found"),
         Map.entry("audit_self_decision", "a blocked user cannot decide their own audit case"),
+        Map.entry("audit_user_restricted", "an audited user cannot change audits or decide their own case"),
+        Map.entry("audit_missing", "the AI AUDIT %s assigned to the user does not exist in this database"),
+        Map.entry("data_rule_audit_refused", "a user with a data rule cannot read AUDIT_LOG or AUDIT_CASES"),
         Map.entry("http_shard_not_implemented", "moving shards is not implemented yet"),
         Map.entry("config_insecure_password", "the root password is the default (set AXON_ROOT_PASSWORD)"),
+        Map.entry("config_root_password_blank", "%s is blank: set a password or remove the setting"),
+        Map.entry("config_tls_client_auth_invalid", "invalid AXON_TLS_CLIENT_AUTH: %s (use optional or require)"),
+        Map.entry("config_tls_client_auth_incomplete", "AXON_TLS_CLIENT_AUTH=require needs AXON_TLS_CERT, AXON_TLS_KEY, AXON_TLS_CA and the plain port turned off"),
         Map.entry("config_insecure_secret", "the JWT secret is the default (set AXON_SECRET)"),
         Map.entry("config_insecure_defaults", "refusing to start on %s with default credentials: %s. To allow it, set AXON_ALLOW_INSECURE_DEFAULTS=true"),
         Map.entry("auth_scope_escalation", "creating an identity with a broader scope than your own is not allowed"),
+        Map.entry("auth_scope_forbidden", "this operation is outside your scope"),
+        Map.entry("data_rule_live_refused", "a user with a data rule cannot open LIVE SELECT"),
+        Map.entry("event_scope_refused", "an event body only reads and writes data of the table's database (%s)"),
+        Map.entry("definition_scope_refused", "a schema, policy or LIVE expression only reads data of the table's database (%s)"),
+        Map.entry("function_read_only", "a function only reads data: writes, schema, users and session control are refused, also in subqueries"),
+        Map.entry("database_scope_refused", "the token scope does not reach the database %s"),
+        Map.entry("data_rule_export_refused", "a user with a data rule cannot export the database"),
+        Map.entry("audit_no_author", "the case does not store its author: deny it and ask for the command to be sent again"),
+        Map.entry("audit_author_gone", "the author of this case no longer exists: deny the case"),
+        Map.entry("auth_param_reserved", "the variable $%s is reserved and cannot be set in an authenticated session"),
+        Map.entry("auth_initial_root_protected", "the initial root user cannot be dropped"),
         Map.entry("stmt_no_table", "Time Travel requires a table in FROM"),
         Map.entry("stmt_no_wal", "Time Travel requires a versioned backend (WAL)"),
         Map.entry("stmt_tt_invalid", "Time Travel invalid TIMESTAMP: %s"),
@@ -539,10 +634,19 @@ public final class Messages {
         ,Map.entry("server_cluster", "cluster=%s node=%s raft=%s quorum=%d/%d")
         ,Map.entry("server_s3_restored", "Restored successfully from S3")
         ,Map.entry("server_s3_empty", "No S3 backup found, starting a new database")
+        ,Map.entry("server_s3_restore_refused", "the S3 restore requested by the configuration failed and the server will not start with an incomplete database: %s. Fix the cause and start again")
+        ,Map.entry("server_s3_restore_interrupted", "an S3 restore stopped halfway and this database is incomplete: delete the data directory and start again to repeat the restore")
         ,Map.entry("server_s3_shutdown_error", "S3 backup error during shutdown: %s")
         ,Map.entry("server_usage", "Usage: axonbase start [--config axonbase.conf] [--path memory|<file>] [--port 8000] [--secret <secret>] [--user root] [--pass root] [--no-auth]")
         ,Map.entry("server_cluster_missing", "cluster_id requires node_id and raft_bind")
         ,Map.entry("server_cluster_backend", "cluster requires a versioned backend; use path=memory or WAL")
+        ,Map.entry("server_env_path_ignored", "AXON_PATH=%s was ignored: the command line opened the database at %s")
+        ,Map.entry("server_raft_state_ambiguous", "Raft state exists in both %s and %s; the node will not start rather than pick the wrong one. Keep only the current directory and move the other away (docs/cluster-raft.md)")
+        ,Map.entry("server_raft_state_outside", "Raft state is still in %s, outside the data directory; in a container it is lost on recreation (docs/cluster-raft.md)")
+        ,Map.entry("server_raft_state_missing", "the database already has data but there is no Raft state in %s. If this node comes from a recreated container, stop and read docs/cluster-raft.md before updating the others")
+        ,Map.entry("server_truststore_adopt_failed", "could not copy the truststores from the old location: %s")
+        ,Map.entry("server_learner_requires", "AXON_RAFT_LEARNER requires cluster_id and on-disk storage")
+        ,Map.entry("server_learner_restored", "learner restored to index %d from %s")
         ,Map.entry("config_invalid", "invalid configuration at %s:%d")
         ,Map.entry("config_invalid_long", "invalid long: %s")
         ,Map.entry("config_invalid_int", "invalid integer: %s")
@@ -553,6 +657,8 @@ public final class Messages {
         ,Map.entry("cert_store_required", "JKS store is required: /certificate/login/{jks}")
         ,Map.entry("cert_scope_required", "ns and db parameters are required")
         ,Map.entry("cert_user_missing", "certificate user does not exist in the active scope")
+        ,Map.entry("cert_user_mismatch", "the given user is not the one identified by the certificate")
+        ,Map.entry("cert_fingerprint_required", "the certificate does not identify the user: only a user defined with the FINGERPRINT of this certificate may sign in")
         ,Map.entry("cert_rate_limited", "New credential available in %d seconds. Each credential can only be generated every 10 minutes.")
 
         ,Map.entry("audit_not_configured", "AI Audit not configured. Set AXON_AI_PROVIDER, AXON_AI_MODEL and AXON_AI_API_KEY.")
@@ -603,13 +709,23 @@ public final class Messages {
          ,Map.entry("backup_counts_mismatch", "counts of segment %d do not match the content")
          ,Map.entry("backup_since_ahead", "since (%d) is greater than the engine current version (%d): the lineage changed, take a full backup")
          ,Map.entry("physical_unsupported", "physical backup only exists with RocksDB storage")
-         ,Map.entry("physical_cluster", "physical backup through this route only applies to a single node; in a cluster use a replica and the log")
+         ,Map.entry("physical_cluster", "in a cluster the physical backup is created on a follower or learner, not on the leader nor during an election")
+         ,Map.entry("physical_cluster_restore", "physical backup restore and import only apply to a single node")
+         ,Map.entry("cluster_outcome_unknown", "unknown outcome of the write in group %s: it may have been committed or may still be; check the state before retrying")
          ,Map.entry("physical_not_found", "physical backup %d does not exist")
          ,Map.entry("physical_busy", "operations in progress did not finish in time: try again shortly")
          ,Map.entry("physical_failed", "physical backup failed: %s")
          ,Map.entry("physical_source_not_found", "the import source %s does not exist")
          ,Map.entry("physical_file_not_found", "physical backup file does not exist: %s")
          ,Map.entry("physical_source_required", "writing a file requires the source parameter")
+         ,Map.entry("pitr_disabled", "the PITR journal is off: enable it with AXON_PITR=on")
+         ,Map.entry("pitr_invalid_instant", "invalid instant: %s (use ISO 8601, for example 2026-11-26T14:32:10Z)")
+         ,Map.entry("pitr_segment_not_found", "journal segment does not exist: %s")
+         ,Map.entry("pitr_no_base_stamp", "physical backup %d has no timestamp; take a new backup")
+         ,Map.entry("pitr_base_too_new", "physical backup %d already contains writes after %s: pick an older backup")
+         ,Map.entry("pitr_unreachable", "the journal does not cover the requested instant from backup %d; latest reachable instant: %s")
+         ,Map.entry("pitr_bad_journal", "unreadable journal: %s")
+         ,Map.entry("pitr_unavailable", "AXON_PITR was ignored: the PITR journal requires RocksDB storage")
          ,Map.entry("txn_active", "there is already an active transaction")
          ,Map.entry("kv_scope_key_required", "kv requires ns, db, and key")
          ,Map.entry("stmt_live_table_required", "LIVE SELECT requires a source table")
@@ -618,6 +734,7 @@ public final class Messages {
          ,Map.entry("stmt_info_table_required", "INFO FOR TABLE requires a table name")
          ,Map.entry("stmt_table_undefined", "table not defined: %s")
          ,Map.entry("stmt_saga_record_required", "SAGA through DATABASE LINK requires a record ID")
+         ,Map.entry("stmt_saga_relate_link_unsupported", "RELATE through DATABASE LINK is not supported inside a SAGA: CANCEL could not undo the edge")
          ,Map.entry("stmt_database_link_missing", "database link not found: %s")
          ,Map.entry("stmt_field_type_invalid", "invalid type for field '%s': expected %s, received %s")
          ,Map.entry("stmt_assert_failed", "assertion failed for field '%s' with %s")
@@ -626,12 +743,17 @@ public final class Messages {
          ,Map.entry("stmt_database_link_error", "database link error: %s")
          ,Map.entry("stmt_database_link_namespace", "database link requires a selected namespace")
          ,Map.entry("stmt_analyzer_missing", "analyzer not defined: %s")
+         ,Map.entry("stmt_analyzer_in_use", "analyzer %s is used by index %s of table %s; drop the index first (DROP INDEX %s ON TABLE %s)")
          ,Map.entry("stmt_access_needs_ns", "DEFINE ACCESS in NAMESPACE/DATABASE scope requires a selected namespace")
          ,Map.entry("stmt_access_needs_db", "DEFINE ACCESS ON DATABASE requires a selected database")
          ,Map.entry("stmt_link_needs_ns", "DEFINE DATABASE LINK requires a selected namespace")
          ,Map.entry("stmt_link_drop_needs_ns", "DROP DATABASE LINK requires a selected namespace")
          ,Map.entry("stmt_saga_missing", "SAGA not found: %s")
          ,Map.entry("stmt_saga_inactive", "no active SAGA transaction for correlation: %s")
+         ,Map.entry("stmt_saga_other_name", "SAGA %s does not match correlation %s, opened by SAGA %s")
+         ,Map.entry("fn_conversion_invalid", "invalid value for conversion %s: %s")
+         ,Map.entry("audit_rules_not_stored", "audit %s was restored without rules (stored by an earlier version): drop it and create it again")
+         ,Map.entry("user_drop_legacy", "a DROP USER for %s was stored by an earlier version; if the user still exists, run DROP USER again")
          ,Map.entry("stmt_saga_link_missing", "database link not found for SAGA: %s")
          ,Map.entry("stmt_saga_participant_failed", "SAGA participant %s failed during %s: %s")
          ,Map.entry("stmt_data_rule_missing", "DATA RULE %s not found")
@@ -646,6 +768,22 @@ public final class Messages {
          ,Map.entry("stmt_graph_function_unknown", "unknown graph function: %s")
          ,Map.entry("stmt_identifier_expected", "expected an identifier, found %s")
          ,Map.entry("stmt_unique_index_violation", "unique index violation '%s'")
+         ,Map.entry("stmt_record_id_immutable", "the id of record %s cannot be changed (received %s)")
+         ,Map.entry("stmt_not_null_violation", "field '%s' of table '%s' cannot be null or absent")
+         ,Map.entry("stmt_primary_key_violation", "duplicate primary key on table '%s' (%s)")
+         ,Map.entry("stmt_unique_index_building", "unique index '%s' is still building on this node, retry the write shortly")
+         ,Map.entry("stmt_table_check_violation", "CHECK of table '%s' rejected the record: %s")
+         ,Map.entry("stmt_path_unsupported", "unsupported SET path: %s")
+         ,Map.entry("stmt_path_not_object", "'%s' is not an object: there is no field to write inside it")
+         ,Map.entry("stmt_path_not_array", "'%s' is not a list: there is no position to write inside it")
+         ,Map.entry("stmt_path_index", "invalid list position: %s")
+         ,Map.entry("stmt_patch_invalid", "invalid PATCH operation: %s")
+         ,Map.entry("stmt_patch_path_missing", "PATCH path does not exist: %s")
+         ,Map.entry("stmt_patch_test_failed", "PATCH test did not match: %s")
+         ,Map.entry("stmt_import_too_large", "import refused, nothing was written: %d bytes exceed the transaction limit of %d bytes. Split the file")
+         ,Map.entry("stmt_import_transaction_control", "import refused, nothing was written: the file cannot contain %s, because it already runs in a single transaction")
+         ,Map.entry("stmt_record_exists", "record %s already exists; use UPDATE or UPSERT to change it")
+         ,Map.entry("stmt_export_edge_unreadable", "the export cannot represent the edge '%s'")
          ,Map.entry("stmt_hash_algorithm_unavailable", "hash algorithm unavailable: %s")
          ,Map.entry("fn_timezone_invalid", "invalid time zone: %s (for example America/Sao_Paulo or UTC)")
          ,Map.entry("fn_duration_invalid", "invalid duration: %s (for example 30s, 10m, 1h or 1d)")
@@ -708,6 +846,10 @@ public final class Messages {
          ,Map.entry("http_shard_fields_required", "body requires \"ns\", \"db\", and \"to\"")
          ,Map.entry("query_timeout", "query timeout exceeded")
          ,Map.entry("query_cancelled", "query cancelled")
+         ,Map.entry("txn_external_not_retried", "the write was not committed, but the statement already called an external service: check before retrying (%s)")
+         ,Map.entry("qos_queue_full", "analytical query rejected: the queue is full")
+         ,Map.entry("qos_queue_timeout", "analytical query rejected: no slot within %s ms")
+         ,Map.entry("qos_budget", "analytical query exceeded the %s ms time limit")
          ,Map.entry("admin_activity_not_found", "query, session or transaction not found (it may have already finished)")
          ,Map.entry("admin_activity_self", "you cannot end your own session")
          ,Map.entry("admin_activity_root", "root sessions cannot be ended here")
@@ -718,6 +860,7 @@ public final class Messages {
          ,Map.entry("mcp_method_required", "method is required")
          ,Map.entry("mcp_parameters_invalid", "invalid params")
          ,Map.entry("mcp_name_required", "name is required")
+         ,Map.entry("mcp_session_not_found", "MCP session not found")
          ,Map.entry("mcp_tool_not_found", "tool not found: %s")
          ,Map.entry("graphql_query_empty", "empty query")
          ,Map.entry("rate_limit_exceeded", "request rate limit exceeded")
@@ -726,16 +869,19 @@ public final class Messages {
          ,Map.entry("cert_x509_invalid", "invalid X.509 certificate")
          ,Map.entry("cert_trust_anchors_missing", "JKS has no trusted certificate authorities")
          ,Map.entry("cert_chain_rejected", "certificate chain rejected")
+         ,Map.entry("cert_revoked", "certificate has been revoked")
+         ,Map.entry("cert_revocation_unavailable", "certificate revocation status could not be verified")
          ,Map.entry("cert_algorithm_unsupported", "unsupported certificate algorithm")
          ,Map.entry("cert_signature_invalid", "invalid certificate signature")
          ,Map.entry("cert_signature_verify_failed", "could not verify certificate signature")
          ,Map.entry("auth_signup_user_invalid", "invalid user for signup")
+         ,Map.entry("auth_signup_user_exists", "the user already exists in this database; signup does not change an existing user")
          ,Map.entry("cert_store_name_path_required", "JKS name and path are required")
          ,Map.entry("cert_store_password_required", "JKS password is required")
          ,Map.entry("cert_store_load_failed", "could not load JKS %s")
          ,Map.entry("jks_reload_failed", "truststore %s could not be reloaded at startup: %s")
-         ,Map.entry("geo_precision_invalid", "precision must be between 0 and 12")
-         ,Map.entry("geo_hash_invalid", "invalid geohash: %s")
+         ,Map.entry("geo_h3_unavailable", "H3 native library unavailable: %s")
+         ,Map.entry("geo_h3_too_many_cells", "%s would produce too many cells (limit %s)")
         ,Map.entry("value_string_null", "string value cannot be null")
         ,Map.entry("value_uuid_null", "UUID value cannot be null")
         ,Map.entry("value_datetime_null", "datetime value cannot be null")
@@ -790,6 +936,7 @@ public final class Messages {
         ,Map.entry("parser_unexpected_define", "unexpected DEFINE at position %d: '%s'")
         ,Map.entry("parser_drop_data_expected_rule", "DROP DATA expected RULE at position %d")
         ,Map.entry("parser_unexpected_drop", "unexpected DROP at position %d: '%s'")
+         ,Map.entry("parser_delete_table", "DELETE TABLE does not exist: use DROP TABLE %s to remove the table, or DELETE %s to delete its records")
         ,Map.entry("parser_invalid_auth_target", "DEFINE USER/ACCESS requires ON ROOT, ON NAMESPACE, or ON DATABASE")
         ,Map.entry("parser_invalid_info", "invalid INFO at position %d")
         ,Map.entry("parser_invalid_audit_case_status", "SET AUDIT CASE expects AUTHORIZED or DENIED but found '%s'")
@@ -804,6 +951,7 @@ public final class Messages {
           ,Map.entry("parser_unexpected_create", "unexpected CREATE at position %d: '%s'")
           ,Map.entry("stmt_field_missing", "field '%s' not found in table '%s'")
           ,Map.entry("stmt_index_missing", "index '%s' not found")
+          ,Map.entry("stmt_index_missing_on_table", "index %s not defined on table %s")
           ,Map.entry("stmt_event_missing", "event '%s' not found")
          ,Map.entry("backup_s3_uri_required", "URI must start with s3://")
          ,Map.entry("backup_s3_upload_failed", "S3 upload error: %s")
@@ -826,6 +974,10 @@ public final class Messages {
          ,Map.entry("database_link_remote_error", "database link remote error: %s")
          ,Map.entry("database_link_connection_failed", "database link connection failed: %s")
          ,Map.entry("saga_compensation_link_missing", "database link not found for compensation: %s")
+         ,Map.entry("saga_compensation_refused", "saga step cannot be compensated safely: %s")
+         ,Map.entry("saga_compensation_only", "a saga compensation session only runs its own compensation")
+         ,Map.entry("saga_scope_refused", "the token scope does not reach the saga %s")
+         ,Map.entry("saga_compensation_not_applied", "participant %s did not remove the record: compensation is still pending")
          ,Map.entry("storage_version_conflict", "version conflict on key '%s'")
          ,Map.entry("storage_phantom_read", "phantom read in prefix '%s': '%s'")
          ,Map.entry("rocksdb_open_failed", "failed to open RocksDB at %s")
@@ -855,6 +1007,10 @@ public final class Messages {
           ,Map.entry("jdbc_invalid_identifier", "invalid SQL identifier: %s")
           ,Map.entry("jdbc_statement_closed", "statement is closed")
           ,Map.entry("jdbc_param_not_set", "parameter %d not set")
+          ,Map.entry("jdbc_batch_failed", "batch command %d failed: %s")
+          ,Map.entry("jdbc_batch_query_refused", "a query that returns rows is not allowed in a batch")
+          ,Map.entry("jdbc_batch_sql_on_prepared", "addBatch(String) is not valid on a PreparedStatement; set the parameters and call addBatch()")
+          ,Map.entry("jdbc_feature_unsupported", "feature not supported by the AxonBase JDBC driver: %s")
           ,Map.entry("jdbc_param_invalid_index", "invalid parameter index: %d")
           ,Map.entry("jdbc_parent_logger_unsupported", "getParentLogger is not supported")
           ,Map.entry("sdk_connect_failed", "failed to connect to %s: %s: %s")
@@ -894,8 +1050,8 @@ public final class Messages {
     );
 
     static {
-        BUNDLES.put("pt-BR", PT_BR);
-        BUNDLES.put("en", EN);
+        BUNDLES.put("pt-BR", PartitionMessages.addTo(PT_BR, PartitionMessages.PT_BR));
+        BUNDLES.put("en", PartitionMessages.addTo(EN, PartitionMessages.EN));
     }
 
     private static volatile String currentLang = "pt-BR";

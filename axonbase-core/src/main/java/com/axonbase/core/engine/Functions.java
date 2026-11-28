@@ -59,7 +59,14 @@ public final class Functions {
      * existe, para o chamador poder decidir o que fazer.
      */
     public static AxonValue call(String name, List<AxonValue> args) {
+        // conversão de valor ausente continua ausente: não vira o instante atual, zero nem falso
+        if (!args.isEmpty() && KEEPS_ABSENT.contains(name) && (args.get(0).isNull() || args.get(0).isNone())) {
+            return args.get(0);
+        }
         return switch (name) {
+            // o registro mora num dos slots dados: filtro das consultas e da cópia durante uma movimentação
+            case "shard::owned" -> AxonValue.bool(com.axonbase.core.shard.SlotFilter.owns(
+                arg(args, 0), str(arg(args, 1)), str(arg(args, 2)), str(arg(args, 3))));
             // ----------------------------------------------------------
             // string
             // ----------------------------------------------------------
@@ -171,14 +178,24 @@ public final class Functions {
             // ----------------------------------------------------------
             // type e conversões
             // ----------------------------------------------------------
-            case "type::bool" -> AxonValue.bool(truthy(arg(args, 0)));
-            case "type::int" -> AxonValue.num(lng(arg(args, 0)));
-            case "type::float", "type::number" -> AxonValue.num(dbl(arg(args, 0)));
-            case "type::decimal" -> AxonValue.num(dec(arg(args, 0)));
-            case "type::string" -> AxonValue.str(str(arg(args, 0)));
-            case "type::datetime" -> AxonValue.datetime(instant(arg(args, 0)));
+            case "type::bool" -> AxonValue.bool(toBool(name, arg(args, 0)));
+            case "type::int" -> AxonValue.num(toLong(name, arg(args, 0)));
+            case "type::float", "type::number" -> AxonValue.num(toDouble(name, arg(args, 0)));
+            case "type::decimal" -> AxonValue.num(toDecimal(name, arg(args, 0)));
+            case "type::string" -> AxonValue.str(text(arg(args, 0)));
+            case "type::datetime" -> {
+                if (args.isEmpty()) {
+                    throw invalidConversion(name, AxonValue.none());
+                }
+                yield AxonValue.datetime(instant(args.get(0)));
+            }
             case "type::table" -> AxonValue.table(str(arg(args, 0)));
-            case "type::record" -> AxonValue.record(str(arg(args, 0)), AxonValue.str(str(arg(args, 1))));
+            case "type::record" -> {
+                if (str(arg(args, 0)).isEmpty() || str(arg(args, 1)).isEmpty()) {
+                    throw invalidConversion(name, arg(args, 1));
+                }
+                yield AxonValue.record(str(arg(args, 0)), AxonValue.str(str(arg(args, 1))));
+            }
             case "type::array" -> AxonValue.array(items(arg(args, 0)));
             case "type::is::array" -> AxonValue.bool(arg(args, 0).isArray());
             case "type::is::bool" -> AxonValue.bool(arg(args, 0).isBool());
@@ -205,6 +222,13 @@ public final class Functions {
             case "geo::area" -> GeoVector.area(arg(args, 0));
             case "geo::contains" -> GeoVector.contains(arg(args, 0), arg(args, 1));
             case "geo::cell" -> GeoVector.cell(arg(args, 0), arg(args, 1));
+            case "geo::h3" -> H3Functions.cell(arg(args, 0), arg(args, 1));
+            case "geo::h3::center" -> H3Functions.center(arg(args, 0));
+            case "geo::h3::boundary" -> H3Functions.boundary(arg(args, 0));
+            case "geo::h3::resolution" -> H3Functions.resolution(arg(args, 0));
+            case "geo::h3::parent" -> H3Functions.parent(arg(args, 0), arg(args, 1));
+            case "geo::h3::children" -> H3Functions.children(arg(args, 0), arg(args, 1));
+            case "geo::h3::disk" -> H3Functions.disk(arg(args, 0), arg(args, 1));
             case "vector::distance::euclidean" -> GeoVector.euclidean(arg(args, 0), arg(args, 1));
             case "vector::distance::manhattan" -> GeoVector.manhattan(arg(args, 0), arg(args, 1));
             case "vector::distance::cosine" -> GeoVector.cosineDistance(arg(args, 0), arg(args, 1));
@@ -228,8 +252,8 @@ public final class Functions {
             case "time::yday" -> AxonValue.num(zoned(args).getDayOfYear());
             case "time::clock" -> AxonValue.str(zoned(args).format(CLOCK));
             case "time::floor" -> timeFloor(args);
-            case "time::from::unix" -> AxonValue.datetime(Instant.ofEpochSecond(lng(arg(args, 0))));
-            case "time::from::millis" -> AxonValue.datetime(Instant.ofEpochMilli(lng(arg(args, 0))));
+            case "time::from::unix" -> AxonValue.datetime(Instant.ofEpochSecond(toLong(name, arg(args, 0))));
+            case "time::from::millis" -> AxonValue.datetime(Instant.ofEpochMilli(toLong(name, arg(args, 0))));
 
             // ----------------------------------------------------------
             // rand
@@ -457,7 +481,7 @@ public final class Functions {
             .stripTrailingZeros());
     }
 
-    private static AxonValue median(List<AxonValue> values) {
+    static AxonValue median(List<AxonValue> values) {
         List<AxonValue> nums = new ArrayList<>(values.stream().filter(AxonValue::isNumber).toList());
         if (nums.isEmpty()) {
             return AxonValue.nul();
@@ -471,7 +495,7 @@ public final class Functions {
             .divide(BigDecimal.valueOf(2), 10, RoundingMode.HALF_UP).stripTrailingZeros());
     }
 
-    private static AxonValue product(List<AxonValue> values) {
+    static AxonValue product(List<AxonValue> values) {
         List<AxonValue> nums = values.stream().filter(AxonValue::isNumber).toList();
         return nums.isEmpty() ? AxonValue.nul() : Arith.product(nums);
     }
@@ -641,7 +665,8 @@ public final class Functions {
     }
 
     private static Instant instant(AxonValue v) {
-        if (v == null) {
+        // sem argumento (time::year()) vale o momento atual; nulo explícito é tratado antes, em call
+        if (v == null || v.isNone() || v.isNull()) {
             return Instant.now();
         }
         if (v.isDatetime()) {
@@ -650,11 +675,101 @@ public final class Functions {
         if (v.isNumber()) {
             return Instant.ofEpochSecond(v.asLong());
         }
-        try {
-            return Instant.parse(str(v));
-        } catch (RuntimeException e) {
-            return Instant.now();
+        if (v.isString()) {
+            String text = v.asString().trim();
+            try {
+                return Instant.parse(text);
+            } catch (java.time.format.DateTimeParseException notInstant) {
+                // texto só com a data: meia-noite UTC; data e hora sem fuso continua sendo erro
+                try {
+                    return java.time.LocalDate.parse(text).atStartOfDay(ZoneOffset.UTC).toInstant();
+                } catch (java.time.format.DateTimeParseException notDate) {
+                    throw invalidConversion("datetime", v);
+                }
+            }
         }
+        throw invalidConversion("datetime", v);
+    }
+
+    /** Funções que convertem o primeiro argumento: com nulo ou ausente, devolvem o próprio. */
+    private static final java.util.Set<String> KEEPS_ABSENT = java.util.Set.of(
+        "type::bool", "type::int", "type::float", "type::number", "type::decimal", "type::datetime",
+        "time::unix", "time::millis", "time::year", "time::month", "time::day", "time::hour", "time::minute",
+        "time::second", "time::wday", "time::yday", "time::clock", "time::floor", "time::from::unix",
+        "time::from::millis");
+
+    private static long toLong(String function, AxonValue v) {
+        if (v.isNumber()) {
+            return v.asLong();
+        }
+        if (v.isString()) {
+            try {
+                return Long.parseLong(v.asString().trim());
+            } catch (NumberFormatException e) {
+                throw invalidConversion(function, v);
+            }
+        }
+        throw invalidConversion(function, v);
+    }
+
+    private static double toDouble(String function, AxonValue v) {
+        if (v.isNumber()) {
+            return v.asDouble();
+        }
+        if (v.isString()) {
+            try {
+                double parsed = Double.parseDouble(v.asString().trim());
+                if (Double.isFinite(parsed)) {
+                    return parsed;
+                }
+            } catch (NumberFormatException e) {
+                throw invalidConversion(function, v);
+            }
+        }
+        throw invalidConversion(function, v);
+    }
+
+    private static BigDecimal toDecimal(String function, AxonValue v) {
+        if (v.isNumber()) {
+            return v.asDecimal();
+        }
+        if (v.isString()) {
+            try {
+                return new BigDecimal(v.asString().trim());
+            } catch (NumberFormatException e) {
+                throw invalidConversion(function, v);
+            }
+        }
+        throw invalidConversion(function, v);
+    }
+
+    /** Texto só vale {@code true} ou {@code false}; os demais tipos seguem a regra de verdade de sempre. */
+    private static boolean toBool(String function, AxonValue v) {
+        if (v.isString()) {
+            String text = v.asString().trim();
+            if (text.equalsIgnoreCase("true")) {
+                return true;
+            }
+            if (text.equalsIgnoreCase("false")) {
+                return false;
+            }
+            throw invalidConversion(function, v);
+        }
+        if (v.isNone()) {
+            throw invalidConversion(function, v);
+        }
+        return truthy(v);
+    }
+
+    /** O valor como texto, sem os marcadores do literal ({@code d'...'}) numa data e hora. */
+    static String text(AxonValue v) {
+        return v != null && v.isDatetime() ? v.asInstant().toString() : str(v);
+    }
+
+    private static AxonError invalidConversion(String function, AxonValue v) {
+        String shown = String.valueOf(v);
+        return AxonError.internal(Messages.get("fn_conversion_invalid", function,
+            shown.length() > 60 ? shown.substring(0, 57) + "..." : shown));
     }
 
     private static ZonedDateTime zoned(AxonValue v) {
@@ -759,7 +874,9 @@ public final class Functions {
         "type::is::number", "type::is::object", "type::is::record", "type::is::string",
         "record::id", "record::table", "record::tb", "record::exists", "meta::id", "meta::tb",
         "geometry::point", "geometry::line", "geometry::polygon", "geo::distance", "geo::area",
-        "geo::contains", "geo::cell", "vector::distance::euclidean", "vector::distance::manhattan",
+        "geo::contains", "geo::cell", "geo::h3", "geo::h3::center", "geo::h3::boundary", "geo::h3::resolution",
+        "geo::h3::parent", "geo::h3::children", "geo::h3::disk",
+        "vector::distance::euclidean", "vector::distance::manhattan",
         "vector::distance::cosine",
         "vector::similarity::cosine",
         "search::score", "search::highlight",
@@ -771,7 +888,8 @@ public final class Functions {
         "crypto::md5", "crypto::sha1", "crypto::sha256", "crypto::sha512",
         "encoding::base64::encode", "encoding::base64::decode",
         "kv::get", "kv::set", "kv::del", "kv::scan",
-        "value::coalesce", "value::default");
+        "value::coalesce", "value::default",
+        "shard::owned");
 
     /** Lista ordenada dos nomes, usada pelo {@code INFO FOR ROOT}. */
     public static List<String> names() {

@@ -21,10 +21,23 @@ public final class AuthService {
     private final Map<String, Long> revokedJwts = new ConcurrentHashMap<>();
     private final Map<String, Long> lastCredentialIssuance = new ConcurrentHashMap<>();
 
-    /** Cache JWT por credencial temporária para reuso na mesma sessão. */
-    private final Map<String, String> credentialJwts = new ConcurrentHashMap<>();
+    /** Primeiro login de cada credencial temporária, para reconectar com o mesmo usuário e escopo até ela expirar. */
+    private final Map<String, CredentialLogin> credentialLogins = new ConcurrentHashMap<>();
 
-    private record TemporaryCredential(String user, String certificate, String fingerprint, long expiresAt) {
+    private record CredentialLogin(String jwt, String user, String namespace, String database, String access,
+                                   long expiresAt) {
+        boolean boundTo(String requestedUser, String ns, String db, String requestedAccess) {
+            return java.util.Objects.equals(user, requestedUser) && java.util.Objects.equals(namespace, ns)
+                && java.util.Objects.equals(database, db) && java.util.Objects.equals(access, requestedAccess);
+        }
+
+        boolean expired() {
+            return System.currentTimeMillis() > expiresAt;
+        }
+    }
+
+    private record TemporaryCredential(String user, String certificate, String fingerprint,
+                                       boolean identityFromCertificate, long expiresAt) {
         boolean matches(String requestedUser) {
             return user.equals(requestedUser) && System.currentTimeMillis() <= expiresAt;
         }
@@ -49,21 +62,22 @@ public final class AuthService {
      * access method, quando informado, também precisa existir no mesmo escopo.
      *
      * <p>Credenciais temporárias ({@code axontc_*}) não são consumidas na
-     * primeira autenticação: ficam no mapa até expirar, e o JWT emitido é
-     * cacheado para reuso. Isso permite que o DataGrip (ou outro cliente)
-     * reconecte múltiplas vezes com a mesma senha temporária sem perder a
-     * sessão, mas impede uso simultâneo em outro cliente porque a credencial
-     * expira em 60 segundos.
+     * primeira autenticação: até expirar, 60 segundos depois da emissão, o mesmo
+     * usuário no mesmo namespace, banco e access method recebe o mesmo JWT, o que
+     * permite ao DataGrip (ou outro cliente) reconectar. Qualquer outro usuário
+     * ou escopo, ou um pedido depois do prazo, é recusado.
      */
     public String signin(String user, String pass, String namespace, String database, String access) {
         if (pass != null && pass.startsWith("axontc_")) {
-            String cached = credentialJwts.get(pass);
-            if (cached != null) {
-                Map<String, Object> claims = claims(cached);
-                if (claims != null) {
-                    return cached;
+            CredentialLogin first = credentialLogins.get(pass);
+            if (first != null) {
+                if (first.expired() || !first.boundTo(user, namespace, database, access)) {
+                    return null;
                 }
-                credentialJwts.remove(pass);
+                if (claims(first.jwt()) != null) {
+                    return first.jwt();
+                }
+                credentialLogins.remove(pass);
             }
         }
 
@@ -94,27 +108,51 @@ public final class AuthService {
         if (!identity.dataRules().isEmpty()) {
             claims.put("data_rules", String.join(",", identity.dataRules()));
         }
+        if (identity.auditName() != null && !identity.auditName().isBlank()) {
+            claims.put("audit", identity.auditName());
+        }
         if (access != null && !access.isBlank()) {
             claims.put("access", access);
         }
         String jwt = Jwt.sign(secret, claims, 1_800_000L).value();
         trackSession(claims, 1_800_000L);
 
-        if (pass != null && pass.startsWith("axontc_")) {
-            credentialJwts.put(pass, jwt);
+        TemporaryCredential used = pass == null ? null : temporaryCredentials.get(pass);
+        if (used != null) {
+            credentialLogins.put(pass,
+                new CredentialLogin(jwt, user, namespace, database, access, used.expiresAt()));
         }
 
         return jwt;
     }
 
-    /** Emite uma senha opaca de uso único, sem amarrar a um namespace/banco. */
+    /**
+     * Emite uma credencial para um nome informado pelo cliente, quando o certificado não identifica ninguém: só vale
+     * para usuário cujo FINGERPRINT é o do certificado apresentado.
+     */
     public String issueTemporaryCredential(String user, String certificateStore, String fingerprint) {
+        return issue(user, certificateStore, fingerprint, false);
+    }
+
+    /**
+     * Emite uma credencial para o usuário que o próprio certificado identifica. O nome precisa ter sido extraído do
+     * certificado pelo servidor, nunca recebido do cliente.
+     */
+    public String issueCredentialForCertificate(String certificateUser, String certificateStore, String fingerprint) {
+        return issue(certificateUser, certificateStore, fingerprint, true);
+    }
+
+    /** Senha opaca e temporária, sem amarrar a um namespace/banco até o primeiro uso. */
+    private String issue(String user, String certificateStore, String fingerprint, boolean fromCertificate) {
         cleanup();
-        AuthCatalog.User identity = users.catalog().certificateUser(user, certificateStore, fingerprint);
+        AuthCatalog.User identity = fromCertificate
+            ? users.catalog().certificateUser(user, certificateStore, fingerprint)
+            : pinnedUser(user, certificateStore, fingerprint);
         if (identity == null) {
             com.axonbase.server.AxonLog.log("warn", "cert_issue_failed", "credencial temporária recusada",
                 Map.of("user", user == null ? "" : user, "store", certificateStore == null ? "" : certificateStore));
-            throw new IllegalArgumentException(Messages.get("cert_user_missing"));
+            throw new IllegalArgumentException(Messages.get(
+                fromCertificate ? "cert_user_missing" : "cert_fingerprint_required"));
         }
         String userKey = user + "@" + certificateStore;
         Long lastIssue = lastCredentialIssuance.get(userKey);
@@ -127,7 +165,7 @@ public final class AuthService {
         random.nextBytes(entropy);
         String credential = "axontc_" + Base64.getUrlEncoder().withoutPadding().encodeToString(entropy);
         temporaryCredentials.put(credential, new TemporaryCredential(user,
-            identity.certificate(), identity.fingerprint(), System.currentTimeMillis() + 60_000L));
+            identity.certificate(), fingerprint, fromCertificate, System.currentTimeMillis() + 60_000L));
         lastCredentialIssuance.put(userKey, now);
         com.axonbase.server.AxonLog.log("info", "certificate_login", "credencial temporária emitida",
             Map.of("user", user, "store", certificateStore));
@@ -145,10 +183,7 @@ public final class AuthService {
 
     private void cleanup() {
         temporaryCredentials.entrySet().removeIf(entry -> entry.getValue().expired());
-        credentialJwts.keySet().removeIf(key -> {
-            TemporaryCredential tc = temporaryCredentials.get(key);
-            return tc == null || tc.expired();
-        });
+        credentialLogins.values().removeIf(CredentialLogin::expired);
     }
 
     private static boolean matchesFingerprint(AuthCatalog.User identity, String fingerprint) {
@@ -157,6 +192,20 @@ public final class AuthService {
             return true;
         }
         return java.util.Objects.equals(identity.fingerprint(), fingerprint);
+    }
+
+    /** O usuário tem FINGERPRINT definido e ele é o do certificado apresentado. */
+    private static boolean pinned(AuthCatalog.User identity, String fingerprint) {
+        return identity.fingerprint() != null && !identity.fingerprint().isBlank()
+            && identity.fingerprint().equals(fingerprint);
+    }
+
+    private AuthCatalog.User pinnedUser(String name, String certificateStore, String fingerprint) {
+        return users.catalog().users().stream()
+            .filter(u -> u.name().equals(name) && u.certificateBased() && u.certificate().equals(certificateStore))
+            .filter(u -> pinned(u, fingerprint))
+            .findFirst()
+            .orElse(null);
     }
 
     private AuthCatalog.User consumeTemporaryCredential(String user, String pass, String namespace,
@@ -168,16 +217,21 @@ public final class AuthService {
         TemporaryCredential credential = temporaryCredentials.get(pass);
         if (credential == null || credential.expired()) {
             temporaryCredentials.remove(pass);
-            credentialJwts.remove(pass);
+            credentialLogins.remove(pass);
             return null;
         }
         if (!credential.matches(user)) {
             return null;
         }
         AuthCatalog.User identity = users.catalog().user(user, namespace, database);
-        return identity != null && identity.certificateBased()
-            && identity.certificate().equals(credential.certificate())
-            && matchesFingerprint(identity, credential.fingerprint()) ? identity : null;
+        if (identity == null || !identity.certificateBased()
+            || !identity.certificate().equals(credential.certificate())) {
+            return null;
+        }
+        boolean accepted = credential.identityFromCertificate()
+            ? matchesFingerprint(identity, credential.fingerprint())
+            : pinned(identity, credential.fingerprint());
+        return accepted ? identity : null;
     }
 
     /** Verifica que un JWT sexa válido. Devolve {@code true} se válido. */
@@ -384,12 +438,16 @@ public final class AuthService {
      * mínimo viável: sem access methods, sem dados de perfil, só a identidade.
      * Sem um namespace/banco o {@code null} devolvido sinaliza escopo ausente.
      */
-    public String signup(String user, String pass, String namespace, String database) {
+    public synchronized String signup(String user, String pass, String namespace, String database) {
         if (user == null || user.isBlank()) {
             throw new IllegalArgumentException(Messages.get("auth_signup_user_invalid"));
         }
         if (namespace == null || namespace.isBlank() || database == null || database.isBlank()) {
             return null;
+        }
+        // signup só cria: trocar senha ou papéis de quem já existe é outra operação
+        if (users.catalog().hasUserExact(user, AuthCatalog.Scope.DATABASE, namespace, database)) {
+            throw new IllegalArgumentException(Messages.get("auth_signup_user_exists"));
         }
         users.catalog().defineUser(user, AuthCatalog.Scope.DATABASE, namespace, database,
             pass == null ? "" : pass, java.util.List.of(), java.util.List.of());
