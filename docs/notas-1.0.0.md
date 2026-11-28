@@ -110,7 +110,7 @@ A lista completa está nas mudanças de comportamento da [rc1](notas-1.0.0-rc1.m
 ### Pacotes
 
 - O artefato publicado para Spring Data não traz repositórios, template nem anotações.
-- Dois testes de integração do SDK (Software Development Kit) Java exigem autenticação e falham sem ela, como já acontecia na 0.10.1.
+- Os testes de integração do SDK (Software Development Kit) Java conectam sem autenticação. Contra um servidor que a exija, eles falham no login, como já acontecia na 0.10.1; para rodá-los, inicie o servidor com `--no-auth`, numa máquina descartável.
 
 As limitações de cluster, shards, partições, índice geográfico e recuperação listadas na [rc1](notas-1.0.0-rc1.md#limitações-conhecidas) e não tratadas na rc2 continuam valendo.
 
