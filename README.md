@@ -2,7 +2,35 @@
 
 Multi-model database written in Java 21+, combining document, graph, relational, key-value, full-text, vector, and geospatial models in a single engine with a unified query language (AxonQL), HTTP and WebSocket server, and SDKs in 8 languages.
 
-Release candidate notes (in Portuguese): [1.0.0-rc2](docs/notas-1.0.0-rc2.md), including behavior changes, and [1.0.0-rc1](docs/notas-1.0.0-rc1.md).
+Release notes (in Portuguese): [1.0.0](docs/notas-1.0.0.md). Behavior changes since 0.10.1 are in the [1.0.0-rc2](docs/notas-1.0.0-rc2.md) and [1.0.0-rc1](docs/notas-1.0.0-rc1.md) notes.
+
+## Security limitations and experimental features
+
+Read this before using version 1.0.0 in production.
+
+> **Do not rely on table `PERMISSIONS` to hide data in reads by record id, `FETCH`, linked record reads or `LIVE SELECT`.** The read condition is not applied on those paths. A fix is planned for 1.0.1.
+
+- `PERMISSIONS` for reading do not apply to direct access by id (`RETURN t:1.field`), to `FETCH` or to the read of a linked record. Do not give free AxonQL access to anyone who may not read the whole table.
+- `LIVE SELECT` does not apply read `PERMISSIONS` to notifications, and a `$parameter` in its filter is read from the variables of whoever writes.
+- `SHOW SAGA TRANSACTION` shows the previous state of records without `PERMISSIONS`, data rules or masks. Whoever reaches a saga and can write can cancel it, which restores that state even where `PERMISSIONS` would deny the write.
+- A saga correlation id (`$saga_corr` or `X-Correlation-Id`) grants no scope check of its own, and a saga opened without a namespace and without steps can be finished by any identity that writes.
+- `REEMBED` does not require an administrator and rewrites rows without checking `PERMISSIONS`.
+- A database link is visible to the whole namespace and runs with its stored credential.
+- A `database.table` query by a namespace or root identity applies the `PERMISSIONS` and data rules of the session database.
+- A `viewer` still stores a table definition by querying a table that does not exist.
+- AI Audit assigned with `AUDITED BY` after login only applies at the next login, and two audited operators can approve each other's `WARNING` cases. Through the Enterprise panel, an audited operator can decide their own case.
+- The Raft port has no authentication or encryption, and without TLS (Transport Layer Security) the shard secret travels in clear text between gateway and shards. Keep both on a private network.
+- Data rules are not a complete isolation boundary (see [coverage and limits](#data-rules-coverage-and-limits)).
+
+**Experimental** features pass the functional tests, but their load and failure targets were not measured on separate machines, and their behavior or storage format may change in a 1.x release:
+
+| Experimental feature | Enabled by |
+|---|---|
+| [Multiple shards](docs/shards.md): `SHARD BY`, gateway and shard backup | gateway and `SHARD BY` |
+| [Time partitions](docs/particoes-e-camada-fria.md) | `DEFINE PARTITION` |
+| [TTL](docs/particoes-e-camada-fria.md) (Time To Live), record expiration | `DEFINE TTL` |
+| [Cold tier](docs/particoes-e-camada-fria.md), never tested against a real S3 (Simple Storage Service) compatible store | `AXON_COLD_DIR` or `AXON_COLD_S3` |
+| [Workload priority](docs/operacao-e-resiliencia.md), or QoS (Quality of Service) | `AXON_QOS`, off by default |
 
 ## Features
 
@@ -54,14 +82,14 @@ All 8 SDKs expose the same public API with feature parity, tested independently:
 
 | Language | Registry | Install |
 |---|---|---|
-| Java | Maven Central | `mvn dependency:get -Dartifact=com.axondatabase:axonbase-sdk-java:0.2.1` |
-| Node.js / TypeScript | npm | `npm install @axonbase/sdk@0.1.1` |
-| Python | PyPI | `python -m pip install axonbase-sdk==0.1.1` |
-| Go | Go module proxy | `go get github.com/axonbase/axonbase/axonbase-sdk-go@v0.1.0` |
-| Rust | crates.io | `cargo add axonbase-sdk@0.1.1` |
-| .NET | NuGet | `dotnet add package AxonBase.Sdk --version 0.1.0` |
-| PHP | Packagist | `composer require axonbase/sdk:^0.1` |
-| Ruby / Rails | RubyGems | `gem install axonbase-sdk -v 0.1.0` |
+| Java | Maven Central | `mvn dependency:get -Dartifact=com.axondatabase:axonbase-sdk-java:1.0.0` |
+| Node.js / TypeScript | npm | `npm install @axonbase/sdk@1.0.0` |
+| Python | PyPI | `python -m pip install axonbase-sdk==1.0.0` |
+| Go | Go module proxy | `go get github.com/axonbase/axonbase/axonbase-sdk-go@v1.0.0` |
+| Rust | crates.io | `cargo add axonbase-sdk@1.0.0` |
+| .NET | NuGet | `dotnet add package AxonBase.Sdk --version 1.0.0` |
+| PHP | Packagist | `composer require axonbase/sdk:^1.0` |
+| Ruby / Rails | RubyGems | `gem install axonbase-sdk -v 1.0.0` |
 
 Every SDK implements: `connect`, `use`, `signin`, `authenticate`, `query`, `select`, `create`, `insert`, `update`, `upsert`, `delete`, `relate`, `begin`/`commit`/`cancel`, `kv_get`/`kv_set`/`kv_del`/`kv_scan`, `live`/`kill`, `certificateBegin`/`certificateComplete`, mTLS, typed RPC errors, Migrator (.axql), and `SagaTransaction`/`SagaParticipantTransaction`.
 
@@ -119,7 +147,7 @@ export AXON_SECRET="$(openssl rand -hex 32)"
 docker run -d --name axonbase -p 8000:8000 \
   -v axonbase-data:/data \
   -e AXON_ROOT_PASSWORD -e AXON_SECRET \
-  axonbase/axonbase:1.0.0-rc2
+  axonbase/axonbase:1.0.0
 
 # Sign in (returns a JWT valid for 30 minutes)
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/signin \

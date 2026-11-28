@@ -4,6 +4,8 @@ Desenho da fase E5 do [plano de escala](plano-escala-e0-e5.md): prioridade por t
 
 ## Prioridade por tipo de carga
 
+> **Recurso experimental na 1.0.0.** Passou nos testes funcionais, mas a meta de latência nunca foi medida em máquinas separadas. Veja as [notas da 1.0.0](notas-1.0.0.md#recursos-experimentais).
+
 QoS (Quality of Service) é a regra que impede que consultas analíticas ocupem os recursos das transacionais. O padrão é **desligado**: sem `AXON_QOS`, o motor se comporta como antes, sem classificar nada.
 
 ### Classificação
@@ -99,7 +101,7 @@ O redirecionamento `307` de escrita aponta, por padrão, para o endereço do Raf
 
 **A partir da 0.10.x** este roteiro não vale: o líder antigo não sabe transferir o cargo, a versão antiga não tem drenagem e os defeitos dela podem perder escritas confirmadas enquanto ela participa do quórum. Veja [Falha de versões mistas](#falha-de-versões-mistas).
 
-**O que foi medido:** o reinício um nó de cada vez de um cluster só desta versão, derrubando também o líder, passou em 60 rodadas sem perda, sem parada e sem anomalia. Os dois lados eram a mesma versão: a troca entre duas versões novas diferentes ainda não existe para medir.
+**O que foi medido:** o reinício um nó de cada vez de um cluster só de uma versão desta linha, derrubando também o líder, passou em 60 rodadas sem perda, sem parada e sem anomalia, com a mesma versão dos dois lados. A troca da 1.0.0-rc2 para a 1.0.0 faz parte da [validação da 1.0.0](notas-1.0.0.md#validação).
 
 **Conexões que não são HTTP:** uma conexão WebSocket continua aberta no nó drenado. Escritas passam a receber `NOT_LEADER` com o líder novo, e a conexão cai quando o processo para: o cliente precisa reconectar. Uma transação explícita aberta no líder durante a transferência recebe `NOT_LEADER` no `COMMIT` e precisa ser refeita.
 

@@ -1,5 +1,7 @@
 # Partições por tempo, TTL e camada fria
 
+> **Recursos experimentais na 1.0.0.** Partições, expiração de linhas e camada fria passaram nos testes funcionais, mas os portões de desempenho nunca rodaram e a camada fria nunca foi testada contra um serviço de armazenamento real. O comportamento e o formato gravado podem mudar numa versão 1.x. Veja as [notas da 1.0.0](notas-1.0.0.md#recursos-experimentais).
+
 Desenho da parte de dados no tempo da fase E4 do [plano de escala](plano-escala-e0-e5.md). Cobre três recursos:
 
 - **Partição por tempo:** a tabela é dividida em faixas de tempo. Apagar uma faixa inteira custa o mesmo com mil ou com um milhão de linhas.

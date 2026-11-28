@@ -1,5 +1,7 @@
 # Vários shards: `SHARD BY`, gateway e plano de controle
 
+> **Recurso experimental na 1.0.0.** Passou nos testes funcionais, mas a meta de ingestão com três shards nunca foi medida em máquinas separadas. O comportamento e o formato gravado podem mudar numa versão 1.x. Veja as [notas da 1.0.0](notas-1.0.0.md#recursos-experimentais).
+
 Este documento descreve a fase E3 do [plano de escala](plano-escala-e0-e5.md): como o motor divide uma tabela entre vários grupos de consenso, o que o gateway aceita e recusa, e como o backup e a restauração a um instante funcionam entre shards.
 
 Um **shard** é um grupo Raft inteiro (três nós, com o próprio líder, log e base) que guarda uma parte dos registros. Um nó único e um cluster de um só grupo continuam funcionando como antes: nada aqui muda o comportamento de quem não usa o gateway.
