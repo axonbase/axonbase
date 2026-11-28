@@ -121,8 +121,8 @@ class DatabaseLinkIntegrationTest {
         System.out.println("DELETE via link OK");
 
         // RELATE via link (graph on remote)
-        axon.query("CREATE \"remote_link\".\"city\":1 CONTENT {label: 'SP', population: 12000000}");
-        axon.query("CREATE \"remote_link\".\"city\":2 CONTENT {label: 'RJ', population: 6000000}");
+        axon.query("UPSERT \"remote_link\".\"city\":1 CONTENT {label: 'SP', population: 12000000}");
+        axon.query("UPSERT \"remote_link\".\"city\":2 CONTENT {label: 'RJ', population: 6000000}");
         axon.query("RELATE \"remote_link\".\"city\":1 ->near-> \"remote_link\".\"city\":2");
         var friends = axon.query("SELECT VALUE ->near->city FROM \"remote_link\".\"city\":1");
         System.out.println("RELATE via link OK: " + friends);
