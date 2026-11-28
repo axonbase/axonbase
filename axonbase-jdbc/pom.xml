@@ -3,7 +3,7 @@
   <parent>
     <groupId>com.axondatabase</groupId>
     <artifactId>axonbase</artifactId>
-    <version>1.0.0-rc2</version>
+    <version>1.0.0</version>
   </parent>
   <artifactId>axonbase-jdbc</artifactId>
   <name>AxonBase JDBC Driver</name>
@@ -12,12 +12,12 @@
     <dependency>
       <groupId>com.axondatabase</groupId>
       <artifactId>axonbase-sdk-java</artifactId>
-      <version>1.0.0-rc2</version>
+      <version>1.0.0</version>
     </dependency>
     <dependency>
       <groupId>com.axondatabase</groupId>
       <artifactId>axonbase-common</artifactId>
-      <version>1.0.0-rc2</version>
+      <version>1.0.0</version>
     </dependency>
     <dependency>
       <groupId>org.hibernate.orm</groupId>
@@ -29,7 +29,7 @@
     <dependency>
       <groupId>com.axondatabase</groupId>
       <artifactId>axonbase-server</artifactId>
-      <version>1.0.0-rc2</version>
+      <version>1.0.0</version>
       <scope>test</scope>
     </dependency>
     <dependency>

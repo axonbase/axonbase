@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "axonbase-sdk"
-version = "1.0.0-rc2"
+version = "1.0.0"
 dependencies = [
  "base64",
  "chrono",
