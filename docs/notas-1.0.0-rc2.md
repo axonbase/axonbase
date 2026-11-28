@@ -371,6 +371,9 @@ As conversões por função (`type::`) e as formas `<int>`, `<decimal>` e `<bool
 - Numa tabela particionada, apagar uma partição não remove as chaves por valor `UNIQUE` das linhas dela. Elas não recusam escritas, mas ocupam espaço até um `DROP INDEX` ou `DROP TABLE`.
 - `CANCEL SAGA` ainda não desfaz `UNRELATE` nem repõe as arestas que um `DELETE` removeu junto com o registro. Desfazer a criação de um registro remove também as arestas ligadas a ele.
 - Um `ROLLBACK TO` de ponto de salvamento não retira os passos de SAGA das escritas que ele desfez.
+- `CANCEL SAGA` não desfaz a escrita num registro cuja chave seja um valor tipado (`t:u"..."`, `t:d"..."`), uma lista ou um objeto, nem uma aresta ligada a um registro assim. O comando devolve erro, a SAGA fica em `COMPENSATING` e os passos anteriores não são desfeitos; o estado anterior continua gravado no registro da SAGA. Chaves de texto e de número, inclusive as geradas pelo servidor, são desfeitas.
+- Numa tabela particionada vinda de uma versão anterior, uma entrada antiga de índice `UNIQUE` sobre ligação entre registros pode recusar a gravação do mesmo valor como texto até um `DROP INDEX`.
+- Uma `PRIMARY KEY` com muitas colunas cujos textos tenham a forma `tabela:chave` multiplica as conferências por gravação. Com poucas colunas o efeito é pequeno; evite chaves com dezenas de colunas desse tipo.
 - Num armazenamento em memória, um comando que falha no meio de várias linhas mantém as linhas anteriores.
 - `PERMISSIONS` de leitura não valem no acesso direto por id (`RETURN t:1.campo`), no `FETCH` e na leitura de um registro ligado.
 - `FETCH` e o acesso por ponto não seguem uma ligação gravada num campo.
